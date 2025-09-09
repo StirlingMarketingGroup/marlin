@@ -1,0 +1,57 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    @apply border-discord-border;
+  }
+  
+  body {
+    @apply bg-discord-dark text-discord-text font-sans;
+    margin: 0;
+    line-height: 1.5;
+    font-weight: 400;
+    color-scheme: dark;
+    font-synthesis: none;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  #root {
+    @apply min-h-screen;
+  }
+
+  /* Scrollbar styling */
+  ::-webkit-scrollbar {
+    @apply w-2 h-2;
+  }
+
+  ::-webkit-scrollbar-track {
+    @apply bg-discord-darker;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply bg-discord-muted rounded-full;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-discord-text/50;
+  }
+}
+
+@layer components {
+  .button-primary {
+    @apply bg-discord-accent hover:bg-discord-accent/90 text-white px-4 py-2 rounded-md font-medium transition-colors;
+  }
+
+  .button-secondary {
+    @apply bg-discord-gray hover:bg-discord-light text-discord-text px-4 py-2 rounded-md font-medium transition-colors;
+  }
+
+  .input-field {
+    @apply bg-discord-gray border border-discord-border rounded-md px-3 py-2 text-discord-text placeholder-discord-muted focus:outline-none focus:border-discord-accent;
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "name": "marlin-file-browser",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A modern, Discord-inspired file browser with native performance",
+  "keywords": ["file-browser", "file-manager", "tauri", "react", "typescript", "discord-ui", "cross-platform", "rust"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/user/marlin"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0",
+    "@tauri-apps/plugin-fs": "^2.0.0",
+    "@tauri-apps/plugin-os": "^2.0.0",
+    "@tauri-apps/plugin-shell": "^2.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "zustand": "^4.5.5",
+    "lucide-react": "^0.439.0",
+    "clsx": "^2.1.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
+    "@types/react": "^18.3.5",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.47",
+    "tailwindcss": "^3.4.12",
+    "typescript": "^5.6.2",
+    "vite": "^5.4.6"
+  }
+}
