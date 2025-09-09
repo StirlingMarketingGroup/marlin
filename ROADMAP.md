@@ -41,30 +41,69 @@ Create the most intuitive, performant, and beautiful file browser that feels lik
 
 ---
 
+## 🚀 Performance Foundation (HIGH PRIORITY)
+
+**Goal**: Build world-class performance for large directories and SMB/NAS networks
+
+### 🎯 Performance Targets
+- **Open 50k-file folder**: First paint ≤ 120ms (names only), interactive ≤ 200ms
+- **Scroll 50k items**: ≥ 60fps, no long tasks > 16ms in renderer
+- **SMB 20k over 10ms RTT**: First 1k names ≤ 400ms, progressive fill thereafter
+- **Memory budget**: < 150MB with 50k entries, aggressive LRU eviction
+- **Thumbnail budget**: ≤ 4 concurrent per spindle/host, never block UI
+
+### 📁 Directory Read Pipeline
+- [ ] **Names-first rendering**: Render immediately on `readdir`, metadata later
+- [ ] **Native bulk APIs**: 
+  - macOS `getattrlistbulk`
+  - Windows `FindFirstFileExW(FIND_FIRST_EX_LARGE_FETCH)`  
+  - Linux `getdents64` + `statx` as needed
+- [ ] **Adaptive batching**: 512–2048 entries per chunk, backpressure-aware
+- [ ] **Virtualized views**: Windowed list/grid, O(visible) DOM, no layout thrash
+
+### 🌐 SMB/NAS Optimization
+- [ ] **Network awareness**: Treat `smb://`, mounted shares, UNC paths as high-latency
+- [ ] **Timeouts & retries**: Jittered backoff, "degraded mode" (no thumbs, names-only)
+- [ ] **I/O budgets**: Coalesce `stat` calls, avoid `realpath` per item, cache dir inodes
+- [ ] **Per-host rate limits**: Prevent SMB server overload
+
+### ⚡ Async & Caching
+- [ ] **Thread pool**: Per-device concurrency caps, cancel off-screen jobs
+- [ ] **Persistent cache**: Dir-entry cache (names + minimal attrs) by dir inode + mtime
+- [ ] **Heuristic invalidation**: Watcher events or parent mtime change
+- [ ] **Memory control**: Evict metadata/thumbnail LRU aggressively
+
+### 📊 File Watching & Benchmarks
+- [ ] **Platform watchers**: macOS FSEvents, Windows ReadDirectoryChangesW, Linux inotify
+- [ ] **Event collapsing**: Collapse burst events, debounce updates
+- [ ] **Bench harness**: Synthetic dir generator (1k→100k files), repeatable perf tests
+
+---
+
 ### Phase 2: Core Features (Weeks 3-4) 🚧 **IN PROGRESS**
 
 **Goal**: Implement essential file management capabilities
 
 #### 🚧 Current Sprint
 
-- [ ] **Advanced File Operations**
-  - [ ] Copy, cut, paste operations
-  - [ ] File/folder creation and deletion
-  - [ ] Rename functionality with inline editing
+- [ ] **Core File Operations**
+  - [ ] Copy/Cut/Paste with true cut semantics
+  - [ ] Inline rename (F2) with stem selected
+  - [ ] Trash vs Delete with confirmation
   - [ ] Drag and drop support
-  - [ ] Multi-file selection
+  - [ ] Multi-file selection with keyboard (Ctrl/Cmd+click)
 
 - [ ] **View Management**
-  - [ ] Grid, List, and Details view modes
+  - [ ] Grid/list toggle with icon size slider
   - [ ] Per-directory view preferences persistence
   - [ ] Smart sorting (name, size, date, type)
-  - [ ] File type icons and thumbnails
+  - [ ] Status line: count, size, free space
 
-- [ ] **User Experience**
+- [ ] **Navigation & UX**
+  - [ ] Enhanced path bar with paste + Tab autocomplete
+  - [ ] Keyboard model: arrows, Enter open, Backspace/Cmd↑ up, Space select
   - [ ] Context menus (right-click actions)
-  - [ ] Keyboard shortcuts (Ctrl+C, Ctrl+V, etc.)
-  - [ ] Status bar with selection info
-  - [ ] Loading states and error handling
+  - [ ] New window opens last dir or user default
 
 #### 📋 Upcoming
 
@@ -76,30 +115,106 @@ Create the most intuitive, performant, and beautiful file browser that feels lik
 
 ---
 
+## 🖼️ Thumbnails & Media
+
+**Goal**: High-performance thumbnail system with intelligent caching
+
+- [ ] **Thumbnail Engine**
+  - [ ] Disk cache by content-hash+mtime; sizes 32/64/96/128/256
+  - [ ] Worker queue with cancellation; offscreen eviction
+  - [ ] Built-ins: JPG/PNG, GIF first frame, SVG, PDF page 1
+  - [ ] Optional OS providers: QuickLook, Windows Shell, XDG cache
+  - [ ] Fallback icons; invalidate by hash on rename
+
+---
+
+## 🏷️ Batch Rename (Rules Engine)
+
+**Goal**: Powerful, safe batch renaming with preview and rollback
+
+- [ ] **Rules System**
+  - [ ] Find/replace (regex), prefix/suffix, numbering `{n}`
+  - [ ] Tokens: `{name}{ext}{parent}{yyyy}{MM}{dd}`
+  - [ ] Dry-run diff with collision detection + illegal char fixes per OS
+  - [ ] Apply with rollback capability
+
+---
+
+## 🤖 AI Operations Framework  
+
+**Goal**: Safe AI-powered file operations with strict JSON schema
+
+- [ ] **Safety-First Architecture**
+  - [ ] JSON-only system prompt; reject non-schema output
+  - [ ] Schema: `rename`, `image.resize`, `image.trim`, `image.convert`, `image.compress`, `move`, `copy`
+  - [ ] Never execute raw shell commands
+
+- [ ] **Provider Integration**
+  - [ ] Provider config: OpenAI/Anthropic/Gemini API keys
+  - [ ] Vision caption cache (perceptual hash)
+  - [ ] Freehand prompt → structured JSON plan
+
+- [ ] **User Control**
+  - [ ] Dry-run UI with per-operation toggles
+  - [ ] Export/import plan as JSON
+  - [ ] Quotas per apply; paging for huge plans
+
+### 🎨 Built-in Presets
+- [ ] SEO rename from image content
+- [ ] Resize ≤2000px (preserve aspect)
+- [ ] Trim whitespace margins
+- [ ] Convert to WebP with target size
+- [ ] Generate `-thumb` 512px square white background
+
+---
+
+## 🎨 Image Operations (Native)
+
+**Goal**: Fast native image processing without external dependencies
+
+- [ ] **Core Operations**
+  - [ ] Resize ≤ W×H, preserve aspect, skip if smaller
+  - [ ] Trim transparent/solid margins (threshold configurable)
+  - [ ] Convert PNG↔JPEG↔WebP↔AVIF
+  - [ ] PNG optimize; JPEG recompress with quality slider
+
+- [ ] **Performance**
+  - [ ] Streamed processing with progress bars
+  - [ ] Cancellation support for large batches
+  - [ ] Memory-efficient processing (no full load)
+
+---
+
+## 💼 Productivity Features
+
+**Goal**: Professional workflow enhancements
+
+- [ ] **Multi-Window & Tabs**
+  - [ ] Dual-pane toggle for side-by-side comparison
+  - [ ] Tabs with session restore
+  - [ ] New window opens last directory or user default
+
+- [ ] **Enhanced Navigation**  
+  - [ ] In-folder quick filter (non-indexed, real-time)
+  - [ ] Favorites/bookmarks system
+  - [ ] Copy path (Unix, Windows, file:// formats)
+
 ### Phase 3: Advanced Features (Weeks 5-6) 📋 **PLANNED**
 
 **Goal**: Add power-user features and customization
 
 #### 🔧 Advanced Operations
 
-- [ ] **File Operations++**
-  - [ ] Bulk operations (rename, move, delete)
+- [ ] **System Integration**
   - [ ] File compression/extraction (zip, tar, etc.)
-  - [ ] File permissions management
-  - [ ] Symbolic link handling
-
-- [ ] **Preview System**
-  - [ ] Collapsible preview panel
-  - [ ] Image preview with zoom
-  - [ ] Text file preview with syntax highlighting
-  - [ ] Markdown rendering
-  - [ ] PDF preview integration
+  - [ ] File permissions management with inline error fixes
+  - [ ] Symlink/junction badges; safe operations on links
 
 - [ ] **System Integration**
   - [ ] Default application associations
-  - [ ] "Open with" menu
+  - [ ] "Open with" menu  
   - [ ] System trash integration
-  - [ ] Network drive support
+  - [ ] Network drive support with timeout handling
 
 #### 🎨 Customization
 
@@ -151,6 +266,68 @@ Create the most intuitive, performant, and beautiful file browser that feels lik
 
 ---
 
+## 🛡️ Robustness & Error Handling
+
+**Goal**: Bulletproof reliability across all platforms and edge cases
+
+- [ ] **Cross-Platform Compatibility**
+  - [ ] Windows long paths support (>260 chars)
+  - [ ] macOS Unicode NFC normalization  
+  - [ ] Linux extended attributes and permissions
+
+- [ ] **Network & Performance**
+  - [ ] Network share timeout/retry with exponential backoff
+  - [ ] SMB connection pooling and keep-alive
+  - [ ] Graceful degradation on slow connections
+
+- [ ] **Error Recovery**
+  - [ ] Inline permission errors with fix hints ("Run as Admin", "Change permissions")
+  - [ ] Corrupted file detection and recovery suggestions
+  - [ ] Disk space monitoring with warnings
+  - [ ] Operation rollback on partial failures
+
+---
+
+## 📦 Packaging & Auto-Updates
+
+**Goal**: Professional CI/CD pipeline with signed, automatic updates
+
+- [ ] **Build Pipeline**
+  - [ ] GitHub Actions on tag `v*`; matrix build
+  - [ ] macOS `.dmg` with notarization
+  - [ ] Windows `.msi` with code signing
+  - [ ] Linux `.AppImage` + `.deb`/`.rpm` packages
+
+- [ ] **Distribution**
+  - [ ] GitHub Releases with artifacts + `latest.json`
+  - [ ] Optional: Homebrew Cask, winget, AppImageHub
+  - [ ] Chocolatey package for Windows
+
+- [ ] **Auto-Updater**
+  - [ ] Tauri updater: signed, checks `latest.json` at startup/manual
+  - [ ] Update keypair: public in config, private in CI secrets
+  - [ ] Background downloads, install on restart
+  - [ ] Rollback capability for failed updates
+
+---
+
+## ⚙️ Settings & Configuration
+
+**Goal**: Minimal UI with powerful JSON config for power users
+
+- [ ] **User Preferences**
+  - [ ] Start directory, default view/sort preferences
+  - [ ] Enable/disable OS thumbnail providers
+  - [ ] Toggle heavy converters + max input file size limits
+  - [ ] AI provider API key management
+
+- [ ] **Configuration**
+  - [ ] JSON config file with schema validation
+  - [ ] Minimal settings UI for common options
+  - [ ] Import/export settings for team deployments
+
+---
+
 ### Phase 5: Extensions & Ecosystem (Weeks 9+) 🔮 **FUTURE**
 
 **Goal**: Create an extensible platform for community contributions
@@ -189,10 +366,12 @@ Create the most intuitive, performant, and beautiful file browser that feels lik
 ## 🎯 Success Metrics
 
 ### Performance Targets
-- **Bundle Size**: < 20MB (vs 200MB+ Electron apps)
-- **Memory Usage**: < 100MB typical usage
+- **Large Directories**: Open 50k files ≤ 120ms first paint, ≤ 200ms interactive
+- **SMB/NAS Performance**: 20k files over 10ms RTT, first 1k names ≤ 400ms  
+- **Scroll Performance**: ≥ 60fps with 50k items, no long tasks > 16ms
+- **Memory Budget**: < 150MB with 50k entries, aggressive LRU eviction
+- **Bundle Size**: < 20MB installed (vs 200MB+ Electron apps)
 - **Startup Time**: < 1 second cold start
-- **File Operations**: < 100ms response time
 
 ### User Experience Goals
 - **Accessibility**: WCAG 2.1 AA compliance
@@ -202,9 +381,42 @@ Create the most intuitive, performant, and beautiful file browser that feels lik
 
 ### Technical Excellence
 - **Test Coverage**: > 85% for critical paths
-- **Performance**: Passes Core Web Vitals metrics
+- **Performance**: Passes Core Web Vitals metrics  
 - **Security**: Regular security audits
 - **Cross-Platform**: Consistent experience across OS
+
+---
+
+## ✅ Acceptance Tests
+
+**Goal**: Automated verification of core performance and functionality
+
+- [ ] **Performance Benchmarks**
+  - [ ] 50k local files: first paint ≤ 120ms; smooth scroll; memory < 150MB
+  - [ ] 20k SMB files: progressive load; no UI stalls; degraded mode works
+  - [ ] Thumbnail streaming without blocking; cancel on fast scroll
+
+- [ ] **Core Functionality**
+  - [ ] Path paste → Enter navigates or shows clear error
+  - [ ] Batch rename dry-run results exactly match apply results
+  - [ ] AI operations produce valid JSON; collisions resolved as `-1`, `-2` 
+  - [ ] Cancel mid-apply leaves filesystem in consistent state
+
+- [ ] **Distribution**
+  - [ ] Fresh install via DMG/MSI/AppImage works on clean systems
+  - [ ] Auto-update N→N+1 works; rejects tampered updates
+  - [ ] Code signing verification passes on all platforms
+
+---
+
+## 🚫 Non-Goals
+
+**What Marlin will NOT include to maintain focus and performance:**
+
+- **No preview sidebar** - Use native system preview instead
+- **No cloud client** - Focus on local and network storage only
+- **No system indexer** - Keep it lightweight and focused
+- **No plugin marketplace** - Maintain security and simplicity
 
 ---
 
