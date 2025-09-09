@@ -41,7 +41,7 @@ export default function MainPanel() {
   if (loading) {
     return (
       <div className="flex-1 flex items-center justify-center">
-        <div className="text-discord-muted">Loading...</div>
+        <div className="text-app-muted">Loading...</div>
       </div>
     )
   }
@@ -49,7 +49,7 @@ export default function MainPanel() {
   if (error) {
     return (
       <div className="flex-1 flex items-center justify-center">
-        <div className="text-discord-red">Error: {error}</div>
+        <div className="text-app-red">Error: {error}</div>
       </div>
     )
   }
@@ -57,12 +57,12 @@ export default function MainPanel() {
   return (
     <div className="flex-1 flex flex-col">
       {/* Toolbar */}
-      <div className="h-12 bg-discord-gray border-b border-discord-border flex items-center justify-between px-4">
+      <div className="h-12 bg-app-gray border-b border-app-border flex items-center justify-between px-4">
         <div className="flex items-center gap-2">
           {/* View mode toggle */}
           <button
             onClick={toggleViewMode}
-            className="p-2 rounded-md hover:bg-discord-light transition-colors"
+            className="p-2 rounded-md hover:bg-app-light transition-colors"
             title={`Switch to ${currentPrefs.viewMode === 'grid' ? 'list' : 'grid'} view`}
           >
             {currentPrefs.viewMode === 'grid' ? (
@@ -77,7 +77,7 @@ export default function MainPanel() {
             <select
               value={currentPrefs.sortBy}
               onChange={(e) => changeSortBy(e.target.value as typeof currentPrefs.sortBy)}
-              className="bg-discord-darker border border-discord-border rounded-md px-2 py-1 text-sm"
+              className="bg-app-darker border border-app-border rounded-md px-2 py-1 text-sm"
             >
               <option value="name">Name</option>
               <option value="size">Size</option>
@@ -87,7 +87,7 @@ export default function MainPanel() {
             
             <button
               onClick={toggleSortOrder}
-              className="p-2 rounded-md hover:bg-discord-light transition-colors"
+              className="p-2 rounded-md hover:bg-app-light transition-colors"
               title={`Sort ${currentPrefs.sortOrder === 'asc' ? 'descending' : 'ascending'}`}
             >
               {currentPrefs.sortOrder === 'asc' ? (
@@ -98,15 +98,15 @@ export default function MainPanel() {
             </button>
           </div>
 
-          <div className="w-px h-6 bg-discord-border" />
+          <div className="w-px h-6 bg-app-border" />
 
           {/* Hidden files toggle */}
           <button
             onClick={toggleHidden}
             className={`p-2 rounded-md transition-colors ${
               currentPrefs.showHidden
-                ? 'bg-discord-accent/20 text-discord-accent hover:bg-discord-accent/30'
-                : 'hover:bg-discord-light'
+                ? 'bg-app-accent/20 text-app-accent hover:bg-app-accent/30'
+                : 'hover:bg-app-light'
             }`}
             title={`${currentPrefs.showHidden ? 'Hide' : 'Show'} hidden files`}
           >
@@ -118,9 +118,9 @@ export default function MainPanel() {
           </button>
         </div>
 
-        <div className="flex items-center gap-2 text-sm text-discord-muted">
+        <div className="flex items-center gap-2 text-sm text-app-muted">
           <span>{files.length} items</span>
-          <button className="p-1 rounded hover:bg-discord-light">
+          <button className="p-1 rounded hover:bg-app-light">
             <MoreHorizontal className="w-4 h-4" />
           </button>
         </div>

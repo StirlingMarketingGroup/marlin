@@ -14,33 +14,33 @@ export default function FileList({ files, preferences }: FileListProps) {
 
   const getFileIcon = (file: FileItem) => {
     if (file.isDirectory) {
-      return <Folder className="w-5 h-5 text-discord-accent" />
+      return <Folder className="w-5 h-5 text-app-accent" />
     }
 
     const ext = file.extension?.toLowerCase()
-    if (!ext) return <File className="w-5 h-5 text-discord-muted" />
+    if (!ext) return <File className="w-5 h-5 text-app-muted" />
 
     // Same icon logic as FileGrid but smaller
     if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp'].includes(ext)) {
-      return <Image className="w-5 h-5 text-discord-green" />
+      return <Image className="w-5 h-5 text-app-green" />
     }
     if (['mp3', 'wav', 'flac', 'aac', 'm4a', 'ogg'].includes(ext)) {
-      return <Music className="w-5 h-5 text-discord-yellow" />
+      return <Music className="w-5 h-5 text-app-yellow" />
     }
     if (['mp4', 'mkv', 'avi', 'mov', 'webm', 'flv'].includes(ext)) {
-      return <Video className="w-5 h-5 text-discord-red" />
+      return <Video className="w-5 h-5 text-app-red" />
     }
     if (['zip', 'rar', '7z', 'tar', 'gz', 'bz2'].includes(ext)) {
-      return <Archive className="w-5 h-5 text-discord-muted" />
+      return <Archive className="w-5 h-5 text-app-muted" />
     }
     if (['js', 'ts', 'jsx', 'tsx', 'py', 'rs', 'go', 'java', 'cpp', 'c', 'h'].includes(ext)) {
-      return <Code className="w-5 h-5 text-discord-accent" />
+      return <Code className="w-5 h-5 text-app-accent" />
     }
     if (['txt', 'md', 'json', 'xml', 'yml', 'yaml'].includes(ext)) {
-      return <FileText className="w-5 h-5 text-discord-text" />
+      return <FileText className="w-5 h-5 text-app-text" />
     }
 
-    return <File className="w-5 h-5 text-discord-muted" />
+    return <File className="w-5 h-5 text-app-muted" />
   }
 
   const handleFileClick = (file: FileItem, isCtrlClick = false) => {
@@ -95,7 +95,7 @@ export default function FileList({ files, preferences }: FileListProps) {
 
   if (filteredFiles.length === 0) {
     return (
-      <div className="flex-1 flex items-center justify-center text-discord-muted">
+      <div className="flex-1 flex items-center justify-center text-app-muted">
         <div className="text-center">
           <Folder className="w-16 h-16 mx-auto mb-4 opacity-50" />
           <p>This folder is empty</p>
@@ -107,7 +107,7 @@ export default function FileList({ files, preferences }: FileListProps) {
   return (
     <div className="flex-1 overflow-auto">
       {/* Header */}
-      <div className="grid grid-cols-12 gap-4 px-4 py-3 border-b border-discord-border text-sm font-medium text-discord-muted bg-discord-gray/50">
+      <div className="grid grid-cols-12 gap-4 px-4 py-3 border-b border-app-border text-sm font-medium text-app-muted bg-app-gray/50">
         <div className="col-span-6">Name</div>
         <div className="col-span-2">Size</div>
         <div className="col-span-2">Type</div>
@@ -115,7 +115,7 @@ export default function FileList({ files, preferences }: FileListProps) {
       </div>
 
       {/* File rows */}
-      <div className="divide-y divide-discord-border/50">
+      <div className="divide-y divide-app-border/50">
         {filteredFiles.map((file) => {
           const isSelected = selectedFiles.includes(file.path)
           const isDragged = draggedFile === file.path
@@ -123,8 +123,8 @@ export default function FileList({ files, preferences }: FileListProps) {
           return (
             <div
               key={file.path}
-              className={`grid grid-cols-12 gap-4 px-4 py-2 hover:bg-discord-light cursor-pointer transition-colors ${
-                isSelected ? 'bg-discord-accent/20' : ''
+              className={`grid grid-cols-12 gap-4 px-4 py-2 hover:bg-app-light cursor-pointer transition-colors ${
+                isSelected ? 'bg-app-accent/20' : ''
               } ${isDragged ? 'opacity-50' : ''} ${
                 file.isHidden ? 'opacity-60' : ''
               }`}
@@ -143,17 +143,17 @@ export default function FileList({ files, preferences }: FileListProps) {
               </div>
 
               {/* Size column */}
-              <div className="col-span-2 flex items-center text-sm text-discord-muted">
+              <div className="col-span-2 flex items-center text-sm text-app-muted">
                 {file.isDirectory ? '—' : formatFileSize(file.size)}
               </div>
 
               {/* Type column */}
-              <div className="col-span-2 flex items-center text-sm text-discord-muted">
+              <div className="col-span-2 flex items-center text-sm text-app-muted">
                 {file.isDirectory ? 'Folder' : (file.extension?.toUpperCase() || 'File')}
               </div>
 
               {/* Modified column */}
-              <div className="col-span-2 flex items-center text-sm text-discord-muted">
+              <div className="col-span-2 flex items-center text-sm text-app-muted">
                 {formatDate(file.modified)}
               </div>
             </div>

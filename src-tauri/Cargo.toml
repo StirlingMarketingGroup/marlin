@@ -1,7 +1,7 @@
 [package]
 name = "marlin"
 version = "0.1.0"
-description = "A modern, Discord-inspired file browser with native performance"
+description = "A modern, sleek file browser with native performance"
 authors = ["Marlin Team"]
 license = "MIT"
 repository = "https://github.com/user/marlin"

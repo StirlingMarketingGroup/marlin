@@ -9,7 +9,7 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.6-blue.svg)](https://www.typescriptlang.org/)
 [![Stars](https://img.shields.io/github/stars/StirlingMarketingGroup/marlin?style=social)](https://github.com/StirlingMarketingGroup/marlin/stargazers)
 
-*A modern, Discord-inspired file browser with native performance and beautiful UI*
+*A modern, sleek file browser with native performance and beautiful UI*
 
 [🚀 Features](#features) • [📦 Installation](#installation) • [🛠️ Development](#development) • [🎨 Screenshots](#screenshots) • [🤝 Contributing](#contributing)
 
@@ -17,9 +17,9 @@
 
 ## ✨ Features
 
-### 🎨 **Discord-Inspired Design**
+### 🎨 **Modern Design**
 - **Dark-first UI** with system theme detection
-- **Smooth animations** and modern Discord-like interface
+- **Smooth animations** and clean modern interface
 - **Customizable sidebar** with collapsible file tree
 - **Native system colors** integration
 
@@ -148,7 +148,7 @@ See our [detailed roadmap](ROADMAP.md) for planned features and development time
 
 ### Phase 1: Foundation ✅
 - [x] Basic Tauri + React setup
-- [x] Discord-like UI design
+- [x] Modern UI design
 - [x] File system operations
 - [x] Editable path bar
 
@@ -188,7 +188,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## 🙏 Acknowledgments
 
 - [Tauri](https://tauri.app/) - For the amazing framework
-- [Discord](https://discord.com/) - For UI/UX inspiration
 - [Lucide](https://lucide.dev/) - For beautiful icons
 - [Tailwind CSS](https://tailwindcss.com/) - For utility-first CSS
 

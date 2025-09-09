@@ -33,13 +33,13 @@ export default function PathBar() {
   const pathSegments = currentPath.split('/').filter(Boolean)
 
   return (
-    <div className="h-12 bg-discord-gray border-b border-discord-border flex items-center px-4 gap-3">
+    <div className="h-12 bg-app-gray border-b border-app-border flex items-center px-4 gap-3">
       {/* Navigation buttons */}
       <div className="flex items-center gap-1">
         <button
           onClick={goBack}
           disabled={!canGoBack()}
-          className="p-2 rounded-md hover:bg-discord-light disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          className="p-2 rounded-md hover:bg-app-light disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           title="Back"
         >
           <ChevronLeft className="w-4 h-4" />
@@ -47,14 +47,14 @@ export default function PathBar() {
         <button
           onClick={goForward}
           disabled={!canGoForward()}
-          className="p-2 rounded-md hover:bg-discord-light disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          className="p-2 rounded-md hover:bg-app-light disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           title="Forward"
         >
           <ChevronRight className="w-4 h-4" />
         </button>
         <button
           onClick={() => navigateTo('~')}
-          className="p-2 rounded-md hover:bg-discord-light transition-colors"
+          className="p-2 rounded-md hover:bg-app-light transition-colors"
           title="Home"
         >
           <Home className="w-4 h-4" />
@@ -76,20 +76,20 @@ export default function PathBar() {
           />
         ) : (
           <div 
-            className="flex-1 flex items-center gap-1 px-3 py-2 bg-discord-darker rounded-md cursor-text hover:bg-discord-light/50 transition-colors"
+            className="flex-1 flex items-center gap-1 px-3 py-2 bg-app-darker rounded-md cursor-text hover:bg-app-light/50 transition-colors"
             onClick={handleEdit}
           >
-            <span className="text-discord-muted">/</span>
+            <span className="text-app-muted">/</span>
             {pathSegments.map((segment, index) => (
               <div key={index} className="flex items-center gap-1">
                 <button
                   onClick={() => navigateTo('/' + pathSegments.slice(0, index + 1).join('/'))}
-                  className="text-discord-text hover:text-discord-accent transition-colors"
+                  className="text-app-text hover:text-app-accent transition-colors"
                 >
                   {segment}
                 </button>
                 {index < pathSegments.length - 1 && (
-                  <span className="text-discord-muted">/</span>
+                  <span className="text-app-muted">/</span>
                 )}
               </div>
             ))}
@@ -98,7 +98,7 @@ export default function PathBar() {
         
         <button
           onClick={handleEdit}
-          className="p-2 rounded-md hover:bg-discord-light transition-colors"
+          className="p-2 rounded-md hover:bg-app-light transition-colors"
           title="Edit path"
         >
           <Edit3 className="w-4 h-4" />

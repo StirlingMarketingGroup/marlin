@@ -7,8 +7,8 @@ export default {
   theme: {
     extend: {
       colors: {
-        // Discord-inspired color palette
-        discord: {
+        // Modern dark theme color palette
+        app: {
           dark: '#1e1f22',
           darker: '#111214', 
           gray: '#2b2d31',

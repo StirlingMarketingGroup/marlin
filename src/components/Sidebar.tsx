@@ -53,8 +53,8 @@ export default function Sidebar() {
     return (
       <div key={item.path} className="select-none">
         <div
-          className={`flex items-center gap-2 px-2 py-1 rounded-md cursor-pointer hover:bg-discord-light transition-colors ${
-            isSelected ? 'bg-discord-accent/20 text-discord-accent' : ''
+          className={`flex items-center gap-2 px-2 py-1 rounded-md cursor-pointer hover:bg-app-light transition-colors ${
+            isSelected ? 'bg-app-accent/20 text-app-accent' : ''
           }`}
           style={{ paddingLeft: `${8 + level * 20}px` }}
           onClick={() => navigateTo(item.path)}
@@ -65,7 +65,7 @@ export default function Sidebar() {
                 e.stopPropagation()
                 toggleFolder(item.path)
               }}
-              className="p-1 hover:bg-discord-gray rounded"
+              className="p-1 hover:bg-app-gray rounded"
             >
               {isOpen ? (
                 <ChevronDown className="w-3 h-3" />
@@ -103,13 +103,13 @@ export default function Sidebar() {
 
   return (
     <div 
-      className="bg-discord-gray border-r border-discord-border flex flex-col"
+      className="bg-app-gray border-r border-app-border flex flex-col"
       style={{ width: sidebarWidth }}
     >
       {/* Sidebar header */}
-      <div className="h-12 flex items-center justify-between px-4 border-b border-discord-border">
+      <div className="h-12 flex items-center justify-between px-4 border-b border-app-border">
         <h2 className="font-semibold text-sm">Locations</h2>
-        <button className="p-1 hover:bg-discord-light rounded transition-colors">
+        <button className="p-1 hover:bg-app-light rounded transition-colors">
           <Settings className="w-4 h-4" />
         </button>
       </div>

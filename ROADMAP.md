@@ -1,10 +1,10 @@
 # 🗺️ Marlin File Browser Roadmap
 
-This roadmap outlines the planned development phases for Marlin, a modern Discord-inspired file browser built with Tauri and React.
+This roadmap outlines the planned development phases for Marlin, a modern file browser built with Tauri and React.
 
 ## 🎯 Vision
 
-Create the most intuitive, performant, and beautiful file browser that feels like a natural extension of your operating system, with the familiar Discord-inspired interface that developers love.
+Create the most intuitive, performant, and beautiful file browser that feels like a natural extension of your operating system, with a clean modern interface that developers love.
 
 ---
 
@@ -18,11 +18,11 @@ Create the most intuitive, performant, and beautiful file browser that feels lik
 
 - [x] **Project Setup**
   - [x] Tauri 2.0 + React 18 + TypeScript configuration
-  - [x] Tailwind CSS with Discord-inspired color palette
+  - [x] Tailwind CSS with modern dark color palette
   - [x] Development environment and build scripts
 
 - [x] **Core UI Framework**
-  - [x] Discord-like layout with sidebar and main panel
+  - [x] Modern layout with sidebar and main panel
   - [x] Responsive design system
   - [x] Dark theme implementation
   - [x] Custom scrollbars and UI components
@@ -237,9 +237,8 @@ We welcome contributions to any phase of the roadmap! Here's how you can help:
 
 ## 📞 Contact & Feedback
 
-- **GitHub Issues**: [Feature requests & bug reports](https://github.com/user/marlin/issues)
-- **Discussions**: [Community discussions](https://github.com/user/marlin/discussions)
-- **Discord**: [Join our community](https://discord.gg/marlin) (Coming Soon)
+- **GitHub Issues**: [Feature requests & bug reports](https://github.com/StirlingMarketingGroup/marlin/issues)
+- **Discussions**: [Community discussions](https://github.com/StirlingMarketingGroup/marlin/discussions)
 - **Email**: [team@marlin.dev](mailto:team@marlin.dev) (Coming Soon)
 
 ---

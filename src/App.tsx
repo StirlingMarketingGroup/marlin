@@ -34,7 +34,7 @@ function App() {
   }, [setCurrentPath, navigateTo, setLoading, setError, setFiles])
 
   return (
-    <div className="h-screen flex flex-col bg-discord-dark text-discord-text">
+    <div className="h-screen flex flex-col bg-app-dark text-app-text">
       {/* Path bar */}
       <PathBar />
       

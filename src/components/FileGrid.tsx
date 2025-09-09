@@ -14,43 +14,43 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
 
   const getFileIcon = (file: FileItem) => {
     if (file.isDirectory) {
-      return <Folder className="w-8 h-8 text-discord-accent" />
+      return <Folder className="w-8 h-8 text-app-accent" />
     }
 
     const ext = file.extension?.toLowerCase()
-    if (!ext) return <File className="w-8 h-8 text-discord-muted" />
+    if (!ext) return <File className="w-8 h-8 text-app-muted" />
 
     // Image files
     if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp'].includes(ext)) {
-      return <Image className="w-8 h-8 text-discord-green" />
+      return <Image className="w-8 h-8 text-app-green" />
     }
 
     // Audio files
     if (['mp3', 'wav', 'flac', 'aac', 'm4a', 'ogg'].includes(ext)) {
-      return <Music className="w-8 h-8 text-discord-yellow" />
+      return <Music className="w-8 h-8 text-app-yellow" />
     }
 
     // Video files
     if (['mp4', 'mkv', 'avi', 'mov', 'webm', 'flv'].includes(ext)) {
-      return <Video className="w-8 h-8 text-discord-red" />
+      return <Video className="w-8 h-8 text-app-red" />
     }
 
     // Archive files
     if (['zip', 'rar', '7z', 'tar', 'gz', 'bz2'].includes(ext)) {
-      return <Archive className="w-8 h-8 text-discord-muted" />
+      return <Archive className="w-8 h-8 text-app-muted" />
     }
 
     // Code files
     if (['js', 'ts', 'jsx', 'tsx', 'py', 'rs', 'go', 'java', 'cpp', 'c', 'h'].includes(ext)) {
-      return <Code className="w-8 h-8 text-discord-accent" />
+      return <Code className="w-8 h-8 text-app-accent" />
     }
 
     // Text files
     if (['txt', 'md', 'json', 'xml', 'yml', 'yaml'].includes(ext)) {
-      return <FileText className="w-8 h-8 text-discord-text" />
+      return <FileText className="w-8 h-8 text-app-text" />
     }
 
-    return <File className="w-8 h-8 text-discord-muted" />
+    return <File className="w-8 h-8 text-app-muted" />
   }
 
   const handleFileClick = (file: FileItem, isCtrlClick = false) => {
@@ -105,7 +105,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
 
   if (filteredFiles.length === 0) {
     return (
-      <div className="flex-1 flex items-center justify-center text-discord-muted">
+      <div className="flex-1 flex items-center justify-center text-app-muted">
         <div className="text-center">
           <Folder className="w-16 h-16 mx-auto mb-4 opacity-50" />
           <p>This folder is empty</p>
@@ -126,8 +126,8 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
           return (
             <div
               key={file.path}
-              className={`flex flex-col items-center p-3 rounded-lg cursor-pointer transition-all hover:bg-discord-light ${
-                isSelected ? 'bg-discord-accent/20 ring-2 ring-discord-accent' : ''
+              className={`flex flex-col items-center p-3 rounded-lg cursor-pointer transition-all hover:bg-app-light ${
+                isSelected ? 'bg-app-accent/20 ring-2 ring-app-accent' : ''
               } ${isDragged ? 'opacity-50' : ''} ${
                 file.isHidden ? 'opacity-60' : ''
               }`}
@@ -146,7 +146,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
                   {file.name}
                 </div>
                 {!file.isDirectory && (
-                  <div className="text-xs text-discord-muted mt-1">
+                  <div className="text-xs text-app-muted mt-1">
                     {formatFileSize(file.size)}
                   </div>
                 )}
