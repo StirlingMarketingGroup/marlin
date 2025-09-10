@@ -2,7 +2,7 @@ use std::collections::BinaryHeap;
 use std::sync::Arc;
 use std::cmp::Ordering;
 use std::time::Instant;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Semaphore};
 use tokio::task::JoinHandle;
 use rayon::ThreadPool;
 
@@ -62,13 +62,18 @@ impl ThumbnailWorker {
             .build()
             .map_err(|e| format!("Failed to create thread pool: {}", e))?);
 
+        // Allow multiple in-flight requests (bounded)
+        // Allow up to the number of logical CPUs in flight
+        let max_in_flight = std::cmp::max(1, num_cpus::get());
+        let semaphore = Arc::new(Semaphore::new(max_in_flight));
+
         let mut worker = ThumbnailWorker {
             sender,
             worker_handles: Vec::new(),
         };
 
         // Start single worker task that handles all requests
-        let handle = worker.spawn_worker_task(0, receiver, cache.clone(), thread_pool).await;
+        let handle = worker.spawn_worker_task(0, receiver, cache.clone(), thread_pool, semaphore).await;
         worker.worker_handles.push(handle);
 
         Ok(worker)
@@ -80,6 +85,7 @@ impl ThumbnailWorker {
         mut receiver: mpsc::UnboundedReceiver<WorkerMessage>,
         cache: Arc<ThumbnailCache>,
         thread_pool: Arc<ThreadPool>,
+        semaphore: Arc<Semaphore>,
     ) -> JoinHandle<()> {
         
         tokio::spawn(async move {
@@ -107,48 +113,63 @@ impl ThumbnailWorker {
                     }
                 }
 
-                // Process highest priority request
-                if let Some(priority_request) = request_queue.pop() {
-                    let start_time = Instant::now();
-                    let request = priority_request.request;
-                    let response_sender = priority_request.response_sender;
-
-                    // Generate thumbnail using thread pool
-                    let request_clone = request.clone();
-                    let thread_pool_clone = thread_pool.clone();
-                    
-                    let result = tokio::task::spawn_blocking(move || {
-                        thread_pool_clone.install(|| {
-                            ThumbnailGenerator::generate(&request_clone)
-                        })
-                    }).await;
-
-                    let response = match result {
-                        Ok(Ok(data_url)) => {
-                            let generation_time_ms = start_time.elapsed().as_millis() as u64;
-                            
-                            // Store in cache
-                            if let Err(e) = cache.put(&request.path, request.size, data_url.clone(), generation_time_ms).await {
-                                log::warn!("Failed to cache thumbnail: {}", e);
-                            }
-
-                            Ok(ThumbnailResponse {
-                                id: request.id.clone(),
-                                data_url,
-                                cached: false,
-                                generation_time_ms,
-                            })
-                        }
-                        Ok(Err(e)) => Err(format!("Thumbnail generation failed: {}", e)),
-                        Err(e) => Err(format!("Task execution failed: {}", e)),
+                // Launch as many tasks as we have permits and queued work
+                loop {
+                    // Try to acquire a permit; if none available, stop launching
+                    let permit = match semaphore.clone().try_acquire_owned() {
+                        Ok(p) => p,
+                        Err(_) => break,
                     };
 
-                    // Send response back
-                    let _ = response_sender.send(response);
-                } else {
-                    // No requests to process, wait a bit
-                    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                    // Pop highest priority; if none, release permit and break
+                    let Some(priority_request) = request_queue.pop() else {
+                        drop(permit);
+                        break;
+                    };
+
+                    let request = priority_request.request;
+                    let response_sender = priority_request.response_sender;
+                    let cache_clone = cache.clone();
+                    let thread_pool_clone = thread_pool.clone();
+
+                    // Spawn an async task to process this request; permit is dropped on completion
+                    tokio::spawn(async move {
+                        let start_time = Instant::now();
+                        // Generate thumbnail using thread pool
+                        let req_for_pool = request.clone();
+                        let result = tokio::task::spawn_blocking(move || {
+                            thread_pool_clone.install(|| {
+                                ThumbnailGenerator::generate(&req_for_pool)
+                            })
+                        }).await;
+
+                        let response = match result {
+                            Ok(Ok(data_url)) => {
+                                let generation_time_ms = start_time.elapsed().as_millis() as u64;
+                                // Store in cache
+                                if let Err(e) = cache_clone.put(&request.path, request.size, data_url.clone(), generation_time_ms).await {
+                                    log::warn!("Failed to cache thumbnail: {}", e);
+                                }
+                                Ok(ThumbnailResponse {
+                                    id: request.id.clone(),
+                                    data_url,
+                                    cached: false,
+                                    generation_time_ms,
+                                })
+                            }
+                            Ok(Err(e)) => Err(format!("Thumbnail generation failed: {}", e)),
+                            Err(e) => Err(format!("Task execution failed: {}", e)),
+                        };
+
+                        // Send response back
+                        let _ = response_sender.send(response);
+                        // Release permit at end of task
+                        drop(permit);
+                    });
                 }
+
+                // Idle briefly to avoid tight-looping when queue is empty or saturated
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
             }
         })
     }

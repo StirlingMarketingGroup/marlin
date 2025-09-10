@@ -14,6 +14,8 @@ export interface ViewPreferences {
   sortOrder: 'asc' | 'desc'
   showHidden: boolean
   foldersFirst: boolean
+  // Grid (thumbnail) view tile size in px (min column width)
+  gridSize?: number
 }
 
 export interface DirectoryState {

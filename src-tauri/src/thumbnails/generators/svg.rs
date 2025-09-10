@@ -17,15 +17,22 @@ impl SvgGenerator {
         let svg_size = tree.size();
         let (w, h) = (svg_size.width().max(1.0), svg_size.height().max(1.0));
         let target = request.size.max(1);
-        let scale = (target as f32 / w).min(target as f32 / h);
-        let out_w = (w * scale).round().max(1.0) as u32;
-        let out_h = (h * scale).round().max(1.0) as u32;
+        // Leave a small padding inside the square so logos don't touch the edges
+        let padding = (target as f32 * 0.08).round();
+        let inner = (target as f32 - 2.0 * padding).max(1.0);
+        let scale = (inner / w).min(inner / h);
+        let scaled_w = w * scale;
+        let scaled_h = h * scale;
 
-        let mut pixmap = resvg::tiny_skia::Pixmap::new(out_w, out_h)
+        // Always render to a square pixmap
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(target, target)
             .ok_or_else(|| "Failed to allocate pixmap".to_string())?;
 
-        // Build transform to scale into our pixmap (top-left origin)
-        let ts = resvg::tiny_skia::Transform::from_scale(scale, scale);
+        // Build transform to scale into our pixmap and center with padding
+        let mut ts = resvg::tiny_skia::Transform::from_scale(scale, scale);
+        let tx = ((target as f32 - scaled_w) * 0.5).round();
+        let ty = ((target as f32 - scaled_h) * 0.5).round();
+        ts = ts.post_translate(tx, ty);
         let mut pmut = pixmap.as_mut();
         resvg::render(&tree, ts, &mut pmut);
 
@@ -47,7 +54,7 @@ impl SvgGenerator {
             }
         }
 
-        let img = image::ImageBuffer::<image::Rgba<u8>, _>::from_vec(out_w, out_h, rgba)
+        let img = image::ImageBuffer::<image::Rgba<u8>, _>::from_vec(target, target, rgba)
             .ok_or_else(|| "Failed to create image buffer".to_string())?;
         let di = DynamicImage::ImageRgba8(img);
 

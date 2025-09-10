@@ -14,62 +14,97 @@ interface FileGridProps {
 }
 
 // Stable, top-level preview component to avoid remount flicker
-function GridFilePreview({ file, isMac, fallbackIcon }: { file: FileItem; isMac: boolean; fallbackIcon: ReactNode }) {
+function GridFilePreview({ file, isMac, fallbackIcon, tile }: { file: FileItem; isMac: boolean; fallbackIcon: ReactNode; tile: number }) {
   const ext = file.extension?.toLowerCase()
   const isImage = !!ext && ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'tiff', 'tga', 'ico', 'svg'].includes(ext || '')
   const isPdf = ext === 'pdf'
   const isAi = ext === 'ai' || ext === 'eps'
   const isPsd = ext === 'psd' || ext === 'psb'
+  const isSvg = ext === 'svg'
+  const isAppBundle = isMac && file.is_directory && file.name.toLowerCase().endsWith('.app')
 
-  // Prefer native app icons/DMG if applicable
-  if (isMac) {
-    const fileName = file.name.toLowerCase()
-    if (file.is_directory && fileName.endsWith('.app')) {
-      return (
-        <AppIcon
-          path={file.path}
-          size={96}
-          className="w-16 h-16"
-          priority="high"
-          fallback={<AppWindow className="w-14 h-14 text-accent" />}
-        />
-      )
+  // (Rendering handled below with a fixed preview box for alignment)
+
+  // Device pixel ratio quantized to 1 or 2 for cache reuse
+  const dpr = typeof window !== 'undefined' ? (window.devicePixelRatio && window.devicePixelRatio > 1.5 ? 2 : 1) : 1
+  // Padding is small and stable (more noticeable for breathing room)
+  const pad = Math.max(3, Math.min(8, Math.round(tile * 0.03)))
+  // Fixed preview box to keep rows aligned
+  const box = Math.max(48, Math.min(tile - pad * 2, 320))
+
+  // Bucket request sizes to improve cache hits across navigation and zoom
+  const pickBucket = (target: number) => {
+    const buckets = [64, 96, 128, 192, 256, 320, 384, 512]
+    let best = buckets[0]
+    let bestDiff = Math.abs(buckets[0] - target)
+    for (let i = 1; i < buckets.length; i++) {
+      const diff = Math.abs(buckets[i] - target)
+      if (diff < bestDiff) { best = buckets[i]; bestDiff = diff }
     }
-    if (fileName.endsWith('.pkg')) {
-      return <Package className="w-12 h-12 text-blue-500" weight="fill" />
-    }
-    if (fileName.endsWith('.dmg')) {
-      return <Disc className="w-12 h-12 text-app-muted" weight="fill" />
-    }
+    return best
   }
 
-    if (isImage || isPdf || isAi || isPsd) {
-    const { dataUrl, loading } = useThumbnail(file.path, { size: 192, quality: 'medium', priority: 'high', format: 'png' })
+  // Image-like previews (real thumbnails)
+  if (isImage || isPdf || isAi || isPsd) {
+    const requestSize = pickBucket(Math.round((box - pad * 2) * dpr))
+    const { dataUrl, loading } = useThumbnail(file.path, { size: requestSize, quality: 'medium', priority: 'high' })
     if (dataUrl) {
       return (
-        <img
-          src={dataUrl}
-          alt={file.name}
-          className="w-16 h-16 rounded-md object-cover border border-app-border bg-checker"
-          draggable={false}
-        />
+        <div className={`rounded-md border border-app-border bg-checker overflow-hidden`} style={{ width: box, height: box, padding: pad, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <img
+            src={dataUrl}
+            alt={file.name}
+            className={`max-w-full max-h-full w-full h-full`}
+            style={{ objectFit: 'contain', transform: 'none' }}
+            draggable={false}
+          />
+        </div>
       )
     }
     if (loading) {
-      return <div className="w-16 h-16 rounded-md border border-app-border bg-checker animate-pulse" />
+      return <div className="rounded-md border border-app-border bg-checker animate-pulse" style={{ width: box, height: box, padding: pad }} />
     }
   }
 
-  // Non-image fallback icon
-  return <>{fallbackIcon}</>
+  // macOS .app Application icons (native icons)
+  if (isAppBundle) {
+    const requestSize = pickBucket(Math.round((box - pad * 2) * dpr))
+    return (
+      <div className="overflow-hidden" style={{ width: box, height: box, padding: pad }}>
+        <AppIcon
+          path={file.path}
+          size={requestSize}
+          className="w-full h-full"
+          priority="high"
+          fallback={<AppWindow className="w-14 h-14 text-accent" />}
+        />
+      </div>
+    )
+  }
+
+  // Non-image fallback icon (reuse the same padding rule)
+  const thumb = Math.max(48, Math.min(tile - pad * 2, 320))
+  // Base icons ~48px; target ~50% of thumb at default
+  const target = Math.max(32, Math.min(thumb * 0.5, 140))
+  const scale = Math.max(0.75, Math.min(2.0, target / 48))
+  return (
+    <div className="rounded-md" style={{ width: thumb, height: thumb, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <div style={{ transform: `scale(${scale})`, transformOrigin: 'center' }}>
+        {fallbackIcon}
+      </div>
+    </div>
+  )
 }
 
 export default function FileGrid({ files, preferences }: FileGridProps) {
   const { selectedFiles, setSelectedFiles, navigateTo } = useAppStore()
   const [draggedFile, setDraggedFile] = useState<string | null>(null)
   
-  // Fixed safe middle-truncation target for 120px tile captions (2 lines)
-  const gridNameCharLimit = 40
+  // Tile width from preferences (default 120)
+  // Allow full range up to 320 to match ZoomSlider
+  const tile = Math.max(80, Math.min(320, preferences.gridSize ?? 120))
+  // Name char limit scales roughly with tile width (40 at 120)
+  const gridNameCharLimit = Math.max(20, Math.round(40 * (tile / 120)))
 
   const isMac = typeof navigator !== 'undefined' && navigator.platform.toUpperCase().includes('MAC')
 
@@ -250,7 +285,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
   return (
     <div className="p-2 select-none" onClick={handleBackgroundClick}>
       <div className="grid gap-2" style={{
-        gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))'
+        gridTemplateColumns: `repeat(auto-fill, minmax(${tile}px, 1fr))`
       }}>
         {filteredFiles.map((file) => {
           const isSelected = selectedFiles.includes(file.path)
@@ -271,8 +306,8 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
               onDragEnd={() => setDraggedFile(null)}
               draggable
             >
-              <div className="mb-2 flex-shrink-0">
-                <GridFilePreview file={file} isMac={isMac} fallbackIcon={getFileIcon(file)} />
+              <div className="mb-2 flex-shrink-0" style={{ width: tile, display: 'flex', justifyContent: 'center', height: Math.max(48, Math.min(tile - Math.max(3, Math.min(8, Math.round(tile * 0.03))) * 2, 320)) }}>
+                <GridFilePreview file={file} isMac={isMac} fallbackIcon={getFileIcon(file)} tile={tile} />
               </div>
               
               <div className={`text-center`}>
@@ -282,30 +317,19 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
                     : file.name
                   
                   const needsTruncation = raw.length > gridNameCharLimit
-                  const needsExpansion = needsTruncation && isSelected
+                  const needsExpansion = false // keep row heights stable; rely on tooltip for full name
                   
                   return (
                     <>
                       <div 
-                        className={`text-sm font-medium ${isSelected ? 'text-accent' : ''} ${needsExpansion ? 'relative z-10' : ''}`}
+                        className={`text-sm font-medium ${isSelected ? 'text-accent' : ''}`}
                         style={{
                           wordBreak: 'break-word',
-                          maxWidth: '120px',
-                          height: needsExpansion ? 'auto' : '2.5rem',
+                          maxWidth: `${tile}px`,
+                          height: '2.5rem',
                           lineHeight: '1.25rem',
-                          overflow: needsExpansion ? 'visible' : 'hidden',
-                          textAlign: 'center',
-                          ...(needsExpansion && {
-                            backgroundColor: 'rgb(30 30 30 / 0.95)',
-                            padding: '2px 4px',
-                            borderRadius: '4px',
-                            position: 'absolute',
-                            left: '50%',
-                            transform: 'translateX(-50%)',
-                            minWidth: '120px',
-                            zIndex: 20,
-                            height: 'auto'
-                          })
+                          overflow: 'hidden',
+                          textAlign: 'center'
                         }}
                         
                         title={file.name}

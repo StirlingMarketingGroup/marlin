@@ -2,12 +2,16 @@ import { useEffect, useState, KeyboardEvent, MouseEvent } from 'react'
 import { CaretLeft, CaretRight, SquaresFour, List, ArrowUp, ArrowClockwise } from 'phosphor-react'
 import { useAppStore } from '../store/useAppStore'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import ZoomSlider from './ZoomSlider'
 
 export default function PathBar() {
   const {
     currentPath,
     homeDir,
     navigateTo,
+    showZoomSliderNow,
+    scheduleHideZoomSlider,
+    showZoomSlider,
   } = useAppStore()
 
   const [editPath, setEditPath] = useState(currentPath)
@@ -44,7 +48,7 @@ export default function PathBar() {
 
   return (
     <div 
-      className="toolbar gap-3 select-none" 
+      className="toolbar gap-3 select-none relative" 
       data-tauri-drag-region
       onMouseDown={handleManualDrag}
     >
@@ -123,6 +127,10 @@ export default function PathBar() {
           }
           title="Icons"
           data-tauri-drag-region={false}
+          onMouseEnter={() => showZoomSliderNow()}
+          onMouseLeave={() => scheduleHideZoomSlider(400)}
+          onFocus={() => showZoomSliderNow()}
+          onBlur={() => scheduleHideZoomSlider(400)}
         >
           <SquaresFour className="w-4 h-4 text-accent" />
         </button>
@@ -142,6 +150,16 @@ export default function PathBar() {
           <List className="w-4 h-4 text-accent" />
         </button>
       </div>
+
+      {/* Sticky Zoom slider at top right */}
+      {(() => {
+        const viewMode = (useAppStore.getState().directoryPreferences[currentPath]?.viewMode ||
+          useAppStore.getState().globalPreferences.viewMode)
+        const isGrid = viewMode === 'grid'
+        return (
+          <ZoomSlider visible={isGrid && showZoomSlider} />
+        )
+      })()}
     </div>
   )
 }

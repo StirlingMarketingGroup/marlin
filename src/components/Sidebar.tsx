@@ -1,4 +1,4 @@
-import { House, Desktop, FileText, DownloadSimple, ImageSquare, SquaresFour, UsersThree, HardDrives, Eject, CircleNotch } from 'phosphor-react'
+import { House, Desktop, FileText, DownloadSimple, ImageSquare, SquaresFour, UsersThree, HardDrives, Eject, CircleNotch, Trash, Recycle } from 'phosphor-react'
 import { useAppStore } from '../store/useAppStore'
 import { useEffect, useState, MouseEvent } from 'react'
 import { invoke } from '@tauri-apps/api/core'
@@ -65,12 +65,19 @@ export default function Sidebar() {
     <IconComponent className={`w-4 h-4 ${isActive ? 'text-accent' : ''}`} weight={weight} />
   )
 
+  // Platform detection for special folders
+  const isMac = typeof navigator !== 'undefined' && navigator.platform.toUpperCase().includes('MAC')
+  const isWindows = typeof navigator !== 'undefined' && navigator.userAgent.toUpperCase().includes('WINDOWS')
+  const trashPath = isMac ? join(home, '.Trash') : (isWindows ? null : join(home, '.local/share/Trash/files'))
+  const trashLabel = isWindows ? 'Recycle Bin' : 'Trash'
+
   const links = [
     { name: userLabel, path: home || '/', iconType: House, weight: "fill" as const },
     { name: 'Desktop', path: join(home, 'Desktop'), iconType: Desktop, weight: "fill" as const },
     { name: 'Documents', path: join(home, 'Documents'), iconType: FileText, weight: "fill" as const },
     { name: 'Downloads', path: join(home, 'Downloads'), iconType: DownloadSimple, weight: "fill" as const },
     { name: 'Pictures', path: join(home, 'Pictures'), iconType: ImageSquare, weight: "fill" as const },
+    { name: trashLabel, path: trashPath, iconType: isWindows ? Recycle : Trash, weight: "fill" as const },
     // macOS locations
     { name: 'Applications', path: '/Applications', iconType: SquaresFour, weight: "fill" as const },
     { name: 'Users', path: '/Users', iconType: UsersThree, weight: "fill" as const },

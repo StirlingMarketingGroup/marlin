@@ -54,6 +54,9 @@ interface AppState {
   sidebarWidth: number
   showSidebar: boolean
   showPreviewPanel: boolean
+  // UI ephemeral
+  showZoomSlider: boolean
+  _zoomSliderHideTimer?: number
   
   // Actions
   setCurrentPath: (path: string) => void
@@ -68,6 +71,9 @@ interface AppState {
   setSidebarWidth: (width: number) => void
   toggleSidebar: () => void
   togglePreviewPanel: () => void
+  showZoomSliderNow: () => void
+  hideZoomSliderNow: () => void
+  scheduleHideZoomSlider: (delayMs?: number) => void
   navigateTo: (path: string) => void
   goBack: () => void
   goForward: () => void
@@ -115,6 +121,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     sortOrder: 'asc',
     showHidden: false,
     foldersFirst: true,
+    gridSize: 120,
   },
   directoryPreferences: {},
   theme: 'system',
@@ -123,6 +130,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   sidebarWidth: 240,
   showSidebar: true,
   showPreviewPanel: false,
+  showZoomSlider: false,
+  _zoomSliderHideTimer: undefined,
   
   // Actions
   setCurrentPath: (path) => set({ currentPath: (get() as any)._normalizePath(path) }),
@@ -152,6 +161,27 @@ export const useAppStore = create<AppState>((set, get) => ({
   setSidebarWidth: (width) => set({ sidebarWidth: Math.max(200, Math.min(400, width)) }),
   toggleSidebar: () => set((state) => ({ showSidebar: !state.showSidebar })),
   togglePreviewPanel: () => set((state) => ({ showPreviewPanel: !state.showPreviewPanel })),
+  showZoomSliderNow: () => set((state) => {
+    if (state._zoomSliderHideTimer) {
+      window.clearTimeout(state._zoomSliderHideTimer)
+    }
+    return { showZoomSlider: true, _zoomSliderHideTimer: undefined }
+  }),
+  hideZoomSliderNow: () => set((state) => {
+    if (state._zoomSliderHideTimer) {
+      window.clearTimeout(state._zoomSliderHideTimer)
+    }
+    return { showZoomSlider: false, _zoomSliderHideTimer: undefined }
+  }),
+  scheduleHideZoomSlider: (delayMs = 300) => set((state) => {
+    if (state._zoomSliderHideTimer) {
+      window.clearTimeout(state._zoomSliderHideTimer)
+    }
+    const id = window.setTimeout(() => {
+      useAppStore.getState().hideZoomSliderNow()
+    }, delayMs)
+    return { _zoomSliderHideTimer: id }
+  }),
   
   navigateTo: (path) => {
     const { pathHistory, historyIndex } = get()

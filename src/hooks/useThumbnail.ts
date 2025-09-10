@@ -67,18 +67,11 @@ export function useThumbnail(
     // Store promise in cache
     thumbnailPromises.set(cacheKey, requestPromise);
 
-    // Clean up promise from cache after completion
-    requestPromise
-      .then(() => {
-        // Keep successful results in cache for a bit
-        setTimeout(() => {
-          thumbnailPromises.delete(cacheKey);
-        }, 30000); // 30 seconds
-      })
-      .catch(() => {
-        // Remove failed requests immediately
-        thumbnailPromises.delete(cacheKey);
-      });
+    // Do not expire successful promises eagerly; they serve as an L1 in-memory cache
+    // Remove failed requests immediately so they can be retried
+    requestPromise.catch(() => {
+      thumbnailPromises.delete(cacheKey);
+    });
 
     return requestPromise;
   }, []);

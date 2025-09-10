@@ -192,12 +192,18 @@ pub fn render_svg_to_png(svg: String, size: Option<u32>) -> Result<String, Strin
     let mut pixmap = resvg::tiny_skia::Pixmap::new(target, target)
         .ok_or_else(|| "Failed to allocate pixmap".to_string())?;
 
-    // Scale the SVG viewBox to the exact target size (Iconify icons are square 24x24).
+    // Fit into square with a small padding to avoid bleeding against edges
     let svg_size = tree.size();
     let (w, h) = (svg_size.width().max(1.0), svg_size.height().max(1.0));
-    let sx = (target as f32) / w;
-    let sy = (target as f32) / h;
-    let ts = resvg::tiny_skia::Transform::from_scale(sx, sy);
+    let padding = (target as f32 * 0.08).round();
+    let inner = (target as f32 - 2.0 * padding).max(1.0);
+    let s = (inner / w).min(inner / h);
+    let scaled_w = w * s;
+    let scaled_h = h * s;
+    let mut ts = resvg::tiny_skia::Transform::from_scale(s, s);
+    let tx = ((target as f32 - scaled_w) * 0.5).round();
+    let ty = ((target as f32 - scaled_h) * 0.5).round();
+    ts = ts.post_translate(tx, ty);
 
     let mut pmut = pixmap.as_mut();
     resvg::render(&tree, ts, &mut pmut);

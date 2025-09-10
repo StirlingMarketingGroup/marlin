@@ -20,6 +20,7 @@ function ListFilePreview({ file, isMac, fallbackIcon }: { file: FileItem; isMac:
   const isPdf = ext === 'pdf'
   const isAi = ext === 'ai' || ext === 'eps'
   const isPsd = ext === 'psd' || ext === 'psb'
+  const isSvg = ext === 'svg'
 
   if (isMac) {
     const fileName = file.name.toLowerCase()
@@ -43,10 +44,36 @@ function ListFilePreview({ file, isMac, fallbackIcon }: { file: FileItem; isMac:
     }
   }
 
-    if (isImage || isPdf || isAi || isPsd) {
-    const { dataUrl, loading } = useThumbnail(file.path, { size: 64, quality: 'medium', priority: 'medium', format: 'png' })
+  if (isImage || isPdf || isAi || isPsd) {
+    const dpr = typeof window !== 'undefined' ? Math.min(2, Math.max(1, window.devicePixelRatio || 1)) : 1
+    const { dataUrl, loading } = useThumbnail(file.path, { size: Math.round(64 * dpr), quality: 'medium', priority: 'medium' })
     if (dataUrl) {
-      return <img src={dataUrl} alt="" className="w-5 h-5 rounded-sm object-cover border border-app-border bg-checker" draggable={false} />
+      const isRaster = isImage && !isSvg
+      return (
+        <div className={`w-5 h-5 rounded-sm border border-app-border bg-checker ${isRaster ? '' : 'p-[1px]'} overflow-hidden`}>
+          <img
+            src={dataUrl}
+            alt=""
+            className={`w-full h-full`}
+            style={{ objectFit: isRaster ? 'contain' as const : 'contain' as const, transform: 'none' }}
+            onLoad={(e) => {
+              if (!isRaster) return
+              const img = e.currentTarget as HTMLImageElement
+              const iw = img.naturalWidth || 1
+              const ih = img.naturalHeight || 1
+              const r = iw / ih
+              if (r > 1/1.10 && r < 1.10) {
+                img.style.objectFit = 'cover'
+                img.style.transform = 'scale(1.01)'
+              } else {
+                img.style.objectFit = 'contain'
+                img.style.transform = 'none'
+              }
+            }}
+            draggable={false}
+          />
+        </div>
+      )
     }
     if (loading) {
       return <div className="w-5 h-5 rounded-sm border border-app-border bg-checker animate-pulse" />
