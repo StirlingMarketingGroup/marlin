@@ -78,8 +78,15 @@ export function useThumbnail(
 
   useEffect(() => {
     if (!path) {
-      // Defer fetching while offscreen; keep any existing dataUrl so scrolling back is instant.
-      return;
+      // If path becomes undefined, cancel any in-flight request but keep current dataUrl
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+      if (requestIdRef.current) {
+        invoke('cancel_thumbnail', { requestId: requestIdRef.current }).catch(() => {})
+      }
+      setLoading(false)
+      return
     }
 
     // Cancel any existing request

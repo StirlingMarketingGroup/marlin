@@ -8,6 +8,7 @@ import { open } from '@tauri-apps/plugin-shell'
 import { useThumbnail } from '@/hooks/useThumbnail'
 import { useVisibility } from '@/hooks/useVisibility'
 import { truncateMiddle } from '@/utils/truncate'
+import QuickTooltip from '@/components/QuickTooltip'
 
 interface FileListProps {
   files: FileItem[]
@@ -359,7 +360,7 @@ export default function FileList({ files, preferences }: FileListProps) {
             <div
               key={file.path}
               className={`grid grid-cols-12 gap-3 py-[2px] leading-5 text-[13px] cursor-pointer transition-colors duration-75 rounded-full ${
-                isSelected ? 'bg-accent-selected' : 'odd:bg-app-gray hover:bg-app-light'
+                isSelected ? 'bg-accent-selected text-white' : 'odd:bg-app-gray hover:bg-app-light'
               } ${isDragged ? 'opacity-50' : ''} ${
                 file.is_hidden ? 'opacity-60' : ''
               }`}
@@ -375,24 +376,41 @@ export default function FileList({ files, preferences }: FileListProps) {
                 <span className="flex-shrink-0">
                   <ListFilePreview file={file} isMac={isMac} fallbackIcon={getFileIcon(file)} />
                 </span>
-                <span className={`block truncate text-sm ${isSelected ? 'text-accent' : ''}`} title={file.name}>
-                  {(() => {
-                    const displayName = (isMac && file.is_directory && file.name.toLowerCase().endsWith('.app'))
-                      ? file.name.replace(/\.app$/i, '')
-                      : file.name
-                    // Dynamically computed safe length so we avoid double-ellipsis
-                    return truncateMiddle(displayName, nameCharLimit)
-                  })()}
-                </span>
+                {(() => {
+                  const displayName = (isMac && file.is_directory && file.name.toLowerCase().endsWith('.app'))
+                    ? file.name.replace(/\.app$/i, '')
+                    : file.name
+                  const truncated = truncateMiddle(displayName, nameCharLimit)
+                  const needsTooltip = truncated !== displayName
+                  if (!needsTooltip) {
+                    return <span className={`block truncate text-sm ${isSelected ? 'text-white' : ''}`}>{truncated}</span>
+                  }
+                  return (
+                    <QuickTooltip text={displayName}>
+                      {({ onMouseEnter, onMouseLeave, onFocus, onBlur, ref }) => (
+                        <span
+                          className={`block truncate text-sm ${isSelected ? 'text-white' : ''}`}
+                          onMouseEnter={onMouseEnter}
+                          onMouseLeave={onMouseLeave}
+                          onFocus={onFocus}
+                          onBlur={onBlur}
+                          ref={ref as any}
+                        >
+                          {truncated}
+                        </span>
+                      )}
+                    </QuickTooltip>
+                  )
+                })()}
               </div>
 
               {/* Size column */}
-              <div className="col-span-2 flex items-center text-app-muted">
+              <div className={`col-span-2 flex items-center ${isSelected ? 'text-white' : 'text-app-muted'}`}>
                 {file.is_directory ? '—' : formatFileSize(file.size)}
               </div>
 
               {/* Type column */}
-              <div className="col-span-2 flex items-center text-app-muted">
+              <div className={`col-span-2 flex items-center ${isSelected ? 'text-white' : 'text-app-muted'}`}>
                 {file.is_directory && file.name.toLowerCase().endsWith('.app') 
                   ? 'Application' 
                   : file.is_directory 
@@ -401,7 +419,7 @@ export default function FileList({ files, preferences }: FileListProps) {
               </div>
 
               {/* Modified column */}
-              <div className="col-span-3 flex items-center text-app-muted whitespace-nowrap">
+              <div className={`col-span-3 flex items-center ${isSelected ? 'text-white' : 'text-app-muted'} whitespace-nowrap`}>
                 {formatDateFull(file.modified)}
               </div>
             </div>

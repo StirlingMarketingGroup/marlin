@@ -115,7 +115,7 @@ export default function Sidebar() {
               key={item.name}
               onClick={() => !isDisabled && navigateTo(item.path!)}
               className={`w-full flex items-center gap-1 px-1.5 py-1 rounded-md text-left leading-5 text-[13px] ${
-                isActive ? 'bg-accent-soft' : 'hover:bg-app-light/70'
+                isActive ? 'bg-app-light' : 'hover:bg-app-light/70'
               } ${isDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
               title={item.path || ''}
               data-tauri-drag-region={false}
@@ -138,7 +138,7 @@ export default function Sidebar() {
                 <div
                   key={drive.path}
                   className={`w-full flex items-center gap-1 px-1.5 py-1 rounded-md text-left leading-5 text-[13px] group ${
-                    isActive ? 'bg-accent-soft' : 'hover:bg-app-light/70'
+                    isActive ? 'bg-app-light' : 'hover:bg-app-light/70'
                   }`}
                 >
                   <button

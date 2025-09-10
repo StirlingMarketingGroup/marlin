@@ -331,7 +331,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
                   return (
                     <>
                       <div 
-                        className={`text-sm font-medium ${isSelected ? 'text-accent' : ''}`}
+                        className={`text-sm font-medium ${isSelected ? 'text-white' : ''}`}
                         style={{
                           wordBreak: 'break-word',
                           maxWidth: `${tile}px`,
@@ -359,7 +359,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
                         })()}
                       </div>
                       {!file.is_directory && !needsExpansion && (
-                        <div className="text-xs text-app-muted mt-1">
+                        <div className={`text-xs mt-1 ${isSelected ? 'text-white/80' : 'text-app-muted'}`}>
                           {formatFileSize(file.size)}
                         </div>
                       )}
