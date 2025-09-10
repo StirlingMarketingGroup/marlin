@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react'
+import { useState, useMemo, type ReactNode } from 'react'
 import { Folder, File, ImageSquare, MusicNote, VideoCamera, FileZip, FileText, AppWindow, Package, FilePdf, PaintBrush, Palette, Disc } from 'phosphor-react'
 import { FileItem, ViewPreferences } from '../types'
 import { useAppStore } from '../store/useAppStore'
@@ -234,6 +234,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     }
   }
 
+  const nameCollator = useMemo(() => new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' }), [])
   const sortedFiles = [...files].sort((a, b) => {
     // Treat .app as files for sorting purposes
     const aIsApp = a.is_directory && a.name.toLowerCase().endsWith('.app')
@@ -250,7 +251,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     let compareValue = 0
     switch (preferences.sortBy) {
       case 'name':
-        compareValue = a.name.localeCompare(b.name)
+        compareValue = nameCollator.compare(a.name, b.name)
         break
       case 'size':
         compareValue = a.size - b.size
