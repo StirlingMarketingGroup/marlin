@@ -13,6 +13,7 @@ export default function MainPanel() {
     currentPath,
     directoryPreferences,
     setSelectedFiles,
+    loading,
   } = useAppStore()
 
   // We rely solely on the native OS context menu now
@@ -101,10 +102,19 @@ export default function MainPanel() {
         onContextMenu={handleContextMenu}
         onClick={handleContainerBackgroundClick}
       >
-        {currentPrefs.viewMode === 'grid' ? (
-          <FileGrid files={files} preferences={currentPrefs} />
-        ) : (
-          <FileList files={files} preferences={currentPrefs} />
+        {/* Mask old content while loading to avoid layout flicker during view changes */}
+        <div className={`${loading ? 'invisible' : 'visible'}`}>
+          {currentPrefs.viewMode === 'grid' ? (
+            <FileGrid files={files} preferences={currentPrefs} />
+          ) : (
+            <FileList files={files} preferences={currentPrefs} />
+          )}
+        </div>
+
+        {loading && (
+          <div className="absolute inset-0 flex items-center justify-center bg-app-dark">
+            <div className="animate-spin w-6 h-6 border-2 border-[var(--accent)] border-t-transparent rounded-full" />
+          </div>
         )}
       </div>
       

@@ -6,6 +6,7 @@ import AppIcon from '@/components/AppIcon'
 import { FileTypeIcon, resolveVSCodeIcon } from '@/components/FileTypeIcon'
 import { open } from '@tauri-apps/plugin-shell'
 import { useThumbnail } from '@/hooks/useThumbnail'
+import { useVisibility } from '@/hooks/useVisibility'
 import { truncateMiddle } from '@/utils/truncate'
 
 interface FileGridProps {
@@ -15,6 +16,7 @@ interface FileGridProps {
 
 // Stable, top-level preview component to avoid remount flicker
 function GridFilePreview({ file, isMac, fallbackIcon, tile }: { file: FileItem; isMac: boolean; fallbackIcon: ReactNode; tile: number }) {
+  const { ref, stage } = useVisibility({ nearMargin: '900px', visibleMargin: '0px' })
   const ext = file.extension?.toLowerCase()
   const isImage = !!ext && ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'tiff', 'tga', 'ico', 'svg'].includes(ext || '')
   const isPdf = ext === 'pdf'
@@ -47,10 +49,12 @@ function GridFilePreview({ file, isMac, fallbackIcon, tile }: { file: FileItem; 
   // Image-like previews (real thumbnails)
   if (isImage || isPdf || isAi || isPsd) {
     const requestSize = pickBucket(Math.round((box - pad * 2) * dpr))
-    const { dataUrl, loading } = useThumbnail(file.path, { size: requestSize, quality: 'medium', priority: 'high' })
+    const shouldLoad = stage !== 'far'
+    const priority = stage === 'visible' ? 'high' : 'medium'
+    const { dataUrl, loading } = useThumbnail(shouldLoad ? file.path : undefined, { size: requestSize, quality: 'medium', priority })
     if (dataUrl) {
       return (
-        <div className={`rounded-md border border-app-border bg-checker overflow-hidden`} style={{ width: box, height: box, padding: pad, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <div ref={ref as any} className={`rounded-md border border-app-border bg-checker overflow-hidden`} style={{ width: box, height: box, padding: pad, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           <img
             src={dataUrl}
             alt={file.name}
@@ -62,20 +66,24 @@ function GridFilePreview({ file, isMac, fallbackIcon, tile }: { file: FileItem; 
       )
     }
     if (loading) {
-      return <div className="rounded-md border border-app-border bg-checker animate-pulse" style={{ width: box, height: box, padding: pad }} />
+      return <div ref={ref as any} className="rounded-md border border-app-border bg-checker animate-pulse" style={{ width: box, height: box, padding: pad }} />
     }
+    return <div ref={ref as any} className="rounded-md border border-app-border bg-checker" style={{ width: box, height: box, padding: pad }} />
   }
 
   // macOS .app Application icons (native icons)
   if (isAppBundle) {
     const requestSize = pickBucket(Math.round((box - pad * 2) * dpr))
+    if (stage === 'far') {
+      return <div ref={ref as any} className="overflow-hidden rounded-md border border-app-border bg-checker" style={{ width: box, height: box, padding: pad }} />
+    }
     return (
-      <div className="overflow-hidden" style={{ width: box, height: box, padding: pad }}>
+      <div ref={ref as any} className="overflow-hidden" style={{ width: box, height: box, padding: pad }}>
         <AppIcon
           path={file.path}
           size={requestSize}
           className="w-full h-full"
-          priority="high"
+          priority={stage === 'visible' ? 'high' : 'medium'}
           fallback={<AppWindow className="w-14 h-14 text-accent" />}
         />
       </div>
@@ -88,7 +96,7 @@ function GridFilePreview({ file, isMac, fallbackIcon, tile }: { file: FileItem; 
   const target = Math.max(32, Math.min(thumb * 0.5, 140))
   const scale = Math.max(0.75, Math.min(2.0, target / 48))
   return (
-    <div className="rounded-md" style={{ width: thumb, height: thumb, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+    <div ref={ref as any} className="rounded-md" style={{ width: thumb, height: thumb, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
       <div style={{ transform: `scale(${scale})`, transformOrigin: 'center' }}>
         {fallbackIcon}
       </div>

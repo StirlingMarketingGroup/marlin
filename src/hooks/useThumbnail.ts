@@ -78,11 +78,7 @@ export function useThumbnail(
 
   useEffect(() => {
     if (!path) {
-      setDataUrl(undefined);
-      setLoading(false);
-      setError(undefined);
-      setCached(false);
-      setGenerationTimeMs(0);
+      // Defer fetching while offscreen; keep any existing dataUrl so scrolling back is instant.
       return;
     }
 

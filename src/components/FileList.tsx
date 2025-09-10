@@ -6,6 +6,7 @@ import AppIcon from '@/components/AppIcon'
 import { FileTypeIcon, resolveVSCodeIcon } from '@/components/FileTypeIcon'
 import { open } from '@tauri-apps/plugin-shell'
 import { useThumbnail } from '@/hooks/useThumbnail'
+import { useVisibility } from '@/hooks/useVisibility'
 import { truncateMiddle } from '@/utils/truncate'
 
 interface FileListProps {
@@ -15,6 +16,7 @@ interface FileListProps {
 
 // Stable, top-level preview component to avoid remount flicker
 function ListFilePreview({ file, isMac, fallbackIcon }: { file: FileItem; isMac: boolean; fallbackIcon: ReactNode }) {
+  const { ref, stage } = useVisibility({ nearMargin: '800px', visibleMargin: '0px' })
   const ext = file.extension?.toLowerCase()
   const isImage = !!ext && ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'tiff', 'tga', 'ico', 'svg'].includes(ext || '')
   const isPdf = ext === 'pdf'
@@ -46,11 +48,13 @@ function ListFilePreview({ file, isMac, fallbackIcon }: { file: FileItem; isMac:
 
   if (isImage || isPdf || isAi || isPsd) {
     const dpr = typeof window !== 'undefined' ? Math.min(2, Math.max(1, window.devicePixelRatio || 1)) : 1
-    const { dataUrl, loading } = useThumbnail(file.path, { size: Math.round(64 * dpr), quality: 'medium', priority: 'medium' })
+    const shouldLoad = stage !== 'far'
+    const priority = stage === 'visible' ? 'high' : 'medium'
+    const { dataUrl, loading } = useThumbnail(shouldLoad ? file.path : undefined, { size: Math.round(64 * dpr), quality: 'medium', priority })
     if (dataUrl) {
       const isRaster = isImage && !isSvg
       return (
-        <div className={`w-5 h-5 rounded-sm border border-app-border bg-checker ${isRaster ? '' : 'p-[1px]'} overflow-hidden`}>
+        <div ref={ref as any} className={`w-5 h-5 rounded-sm border border-app-border bg-checker ${isRaster ? '' : 'p-[1px]'} overflow-hidden`}>
           <img
             src={dataUrl}
             alt=""
@@ -76,11 +80,12 @@ function ListFilePreview({ file, isMac, fallbackIcon }: { file: FileItem; isMac:
       )
     }
     if (loading) {
-      return <div className="w-5 h-5 rounded-sm border border-app-border bg-checker animate-pulse" />
+      return <div ref={ref as any} className="w-5 h-5 rounded-sm border border-app-border bg-checker animate-pulse" />
     }
+    return <div ref={ref as any} className="w-5 h-5 rounded-sm border border-app-border bg-checker" />
   }
 
-  return <>{fallbackIcon}</>
+  return <span ref={ref as any}>{fallbackIcon}</span>
 }
 
 export default function FileList({ files, preferences }: FileListProps) {
