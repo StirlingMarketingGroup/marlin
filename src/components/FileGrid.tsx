@@ -16,16 +16,22 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
   const isMac = typeof navigator !== 'undefined' && navigator.platform.toUpperCase().includes('MAC')
 
   const getFileIcon = (file: FileItem) => {
-    // Special-case: .app bundles on macOS (any folder)
-    if (isMac && file.is_directory && file.name.toLowerCase().endsWith('.app')) {
-      return (
-        <AppIcon
-          path={file.path}
-          size={64}
-          className="w-12 h-12"
-          fallback={<AppWindow className="w-10 h-10 text-accent" />}
-        />
-      )
+    // Special-case: macOS files with system icons
+    if (isMac) {
+      const fileName = file.name.toLowerCase()
+      if ((file.is_directory && fileName.endsWith('.app')) || 
+          fileName.endsWith('.dmg') || 
+          fileName.endsWith('.pkg')) {
+        return (
+          <AppIcon
+            path={file.path}
+            size={64}
+            className="w-12 h-12"
+            priority="high"
+            fallback={<AppWindow className="w-10 h-10 text-accent" />}
+          />
+        )
+      }
     }
     if (file.is_directory) {
       return <Folder className="w-8 h-8 text-accent" weight="fill" />

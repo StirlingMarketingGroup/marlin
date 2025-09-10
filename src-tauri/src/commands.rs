@@ -2,7 +2,8 @@ use std::path::Path;
 use tauri::command;
 use dirs;
 use std::process::Command as OsCommand;
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use tokio::sync::OnceCell;
 
 use crate::fs_utils::{
     self, FileItem, read_directory_contents, get_file_info, 
@@ -195,4 +196,76 @@ pub fn update_hidden_files_menu(
     }
     
     Ok(())
+}
+
+// Global thumbnail service instance
+static THUMBNAIL_SERVICE: OnceCell<Result<Arc<crate::thumbnails::ThumbnailService>, String>> = OnceCell::const_new();
+
+async fn get_thumbnail_service() -> Result<Arc<crate::thumbnails::ThumbnailService>, String> {
+    THUMBNAIL_SERVICE
+        .get_or_init(|| async {
+            crate::thumbnails::ThumbnailService::new()
+                .await
+                .map(Arc::new)
+        })
+        .await
+        .clone()
+}
+
+#[tauri::command]
+pub async fn request_thumbnail(
+    path: String,
+    size: Option<u32>,
+    quality: Option<String>,
+    priority: Option<String>,
+    format: Option<String>,
+) -> Result<crate::thumbnails::ThumbnailResponse, String> {
+    let service = get_thumbnail_service().await?;
+    
+    let quality = match quality.as_deref() {
+        Some("low") => crate::thumbnails::ThumbnailQuality::Low,
+        Some("high") => crate::thumbnails::ThumbnailQuality::High,
+        _ => crate::thumbnails::ThumbnailQuality::Medium,
+    };
+    
+    let priority = match priority.as_deref() {
+        Some("high") => crate::thumbnails::ThumbnailPriority::High,
+        Some("low") => crate::thumbnails::ThumbnailPriority::Low,
+        _ => crate::thumbnails::ThumbnailPriority::Medium,
+    };
+    
+    let format = match format.as_deref() {
+        Some("jpeg") => crate::thumbnails::ThumbnailFormat::JPEG,
+        Some("png") => crate::thumbnails::ThumbnailFormat::PNG,
+        _ => crate::thumbnails::ThumbnailFormat::WebP,
+    };
+
+    let request = crate::thumbnails::ThumbnailRequest {
+        id: crate::thumbnails::generate_request_id(),
+        path,
+        size: size.unwrap_or(128),
+        quality,
+        priority,
+        format,
+    };
+
+    service.request_thumbnail(request).await
+}
+
+#[tauri::command]
+pub async fn cancel_thumbnail(request_id: String) -> Result<bool, String> {
+    let service = get_thumbnail_service().await?;
+    Ok(service.cancel_request(&request_id).await)
+}
+
+#[tauri::command]
+pub async fn get_thumbnail_cache_stats() -> Result<crate::thumbnails::cache::CacheStats, String> {
+    let service = get_thumbnail_service().await?;
+    Ok(service.get_cache_stats().await)
+}
+
+#[tauri::command]
+pub async fn clear_thumbnail_cache() -> Result<(), String> {
+    let service = get_thumbnail_service().await?;
+    service.clear_cache().await
 }

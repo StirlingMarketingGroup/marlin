@@ -2,6 +2,7 @@ mod commands;
 mod fs_utils;
 mod menu;
 mod state;
+mod thumbnails;
 #[cfg(target_os = "macos")]
 mod macos_icons;
 
@@ -30,6 +31,10 @@ pub fn run() {
       commands::get_system_accent_color,
       commands::get_application_icon,
       commands::update_hidden_files_menu,
+      commands::request_thumbnail,
+      commands::cancel_thumbnail,
+      commands::get_thumbnail_cache_stats,
+      commands::clear_thumbnail_cache,
     ])
     .setup(|app| {
       if cfg!(debug_assertions) {

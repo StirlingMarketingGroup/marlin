@@ -1,3 +1,5 @@
+#![allow(unexpected_cfgs)]
+
 #[cfg(target_os = "macos")]
 use cocoa::base::{id, nil};
 #[cfg(target_os = "macos")]

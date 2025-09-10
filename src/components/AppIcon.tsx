@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
-import { useAppStore } from '@/store/useAppStore'
+import { useRef, useState } from 'react'
+import { useThumbnail } from '@/hooks/useThumbnail'
 
 interface AppIconProps {
   path: string
@@ -7,65 +7,62 @@ interface AppIconProps {
   className?: string
   rounded?: boolean
   fallback?: React.ReactNode
+  priority?: 'high' | 'medium' | 'low'
 }
 
-export default function AppIcon({ path, size = 96, className = '', rounded = true, fallback }: AppIconProps) {
-  const { appIconCache, fetchAppIcon } = useAppStore()
-  const [url, setUrl] = useState<string | undefined>(appIconCache[path])
+export default function AppIcon({ 
+  path, 
+  size = 96, 
+  className = '', 
+  rounded = true, 
+  fallback,
+  priority = 'medium'
+}: AppIconProps) {
   const [loaded, setLoaded] = useState(false)
   const ref = useRef<HTMLDivElement | null>(null)
-  const fetchedRef = useRef(false)
+  
+  // Use the new ultra-efficient thumbnail system
+  const { dataUrl, loading, error, cached, generationTimeMs } = useThumbnail(path, {
+    size,
+    quality: 'medium',
+    priority,
+    format: 'png' // Use PNG for app icons to preserve transparency
+  })
 
-  useEffect(() => {
-    if (url) return
-    const el = ref.current
-    if (!el) return
-    const isMac = typeof navigator !== 'undefined' && navigator.platform.toUpperCase().includes('MAC')
-    if (!isMac) return // Only fetch special app icons on macOS
-
-    const observer = new IntersectionObserver((entries) => {
-      for (const entry of entries) {
-        if (entry.isIntersecting && !fetchedRef.current) {
-          fetchedRef.current = true
-          const schedule = (cb: () => void) => {
-            const ric = (window as any).requestIdleCallback as
-              | ((cb: (deadline: any) => void, opts?: { timeout?: number }) => number)
-              | undefined
-            if (ric) ric(() => cb(), { timeout: 200 })
-            else setTimeout(cb, 0)
-          }
-          schedule(() => {
-            ;(async () => {
-              const u = await fetchAppIcon(path, size)
-              if (u) setUrl(u)
-            })()
-          })
-        }
-      }
-    }, { rootMargin: '600px' })
-    observer.observe(el)
-
-    return () => { observer.disconnect() }
-  }, [path, size, url, fetchAppIcon])
+  const isMac = typeof navigator !== 'undefined' && navigator.platform.toUpperCase().includes('MAC')
+  const shouldShowThumbnail = isMac && (
+    path.toLowerCase().endsWith('.app') || 
+    path.toLowerCase().endsWith('.dmg') || 
+    path.toLowerCase().endsWith('.pkg')
+  )
 
   return (
     <div ref={ref} className={className}>
       {/* Skeleton / fallback while loading */}
-      {(!url || !loaded) && (
-        <div className={`${rounded ? 'rounded' : ''} w-full h-full bg-app-gray/50 animate-pulse flex items-center justify-center`}>
+      {(!dataUrl || !loaded) && (
+        <div className={`${rounded ? 'rounded' : ''} w-full h-full bg-app-gray/50 ${loading ? 'animate-pulse' : ''} flex items-center justify-center`}>
           {fallback || null}
         </div>
       )}
-      {url ? (
-        // eslint-disable-next-line @next/next/no-img-element
+      
+      {/* Show thumbnail if available */}
+      {dataUrl && shouldShowThumbnail ? (
         <img
-          src={url}
+          src={dataUrl}
           alt="app"
           className={`${rounded ? 'rounded' : ''} w-full h-full transition-opacity duration-200 ${loaded ? 'opacity-100' : 'opacity-0'}`}
           draggable={false}
           onLoad={() => setLoaded(true)}
+          title={error ? `Error: ${error}` : `${cached ? 'Cached' : 'Generated'} in ${generationTimeMs}ms`}
         />
       ) : null}
+      
+      {/* Debug info in development */}
+      {process.env.NODE_ENV === 'development' && (
+        <div className="absolute bottom-0 right-0 text-xs bg-black text-white px-1 rounded opacity-75">
+          {cached ? 'C' : 'G'}{generationTimeMs}
+        </div>
+      )}
     </div>
   )
 }

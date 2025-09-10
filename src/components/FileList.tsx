@@ -35,21 +35,32 @@ export default function FileList({ files, preferences }: FileListProps) {
   // Optionally warm cache for a small first screenful
   useEffect(() => {
     if (!isMac) return
-    const initial = files.filter(f => f.is_directory && f.name.toLowerCase().endsWith('.app')).slice(0, 6)
+    const initial = files.filter(f => {
+      const fileName = f.name.toLowerCase()
+      return (f.is_directory && fileName.endsWith('.app')) || 
+             fileName.endsWith('.dmg') || 
+             fileName.endsWith('.pkg')
+    }).slice(0, 6)
     initial.forEach(f => { void fetchAppIcon(f.path, 64) })
   }, [isMac, files, fetchAppIcon])
 
   const getFileIcon = (file: FileItem) => {
-    if (isMac && file.is_directory && file.name.toLowerCase().endsWith('.app')) {
-      return (
-        <AppIcon
-          path={file.path}
-          size={64}
-          className="w-5 h-5"
-          rounded={false}
-          fallback={<AppWindow className="w-5 h-5 text-accent" />}
-        />
-      )
+    if (isMac) {
+      const fileName = file.name.toLowerCase()
+      if ((file.is_directory && fileName.endsWith('.app')) || 
+          fileName.endsWith('.dmg') || 
+          fileName.endsWith('.pkg')) {
+        return (
+          <AppIcon
+            path={file.path}
+            size={64}
+            className="w-5 h-5"
+            rounded={false}
+            priority="high"
+            fallback={<AppWindow className="w-5 h-5 text-accent" />}
+          />
+        )
+      }
     }
     if (file.is_directory) {
       return <Folder className="w-5 h-5 text-accent" weight="fill" />
