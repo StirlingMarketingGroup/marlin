@@ -2,7 +2,6 @@ import { useEffect, useRef, useState, MouseEvent } from 'react'
 import { useAppStore } from '../store/useAppStore'
 import FileGrid from './FileGrid'
 import FileList from './FileList'
-import ContextMenu from './ContextMenu'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { invoke } from '@tauri-apps/api/core'
 
@@ -16,7 +15,7 @@ export default function MainPanel() {
     setSelectedFiles,
   } = useAppStore()
 
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
+  // We rely solely on the native OS context menu now
   const scrollRef = useRef<HTMLDivElement>(null)
 
   const currentPrefs = {
@@ -29,11 +28,11 @@ export default function MainPanel() {
     try {
       const win = getCurrentWindow()
       // Prefer native OS context menu
-      // Derive effective preferences for the current path
-      const state = useAppStore.getState()
-      const dirPrefs = state.directoryPreferences[state.currentPath]
-      const sortBy = dirPrefs?.sortBy ?? state.globalPreferences.sortBy
-      const sortOrder = dirPrefs?.sortOrder ?? state.globalPreferences.sortOrder
+      // Use the same merged prefs driving the UI header so checks match exactly
+      const sortBy = currentPrefs.sortBy
+      const sortOrder = currentPrefs.sortOrder
+      // Debug in DevTools to verify values we pass to backend
+      console.debug('[ContextMenu] passing', { path: currentPath, sortBy, sortOrder })
 
       await invoke('show_native_context_menu', {
         window_label: win.label,
@@ -42,17 +41,15 @@ export default function MainPanel() {
         y: e.clientY,
         sort_by: sortBy,
         sort_order: sortOrder,
+        path: currentPath,
       })
       return
     } catch (_) {
-      // Fallback to custom React menu
-      setContextMenu({ x: e.clientX, y: e.clientY })
+      // If native menu fails for some reason, silently ignore
     }
   }
 
-  const closeContextMenu = () => {
-    setContextMenu(null)
-  }
+  // No custom context menu fallback
 
   // Reset scroll when navigating to a new path
   useEffect(() => {
@@ -111,14 +108,7 @@ export default function MainPanel() {
         )}
       </div>
       
-      {/* Context Menu */}
-      {contextMenu && (
-        <ContextMenu
-          x={contextMenu.x}
-          y={contextMenu.y}
-          onClose={closeContextMenu}
-        />
-      )}
+      {/* No React context menu fallback */}
     </div>
   )
 }

@@ -32,6 +32,7 @@ pub fn run() {
       commands::get_application_icon,
       commands::update_hidden_files_menu,
       commands::update_folders_first_menu,
+      commands::update_sort_menu_state,
       commands::get_system_drives,
       commands::eject_drive,
       commands::request_thumbnail,
@@ -41,6 +42,7 @@ pub fn run() {
       commands::open_path,
       commands::new_window,
       commands::show_native_context_menu,
+      commands::render_svg_to_png,
       commands::read_preferences,
       commands::write_preferences,
       commands::get_dir_prefs,
@@ -67,7 +69,17 @@ pub fn run() {
       }
 
       // Create and set the menu
-      let (app_menu, show_hidden_item, folders_first_item) = menu::create_menu(&app.handle())?;
+      let (
+        app_menu,
+        show_hidden_item,
+        folders_first_item,
+        sort_name_item,
+        sort_size_item,
+        sort_type_item,
+        sort_modified_item,
+        sort_order_asc_item,
+        sort_order_desc_item,
+      ) = menu::create_menu(&app.handle())?;
       app.set_menu(app_menu)?;
 
       // Store the menu item in managed state
@@ -77,6 +89,13 @@ pub fn run() {
         folders_first_item: Mutex::new(Some(folders_first_item)),
         folders_first_checked: Mutex::new(true),
         sort_order_asc_checked: Mutex::new(true),
+        current_sort_by: Mutex::new("name".to_string()),
+        sort_name_item: Mutex::new(Some(sort_name_item)),
+        sort_size_item: Mutex::new(Some(sort_size_item)),
+        sort_type_item: Mutex::new(Some(sort_type_item)),
+        sort_modified_item: Mutex::new(Some(sort_modified_item)),
+        sort_asc_item: Mutex::new(Some(sort_order_asc_item)),
+        sort_desc_item: Mutex::new(Some(sort_order_desc_item)),
       });
 
       Ok(())

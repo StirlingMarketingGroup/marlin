@@ -113,7 +113,7 @@ pub fn get_file_mtime(path: &Path) -> u64 {
 pub fn get_thumbnail_format_from_path(path: &Path) -> ThumbnailFormat {
     match path.extension().and_then(|s| s.to_str()).map(|s| s.to_lowercase()).as_deref() {
         Some("jpg") | Some("jpeg") => ThumbnailFormat::JPEG,
-        Some("png") | Some("gif") => ThumbnailFormat::PNG,
+        Some("png") | Some("gif") | Some("svg") => ThumbnailFormat::PNG,
         _ => ThumbnailFormat::WebP, // Default to WebP for best compression
     }
 }

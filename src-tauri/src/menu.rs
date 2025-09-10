@@ -5,8 +5,14 @@ use tauri::{
 
 pub fn create_menu<R: Runtime>(app: &AppHandle<R>) -> Result<(
     tauri::menu::Menu<R>,
-    tauri::menu::CheckMenuItem<R>,
-    tauri::menu::CheckMenuItem<R>,
+    tauri::menu::CheckMenuItem<R>, // show_hidden
+    tauri::menu::CheckMenuItem<R>, // folders_first
+    tauri::menu::CheckMenuItem<R>, // sort_name
+    tauri::menu::CheckMenuItem<R>, // sort_size
+    tauri::menu::CheckMenuItem<R>, // sort_type
+    tauri::menu::CheckMenuItem<R>, // sort_modified
+    tauri::menu::CheckMenuItem<R>, // sort_order_asc
+    tauri::menu::CheckMenuItem<R>, // sort_order_desc
 ), tauri::Error> {
     // Create App submenu (appears under app name on macOS)
     let app_submenu = SubmenuBuilder::new(app, "Marlin")
@@ -18,6 +24,7 @@ pub fn create_menu<R: Runtime>(app: &AppHandle<R>) -> Result<(
         .separator()
         .text("menu:preferences", "Preferences...")
         .text("menu:reset_folder_defaults", "Reset Folder Defaults...")
+        .text("menu:clear_thumbnail_cache", "Clear Thumbnail Cache...")
         .separator()
         .services()
         .separator()
@@ -66,6 +73,37 @@ pub fn create_menu<R: Runtime>(app: &AppHandle<R>) -> Result<(
         .build(app)?;
     let folders_first_clone = folders_first_item.clone();
 
+    // Build Sort submenu with checkable items
+    let sort_name_item = CheckMenuItemBuilder::with_id("menu:sort_name", "Name")
+        .checked(true)
+        .build(app)?;
+    let sort_size_item = CheckMenuItemBuilder::with_id("menu:sort_size", "Size")
+        .checked(false)
+        .build(app)?;
+    let sort_type_item = CheckMenuItemBuilder::with_id("menu:sort_type", "Type")
+        .checked(false)
+        .build(app)?;
+    let sort_modified_item = CheckMenuItemBuilder::with_id("menu:sort_modified", "Date Modified")
+        .checked(false)
+        .build(app)?;
+
+    let sort_order_asc_item = CheckMenuItemBuilder::with_id("menu:sort_order_asc", "Ascending")
+        .checked(true)
+        .build(app)?;
+    let sort_order_desc_item = CheckMenuItemBuilder::with_id("menu:sort_order_desc", "Descending")
+        .checked(false)
+        .build(app)?;
+
+    let sort_submenu = SubmenuBuilder::new(app, "Sort by")
+        .item(&sort_name_item)
+        .item(&sort_size_item)
+        .item(&sort_type_item)
+        .item(&sort_modified_item)
+        .separator()
+        .item(&sort_order_asc_item)
+        .item(&sort_order_desc_item)
+        .build()?;
+
     // Create View submenu
     let view_submenu = SubmenuBuilder::new(app, "View")
         .text("menu:view_grid", "as Grid")
@@ -74,10 +112,7 @@ pub fn create_menu<R: Runtime>(app: &AppHandle<R>) -> Result<(
         .item(&show_hidden_item)
         .item(&folders_first_item)
         .separator()
-        .text("menu:sort_name", "Sort by Name")
-        .text("menu:sort_size", "Sort by Size")
-        .text("menu:sort_type", "Sort by Type")
-        .text("menu:sort_modified", "Sort by Date Modified")
+        .item(&sort_submenu)
         .build()?;
 
     // Create Window submenu
@@ -98,7 +133,17 @@ pub fn create_menu<R: Runtime>(app: &AppHandle<R>) -> Result<(
         ])
         .build()?;
 
-    Ok((menu, show_hidden_clone, folders_first_clone))
+    Ok((
+        menu,
+        show_hidden_clone,
+        folders_first_clone,
+        sort_name_item,
+        sort_size_item,
+        sort_type_item,
+        sort_modified_item,
+        sort_order_asc_item,
+        sort_order_desc_item,
+    ))
 }
 
 pub fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, event: &tauri::menu::MenuEvent) {
@@ -124,26 +169,54 @@ pub fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, event: &tauri::menu::Me
             let _ = app.emit("menu:view_grid", ());
         }
         "menu:sort_name" => {
+            // Update check states and emit
+            let state: tauri::State<crate::state::MenuState<R>> = app.state();
+            if let Ok(mut sb) = state.current_sort_by.lock() { *sb = "name".to_string(); }
+            if let Ok(item) = state.sort_name_item.lock() { if let Some(i) = &*item { let _ = i.set_checked(true); } }
+            if let Ok(item) = state.sort_size_item.lock() { if let Some(i) = &*item { let _ = i.set_checked(false); } }
+            if let Ok(item) = state.sort_type_item.lock() { if let Some(i) = &*item { let _ = i.set_checked(false); } }
+            if let Ok(item) = state.sort_modified_item.lock() { if let Some(i) = &*item { let _ = i.set_checked(false); } }
             let _ = app.emit("menu:sort_name", ());
         }
         "menu:sort_size" => {
+            let state: tauri::State<crate::state::MenuState<R>> = app.state();
+            if let Ok(mut sb) = state.current_sort_by.lock() { *sb = "size".to_string(); }
+            if let Ok(item) = state.sort_name_item.lock() { if let Some(i) = &*item { let _ = i.set_checked(false); } }
+            if let Ok(item) = state.sort_size_item.lock() { if let Some(i) = &*item { let _ = i.set_checked(true); } }
+            if let Ok(item) = state.sort_type_item.lock() { if let Some(i) = &*item { let _ = i.set_checked(false); } }
+            if let Ok(item) = state.sort_modified_item.lock() { if let Some(i) = &*item { let _ = i.set_checked(false); } }
             let _ = app.emit("menu:sort_size", ());
         }
         "menu:sort_type" => {
+            let state: tauri::State<crate::state::MenuState<R>> = app.state();
+            if let Ok(mut sb) = state.current_sort_by.lock() { *sb = "type".to_string(); }
+            if let Ok(item) = state.sort_name_item.lock() { if let Some(i) = &*item { let _ = i.set_checked(false); } }
+            if let Ok(item) = state.sort_size_item.lock() { if let Some(i) = &*item { let _ = i.set_checked(false); } }
+            if let Ok(item) = state.sort_type_item.lock() { if let Some(i) = &*item { let _ = i.set_checked(true); } }
+            if let Ok(item) = state.sort_modified_item.lock() { if let Some(i) = &*item { let _ = i.set_checked(false); } }
             let _ = app.emit("menu:sort_type", ());
         }
         "menu:sort_modified" => {
+            let state: tauri::State<crate::state::MenuState<R>> = app.state();
+            if let Ok(mut sb) = state.current_sort_by.lock() { *sb = "modified".to_string(); }
+            if let Ok(item) = state.sort_name_item.lock() { if let Some(i) = &*item { let _ = i.set_checked(false); } }
+            if let Ok(item) = state.sort_size_item.lock() { if let Some(i) = &*item { let _ = i.set_checked(false); } }
+            if let Ok(item) = state.sort_type_item.lock() { if let Some(i) = &*item { let _ = i.set_checked(false); } }
+            if let Ok(item) = state.sort_modified_item.lock() { if let Some(i) = &*item { let _ = i.set_checked(true); } }
             let _ = app.emit("menu:sort_modified", ());
         }
         "menu:sort_order_asc" => {
-            // Update state to reflect ascending order for future native context builds
             let state: tauri::State<crate::state::MenuState<R>> = app.state();
             if let Ok(mut asc) = state.sort_order_asc_checked.lock() { *asc = true; }
+            if let Ok(item) = state.sort_asc_item.lock() { if let Some(i) = &*item { let _ = i.set_checked(true); } }
+            if let Ok(item) = state.sort_desc_item.lock() { if let Some(i) = &*item { let _ = i.set_checked(false); } }
             let _ = app.emit("menu:sort_order_asc", ());
         }
         "menu:sort_order_desc" => {
             let state: tauri::State<crate::state::MenuState<R>> = app.state();
             if let Ok(mut asc) = state.sort_order_asc_checked.lock() { *asc = false; }
+            if let Ok(item) = state.sort_asc_item.lock() { if let Some(i) = &*item { let _ = i.set_checked(false); } }
+            if let Ok(item) = state.sort_desc_item.lock() { if let Some(i) = &*item { let _ = i.set_checked(true); } }
             let _ = app.emit("menu:sort_order_desc", ());
         }
         "menu:refresh" => {
@@ -214,6 +287,9 @@ pub fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, event: &tauri::menu::Me
         }
         "menu:reset_folder_defaults" => {
             let _ = app.emit("menu:reset_folder_defaults", ());
+        }
+        "menu:clear_thumbnail_cache" => {
+            let _ = app.emit("menu:clear_thumbnail_cache", ());
         }
         _ => {}
     }

@@ -1,10 +1,12 @@
-import { useState, type ReactNode } from 'react'
-import { Folder, File, ImageSquare, MusicNote, VideoCamera, FileZip, Code, FileText, AppWindow, HardDrive, Package } from 'phosphor-react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { Folder, File, ImageSquare, MusicNote, VideoCamera, FileZip, FileText, AppWindow, Package, FilePdf, PaintBrush, Palette, Disc } from 'phosphor-react'
 import { FileItem, ViewPreferences } from '../types'
 import { useAppStore } from '../store/useAppStore'
 import AppIcon from '@/components/AppIcon'
+import { FileTypeIcon, resolveVSCodeIcon } from '@/components/FileTypeIcon'
 import { open } from '@tauri-apps/plugin-shell'
 import { useThumbnail } from '@/hooks/useThumbnail'
+import { truncateMiddle } from '@/utils/truncate'
 
 interface FileGridProps {
   files: FileItem[]
@@ -14,7 +16,10 @@ interface FileGridProps {
 // Stable, top-level preview component to avoid remount flicker
 function GridFilePreview({ file, isMac, fallbackIcon }: { file: FileItem; isMac: boolean; fallbackIcon: ReactNode }) {
   const ext = file.extension?.toLowerCase()
-  const isImage = !!ext && ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'tiff', 'tga', 'ico'].includes(ext || '')
+  const isImage = !!ext && ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'tiff', 'tga', 'ico', 'svg'].includes(ext || '')
+  const isPdf = ext === 'pdf'
+  const isAi = ext === 'ai' || ext === 'eps'
+  const isPsd = ext === 'psd' || ext === 'psb'
 
   // Prefer native app icons/DMG if applicable
   if (isMac) {
@@ -34,24 +39,24 @@ function GridFilePreview({ file, isMac, fallbackIcon }: { file: FileItem; isMac:
       return <Package className="w-12 h-12 text-blue-500" weight="fill" />
     }
     if (fileName.endsWith('.dmg')) {
-      return <HardDrive className="w-12 h-12 text-orange-500" weight="fill" />
+      return <Disc className="w-12 h-12 text-app-muted" weight="fill" />
     }
   }
 
-  if (isImage) {
+    if (isImage || isPdf || isAi || isPsd) {
     const { dataUrl, loading } = useThumbnail(file.path, { size: 192, quality: 'medium', priority: 'high', format: 'png' })
     if (dataUrl) {
       return (
         <img
           src={dataUrl}
           alt={file.name}
-          className="w-16 h-16 rounded-md object-cover border border-app-border bg-app-darker"
+          className="w-16 h-16 rounded-md object-cover border border-app-border bg-checker"
           draggable={false}
         />
       )
     }
     if (loading) {
-      return <div className="w-16 h-16 rounded-md border border-app-border bg-app-darker animate-pulse" />
+      return <div className="w-16 h-16 rounded-md border border-app-border bg-checker animate-pulse" />
     }
   }
 
@@ -62,6 +67,41 @@ function GridFilePreview({ file, isMac, fallbackIcon }: { file: FileItem; isMac:
 export default function FileGrid({ files, preferences }: FileGridProps) {
   const { selectedFiles, setSelectedFiles, navigateTo } = useAppStore()
   const [draggedFile, setDraggedFile] = useState<string | null>(null)
+  
+  // Dynamically compute a safe middle-truncation length for grid captions
+  const gridMeasureSpanRef = useRef<HTMLSpanElement>(null)
+  const gridLabelProbeRef = useRef<HTMLDivElement>(null)
+  const [gridNameCharLimit, setGridNameCharLimit] = useState<number>(30)
+
+  useEffect(() => {
+    const recalc = () => {
+      const probe = gridLabelProbeRef.current
+      const measure = gridMeasureSpanRef.current
+      if (!probe || !measure) return
+
+      const width = Math.max(0, probe.getBoundingClientRect().width || 120)
+      const sample = measure.textContent || ''
+      const sampleWidth = measure.getBoundingClientRect().width || 7.5 * sample.length
+      const avgChar = sampleWidth / Math.max(1, sample.length)
+
+      // Two lines worth of characters, with a small safety buffer
+      const perLine = Math.max(6, Math.floor(width / Math.max(5, avgChar)))
+      const total = Math.max(10, perLine * 2 - 4)
+      setGridNameCharLimit(total)
+    }
+
+    recalc()
+    let ro: ResizeObserver | undefined
+    if (typeof ResizeObserver !== 'undefined' && gridLabelProbeRef.current) {
+      ro = new ResizeObserver(() => recalc())
+      ro.observe(gridLabelProbeRef.current)
+    }
+    window.addEventListener('resize', recalc)
+    return () => {
+      window.removeEventListener('resize', recalc)
+      if (ro) ro.disconnect()
+    }
+  }, [])
 
   const isMac = typeof navigator !== 'undefined' && navigator.platform.toUpperCase().includes('MAC')
 
@@ -88,7 +128,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
       
       // DMG files use a custom icon since they don't have embedded icons
       if (fileName.endsWith('.dmg')) {
-        return <HardDrive className="w-12 h-12 text-orange-500" weight="fill" />
+        return <Disc className="w-12 h-12 text-app-muted" weight="fill" />
       }
     }
     if (file.is_directory) {
@@ -96,11 +136,30 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     }
 
     const ext = file.extension?.toLowerCase()
-    if (!ext) return <File className="w-12 h-12 text-app-muted" />
+    if (!ext) {
+      const special = resolveVSCodeIcon(file.name)
+      if (special) return <FileTypeIcon name={file.name} size="large" />
+      return <File className="w-12 h-12 text-app-muted" />
+    }
 
     // Image files
     if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp'].includes(ext)) {
       return <ImageSquare className="w-12 h-12 text-app-green" />
+    }
+
+    // PDF files
+    if (ext === 'pdf') {
+      return <FilePdf className="w-12 h-12 text-red-500" />
+    }
+
+    // Adobe Illustrator files
+    if (ext === 'ai' || ext === 'eps') {
+      return <PaintBrush className="w-12 h-12 text-orange-500" />
+    }
+
+    // Photoshop files
+    if (ext === 'psd' || ext === 'psb') {
+      return <Palette className="w-12 h-12 text-blue-500" />
     }
 
     // Audio files
@@ -118,13 +177,13 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
       return <FileZip className="w-12 h-12 text-app-muted" />
     }
 
-    // Code files
-    if (['js', 'ts', 'jsx', 'tsx', 'py', 'rs', 'go', 'java', 'cpp', 'c', 'h'].includes(ext)) {
-      return <Code className="w-12 h-12 text-accent" />
+    // VSCode-style file icons for code/config types
+    if (resolveVSCodeIcon(file.name, ext)) {
+      return <FileTypeIcon name={file.name} ext={ext} size="large" />
     }
 
     // Text files
-    if (['txt', 'md', 'json', 'xml', 'yml', 'yaml'].includes(ext)) {
+    if (['txt', 'md', 'json', 'xml', 'yml', 'yaml', 'toml', 'ini'].includes(ext)) {
       return <FileText className="w-12 h-12 text-app-text" />
     }
 
@@ -232,7 +291,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
           return (
             <div
               key={file.path}
-              className={`flex flex-col items-center px-1 py-2 rounded-md cursor-pointer transition-colors duration-75 ${
+              className={`relative flex flex-col items-center px-1 py-2 rounded-md cursor-pointer transition-colors duration-75 ${
                 isSelected ? 'bg-accent-selected' : 'hover:bg-app-light/70'
               } ${isDragged ? 'opacity-50' : ''} ${
                 file.is_hidden ? 'opacity-60' : ''
@@ -248,27 +307,77 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
                 <GridFilePreview file={file} isMac={isMac} fallbackIcon={getFileIcon(file)} />
               </div>
               
-              <div className="text-center">
-                <div className={`text-sm font-medium w-full max-w-[120px] line-clamp-2 overflow-anywhere whitespace-normal ${isSelected ? 'text-accent' : ''}`} title={file.name}>
-                  {(() => {
-                    const raw = (isMac && file.is_directory && file.name.toLowerCase().endsWith('.app'))
-                      ? file.name.replace(/\.app$/i, '')
-                      : file.name
-                    // Insert a zero-width space before the last dot to prefer breaking before the extension
-                    const withBreakBeforeExt = raw.replace(/\.(?=[^.]*$)/, '\u200B.')
-                    return withBreakBeforeExt
-                  })()}
-                </div>
-                {!file.is_directory && (
-                  <div className="text-xs text-app-muted mt-1">
-                    {formatFileSize(file.size)}
-                  </div>
-                )}
+              <div className={`text-center`}>
+                {(() => {
+                  const raw = (isMac && file.is_directory && file.name.toLowerCase().endsWith('.app'))
+                    ? file.name.replace(/\.app$/i, '')
+                    : file.name
+                  
+                  const needsTruncation = raw.length > gridNameCharLimit
+                  const needsExpansion = needsTruncation && isSelected
+                  
+                  return (
+                    <>
+                      <div 
+                        className={`text-sm font-medium ${isSelected ? 'text-accent' : ''} ${needsExpansion ? 'relative z-10' : ''}`}
+                        style={{
+                          wordBreak: 'break-word',
+                          maxWidth: '120px',
+                          height: needsExpansion ? 'auto' : '2.5rem',
+                          lineHeight: '1.25rem',
+                          overflow: needsExpansion ? 'visible' : 'hidden',
+                          textAlign: 'center',
+                          ...(needsExpansion && {
+                            backgroundColor: 'rgb(30 30 30 / 0.95)',
+                            padding: '2px 4px',
+                            borderRadius: '4px',
+                            position: 'absolute',
+                            left: '50%',
+                            transform: 'translateX(-50%)',
+                            minWidth: '120px',
+                            zIndex: 20,
+                            height: 'auto'
+                          })
+                        }}
+                        ref={(el) => { if (!gridLabelProbeRef.current) gridLabelProbeRef.current = el! }}
+                        title={file.name}
+                      >
+                        {(() => {
+                          // When selected AND long, show full name
+                          if (needsExpansion) {
+                            return raw
+                          }
+                          
+                          // If it fits naturally, show it as-is
+                          if (!needsTruncation) {
+                            return raw
+                          }
+                          
+                          // Otherwise use middle truncation to ensure extension is visible
+                          return truncateMiddle(raw, gridNameCharLimit)
+                        })()}
+                      </div>
+                      {!file.is_directory && !needsExpansion && (
+                        <div className="text-xs text-app-muted mt-1">
+                          {formatFileSize(file.size)}
+                        </div>
+                      )}
+                    </>
+                  )
+                })()}
               </div>
             </div>
           )
         })}
       </div>
+      {/* Hidden measurement element for accurate char width */}
+      <span
+        ref={gridMeasureSpanRef}
+        className="absolute -left-[9999px] -top-[9999px] whitespace-nowrap text-sm"
+        aria-hidden
+      >
+        ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789
+      </span>
     </div>
   )
 }

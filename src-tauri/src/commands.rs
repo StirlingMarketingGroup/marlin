@@ -9,6 +9,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{PathBuf};
 use serde_json::{json, Value};
+use base64::Engine as _;
 
 use crate::fs_utils::{
     self, FileItem, read_directory_contents, get_file_info, 
@@ -180,6 +181,63 @@ pub fn get_application_icon(path: String, size: Option<u32>) -> Result<String, S
 }
 
 #[tauri::command]
+pub fn render_svg_to_png(svg: String, size: Option<u32>) -> Result<String, String> {
+    // Parse SVG (usvg 0.43 API)
+    let opt = resvg::usvg::Options::default();
+    let tree = resvg::usvg::Tree::from_data(svg.as_bytes(), &opt)
+        .map_err(|e| format!("SVG parse error: {:?}", e))?;
+
+    // Allocate pixmap
+    let target = size.unwrap_or(64).max(1);
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(target, target)
+        .ok_or_else(|| "Failed to allocate pixmap".to_string())?;
+
+    // Scale the SVG viewBox to the exact target size (Iconify icons are square 24x24).
+    let svg_size = tree.size();
+    let (w, h) = (svg_size.width().max(1.0), svg_size.height().max(1.0));
+    let sx = (target as f32) / w;
+    let sy = (target as f32) / h;
+    let ts = resvg::tiny_skia::Transform::from_scale(sx, sy);
+
+    let mut pmut = pixmap.as_mut();
+    resvg::render(&tree, ts, &mut pmut);
+
+    // Convert premultiplied BGRA pixels -> non-premultiplied RGBA for PNG encoder
+    let data = pixmap.data();
+    let mut rgba = Vec::with_capacity(data.len());
+    for px in data.chunks_exact(4) {
+        let r = px[0] as u32;
+        let g = px[1] as u32;
+        let b = px[2] as u32;
+        let a = px[3] as u32;
+        if a == 0 {
+            rgba.extend_from_slice(&[0, 0, 0, 0]);
+        } else {
+            // Un-premultiply and reorder to RGBA
+            let ur = ((r * 255 + a / 2) / a).min(255) as u8;
+            let ug = ((g * 255 + a / 2) / a).min(255) as u8;
+            let ub = ((b * 255 + a / 2) / a).min(255) as u8;
+            rgba.extend_from_slice(&[ur, ug, ub, a as u8]);
+        }
+    }
+
+    // Encode PNG with the image crate
+    let img = image::ImageBuffer::<image::Rgba<u8>, _>::from_vec(target, target, rgba)
+        .ok_or_else(|| "Failed to create image buffer".to_string())?;
+    let mut out = Vec::new();
+    let mut cursor = std::io::Cursor::new(&mut out);
+    image::DynamicImage::ImageRgba8(img)
+        .write_to(&mut cursor, image::ImageOutputFormat::Png)
+        .map_err(|e| format!("PNG encode error: {}", e))?;
+
+    let data_url = format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(out)
+    );
+    Ok(data_url)
+}
+
+#[tauri::command]
 pub fn update_hidden_files_menu(
     _app: tauri::AppHandle,
     menu_state: tauri::State<crate::state::MenuState<tauri::Wry>>, 
@@ -222,6 +280,59 @@ pub fn update_folders_first_menu(
         *flag = checked;
     }
 
+    Ok(())
+}
+
+#[tauri::command]
+pub fn update_sort_menu_state(
+    _app: tauri::AppHandle,
+    menu_state: tauri::State<crate::state::MenuState<tauri::Wry>>,
+    sort_by: String,
+    ascending: bool,
+) -> Result<(), String> {
+    if let Ok(mut sb) = menu_state.current_sort_by.lock() {
+        *sb = sort_by;
+    }
+    if let Ok(mut asc) = menu_state.sort_order_asc_checked.lock() {
+        *asc = ascending;
+    }
+    // Update system menu checkboxes if available
+    let set_checked = |item_mutex: &std::sync::Mutex<Option<tauri::menu::CheckMenuItem<tauri::Wry>>>, value: bool| {
+        if let Ok(item_guard) = item_mutex.lock() {
+            if let Some(ref item) = *item_guard {
+                let _ = item.set_checked(value);
+            }
+        }
+    };
+    match menu_state.current_sort_by.lock().map(|s| s.clone()).unwrap_or_else(|_| "name".to_string()).as_str() {
+        "name" => {
+            set_checked(&menu_state.sort_name_item, true);
+            set_checked(&menu_state.sort_size_item, false);
+            set_checked(&menu_state.sort_type_item, false);
+            set_checked(&menu_state.sort_modified_item, false);
+        }
+        "size" => {
+            set_checked(&menu_state.sort_name_item, false);
+            set_checked(&menu_state.sort_size_item, true);
+            set_checked(&menu_state.sort_type_item, false);
+            set_checked(&menu_state.sort_modified_item, false);
+        }
+        "type" => {
+            set_checked(&menu_state.sort_name_item, false);
+            set_checked(&menu_state.sort_size_item, false);
+            set_checked(&menu_state.sort_type_item, true);
+            set_checked(&menu_state.sort_modified_item, false);
+        }
+        "modified" => {
+            set_checked(&menu_state.sort_name_item, false);
+            set_checked(&menu_state.sort_size_item, false);
+            set_checked(&menu_state.sort_type_item, false);
+            set_checked(&menu_state.sort_modified_item, true);
+        }
+        _ => {}
+    }
+    set_checked(&menu_state.sort_asc_item, ascending);
+    set_checked(&menu_state.sort_desc_item, !ascending);
     Ok(())
 }
 
@@ -516,7 +627,17 @@ pub fn show_native_context_menu(
     y: f64,
     sort_by: Option<String>,
     sort_order: Option<String>,
+    path: Option<String>,
 ) -> Result<(), String> {
+    // Helpful debug to ensure frontend is passing expected values
+    #[cfg(debug_assertions)]
+    log::info!(
+        "ContextMenu request: sort_by={:?} sort_order={:?} at ({}, {})",
+        sort_by,
+        sort_order,
+        x,
+        y
+    );
     // Resolve window
     let webview = if let Some(label) = window_label {
         app.get_webview_window(&label).ok_or_else(|| "Window not found".to_string())?
@@ -546,7 +667,36 @@ pub fn show_native_context_menu(
         .build(&app)
         .map_err(|e| e.to_string())?;
 
-    let sort_by_val = sort_by.unwrap_or_else(|| "name".to_string());
+    // Determine effective sort_by from args or stored prefs
+    let sort_by_val = if let Some(sb) = sort_by.clone() {
+        sb
+    } else if let Some(p) = path.clone() {
+        // Try to read per-directory or global preferences for fallback
+        let norm = normalize_path(p);
+        if let Ok(v) = read_prefs_value() {
+            if let Some(dir_prefs) = v.get("directoryPreferences").and_then(|d| d.get(&norm)) {
+                if let Some(sb) = dir_prefs.get("sortBy").and_then(|x| x.as_str()) {
+                    sb.to_string()
+                } else {
+                    v.get("globalPreferences")
+                        .and_then(|g| g.get("sortBy"))
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("name")
+                        .to_string()
+                }
+            } else {
+                v.get("globalPreferences")
+                    .and_then(|g| g.get("sortBy"))
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("name")
+                    .to_string()
+            }
+        } else {
+            "name".to_string()
+        }
+    } else {
+        "name".to_string()
+    };
     let sort_name = CheckMenuItemBuilder::with_id("ctx:sort_name", "Name")
         .checked(matches!(sort_by_val.as_str(), "name"))
         .build(&app)
@@ -567,6 +717,22 @@ pub fn show_native_context_menu(
     // Determine current sort order from arg or fallback to stored state
     let sort_order_asc_checked = if let Some(ord) = sort_order.as_deref() {
         ord.eq_ignore_ascii_case("asc")
+    } else if let Some(p) = path.clone() {
+        if let Ok(v) = read_prefs_value() {
+            let norm = normalize_path(p);
+            let so = v.get("directoryPreferences")
+                .and_then(|d| d.get(&norm))
+                .and_then(|dp| dp.get("sortOrder"))
+                .and_then(|x| x.as_str())
+                .or_else(|| v.get("globalPreferences").and_then(|g| g.get("sortOrder")).and_then(|x| x.as_str()));
+            match so {
+                Some("asc") => true,
+                Some("desc") => false,
+                _ => matches!(sort_by_val.as_str(), "name" | "type"),
+            }
+        } else {
+            matches!(sort_by_val.as_str(), "name" | "type")
+        }
     } else {
         state
             .sort_order_asc_checked

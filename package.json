@@ -4,7 +4,16 @@
   "private": true,
   "type": "module",
   "description": "A modern, sleek file browser with native performance",
-  "keywords": ["file-browser", "file-manager", "tauri", "react", "typescript", "modern-ui", "cross-platform", "rust"],
+  "keywords": [
+    "file-browser",
+    "file-manager",
+    "tauri",
+    "react",
+    "typescript",
+    "modern-ui",
+    "cross-platform",
+    "rust"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/user/marlin"
@@ -16,16 +25,18 @@
     "tauri": "tauri"
   },
   "dependencies": {
+    "@iconify-json/vscode-icons": "^1.2.30",
+    "@iconify/react": "^6.0.1",
     "@tauri-apps/api": "^2.0.0",
     "@tauri-apps/plugin-dialog": "^2.0.0",
     "@tauri-apps/plugin-fs": "^2.0.0",
     "@tauri-apps/plugin-os": "^2.0.0",
     "@tauri-apps/plugin-shell": "^2.0.0",
+    "clsx": "^2.1.1",
+    "phosphor-react": "^1.4.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "zustand": "^4.5.5",
-    "phosphor-react": "^1.4.1",
-    "clsx": "^2.1.1"
+    "zustand": "^4.5.5"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0",

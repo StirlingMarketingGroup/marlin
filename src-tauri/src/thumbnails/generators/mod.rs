@@ -7,6 +7,9 @@ use super::{ThumbnailRequest, ThumbnailFormat, ThumbnailQuality};
 
 pub mod images;
 pub mod apps;
+pub mod pdf;
+pub mod psd;
+pub mod svg;
 
 pub struct ThumbnailGenerator;
 
@@ -42,12 +45,27 @@ impl ThumbnailGenerator {
             }
         }
 
+        // Check if it's a PSD file (handle before regular images)
+        if Self::is_psd_file(path) {
+            return psd::PsdGenerator::generate(request);
+        }
+        
         // Check if it's an image file
         if Self::is_image_file(path) {
             return images::ImageGenerator::generate(request);
         }
 
-        // TODO: Add support for PDFs, videos, documents
+        // Check if it's an SVG file
+        if Self::is_svg_file(path) {
+            return svg::SvgGenerator::generate(request);
+        }
+
+        // Check if it's a PDF file (includes AI and EPS)
+        if Self::is_pdf_file(path) {
+            return pdf::PdfGenerator::generate(request);
+        }
+
+        // TODO: Add support for videos, documents
         Err("Unsupported file type for thumbnail generation".to_string())
     }
 
@@ -58,6 +76,33 @@ impl ThumbnailGenerator {
             )
         } else {
             false
+        }
+    }
+    
+    fn is_psd_file(path: &Path) -> bool {
+        if let Some(extension) = path.extension().and_then(|s| s.to_str()) {
+            matches!(extension.to_lowercase().as_str(), 
+                "psd" | "psb" // Photoshop files
+            )
+        } else {
+            false
+        }
+    }
+
+    fn is_pdf_file(path: &Path) -> bool {
+        if let Some(extension) = path.extension().and_then(|s| s.to_str()) {
+            matches!(extension.to_lowercase().as_str(),
+                "pdf" | "ai" | "eps" // PDF and Adobe Illustrator/EPS files
+            )
+        } else {
+            false
+        }
+    }
+
+    fn is_svg_file(path: &Path) -> bool {
+        match path.extension().and_then(|s| s.to_str()) {
+            Some(ext) => ext.eq_ignore_ascii_case("svg"),
+            None => false,
         }
     }
 

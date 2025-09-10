@@ -1,10 +1,12 @@
-import { useEffect, useState, type ReactNode } from 'react'
-import { Folder, File, ImageSquare, MusicNote, VideoCamera, FileZip, Code, FileText, CaretUp, CaretDown, AppWindow, HardDrive, Package } from 'phosphor-react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { Folder, File, ImageSquare, MusicNote, VideoCamera, FileZip, FileText, CaretUp, CaretDown, AppWindow, Package, FilePdf, PaintBrush, Palette, Disc } from 'phosphor-react'
 import { FileItem, ViewPreferences } from '../types'
 import { useAppStore } from '../store/useAppStore'
 import AppIcon from '@/components/AppIcon'
+import { FileTypeIcon, resolveVSCodeIcon } from '@/components/FileTypeIcon'
 import { open } from '@tauri-apps/plugin-shell'
 import { useThumbnail } from '@/hooks/useThumbnail'
+import { truncateMiddle } from '@/utils/truncate'
 
 interface FileListProps {
   files: FileItem[]
@@ -14,7 +16,10 @@ interface FileListProps {
 // Stable, top-level preview component to avoid remount flicker
 function ListFilePreview({ file, isMac, fallbackIcon }: { file: FileItem; isMac: boolean; fallbackIcon: ReactNode }) {
   const ext = file.extension?.toLowerCase()
-  const isImage = !!ext && ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'tiff', 'tga', 'ico'].includes(ext || '')
+  const isImage = !!ext && ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'tiff', 'tga', 'ico', 'svg'].includes(ext || '')
+  const isPdf = ext === 'pdf'
+  const isAi = ext === 'ai' || ext === 'eps'
+  const isPsd = ext === 'psd' || ext === 'psb'
 
   if (isMac) {
     const fileName = file.name.toLowerCase()
@@ -34,17 +39,17 @@ function ListFilePreview({ file, isMac, fallbackIcon }: { file: FileItem; isMac:
       return <Package className="w-5 h-5 text-blue-500" weight="fill" />
     }
     if (fileName.endsWith('.dmg')) {
-      return <HardDrive className="w-5 h-5 text-orange-500" weight="fill" />
+      return <Disc className="w-5 h-5 text-app-muted" weight="fill" />
     }
   }
 
-  if (isImage) {
+    if (isImage || isPdf || isAi || isPsd) {
     const { dataUrl, loading } = useThumbnail(file.path, { size: 64, quality: 'medium', priority: 'medium', format: 'png' })
     if (dataUrl) {
-      return <img src={dataUrl} alt="" className="w-5 h-5 rounded-sm object-cover border border-app-border bg-app-darker" draggable={false} />
+      return <img src={dataUrl} alt="" className="w-5 h-5 rounded-sm object-cover border border-app-border bg-checker" draggable={false} />
     }
     if (loading) {
-      return <div className="w-5 h-5 rounded-sm border border-app-border bg-app-darker animate-pulse" />
+      return <div className="w-5 h-5 rounded-sm border border-app-border bg-checker animate-pulse" />
     }
   }
 
@@ -55,6 +60,50 @@ export default function FileList({ files, preferences }: FileListProps) {
   const { selectedFiles, setSelectedFiles, navigateTo } = useAppStore()
   const { fetchAppIcon } = useAppStore()
   const [draggedFile, setDraggedFile] = useState<string | null>(null)
+  
+  // Dynamically compute a safe middle-truncation length for the Name column
+  const nameHeaderRef = useRef<HTMLButtonElement>(null)
+  const measureRef = useRef<HTMLSpanElement>(null)
+  const [nameCharLimit, setNameCharLimit] = useState<number>(40)
+
+  useEffect(() => {
+    const recalc = () => {
+      const header = nameHeaderRef.current
+      const measure = measureRef.current
+      if (!header || !measure) return
+
+      const colWidth = header.getBoundingClientRect().width
+      if (!colWidth || colWidth <= 0) return
+
+      // Measure average character width for text-sm in our font stack
+      const sample = measure.textContent || ''
+      const sampleWidth = measure.getBoundingClientRect().width || 7.5 * sample.length
+      const avgChar = sampleWidth / Math.max(1, sample.length)
+
+      // Leave room for icon + gap + padding within the cell
+      const reserved = 44 // ≈ 20 (icon) + 8 (gap) + 8 (pl-2) + small buffer
+      const available = Math.max(0, colWidth - reserved - 12) // extra safety buffer
+      const maxChars = Math.max(8, Math.floor(available / Math.max(5, avgChar)))
+      setNameCharLimit(maxChars)
+    }
+
+    // Initial calc
+    recalc()
+
+    // Observe column width changes
+    let ro: ResizeObserver | undefined
+    if (typeof ResizeObserver !== 'undefined' && nameHeaderRef.current) {
+      ro = new ResizeObserver(() => recalc())
+      ro.observe(nameHeaderRef.current)
+    }
+
+    // Also respond to window resizes (e.g., sidebar drag)
+    window.addEventListener('resize', recalc)
+    return () => {
+      window.removeEventListener('resize', recalc)
+      if (ro && nameHeaderRef.current) ro.disconnect()
+    }
+  }, [])
 
   const sortBy = preferences.sortBy
   const sortOrder = preferences.sortOrder
@@ -108,7 +157,7 @@ export default function FileList({ files, preferences }: FileListProps) {
       
       // DMG files use a custom icon since they don't have embedded icons
       if (fileName.endsWith('.dmg')) {
-        return <HardDrive className="w-5 h-5 text-orange-500" weight="fill" />
+        return <Disc className="w-5 h-5 text-app-muted" weight="fill" />
       }
     }
     if (file.is_directory) {
@@ -116,11 +165,24 @@ export default function FileList({ files, preferences }: FileListProps) {
     }
 
     const ext = file.extension?.toLowerCase()
-    if (!ext) return <File className="w-5 h-5 text-app-muted" />
+    if (!ext) {
+      const special = resolveVSCodeIcon(file.name)
+      if (special) return <FileTypeIcon name={file.name} size="small" />
+      return <File className="w-5 h-5 text-app-muted" />
+    }
 
     // Same icon logic as FileGrid but smaller
     if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp'].includes(ext)) {
       return <ImageSquare className="w-5 h-5 text-app-green" />
+    }
+    if (ext === 'pdf') {
+      return <FilePdf className="w-5 h-5 text-red-500" />
+    }
+    if (ext === 'ai' || ext === 'eps') {
+      return <PaintBrush className="w-5 h-5 text-orange-500" />
+    }
+    if (ext === 'psd' || ext === 'psb') {
+      return <Palette className="w-5 h-5 text-blue-500" />
     }
     if (['mp3', 'wav', 'flac', 'aac', 'm4a', 'ogg'].includes(ext)) {
       return <MusicNote className="w-5 h-5 text-app-yellow" />
@@ -131,10 +193,15 @@ export default function FileList({ files, preferences }: FileListProps) {
     if (['zip', 'rar', '7z', 'tar', 'gz', 'bz2'].includes(ext)) {
       return <FileZip className="w-5 h-5 text-app-muted" />
     }
-    if (['js', 'ts', 'jsx', 'tsx', 'py', 'rs', 'go', 'java', 'cpp', 'c', 'h'].includes(ext)) {
-      return <Code className="w-5 h-5 text-accent" />
+    // VSCode-style file icons for code/config types
+    if (resolveVSCodeIcon(file.name, ext)) {
+      return <FileTypeIcon name={file.name} ext={ext} size="small" />
     }
-    if (['txt', 'md', 'json', 'xml', 'yml', 'yaml'].includes(ext)) {
+
+    if (['txt'].includes(ext)) {
+      return <FileText className="w-5 h-5 text-app-text" />
+    }
+    if (['md', 'json', 'xml', 'yml', 'yaml', 'toml', 'ini'].includes(ext)) {
       return <FileText className="w-5 h-5 text-app-text" />
     }
 
@@ -231,10 +298,11 @@ export default function FileList({ files, preferences }: FileListProps) {
   }
 
   return (
+    <>
     <div className="h-full" onClick={handleBackgroundClick}>
       {/* Header */}
       <div className="grid grid-cols-12 gap-3 px-3 py-2 border-b border-app-border border-t-0 text-[12px] font-medium text-app-muted bg-transparent select-none mb-1">
-        <button className={`col-span-5 text-left hover:text-app-text pl-2 ${sortBy === 'name' ? 'text-app-text' : ''}`} onClick={() => toggleSort('name')} data-tauri-drag-region={false}>
+        <button ref={nameHeaderRef} className={`col-span-5 text-left hover:text-app-text pl-2 ${sortBy === 'name' ? 'text-app-text' : ''}`} onClick={() => toggleSort('name')} data-tauri-drag-region={false}>
           <span className="inline-flex items-center gap-1">Name {sortBy === 'name' && (sortOrder === 'asc' ? <CaretUp className="w-3 h-3"/> : <CaretDown className="w-3 h-3"/> )}</span>
         </button>
         <button className={`col-span-2 text-left hover:text-app-text ${sortBy === 'size' ? 'text-app-text' : ''}`} onClick={() => toggleSort('size')} data-tauri-drag-region={false}>
@@ -274,10 +342,14 @@ export default function FileList({ files, preferences }: FileListProps) {
                 <span className="flex-shrink-0">
                   <ListFilePreview file={file} isMac={isMac} fallbackIcon={getFileIcon(file)} />
                 </span>
-                <span className={`truncate text-sm ${isSelected ? 'text-accent' : ''}`} title={file.name}>
-                  {(isMac && file.is_directory && file.name.toLowerCase().endsWith('.app'))
-                    ? file.name.replace(/\.app$/i, '')
-                    : file.name}
+                <span className={`block truncate text-sm ${isSelected ? 'text-accent' : ''}`} title={file.name}>
+                  {(() => {
+                    const displayName = (isMac && file.is_directory && file.name.toLowerCase().endsWith('.app'))
+                      ? file.name.replace(/\.app$/i, '')
+                      : file.name
+                    // Dynamically computed safe length so we avoid double-ellipsis
+                    return truncateMiddle(displayName, nameCharLimit)
+                  })()}
                 </span>
               </div>
 
@@ -304,6 +376,15 @@ export default function FileList({ files, preferences }: FileListProps) {
         })}
       </div>
     </div>
+    {/* Hidden measurement element for accurate char width */}
+    <span
+      ref={measureRef}
+      className="absolute -left-[9999px] -top-[9999px] whitespace-nowrap text-sm"
+      aria-hidden
+    >
+      ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789
+    </span>
+    </>
   )
 }
 

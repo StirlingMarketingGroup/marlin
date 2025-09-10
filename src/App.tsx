@@ -5,22 +5,32 @@ import Sidebar from './components/Sidebar'
 import MainPanel from './components/MainPanel'
 import PathBar from './components/PathBar'
 import { useAppStore } from './store/useAppStore'
-import { open } from '@tauri-apps/plugin-dialog'
+import { message } from '@tauri-apps/plugin-dialog'
 
 function App() {
-  const { currentPath, setCurrentPath, navigateTo, setLoading, setError, setFiles, loading, error, setHomeDir, toggleHiddenFiles, toggleFoldersFirst, directoryPreferences } = useAppStore()
+  const { currentPath, setCurrentPath, navigateTo, setLoading, setError, setFiles, loading, setHomeDir, toggleHiddenFiles, toggleFoldersFirst, directoryPreferences } = useAppStore()
   const initializedRef = useRef(false)
   const [showLoadingOverlay, setShowLoadingOverlay] = useState(false)
   const prefsLoadedRef = useRef(false)
+  const firstLoadRef = useRef(true)
 
   // Apply smart default view and sort preferences based on folder name or contents
-  const applySmartViewDefaults = (path: string, files?: any[]) => {
+  const applySmartViewDefaults = async (path: string, files?: any[]) => {
     try {
       const { directoryPreferences, updateDirectoryPreferences } = useAppStore.getState()
       const existing = directoryPreferences[path]
       
-      // Don't override if user has already set preferences for this folder
-      if (existing && (existing.viewMode || existing.sortBy)) return
+      // If user already set sortBy, don't override it — but fill in a missing sortOrder
+      if (existing && (existing as any).sortBy) {
+        const sb = (existing as any).sortBy as 'name' | 'size' | 'modified' | 'type'
+        const so = (existing as any).sortOrder as 'asc' | 'desc' | undefined
+        if (!so) {
+          const defaultOrder: 'asc' | 'desc' = (sb === 'size' || sb === 'modified') ? 'desc' : 'asc'
+          updateDirectoryPreferences(path, { sortOrder: defaultOrder })
+          try { await invoke('set_dir_prefs', { path, prefs: JSON.stringify({ sortOrder: defaultOrder }) }) } catch {}
+        }
+        return
+      }
 
       const normalized = path.replace(/\\/g, '/').replace(/\/+$/g, '') || '/'
       const base = normalized.split('/').pop()?.toLowerCase() || ''
@@ -42,6 +52,7 @@ function App() {
       // Apply folder-specific defaults if found
       if (folderDefaults[base]) {
         updateDirectoryPreferences(path, folderDefaults[base])
+        try { await invoke('set_dir_prefs', { path, prefs: JSON.stringify(folderDefaults[base]) }) } catch {}
         return
       }
 
@@ -58,11 +69,9 @@ function App() {
             return ext && mediaExtensions.has(ext)
           })
           if (mediaFiles.length / nonFolder.length >= 0.75) {
-            updateDirectoryPreferences(path, { 
-              viewMode: 'grid',
-              sortBy: 'modified',
-              sortOrder: 'desc'
-            })
+            const prefs = { viewMode: 'grid' as const, sortBy: 'modified' as const, sortOrder: 'desc' as const }
+            updateDirectoryPreferences(path, prefs)
+            try { await invoke('set_dir_prefs', { path, prefs: JSON.stringify(prefs) }) } catch {}
           }
         }
       }
@@ -110,7 +119,6 @@ function App() {
         } catch { /* ignore */ }
 
         const homeDir = await invoke<string>('get_home_directory')
-
         setHomeDir(homeDir)
 
         // Check if a path was provided via URL parameter (for new windows)
@@ -118,15 +126,7 @@ function App() {
         const initialPath = urlParams.get('path')
         const startPath = initialPath ? decodeURIComponent(initialPath) : (lastDir || homeDir)
         
-        setCurrentPath(startPath)
-        navigateTo(startPath)
-        
-        // Load initial files and apply smart defaults
-        const files = await invoke<any[]>('read_directory', { path: startPath })
-        setFiles(files)
-        applySmartViewDefaults(startPath, files)
-        
-        // Apply system accent color (macOS) to CSS variables
+        // Apply system accent color (macOS) to CSS variables FIRST
         try {
           const accent = await invoke<string>('get_system_accent_color')
           if (accent && /^#?[0-9a-fA-F]{6}$/.test(accent)) {
@@ -141,27 +141,72 @@ function App() {
             document.documentElement.style.setProperty('--accent-selected', selected)
           }
         } catch (e) {
-          // Ignore accent color lookup failures
+          console.warn('Could not get system accent color:', e)
         }
-        setError(undefined)
-        prefsLoadedRef.current = true
         
-        initializedRef.current = true
-      } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error)
-        const hint = errorMessage.includes('Operation not permitted')
-          ? '\nHint (macOS): Allow Marlin under System Settings → Privacy & Security → Files and Folders (Desktop/Documents/Downloads), then retry.'
-          : ''
-        setError(`Failed to initialize: ${errorMessage}${hint}`)
-        
-        // Fallback: try to show some content even if initialization fails
+        // Now try to load the initial directory
+        let loadSuccess = false
         try {
-          // Fallback: go to filesystem root to avoid showing ~
-          const fallbackPath = '/'
-          setCurrentPath(fallbackPath)
-        } catch (fallbackError) {
-          // ignore
+          const files = await invoke<any[]>('read_directory', { path: startPath })
+          setFiles(files)
+          await applySmartViewDefaults(startPath, files)
+          setCurrentPath(startPath)
+          navigateTo(startPath)
+          loadSuccess = true
+        } catch (dirError) {
+          console.error('Failed to load initial directory:', startPath, dirError)
+          
+          // Try fallback to home directory
+          if (startPath !== homeDir) {
+            try {
+              const files = await invoke<any[]>('read_directory', { path: homeDir })
+              setFiles(files)
+              await applySmartViewDefaults(homeDir, files)
+              setCurrentPath(homeDir)
+              navigateTo(homeDir)
+              loadSuccess = true
+            } catch (homeError) {
+              console.error('Failed to load home directory:', homeError)
+            }
+          }
+          
+          // Last resort: try root
+          if (!loadSuccess) {
+            try {
+              const rootPath = '/'
+              const files = await invoke<any[]>('read_directory', { path: rootPath })
+              setFiles(files)
+              await applySmartViewDefaults(rootPath, files)
+              setCurrentPath(rootPath)
+              navigateTo(rootPath)
+              loadSuccess = true
+            } catch (rootError) {
+              console.error('Failed to load root directory:', rootError)
+              // Show error only if we can't load ANY directory
+              await message('Unable to access any directory. Please check filesystem permissions.', {
+                title: 'Fatal Error',
+                okLabel: 'OK',
+                kind: 'error'
+              })
+            }
+          }
         }
+        
+        // Mark initialization complete only if we successfully loaded something
+        if (loadSuccess) {
+          setError(undefined)
+          prefsLoadedRef.current = true
+          initializedRef.current = true
+          firstLoadRef.current = false
+        }
+      } catch (error) {
+        // Critical error (can't even get home directory)
+        console.error('Critical initialization error:', error)
+        await message('Failed to initialize application. Please restart.', {
+          title: 'Fatal Error',
+          okLabel: 'OK',
+          kind: 'error'
+        })
       } finally {
         setLoading(false)
       }
@@ -184,13 +229,14 @@ function App() {
 
   // Load directory preferences and files when currentPath changes
   useEffect(() => {
-    // Skip if not initialized yet or if this is the initial setup
-    if (!initializedRef.current) return
+    // Skip if not initialized yet or if this is the first load (already handled in init)
+    if (!initializedRef.current || firstLoadRef.current) return
     
     async function loadDirectory() {
       try {
         setLoading(true)
         setError(undefined)
+        
         // Load per-directory preferences first (so sort applies before rendering)
         try {
           const raw = await invoke<string>('get_dir_prefs', { path: currentPath })
@@ -201,22 +247,49 @@ function App() {
             }
           }
         } catch { /* ignore */ }
+        
+        // Try to load the directory
         const files = await invoke<any[]>('read_directory', { path: currentPath })
         setFiles(files)
-        applySmartViewDefaults(currentPath, files)
+        await applySmartViewDefaults(currentPath, files)
+        setError(undefined)  // Clear any previous errors on success
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error)
-        const hint = errorMessage.includes('Operation not permitted')
-          ? '\nHint (macOS): Allow Marlin under System Settings → Privacy & Security → Files and Folders for this folder (Desktop/Documents/Downloads), then retry.'
+        console.error('Failed to load directory:', currentPath, error)
+        
+        // Show alert for all directory access errors
+        const isPermissionError = errorMessage.includes('Operation not permitted')
+        const hint = isPermissionError
+          ? '\n\nAllow Marlin under System Settings → Privacy & Security → Files and Folders.'
           : ''
-        setError(`Failed to load directory: ${errorMessage}${hint}`)
+        
+        // Show native alert dialog
+        await message(`Cannot access: ${currentPath}\n\n${errorMessage}${hint}`, {
+          title: 'Directory Error',
+          okLabel: 'OK',
+          kind: 'error'
+        })
+        
+        // Navigate back to previous valid location
+        // Don't change files - keep showing the previous directory's content
+        const { goBack, pathHistory, historyIndex } = useAppStore.getState()
+        if (pathHistory.length > 1 && historyIndex > 0) {
+          // Go back in history (this will restore the previous path in the address bar)
+          goBack()
+        } else {
+          // If no history, at least update the path to match what we're showing
+          const { homeDir } = useAppStore.getState()
+          if (homeDir && currentPath !== homeDir) {
+            setCurrentPath(homeDir)
+          }
+        }
       } finally {
         setLoading(false)
       }
     }
 
     loadDirectory()
-  }, [currentPath, setLoading, setError, setFiles])
+  }, [currentPath, setLoading, setError, setFiles, setCurrentPath])
 
   // Persist only current directory prefs on change to avoid global clobbering
   useEffect(() => {
@@ -227,6 +300,12 @@ function App() {
     ;(async () => {
       try {
         await invoke('set_dir_prefs', { path: state.currentPath, prefs: JSON.stringify(prefs) })
+        // Keep native context menu's sort state in sync
+        if (prefs.sortBy || prefs.sortOrder) {
+          const sortBy = prefs.sortBy ?? state.globalPreferences.sortBy
+          const sortOrder = prefs.sortOrder ?? state.globalPreferences.sortOrder
+          try { await invoke('update_sort_menu_state', { sort_by: sortBy, ascending: sortOrder === 'asc' }) } catch {}
+        }
       } catch { /* ignore */ }
     })()
   }, [currentPath, directoryPreferences[currentPath]])
@@ -320,12 +399,25 @@ function App() {
           console.error('Failed to clear directory preferences:', err)
         }
       })
+
+      await register('menu:clear_thumbnail_cache', async () => {
+        // Clear the thumbnail cache
+        try {
+          const result = await invoke('clear_thumbnail_cache')
+          console.log('Thumbnail cache cleared:', result)
+          // Optionally refresh current view to show the effect
+          const { refreshCurrentDirectory } = useAppStore.getState()
+          await refreshCurrentDirectory()
+        } catch (err) {
+          console.error('Failed to clear thumbnail cache:', err)
+        }
+      })
       
     })()
 
     // Keyboard shortcuts as fallback (mac-like)
     const onKey = (e: KeyboardEvent) => {
-      const isMac = navigator.platform.toUpperCase().includes('MAC')
+      const isMac = navigator.userAgent.toUpperCase().includes('MAC')
 
       // Back: macOS Cmd+[ , Windows/Linux Alt+Left
       if ((isMac && e.metaKey && e.key === '[') || (!isMac && e.altKey && e.key === 'ArrowLeft')) {
@@ -362,9 +454,13 @@ function App() {
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err)
             const hint = msg.includes('Operation not permitted')
-              ? '\nHint (macOS): Grant access under System Settings → Privacy & Security → Files and Folders.'
+              ? ' Grant access under System Settings → Privacy & Security → Files and Folders.'
               : ''
-            setError(`Failed to refresh: ${msg}${hint}`)
+            await message(`Failed to refresh: ${msg}${hint}`, {
+              title: 'Refresh Error',
+              okLabel: 'OK',
+              kind: 'error'
+            })
           } finally {
             setLoading(false)
           }
@@ -403,6 +499,7 @@ function App() {
     const sync = async () => {
       try { await invoke('update_hidden_files_menu', { checked: !!prefs.showHidden, source: 'frontend' }) } catch {}
       try { await invoke('update_folders_first_menu', { checked: !!prefs.foldersFirst, source: 'frontend' }) } catch {}
+      try { await invoke('update_sort_menu_state', { sort_by: prefs.sortBy, ascending: prefs.sortOrder === 'asc' }) } catch {}
     }
     sync()
   }, [currentPath])
@@ -421,62 +518,7 @@ function App() {
     )
   }
 
-  if (error) {
-    const isMac = navigator.platform.toUpperCase().includes('MAC')
-    const maybePermissionIssue = /Operation not permitted/i.test(error)
 
-    const grantAccess = async () => {
-      try {
-        const path = await open({
-          directory: true,
-          multiple: false,
-          defaultPath: currentPath,
-          title: 'Grant Access to Folder',
-        })
-        if (!path) return
-        // Try reloading the current directory (permission should be granted via picker)
-        setLoading(true)
-        setError(undefined)
-        const files = await invoke<any[]>('read_directory', { path: currentPath })
-        setFiles(files)
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e)
-        setError(`Failed to grant access: ${msg}`)
-      } finally {
-        setLoading(false)
-      }
-    }
-    return (
-      <div className="h-screen flex items-center justify-center bg-app-dark text-app-text">
-        <div className="text-center max-w-lg p-6">
-          <div className="text-app-red text-6xl mb-4">⚠</div>
-          <h1 className="text-xl font-semibold mb-4">Application Error</h1>
-          <div className="text-app-red bg-app-gray p-4 rounded-md text-sm mb-4">
-            {error}
-          </div>
-          <div className="text-app-muted text-sm mb-4">
-            Check the browser console for more detailed error information.
-          </div>
-          <div className="flex items-center justify-center gap-3">
-            {isMac && maybePermissionIssue && (
-              <button
-                onClick={grantAccess}
-                className="button-secondary"
-              >
-                Grant Access…
-              </button>
-            )}
-            <button 
-              onClick={() => window.location.reload()}
-              className="button-primary"
-            >
-              Reload Application
-            </button>
-          </div>
-        </div>
-      </div>
-    )
-  }
 
   return (
     <div className="h-screen flex bg-app-dark text-app-text overflow-hidden">

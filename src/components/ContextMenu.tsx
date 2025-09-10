@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Check } from 'phosphor-react'
 import { useAppStore } from '../store/useAppStore'
+import type { ViewPreferences } from '@/types'
 
 interface ContextMenuProps {
   x: number
@@ -10,13 +11,21 @@ interface ContextMenuProps {
 
 export default function ContextMenu({ x, y, onClose }: ContextMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null)
-  const { globalPreferences, toggleHiddenFiles: centralizedToggle, toggleFoldersFirst } = useAppStore()
+  const { currentPath, globalPreferences, directoryPreferences, toggleHiddenFiles: centralizedToggle, toggleFoldersFirst } = useAppStore()
   const { updateDirectoryPreferences } = useAppStore()
   const sortTriggerRef = useRef<HTMLButtonElement>(null)
   const [submenuOpen, setSubmenuOpen] = useState<boolean>(false)
   const [submenuTop, setSubmenuTop] = useState<number>(0)
   const [submenuLeftSide, setSubmenuLeftSide] = useState<boolean>(false)
   const submenuRef = useRef<HTMLDivElement>(null)
+  
+  // Compute effective (per-folder) preferences
+  // - sort/hidden are per-directory
+  // - foldersFirst remains global
+  const dirPrefs: Partial<ViewPreferences> = directoryPreferences[currentPath] || {}
+  const effectiveSortBy = dirPrefs.sortBy ?? globalPreferences.sortBy
+  const effectiveSortOrder = dirPrefs.sortOrder ?? globalPreferences.sortOrder
+  const effectiveShowHidden = dirPrefs.showHidden ?? globalPreferences.showHidden
 
   // Position the menu and handle viewport boundaries
   useEffect(() => {
@@ -75,10 +84,7 @@ export default function ContextMenu({ x, y, onClose }: ContextMenuProps) {
     onClose()
   }
 
-  const setSortBy = (sortBy: 'name' | 'size' | 'type' | 'modified') => {
-    updateDirectoryPreferences(useAppStore.getState().currentPath, { sortBy })
-    onClose()
-  }
+
 
   const openSortSubmenu = () => {
     if (!menuRef.current || !sortTriggerRef.current) {
@@ -126,7 +132,7 @@ export default function ContextMenu({ x, y, onClose }: ContextMenuProps) {
           data-tauri-drag-region={false}
         >
           <div className="flex items-center justify-center w-4 h-4">
-            {globalPreferences.showHidden ? (
+            {effectiveShowHidden ? (
               <Check className="w-4 h-4 text-app-accent" weight="bold" />
             ) : null}
           </div>
@@ -159,8 +165,7 @@ export default function ContextMenu({ x, y, onClose }: ContextMenuProps) {
               onMouseLeave={closeSubmenu}
             >
               {(['name','size','type','modified'] as const).map((key) => {
-                const dirPrefs = useAppStore.getState().directoryPreferences[useAppStore.getState().currentPath]
-                const active = (dirPrefs?.sortBy ?? globalPreferences.sortBy) === key
+                const active = effectiveSortBy === key
                 const label = key === 'name' ? 'Name' : key === 'size' ? 'Size' : key === 'type' ? 'Type' : 'Date Modified'
                 return (
                   <button
@@ -168,7 +173,7 @@ export default function ContextMenu({ x, y, onClose }: ContextMenuProps) {
                     className="w-full flex items-center gap-3 px-3 py-2 text-sm text-app-text hover:bg-app-light rounded transition-colors"
                     onClick={() => {
                       const defaultOrder: 'asc' | 'desc' = (key === 'size' || key === 'modified') ? 'desc' : 'asc'
-                      updateDirectoryPreferences(useAppStore.getState().currentPath, { sortBy: key, sortOrder: defaultOrder })
+                      updateDirectoryPreferences(currentPath, { sortBy: key, sortOrder: defaultOrder })
                       onClose()
                     }}
                     data-tauri-drag-region={false}
@@ -184,8 +189,7 @@ export default function ContextMenu({ x, y, onClose }: ContextMenuProps) {
               })}
               <div className="h-px bg-app-border my-1" />
               {(['asc','desc'] as const).map((dir) => {
-                const dirPrefs = useAppStore.getState().directoryPreferences[useAppStore.getState().currentPath]
-                const active = (dirPrefs?.sortOrder ?? globalPreferences.sortOrder) === dir
+                const active = effectiveSortOrder === dir
                 const label = dir === 'asc' ? 'Ascending' : 'Descending'
                 return (
                   <button
