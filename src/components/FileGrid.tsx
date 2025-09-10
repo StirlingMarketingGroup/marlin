@@ -1,12 +1,11 @@
-import { useState, useMemo, type ReactNode } from 'react'
+import { useState, useMemo, useEffect, useRef, type ReactNode } from 'react'
 import { Folder, File, ImageSquare, MusicNote, VideoCamera, FileZip, FileText, AppWindow, Package, FilePdf, PaintBrush, Palette, Disc } from 'phosphor-react'
 import { FileItem, ViewPreferences } from '../types'
 import { useAppStore } from '../store/useAppStore'
 import AppIcon from '@/components/AppIcon'
 import { FileTypeIcon, resolveVSCodeIcon } from '@/components/FileTypeIcon'
 import { open } from '@tauri-apps/plugin-shell'
-import { invoke } from '@tauri-apps/api/core'
-import { getCurrentWindow } from '@tauri-apps/api/window'
+// no direct invoke here; background opens the menu
 import { useThumbnail } from '@/hooks/useThumbnail'
 import { useVisibility } from '@/hooks/useVisibility'
 import { truncateMiddle } from '@/utils/truncate'
@@ -108,6 +107,9 @@ function GridFilePreview({ file, isMac, fallbackIcon, tile }: { file: FileItem; 
 
 export default function FileGrid({ files, preferences }: FileGridProps) {
   const { selectedFiles, setSelectedFiles, navigateTo, currentPath } = useAppStore()
+  const { renameTargetPath, setRenameTarget, renameFile } = useAppStore()
+  const [renameText, setRenameText] = useState<string>('')
+  const renameInputRef = useRef<HTMLInputElement>(null)
   const [draggedFile, setDraggedFile] = useState<string | null>(null)
   
   // Tile width from preferences (default 120)
@@ -236,26 +238,41 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     }
   }
 
-  const handleContextMenuForFile = async (e: React.MouseEvent, file: FileItem) => {
-    e.preventDefault()
-    e.stopPropagation()
-    if (!selectedFiles.includes(file.path)) {
-      setSelectedFiles([file.path])
-    }
-    try {
-      const win = getCurrentWindow()
-      await invoke('show_native_context_menu', {
-        window_label: win.label,
-        x: e.clientX,
-        y: e.clientY,
-        sort_by: preferences.sortBy,
-        sort_order: preferences.sortOrder,
-        path: currentPath,
-      })
-    } catch (_) {
-      // ignore
+  // Pre-select on right click so background handler can include file actions
+  const handleMouseDownForFile = (e: React.MouseEvent, file: FileItem) => {
+    if (e.button === 2) {
+      if (!selectedFiles.includes(file.path)) {
+        setSelectedFiles([file.path])
+      }
     }
   }
+
+  // Begin rename UX when store renameTargetPath points to an item in this view
+  useEffect(() => {
+    if (!renameTargetPath) return
+    const f = files.find(ff => ff.path === renameTargetPath)
+    if (!f) return
+    setRenameText(f.name)
+    requestAnimationFrame(() => {
+      const el = renameInputRef.current
+      if (el) {
+        el.focus()
+        const baseLen = (() => {
+          if (f.is_directory) return f.name.toLowerCase().endsWith('.app') ? Math.max(0, f.name.length - 4) : f.name.length
+          const idx = f.name.lastIndexOf('.')
+          return idx > 0 ? idx : f.name.length
+        })()
+        try { el.setSelectionRange(0, baseLen) } catch {}
+      }
+    })
+  }, [renameTargetPath, files])
+
+  const commitRename = async () => {
+    const name = (renameText || '').trim()
+    if (!name) { setRenameTarget(undefined); return }
+    await renameFile(name)
+  }
+  const cancelRename = () => setRenameTarget(undefined)
 
   const nameCollator = useMemo(() => new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' }), [])
   const sortedFiles = [...files].sort((a, b) => {
@@ -331,20 +348,36 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
               } ${isDragged ? 'opacity-50' : ''} ${
                 file.is_hidden ? 'opacity-60' : ''
               }`}
+              data-file-item="true"
+              data-file-path={file.path}
               data-tauri-drag-region={false}
               onClick={(e) => { e.stopPropagation(); handleFileClick(file, e.ctrlKey || e.metaKey) }}
               onDoubleClick={(e) => { e.stopPropagation(); handleDoubleClick(file) }}
+              onMouseDown={(e) => handleMouseDownForFile(e, file)}
               onDragStart={() => setDraggedFile(file.path)}
               onDragEnd={() => setDraggedFile(null)}
               draggable
-              onContextMenu={(e) => handleContextMenuForFile(e, file)}
             >
               <div className="mb-2 flex-shrink-0" style={{ width: tile, display: 'flex', justifyContent: 'center', height: Math.max(48, Math.min(tile - Math.max(3, Math.min(8, Math.round(tile * 0.03))) * 2, 320)) }}>
                 <GridFilePreview file={file} isMac={isMac} fallbackIcon={getFileIcon(file)} tile={tile} />
               </div>
               
               <div className={`text-center`}>
-                {(() => {
+                {renameTargetPath === file.path ? (
+                  <input
+                    ref={renameInputRef}
+                    className={`text-sm font-medium bg-app-dark border border-app-border rounded px-2 py-[3px] ${isSelected ? 'text-white' : ''}`}
+                    style={{ maxWidth: `${tile}px` }}
+                    value={renameText}
+                    onChange={(e) => setRenameText(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') { e.preventDefault(); void commitRename() }
+                      if (e.key === 'Escape') { e.preventDefault(); cancelRename() }
+                    }}
+                    onBlur={cancelRename}
+                    data-tauri-drag-region={false}
+                  />
+                ) : (() => {
                   const raw = (isMac && file.is_directory && file.name.toLowerCase().endsWith('.app'))
                     ? file.name.replace(/\.app$/i, '')
                     : file.name

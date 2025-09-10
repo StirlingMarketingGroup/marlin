@@ -276,6 +276,9 @@ pub fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, event: &tauri::menu::Me
         "ctx:copy_full_name" => {
             let _ = app.emit("menu:copy_full_name", ());
         }
+        "ctx:rename" => {
+            let _ = app.emit("menu:rename", ());
+        }
         "menu:folders_first" => {
             // Toggle and emit new value
             let state: tauri::State<crate::state::MenuState<R>> = app.state();

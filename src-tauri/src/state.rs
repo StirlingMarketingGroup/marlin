@@ -15,4 +15,6 @@ pub struct MenuState<R: tauri::Runtime> {
     pub sort_modified_item: Mutex<Option<CheckMenuItem<R>>>,
     pub sort_asc_item: Mutex<Option<CheckMenuItem<R>>>,
     pub sort_desc_item: Mutex<Option<CheckMenuItem<R>>>,
+    // Selection state to drive context menu enable/visibility
+    pub has_selection: Mutex<bool>,
 }

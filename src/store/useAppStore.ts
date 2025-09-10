@@ -88,6 +88,11 @@ interface AppState {
   refreshCurrentDirectory: () => Promise<void>
   fetchAppIcon: (path: string, size?: number) => Promise<string | undefined>
   resetDirectoryPreferences: () => void
+  // Rename UX
+  renameTargetPath?: string
+  setRenameTarget: (path?: string) => void
+  beginRenameSelected: () => void
+  renameFile: (newName: string) => Promise<void>
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -141,7 +146,16 @@ export const useAppStore = create<AppState>((set, get) => ({
   setFiles: (files) => set({ files }),
   setLoading: (loading) => set({ loading }),
   setError: (error) => set({ error }),
-  setSelectedFiles: (files) => set({ selectedFiles: files }),
+  setSelectedFiles: (files) => {
+    set({ selectedFiles: files })
+    // Update native menu selection state (ignore errors in dev)
+    ;(async () => {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core')
+        await invoke('update_selection_menu_state', { has_selection: Array.isArray(files) && files.length > 0 })
+      } catch { /* ignore */ }
+    })()
+  },
   
   updateGlobalPreferences: (preferences) =>
     set((state) => ({
@@ -331,6 +345,50 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   resetDirectoryPreferences: () => {
     set({ directoryPreferences: {} })
+  },
+  
+  // Rename state
+  renameTargetPath: undefined,
+  setRenameTarget: (path?: string) => set({ renameTargetPath: path }),
+  beginRenameSelected: () => {
+    const { selectedFiles } = get()
+    if (!selectedFiles || selectedFiles.length === 0) return
+    set({ renameTargetPath: selectedFiles[0] })
+  },
+  renameFile: async (newName: string) => {
+    const state = get()
+    const target = state.renameTargetPath
+    if (!target) return
+    const trimmed = (newName || '').trim()
+    if (!trimmed) { set({ renameTargetPath: undefined }); return }
+    if (/[\\/]/.test(trimmed)) {
+      // Invalid characters for a single path segment
+      try {
+        const { message } = await import('@tauri-apps/plugin-dialog')
+        await message('Name cannot contain slashes.', { title: 'Invalid Name', kind: 'warning', okLabel: 'OK' })
+      } catch (_) {}
+      return
+    }
+
+    const sep = target.includes('\\') ? '\\' : '/'
+    const lastSep = Math.max(target.lastIndexOf('/'), target.lastIndexOf('\\'))
+    const parent = lastSep >= 0 ? target.slice(0, lastSep) : state.currentPath
+    const toPath = parent ? `${parent}${sep}${trimmed}` : trimmed
+    try {
+      const { invoke } = await import('@tauri-apps/api/core')
+      await invoke('rename_file', { from_path: target, to_path: toPath })
+      set({ renameTargetPath: undefined })
+      state.setSelectedFiles([toPath])
+      await state.refreshCurrentDirectory()
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      try {
+        const { message } = await import('@tauri-apps/plugin-dialog')
+        await message(`Failed to rename:\n${msg}`, { title: 'Rename Error', kind: 'error', okLabel: 'OK' })
+      } catch (_) {
+        // ignore
+      }
+    }
   },
   
   // Persist the global "last used" showHidden setting so new folders default to it

@@ -5,8 +5,7 @@ import { useAppStore } from '../store/useAppStore'
 import AppIcon from '@/components/AppIcon'
 import { FileTypeIcon, resolveVSCodeIcon } from '@/components/FileTypeIcon'
 import { open } from '@tauri-apps/plugin-shell'
-import { invoke } from '@tauri-apps/api/core'
-import { getCurrentWindow } from '@tauri-apps/api/window'
+// no direct invoke here; background opens the menu
 import { useThumbnail } from '@/hooks/useThumbnail'
 import { useVisibility } from '@/hooks/useVisibility'
 import { truncateMiddle } from '@/utils/truncate'
@@ -93,6 +92,9 @@ function ListFilePreview({ file, isMac, fallbackIcon }: { file: FileItem; isMac:
 
 export default function FileList({ files, preferences }: FileListProps) {
   const { selectedFiles, setSelectedFiles, navigateTo, currentPath } = useAppStore()
+  const { renameTargetPath, setRenameTarget, renameFile } = useAppStore()
+  const [renameText, setRenameText] = useState<string>('')
+  const renameInputRef = useRef<HTMLInputElement>(null)
   const { fetchAppIcon } = useAppStore()
   const [draggedFile, setDraggedFile] = useState<string | null>(null)
   
@@ -276,24 +278,43 @@ export default function FileList({ files, preferences }: FileListProps) {
     }
   }
 
-  const handleContextMenuForFile = async (e: React.MouseEvent, file: FileItem) => {
-    e.preventDefault()
-    e.stopPropagation()
-    if (!selectedFiles.includes(file.path)) {
-      setSelectedFiles([file.path])
-    }
-    try {
-      const win = getCurrentWindow()
-      await invoke('show_native_context_menu', {
-        window_label: win.label,
-        x: e.clientX,
-        y: e.clientY,
-        sort_by: preferences.sortBy,
-        sort_order: preferences.sortOrder,
-        path: currentPath,
-      })
-    } catch (_) {
-      // ignore
+  // Begin rename UX when store renameTargetPath points to an item in this view
+  useEffect(() => {
+    if (!renameTargetPath) return
+    const f = files.find(ff => ff.path === renameTargetPath)
+    if (!f) return
+    setRenameText(f.name)
+    const baseLen = (() => {
+      if (f.is_directory) {
+        return f.name.toLowerCase().endsWith('.app') ? Math.max(0, f.name.length - 4) : f.name.length
+      }
+      const idx = f.name.lastIndexOf('.')
+      return idx > 0 ? idx : f.name.length
+    })()
+    // Focus/select on next frame after input mounts
+    requestAnimationFrame(() => {
+      const el = renameInputRef.current
+      if (el) {
+        el.focus()
+        try { el.setSelectionRange(0, baseLen) } catch {}
+      }
+    })
+  }, [renameTargetPath, files])
+
+  const commitRename = async () => {
+    const name = (renameText || '').trim()
+    if (!name) { setRenameTarget(undefined); return }
+    await renameFile(name)
+  }
+  const cancelRename = () => setRenameTarget(undefined)
+
+  // Pre-select on right click so background handler can include file actions
+  const handleMouseDownForFile = (e: React.MouseEvent, file: FileItem) => {
+    if (e.button === 2) {
+      // Right button
+      if (!selectedFiles.includes(file.path)) {
+        setSelectedFiles([file.path])
+      }
     }
   }
 
@@ -387,45 +408,62 @@ export default function FileList({ files, preferences }: FileListProps) {
               } ${isDragged ? 'opacity-50' : ''} ${
                 file.is_hidden ? 'opacity-60' : ''
               }`}
+              data-file-item="true"
+              data-file-path={file.path}
               data-tauri-drag-region={false}
               onClick={(e) => { e.stopPropagation(); handleFileClick(file, e.ctrlKey || e.metaKey) }}
               onDoubleClick={(e) => { e.stopPropagation(); handleDoubleClick(file) }}
+              onMouseDown={(e) => handleMouseDownForFile(e, file)}
               onDragStart={() => setDraggedFile(file.path)}
               onDragEnd={() => setDraggedFile(null)}
               draggable
-              onContextMenu={(e) => handleContextMenuForFile(e, file)}
             >
               {/* Name column */}
               <div className="col-span-5 flex items-center gap-2 min-w-0 pl-2">
                 <span className="flex-shrink-0">
                   <ListFilePreview file={file} isMac={isMac} fallbackIcon={getFileIcon(file)} />
                 </span>
-                {(() => {
-                  const displayName = (isMac && file.is_directory && file.name.toLowerCase().endsWith('.app'))
-                    ? file.name.replace(/\.app$/i, '')
-                    : file.name
-                  const truncated = truncateMiddle(displayName, nameCharLimit)
-                  const needsTooltip = truncated !== displayName
-                  if (!needsTooltip) {
-                    return <span className={`block truncate text-sm ${isSelected ? 'text-white' : ''}`}>{truncated}</span>
-                  }
-                  return (
-                    <QuickTooltip text={displayName}>
-                      {({ onMouseEnter, onMouseLeave, onFocus, onBlur, ref }) => (
-                        <span
-                          className={`block truncate text-sm ${isSelected ? 'text-white' : ''}`}
-                          onMouseEnter={onMouseEnter}
-                          onMouseLeave={onMouseLeave}
-                          onFocus={onFocus}
-                          onBlur={onBlur}
-                          ref={ref as any}
-                        >
-                          {truncated}
-                        </span>
-                      )}
-                    </QuickTooltip>
-                  )
-                })()}
+                {renameTargetPath === file.path ? (
+                  <input
+                    ref={renameInputRef}
+                    className={`flex-1 min-w-0 text-sm bg-app-dark border border-app-border rounded px-2 py-[3px] outline-none ${isSelected ? 'text-white' : 'text-app-text'} focus:border-[var(--accent)] truncate`}
+                    value={renameText}
+                    onChange={(e) => setRenameText(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') { e.preventDefault(); void commitRename() }
+                      if (e.key === 'Escape') { e.preventDefault(); cancelRename() }
+                    }}
+                    onBlur={cancelRename}
+                    data-tauri-drag-region={false}
+                  />
+                ) : (
+                  (() => {
+                    const displayName = (isMac && file.is_directory && file.name.toLowerCase().endsWith('.app'))
+                      ? file.name.replace(/\.app$/i, '')
+                      : file.name
+                    const truncated = truncateMiddle(displayName, nameCharLimit)
+                    const needsTooltip = truncated !== displayName
+                    if (!needsTooltip) {
+                      return <span className={`block truncate text-sm ${isSelected ? 'text-white' : ''}`}>{truncated}</span>
+                    }
+                    return (
+                      <QuickTooltip text={displayName}>
+                        {({ onMouseEnter, onMouseLeave, onFocus, onBlur, ref }) => (
+                          <span
+                            className={`block truncate text-sm ${isSelected ? 'text-white' : ''}`}
+                            onMouseEnter={onMouseEnter}
+                            onMouseLeave={onMouseLeave}
+                            onFocus={onFocus}
+                            onBlur={onBlur}
+                            ref={ref as any}
+                          >
+                            {truncated}
+                          </span>
+                        )}
+                      </QuickTooltip>
+                    )
+                  })()
+                )}
               </div>
 
               {/* Size column */}

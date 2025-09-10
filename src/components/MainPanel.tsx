@@ -13,36 +13,58 @@ export default function MainPanel() {
     currentPath,
     directoryPreferences,
     setSelectedFiles,
+    selectedFiles,
     loading,
   } = useAppStore()
 
   // We rely solely on the native OS context menu now
   const scrollRef = useRef<HTMLDivElement>(null)
+  const fileCtxCaptureRef = useRef<boolean>(false)
+  const fileCtxPathRef = useRef<string | null>(null)
 
   const currentPrefs = {
     ...globalPreferences,
     ...directoryPreferences[currentPath],
   }
 
+  const handleContextMenuCapture = (e: React.MouseEvent) => {
+    const targetEl = e.target as HTMLElement
+    const fileEl = targetEl && (targetEl.closest('[data-file-item="true"]') as HTMLElement | null)
+    fileCtxCaptureRef.current = !!fileEl
+    fileCtxPathRef.current = fileEl ? (fileEl.getAttribute('data-file-path') || null) : null
+  }
+
   const handleContextMenu = async (e: React.MouseEvent) => {
     e.preventDefault()
     try {
       const win = getCurrentWindow()
-      // Prefer native OS context menu
-      // Use the same merged prefs driving the UI header so checks match exactly
-      const sortBy = currentPrefs.sortBy
-      const sortOrder = currentPrefs.sortOrder
-      // Debug in DevTools to verify values we pass to backend
-      console.debug('[ContextMenu] passing', { path: currentPath, sortBy, sortOrder })
+      const state = useAppStore.getState()
+      const path = state.currentPath
+      const prefs = { ...state.globalPreferences, ...state.directoryPreferences[path] }
+      const sortBy = prefs.sortBy
+      const sortOrder = prefs.sortOrder
+      let filePaths = state.selectedFiles
+      const isFileCtx = fileCtxCaptureRef.current
+      const ctxPath = fileCtxPathRef.current
+      // If right-clicked a file, ensure it is selected and pass it explicitly
+      if (isFileCtx && ctxPath) {
+        if (!filePaths.includes(ctxPath)) {
+          setSelectedFiles([ctxPath])
+        }
+        filePaths = [ctxPath]
+      }
+      fileCtxCaptureRef.current = false
+      fileCtxPathRef.current = null
 
       await invoke('show_native_context_menu', {
         window_label: win.label,
-        // Tauri expects position relative to window's top-left (logical coords)
         x: e.clientX,
         y: e.clientY,
         sort_by: sortBy,
         sort_order: sortOrder,
-        path: currentPath,
+        path,
+        has_file_context: isFileCtx || (Array.isArray(filePaths) && filePaths.length > 0),
+        file_paths: filePaths,
       })
       return
     } catch (_) {
@@ -99,6 +121,7 @@ export default function MainPanel() {
       <div
         ref={scrollRef}
         className="relative flex-1 min-h-0 overflow-auto"
+        onContextMenuCapture={handleContextMenuCapture}
         onContextMenu={handleContextMenu}
         onClick={handleContainerBackgroundClick}
       >

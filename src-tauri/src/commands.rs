@@ -342,6 +342,18 @@ pub fn update_sort_menu_state(
     Ok(())
 }
 
+#[tauri::command]
+pub fn update_selection_menu_state(
+    _app: tauri::AppHandle,
+    menu_state: tauri::State<crate::state::MenuState<tauri::Wry>>,
+    has_selection: bool,
+) -> Result<(), String> {
+    if let Ok(mut sel) = menu_state.has_selection.lock() {
+        *sel = has_selection;
+    }
+    Ok(())
+}
+
 #[derive(serde::Serialize)]
 pub struct SystemDrive {
     pub name: String,
@@ -634,13 +646,17 @@ pub fn show_native_context_menu(
     sort_by: Option<String>,
     sort_order: Option<String>,
     path: Option<String>,
+    has_file_context: Option<bool>,
+    file_paths: Option<Vec<String>>,
 ) -> Result<(), String> {
     // Helpful debug to ensure frontend is passing expected values
     #[cfg(debug_assertions)]
     log::info!(
-        "ContextMenu request: sort_by={:?} sort_order={:?} at ({}, {})",
+        "ContextMenu request: sort_by={:?} sort_order={:?} has_file_context={:?} file_paths_len={} at ({}, {})",
         sort_by,
         sort_order,
+        has_file_context,
+        file_paths.as_ref().map(|v| v.len()).unwrap_or(0),
         x,
         y
     );
@@ -792,24 +808,32 @@ pub fn show_native_context_menu(
         .build()
         .map_err(|e| e.to_string())?;
 
-    // File-specific actions
-    let copy_name_item = MenuItemBuilder::with_id("ctx:copy_name", "Copy File Name")
-        .build(&app)
-        .map_err(|e| e.to_string())?;
-    let copy_full_name_item = MenuItemBuilder::with_id("ctx:copy_full_name", "Copy Full Path")
-        .build(&app)
-        .map_err(|e| e.to_string())?;
+    // Only include file-specific actions when a selection exists or click is on a file
+    let selection_len = file_paths.as_ref().map(|v| v.len()).unwrap_or(0);
+    let selection_from_state = app
+        .state::<crate::state::MenuState<tauri::Wry>>()
+        .has_selection
+        .lock()
+        .map(|v| *v)
+        .unwrap_or(false);
+    let is_file_ctx = has_file_context.unwrap_or(false) || selection_len > 0 || selection_from_state;
 
-    let ctx_menu = MenuBuilder::new(&app)
-        .items(&[
-            &copy_name_item,
-            &copy_full_name_item,
-        ])
-        .separator()
-        .items(&[
-            &show_hidden_item,
-            &sort_submenu,
-        ])
+    let mut builder = MenuBuilder::new(&app);
+    if is_file_ctx {
+        let rename_item = MenuItemBuilder::with_id("ctx:rename", "Rename")
+            .build(&app)
+            .map_err(|e| e.to_string())?;
+        let copy_name_item = MenuItemBuilder::with_id("ctx:copy_name", "Copy File Name")
+            .build(&app)
+            .map_err(|e| e.to_string())?;
+        let copy_full_name_item = MenuItemBuilder::with_id("ctx:copy_full_name", "Copy Full Path")
+            .build(&app)
+            .map_err(|e| e.to_string())?;
+        builder = builder.items(&[&rename_item, &copy_name_item, &copy_full_name_item]).separator();
+    }
+
+    let ctx_menu = builder
+        .items(&[&show_hidden_item, &sort_submenu])
         .build()
         .map_err(|e| e.to_string())?;
 

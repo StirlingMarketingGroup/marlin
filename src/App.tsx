@@ -427,6 +427,9 @@ function App() {
 
       await register('menu:copy_name', () => { void copyNames(false) })
       await register('menu:copy_full_name', () => { void copyNames(true) })
+      await register('menu:rename', () => {
+        useAppStore.getState().beginRenameSelected()
+      })
       
       await register('menu:new_window', () => {
         // Create new window in current directory
@@ -473,6 +476,12 @@ function App() {
     // Keyboard shortcuts as fallback (mac-like)
     const onKey = (e: KeyboardEvent) => {
       const isMac = navigator.userAgent.toUpperCase().includes('MAC')
+      const active = document.activeElement as HTMLElement | null
+      const inEditable = !!active && (
+        active.tagName === 'INPUT' ||
+        active.tagName === 'TEXTAREA' ||
+        active.isContentEditable
+      )
 
       // Back: macOS Cmd+[ , Windows/Linux Alt+Left
       if ((isMac && e.metaKey && e.key === '[') || (!isMac && e.altKey && e.key === 'ArrowLeft')) {
@@ -521,6 +530,20 @@ function App() {
           }
         })()
         return
+      }
+
+      // Rename: F2 everywhere; macOS Return (Enter) with no modifiers
+      if (!inEditable) {
+        if (e.key === 'F2') {
+          e.preventDefault()
+          useAppStore.getState().beginRenameSelected()
+          return
+        }
+        if (isMac && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && e.key === 'Enter') {
+          e.preventDefault()
+          useAppStore.getState().beginRenameSelected()
+          return
+        }
       }
 
       const meta = e.metaKey || e.ctrlKey

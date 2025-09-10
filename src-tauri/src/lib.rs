@@ -42,6 +42,7 @@ pub fn run() {
       commands::open_path,
       commands::new_window,
       commands::show_native_context_menu,
+      commands::update_selection_menu_state,
       commands::render_svg_to_png,
       commands::read_preferences,
       commands::write_preferences,
@@ -96,6 +97,7 @@ pub fn run() {
         sort_modified_item: Mutex::new(Some(sort_modified_item)),
         sort_asc_item: Mutex::new(Some(sort_order_asc_item)),
         sort_desc_item: Mutex::new(Some(sort_order_desc_item)),
+        has_selection: Mutex::new(false),
       });
 
       Ok(())
