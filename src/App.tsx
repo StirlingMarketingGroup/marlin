@@ -353,12 +353,24 @@ function App() {
     
     // Register all listeners asynchronously
     ;(async () => {
-      await register('menu:toggle_hidden', (e) => {
+      await register('menu:toggle_hidden', async (e) => {
         const payload = e && typeof e.payload === 'boolean' ? (e.payload as boolean) : undefined
         if (typeof payload === 'boolean') {
-          // Per-directory hidden toggle
-          const { currentPath, updateDirectoryPreferences } = useAppStore.getState()
+          // Set per-directory and remember as global last-used, then reload
+          const { currentPath, updateDirectoryPreferences, setFiles, setLoading, setError, setLastUsedShowHidden } = useAppStore.getState() as any
           updateDirectoryPreferences(currentPath, { showHidden: payload })
+          await setLastUsedShowHidden(payload)
+          try {
+            setLoading(true)
+            const files = await invoke<any[]>('read_directory', { path: currentPath })
+            setFiles(files)
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err)
+            setError(`Failed to reload files: ${msg}`)
+          } finally {
+            setLoading(false)
+          }
+          try { await invoke('update_hidden_files_menu', { checked: payload, source: 'frontend' }) } catch {}
         } else {
           toggleHidden()
         }

@@ -62,7 +62,7 @@ export default function Sidebar() {
     return parts[parts.length - 1] || 'Home'
   })()
   const createIcon = (IconComponent: any, weight: "fill" | "regular" = "fill", isActive: boolean) => (
-    <IconComponent className={`w-4 h-4 ${isActive ? 'text-accent' : ''}`} weight={weight} />
+    <IconComponent className={`w-5 h-5 ${isActive ? 'text-accent' : ''}`} weight={weight} />
   )
 
   // Platform detection for special folders
@@ -106,15 +106,17 @@ export default function Sidebar() {
 
       {/* Flat list */}
       <div className="flex-1 overflow-y-auto px-2 py-2 pb-2 space-y-[2px] -mt-8">
+        {/* Favorites section */}
+        <div className="px-1 py-1 text-xs text-app-muted select-none">Favorites</div>
         {/* User directories */}
-        {links.map(item => {
+        {links.slice(0, 6).map(item => {
           const isDisabled = item.path == null
           const isActive = !isDisabled && currentPath === item.path
           return (
             <button
               key={item.name}
               onClick={() => !isDisabled && navigateTo(item.path!)}
-              className={`w-full flex items-center gap-1 px-1.5 py-1 rounded-md text-left leading-5 text-[13px] ${
+              className={`w-full flex items-center gap-2 px-1.5 py-1 rounded-md text-left leading-5 text-[13px] ${
                 isActive ? 'bg-app-light' : 'hover:bg-app-light/70'
               } ${isDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
               title={item.path || ''}
@@ -127,23 +129,48 @@ export default function Sidebar() {
           )
         })}
         
+        {/* Locations section */}
+        <div className="px-1 pt-3 pb-1 text-xs text-app-muted select-none">System</div>
+        {(() => {
+          const systemLinks = links.slice(6) // Applications, Users, System
+          return systemLinks.map(item => {
+            const isDisabled = item.path == null
+            const isActive = !isDisabled && currentPath === item.path
+            return (
+              <button
+                key={`sys-${item.name}`}
+                onClick={() => !isDisabled && navigateTo(item.path!)}
+                className={`w-full flex items-center gap-2 px-1.5 py-1 rounded-md text-left leading-5 text-[13px] ${
+                  isActive ? 'bg-app-light' : 'hover:bg-app-light/70'
+                } ${isDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
+                title={item.path || ''}
+                data-tauri-drag-region={false}
+                disabled={isDisabled}
+              >
+                {createIcon(item.iconType, item.weight, isActive)}
+                <span className={`truncate ${isActive ? 'text-accent' : ''}`}>{item.name}</span>
+              </button>
+            )
+          })
+        })()}
+
         {/* System drives */}
         {systemDrives.length > 0 && (
           <>
-            <div className="h-2" /> {/* Small separator */}
+            <div className="px-1 pt-3 pb-1 text-xs text-app-muted select-none">Drives</div>
             {systemDrives.map(drive => {
               const isActive = currentPath === drive.path
               const isEjecting = ejectingDrives.has(drive.path)
               return (
                 <div
                   key={drive.path}
-                  className={`w-full flex items-center gap-1 px-1.5 py-1 rounded-md text-left leading-5 text-[13px] group ${
+                  className={`w-full flex items-center gap-2 px-1.5 py-1 rounded-md text-left leading-5 text-[13px] group ${
                     isActive ? 'bg-app-light' : 'hover:bg-app-light/70'
                   }`}
                 >
                   <button
                     onClick={() => navigateTo(drive.path)}
-                    className="flex items-center gap-1 flex-1 min-w-0"
+                    className="flex items-center gap-2 flex-1 min-w-0"
                     title={drive.path}
                     data-tauri-drag-region={false}
                   >

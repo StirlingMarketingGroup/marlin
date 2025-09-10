@@ -71,6 +71,8 @@ interface AppState {
   setSidebarWidth: (width: number) => void
   toggleSidebar: () => void
   togglePreviewPanel: () => void
+  // Remember last used hidden files preference globally
+  setLastUsedShowHidden: (show: boolean) => Promise<void>
   showZoomSliderNow: () => void
   hideZoomSliderNow: () => void
   scheduleHideZoomSlider: (delayMs?: number) => void
@@ -254,9 +256,11 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   toggleHiddenFiles: async () => {
     const { currentPath, directoryPreferences, updateDirectoryPreferences, setFiles, setLoading, setError } = get()
-    const current = directoryPreferences[currentPath]?.showHidden ?? false
+    const current = directoryPreferences[currentPath]?.showHidden ?? get().globalPreferences.showHidden ?? false
     const newShowHidden = !current
     updateDirectoryPreferences(currentPath, { showHidden: newShowHidden })
+    // Also remember this as the global "last used" default for new directories
+    await (get() as any).setLastUsedShowHidden(newShowHidden)
 
     // Sync the native menu checkbox state
     try {
@@ -327,5 +331,19 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   resetDirectoryPreferences: () => {
     set({ directoryPreferences: {} })
+  },
+  
+  // Persist the global "last used" showHidden setting so new folders default to it
+  setLastUsedShowHidden: async (show: boolean) => {
+    set((state) => ({ globalPreferences: { ...state.globalPreferences, showHidden: show } }))
+    try {
+      const { invoke } = await import('@tauri-apps/api/core')
+      // Read, merge, and write to avoid clobbering other prefs
+      const raw = await invoke<string>('read_preferences').catch(() => '{}')
+      const obj = (() => { try { return JSON.parse(raw || '{}') } catch { return {} } })() as any
+      const gp = { ...(obj.globalPreferences || {}), showHidden: show }
+      const out = { ...obj, globalPreferences: gp }
+      await invoke('write_preferences', { json: JSON.stringify(out) })
+    } catch (_) { /* ignore persistence errors */ }
   },
 }))
