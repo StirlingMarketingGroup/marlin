@@ -1,7 +1,8 @@
-import { useState } from 'react'
-import { Folder, File, Image, Music, Video, Archive, Code, FileText } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { Folder, File, ImageSquare, MusicNote, VideoCamera, FileZip, Code, FileText, CaretUp, CaretDown, AppWindow } from 'phosphor-react'
 import { FileItem, ViewPreferences } from '../types'
 import { useAppStore } from '../store/useAppStore'
+import AppIcon from '@/components/AppIcon'
 
 interface FileListProps {
   files: FileItem[]
@@ -10,11 +11,48 @@ interface FileListProps {
 
 export default function FileList({ files, preferences }: FileListProps) {
   const { selectedFiles, setSelectedFiles, navigateTo } = useAppStore()
+  const { fetchAppIcon } = useAppStore()
   const [draggedFile, setDraggedFile] = useState<string | null>(null)
 
+  const sortBy = preferences.sortBy
+  const sortOrder = preferences.sortOrder
+  const toggleSort = (field: typeof preferences.sortBy) => {
+    const { updateDirectoryPreferences } = useAppStore.getState()
+    if (sortBy === field) {
+      updateDirectoryPreferences(useAppStore.getState().currentPath, {
+        sortOrder: sortOrder === 'asc' ? 'desc' : 'asc'
+      })
+    } else {
+      updateDirectoryPreferences(useAppStore.getState().currentPath, {
+        sortBy: field,
+        sortOrder: 'asc'
+      })
+    }
+  }
+
+  const isMac = typeof navigator !== 'undefined' && navigator.platform.toUpperCase().includes('MAC')
+
+  // Optionally warm cache for a small first screenful
+  useEffect(() => {
+    if (!isMac) return
+    const initial = files.filter(f => f.is_directory && f.name.toLowerCase().endsWith('.app')).slice(0, 6)
+    initial.forEach(f => { void fetchAppIcon(f.path, 64) })
+  }, [isMac, files, fetchAppIcon])
+
   const getFileIcon = (file: FileItem) => {
-    if (file.isDirectory) {
-      return <Folder className="w-5 h-5 text-app-accent" />
+    if (isMac && file.is_directory && file.name.toLowerCase().endsWith('.app')) {
+      return (
+        <AppIcon
+          path={file.path}
+          size={64}
+          className="w-5 h-5"
+          rounded={false}
+          fallback={<AppWindow className="w-5 h-5 text-accent" />}
+        />
+      )
+    }
+    if (file.is_directory) {
+      return <Folder className="w-5 h-5 text-accent" weight="fill" />
     }
 
     const ext = file.extension?.toLowerCase()
@@ -22,19 +60,19 @@ export default function FileList({ files, preferences }: FileListProps) {
 
     // Same icon logic as FileGrid but smaller
     if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp'].includes(ext)) {
-      return <Image className="w-5 h-5 text-app-green" />
+      return <ImageSquare className="w-5 h-5 text-app-green" />
     }
     if (['mp3', 'wav', 'flac', 'aac', 'm4a', 'ogg'].includes(ext)) {
-      return <Music className="w-5 h-5 text-app-yellow" />
+      return <MusicNote className="w-5 h-5 text-app-yellow" />
     }
     if (['mp4', 'mkv', 'avi', 'mov', 'webm', 'flv'].includes(ext)) {
-      return <Video className="w-5 h-5 text-app-red" />
+      return <VideoCamera className="w-5 h-5 text-app-red" />
     }
     if (['zip', 'rar', '7z', 'tar', 'gz', 'bz2'].includes(ext)) {
-      return <Archive className="w-5 h-5 text-app-muted" />
+      return <FileZip className="w-5 h-5 text-app-muted" />
     }
     if (['js', 'ts', 'jsx', 'tsx', 'py', 'rs', 'go', 'java', 'cpp', 'c', 'h'].includes(ext)) {
-      return <Code className="w-5 h-5 text-app-accent" />
+      return <Code className="w-5 h-5 text-accent" />
     }
     if (['txt', 'md', 'json', 'xml', 'yml', 'yaml'].includes(ext)) {
       return <FileText className="w-5 h-5 text-app-text" />
@@ -49,7 +87,7 @@ export default function FileList({ files, preferences }: FileListProps) {
         ? selectedFiles.filter(path => path !== file.path)
         : [...selectedFiles, file.path]
       setSelectedFiles(newSelection)
-    } else if (file.isDirectory) {
+    } else if (file.is_directory) {
       navigateTo(file.path)
     } else {
       setSelectedFiles([file.path])
@@ -57,18 +95,17 @@ export default function FileList({ files, preferences }: FileListProps) {
   }
 
   const handleDoubleClick = (file: FileItem) => {
-    if (file.isDirectory) {
+    if (file.is_directory) {
       navigateTo(file.path)
     } else {
       // TODO: Open file with system default app
-      console.log('Open file:', file.path)
     }
   }
 
   const sortedFiles = [...files].sort((a, b) => {
     // Directories first
-    if (a.isDirectory && !b.isDirectory) return -1
-    if (!a.isDirectory && b.isDirectory) return 1
+    if (a.is_directory && !b.is_directory) return -1
+    if (!a.is_directory && b.is_directory) return 1
 
     let compareValue = 0
     switch (preferences.sortBy) {
@@ -91,7 +128,9 @@ export default function FileList({ files, preferences }: FileListProps) {
 
   const filteredFiles = preferences.showHidden 
     ? sortedFiles 
-    : sortedFiles.filter(file => !file.isHidden)
+    : sortedFiles.filter(file => !file.is_hidden)
+    
+  
 
   if (filteredFiles.length === 0) {
     return (
@@ -105,17 +144,25 @@ export default function FileList({ files, preferences }: FileListProps) {
   }
 
   return (
-    <div className="flex-1 overflow-auto">
+    <div className="h-full">
       {/* Header */}
-      <div className="grid grid-cols-12 gap-4 px-4 py-3 border-b border-app-border text-sm font-medium text-app-muted bg-app-gray/50">
-        <div className="col-span-6">Name</div>
-        <div className="col-span-2">Size</div>
-        <div className="col-span-2">Type</div>
-        <div className="col-span-2">Modified</div>
+      <div className="grid grid-cols-12 gap-3 px-3 py-2 border-b border-app-border border-t-0 text-[12px] font-medium text-app-muted bg-transparent select-none mb-1">
+        <button className={`col-span-5 text-left hover:text-app-text pl-2 ${sortBy === 'name' ? 'text-app-text' : ''}`} onClick={() => toggleSort('name')} data-tauri-drag-region={false}>
+          <span className="inline-flex items-center gap-1">Name {sortBy === 'name' && (sortOrder === 'asc' ? <CaretUp className="w-3 h-3"/> : <CaretDown className="w-3 h-3"/> )}</span>
+        </button>
+        <button className={`col-span-2 text-left hover:text-app-text ${sortBy === 'size' ? 'text-app-text' : ''}`} onClick={() => toggleSort('size')} data-tauri-drag-region={false}>
+          <span className="inline-flex items-center gap-1">Size {sortBy === 'size' && (sortOrder === 'asc' ? <CaretUp className="w-3 h-3"/> : <CaretDown className="w-3 h-3"/> )}</span>
+        </button>
+        <button className={`col-span-2 text-left hover:text-app-text ${sortBy === 'type' ? 'text-app-text' : ''}`} onClick={() => toggleSort('type')} data-tauri-drag-region={false}>
+          <span className="inline-flex items-center gap-1">Type {sortBy === 'type' && (sortOrder === 'asc' ? <CaretUp className="w-3 h-3"/> : <CaretDown className="w-3 h-3"/> )}</span>
+        </button>
+        <button className={`col-span-3 text-left hover:text-app-text ${sortBy === 'modified' ? 'text-app-text' : ''}`} onClick={() => toggleSort('modified')} data-tauri-drag-region={false}>
+          <span className="inline-flex items-center gap-1">Modified {sortBy === 'modified' && (sortOrder === 'asc' ? <CaretUp className="w-3 h-3"/> : <CaretDown className="w-3 h-3"/> )}</span>
+        </button>
       </div>
 
       {/* File rows */}
-      <div className="divide-y divide-app-border/50">
+      <div className="space-y-[2px] px-3 py-1 mt-1">
         {filteredFiles.map((file) => {
           const isSelected = selectedFiles.includes(file.path)
           const isDragged = draggedFile === file.path
@@ -123,11 +170,12 @@ export default function FileList({ files, preferences }: FileListProps) {
           return (
             <div
               key={file.path}
-              className={`grid grid-cols-12 gap-4 px-4 py-2 hover:bg-app-light cursor-pointer transition-colors ${
-                isSelected ? 'bg-app-accent/20' : ''
+              className={`grid grid-cols-12 gap-3 py-[2px] leading-5 text-[13px] cursor-pointer transition-colors odd:bg-app-gray odd:rounded-full ${
+                isSelected ? 'bg-accent-soft' : ''
               } ${isDragged ? 'opacity-50' : ''} ${
-                file.isHidden ? 'opacity-60' : ''
+                file.is_hidden ? 'opacity-60' : ''
               }`}
+              data-tauri-drag-region={false}
               onClick={(e) => handleFileClick(file, e.ctrlKey || e.metaKey)}
               onDoubleClick={() => handleDoubleClick(file)}
               onDragStart={() => setDraggedFile(file.path)}
@@ -135,26 +183,28 @@ export default function FileList({ files, preferences }: FileListProps) {
               draggable
             >
               {/* Name column */}
-              <div className="col-span-6 flex items-center gap-3 min-w-0">
+              <div className="col-span-5 flex items-center gap-2 min-w-0 pl-2">
                 {getFileIcon(file)}
                 <span className="truncate text-sm" title={file.name}>
-                  {file.name}
+                  {(isMac && file.is_directory && file.name.toLowerCase().endsWith('.app'))
+                    ? file.name.replace(/\.app$/i, '')
+                    : file.name}
                 </span>
               </div>
 
               {/* Size column */}
-              <div className="col-span-2 flex items-center text-sm text-app-muted">
-                {file.isDirectory ? '—' : formatFileSize(file.size)}
+              <div className="col-span-2 flex items-center text-app-muted">
+                {file.is_directory ? '—' : formatFileSize(file.size)}
               </div>
 
               {/* Type column */}
-              <div className="col-span-2 flex items-center text-sm text-app-muted">
-                {file.isDirectory ? 'Folder' : (file.extension?.toUpperCase() || 'File')}
+              <div className="col-span-2 flex items-center text-app-muted">
+                {file.is_directory ? 'Folder' : (file.extension?.toUpperCase() || 'File')}
               </div>
 
               {/* Modified column */}
-              <div className="col-span-2 flex items-center text-sm text-app-muted">
-                {formatDate(file.modified)}
+              <div className="col-span-3 flex items-center text-app-muted whitespace-nowrap">
+                {formatDateFull(file.modified)}
               </div>
             </div>
           )
@@ -174,23 +224,13 @@ function formatFileSize(bytes: number): string {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i]
 }
 
-function formatDate(date: Date): string {
-  const now = new Date()
-  const diffMs = now.getTime() - new Date(date).getTime()
-  const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24))
-  
-  if (diffDays === 0) {
-    return new Intl.DateTimeFormat('en', {
-      hour: '2-digit',
-      minute: '2-digit'
-    }).format(date)
-  } else if (diffDays < 7) {
-    return `${diffDays} days ago`
-  } else {
-    return new Intl.DateTimeFormat('en', {
-      month: 'short',
-      day: 'numeric',
-      year: diffDays > 365 ? 'numeric' : undefined
-    }).format(date)
-  }
+function formatDateFull(dateString: string): string {
+  const date = new Date(dateString)
+  return new Intl.DateTimeFormat(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit'
+  }).format(date)
 }

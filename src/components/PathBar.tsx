@@ -1,107 +1,123 @@
-import { useState, KeyboardEvent } from 'react'
-import { ChevronLeft, ChevronRight, Home, Edit3 } from 'lucide-react'
+import { useEffect, useState, KeyboardEvent, MouseEvent } from 'react'
+import { CaretLeft, CaretRight, SquaresFour, List, ArrowUp, ArrowClockwise } from 'phosphor-react'
 import { useAppStore } from '../store/useAppStore'
 
 export default function PathBar() {
   const {
     currentPath,
-    canGoBack,
-    canGoForward,
-    goBack,
-    goForward,
+    homeDir,
     navigateTo,
   } = useAppStore()
 
-  const [isEditing, setIsEditing] = useState(false)
   const [editPath, setEditPath] = useState(currentPath)
 
   const handleKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') {
       navigateTo(editPath)
-      setIsEditing(false)
     } else if (e.key === 'Escape') {
       setEditPath(currentPath)
-      setIsEditing(false)
     }
   }
 
-  const handleEdit = () => {
+  // Keep the input in sync if navigation occurs elsewhere
+  useEffect(() => {
     setEditPath(currentPath)
-    setIsEditing(true)
-  }
-
-  const pathSegments = currentPath.split('/').filter(Boolean)
+  }, [currentPath])
 
   return (
-    <div className="h-12 bg-app-gray border-b border-app-border flex items-center px-4 gap-3">
-      {/* Navigation buttons */}
-      <div className="flex items-center gap-1">
+    <div className="toolbar gap-3 select-none" data-tauri-drag-region>
+      {/* Back/Forward */}
+      <div className="flex items-center">
+        {(() => { const isMac = navigator.platform.toUpperCase().includes('MAC');
+          const backTitle = isMac ? 'Back (⌘[)' : 'Back (Alt+←)'
+          const fwdTitle = isMac ? 'Forward (⌘])' : 'Forward (Alt+→)'
+          const upTitle = isMac ? 'Up (⌘↑)' : 'Up (Alt+↑)'
+          const refreshTitle = isMac ? 'Refresh (⌘R)' : 'Refresh (F5/Ctrl+R)'
+          return (
+            <>
         <button
-          onClick={goBack}
-          disabled={!canGoBack()}
-          className="p-2 rounded-md hover:bg-app-light disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-          title="Back"
+          onClick={() => useAppStore.getState().goBack()}
+          disabled={!useAppStore.getState().canGoBack()}
+          className="btn-icon rounded-full"
+          title={backTitle}
+          data-tauri-drag-region={false}
         >
-          <ChevronLeft className="w-4 h-4" />
+          <CaretLeft className="w-4 h-4" />
         </button>
         <button
-          onClick={goForward}
-          disabled={!canGoForward()}
-          className="p-2 rounded-md hover:bg-app-light disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-          title="Forward"
+          onClick={() => useAppStore.getState().goForward()}
+          disabled={!useAppStore.getState().canGoForward()}
+          className="btn-icon rounded-full"
+          title={fwdTitle}
+          data-tauri-drag-region={false}
         >
-          <ChevronRight className="w-4 h-4" />
+          <CaretRight className="w-4 h-4" />
         </button>
         <button
-          onClick={() => navigateTo('~')}
-          className="p-2 rounded-md hover:bg-app-light transition-colors"
-          title="Home"
+          onClick={() => useAppStore.getState().goUp()}
+          disabled={!useAppStore.getState().canGoUp()}
+          className="btn-icon rounded-full"
+          title={upTitle}
+          data-tauri-drag-region={false}
         >
-          <Home className="w-4 h-4" />
+          <ArrowUp className="w-4 h-4" />
         </button>
+        <button
+          onClick={() => useAppStore.getState().refreshCurrentDirectory()}
+          className="btn-icon rounded-full"
+          title={refreshTitle}
+          data-tauri-drag-region={false}
+        >
+          <ArrowClockwise className="w-4 h-4" />
+        </button>
+            </>
+          )})()}
       </div>
 
-      {/* Path display/editor */}
+      {/* Path input */}
       <div className="flex-1 flex items-center gap-2">
-        {isEditing ? (
-          <input
-            type="text"
-            value={editPath}
-            onChange={(e) => setEditPath(e.target.value)}
-            onKeyDown={handleKeyDown}
-            onBlur={() => setIsEditing(false)}
-            className="flex-1 input-field"
-            placeholder="Enter path..."
-            autoFocus
-          />
-        ) : (
-          <div 
-            className="flex-1 flex items-center gap-1 px-3 py-2 bg-app-darker rounded-md cursor-text hover:bg-app-light/50 transition-colors"
-            onClick={handleEdit}
-          >
-            <span className="text-app-muted">/</span>
-            {pathSegments.map((segment, index) => (
-              <div key={index} className="flex items-center gap-1">
-                <button
-                  onClick={() => navigateTo('/' + pathSegments.slice(0, index + 1).join('/'))}
-                  className="text-app-text hover:text-app-accent transition-colors"
-                >
-                  {segment}
-                </button>
-                {index < pathSegments.length - 1 && (
-                  <span className="text-app-muted">/</span>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
-        
+        <input
+          type="text"
+          value={editPath}
+          onChange={(e) => setEditPath(e.target.value)}
+          onKeyDown={handleKeyDown}
+          className="flex-1 input-field"
+          placeholder="Enter path..."
+          data-tauri-drag-region={false}
+        />
+      </div>
+
+      {/* View toggles */}
+      <div className="flex items-center gap-1">
         <button
-          onClick={handleEdit}
-          className="p-2 rounded-md hover:bg-app-light transition-colors"
-          title="Edit path"
+          className={`btn-icon ${
+            (useAppStore.getState().directoryPreferences[currentPath]?.viewMode ||
+              useAppStore.getState().globalPreferences.viewMode) === 'grid'
+              ? 'bg-accent-soft text-accent'
+              : ''
+          }`}
+          onClick={() =>
+            useAppStore.getState().updateDirectoryPreferences(currentPath, { viewMode: 'grid' })
+          }
+          title="Icons"
+          data-tauri-drag-region={false}
         >
-          <Edit3 className="w-4 h-4" />
+          <SquaresFour className="w-4 h-4 text-accent" />
+        </button>
+        <button
+          className={`btn-icon ${
+            (useAppStore.getState().directoryPreferences[currentPath]?.viewMode ||
+              useAppStore.getState().globalPreferences.viewMode) === 'list'
+              ? 'bg-accent-soft text-accent'
+              : ''
+          }`}
+          onClick={() =>
+            useAppStore.getState().updateDirectoryPreferences(currentPath, { viewMode: 'list' })
+          }
+          title="List"
+          data-tauri-drag-region={false}
+        >
+          <List className="w-4 h-4 text-accent" />
         </button>
       </div>
     </div>

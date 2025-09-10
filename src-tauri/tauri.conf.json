@@ -12,11 +12,12 @@
   "app": {
     "windows": [
       {
-        "title": "Marlin File Browser",
+        "title": "",
         "width": 1200,
         "height": 800,
         "resizable": true,
-        "fullscreen": false
+        "fullscreen": false,
+        "titleBarStyle": "Overlay"
       }
     ],
     "security": {

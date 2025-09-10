@@ -9,22 +9,36 @@ export default {
       colors: {
         // Modern dark theme color palette
         app: {
-          dark: '#1e1f22',
-          darker: '#111214', 
-          gray: '#2b2d31',
-          light: '#313338',
-          accent: '#5865f2',
+          dark: '#1e1e1e',
+          darker: '#121212',
+          gray: '#262626',
+          light: '#2e2e2e',
+          accent: '#3584e4',
           green: '#23a55a',
-          red: '#f23f43',
-          yellow: '#f0b132',
-          text: '#dbdee1',
-          muted: '#80848e',
-          border: '#3f4147'
+          red: '#e01b24',
+          yellow: '#f6c84c',
+          text: '#e6e6e7',
+          muted: '#a1a1aa',
+          border: '#3a3a3a'
         }
       },
       fontFamily: {
-        sans: ['Inter', 'system-ui', 'sans-serif'],
-        mono: ['JetBrains Mono', 'monospace']
+        // Prefer macOS system font to match Finder appearance
+        sans: [
+          'ui-sans-serif',
+          '-apple-system',
+          'BlinkMacSystemFont',
+          'SF Pro Text',
+          'SF Pro Display',
+          'Segoe UI',
+          'Helvetica Neue',
+          'Helvetica',
+          'Arial',
+          'Noto Sans',
+          'Liberation Sans',
+          'sans-serif',
+        ],
+        mono: ['JetBrains Mono', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace']
       }
     },
   },
