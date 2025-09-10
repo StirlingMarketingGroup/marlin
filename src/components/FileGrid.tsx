@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import { Folder, File, ImageSquare, MusicNote, VideoCamera, FileZip, FileText, AppWindow, Package, FilePdf, PaintBrush, Palette, Disc } from 'phosphor-react'
 import { FileItem, ViewPreferences } from '../types'
 import { useAppStore } from '../store/useAppStore'
@@ -68,40 +68,8 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
   const { selectedFiles, setSelectedFiles, navigateTo } = useAppStore()
   const [draggedFile, setDraggedFile] = useState<string | null>(null)
   
-  // Dynamically compute a safe middle-truncation length for grid captions
-  const gridMeasureSpanRef = useRef<HTMLSpanElement>(null)
-  const gridLabelProbeRef = useRef<HTMLDivElement>(null)
-  const [gridNameCharLimit, setGridNameCharLimit] = useState<number>(30)
-
-  useEffect(() => {
-    const recalc = () => {
-      const probe = gridLabelProbeRef.current
-      const measure = gridMeasureSpanRef.current
-      if (!probe || !measure) return
-
-      const width = Math.max(0, probe.getBoundingClientRect().width || 120)
-      const sample = measure.textContent || ''
-      const sampleWidth = measure.getBoundingClientRect().width || 7.5 * sample.length
-      const avgChar = sampleWidth / Math.max(1, sample.length)
-
-      // Two lines worth of characters, with a small safety buffer
-      const perLine = Math.max(6, Math.floor(width / Math.max(5, avgChar)))
-      const total = Math.max(10, perLine * 2 - 4)
-      setGridNameCharLimit(total)
-    }
-
-    recalc()
-    let ro: ResizeObserver | undefined
-    if (typeof ResizeObserver !== 'undefined' && gridLabelProbeRef.current) {
-      ro = new ResizeObserver(() => recalc())
-      ro.observe(gridLabelProbeRef.current)
-    }
-    window.addEventListener('resize', recalc)
-    return () => {
-      window.removeEventListener('resize', recalc)
-      if (ro) ro.disconnect()
-    }
-  }, [])
+  // Fixed safe middle-truncation target for 120px tile captions (2 lines)
+  const gridNameCharLimit = 40
 
   const isMac = typeof navigator !== 'undefined' && navigator.platform.toUpperCase().includes('MAC')
 
@@ -339,7 +307,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
                             height: 'auto'
                           })
                         }}
-                        ref={(el) => { if (!gridLabelProbeRef.current) gridLabelProbeRef.current = el! }}
+                        
                         title={file.name}
                       >
                         {(() => {
@@ -347,7 +315,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
                           if (needsExpansion) {
                             return raw
                           }
-                          
+
                           // If it fits naturally, show it as-is
                           if (!needsTruncation) {
                             return raw
@@ -370,14 +338,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
           )
         })}
       </div>
-      {/* Hidden measurement element for accurate char width */}
-      <span
-        ref={gridMeasureSpanRef}
-        className="absolute -left-[9999px] -top-[9999px] whitespace-nowrap text-sm"
-        aria-hidden
-      >
-        ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789
-      </span>
+      
     </div>
   )
 }
