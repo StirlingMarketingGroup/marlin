@@ -5,6 +5,8 @@ import { useAppStore } from '../store/useAppStore'
 import AppIcon from '@/components/AppIcon'
 import { FileTypeIcon, resolveVSCodeIcon } from '@/components/FileTypeIcon'
 import { open } from '@tauri-apps/plugin-shell'
+import { invoke } from '@tauri-apps/api/core'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useThumbnail } from '@/hooks/useThumbnail'
 import { useVisibility } from '@/hooks/useVisibility'
 import { truncateMiddle } from '@/utils/truncate'
@@ -90,7 +92,7 @@ function ListFilePreview({ file, isMac, fallbackIcon }: { file: FileItem; isMac:
 }
 
 export default function FileList({ files, preferences }: FileListProps) {
-  const { selectedFiles, setSelectedFiles, navigateTo } = useAppStore()
+  const { selectedFiles, setSelectedFiles, navigateTo, currentPath } = useAppStore()
   const { fetchAppIcon } = useAppStore()
   const [draggedFile, setDraggedFile] = useState<string | null>(null)
   
@@ -274,6 +276,27 @@ export default function FileList({ files, preferences }: FileListProps) {
     }
   }
 
+  const handleContextMenuForFile = async (e: React.MouseEvent, file: FileItem) => {
+    e.preventDefault()
+    e.stopPropagation()
+    if (!selectedFiles.includes(file.path)) {
+      setSelectedFiles([file.path])
+    }
+    try {
+      const win = getCurrentWindow()
+      await invoke('show_native_context_menu', {
+        window_label: win.label,
+        x: e.clientX,
+        y: e.clientY,
+        sort_by: preferences.sortBy,
+        sort_order: preferences.sortOrder,
+        path: currentPath,
+      })
+    } catch (_) {
+      // ignore
+    }
+  }
+
   const nameCollator = useMemo(() => new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' }), [])
   const sortedFiles = [...files].sort((a, b) => {
     // Treat .app as files for sorting purposes
@@ -370,6 +393,7 @@ export default function FileList({ files, preferences }: FileListProps) {
               onDragStart={() => setDraggedFile(file.path)}
               onDragEnd={() => setDraggedFile(null)}
               draggable
+              onContextMenu={(e) => handleContextMenuForFile(e, file)}
             >
               {/* Name column */}
               <div className="col-span-5 flex items-center gap-2 min-w-0 pl-2">

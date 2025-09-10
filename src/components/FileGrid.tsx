@@ -5,6 +5,8 @@ import { useAppStore } from '../store/useAppStore'
 import AppIcon from '@/components/AppIcon'
 import { FileTypeIcon, resolveVSCodeIcon } from '@/components/FileTypeIcon'
 import { open } from '@tauri-apps/plugin-shell'
+import { invoke } from '@tauri-apps/api/core'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useThumbnail } from '@/hooks/useThumbnail'
 import { useVisibility } from '@/hooks/useVisibility'
 import { truncateMiddle } from '@/utils/truncate'
@@ -105,7 +107,7 @@ function GridFilePreview({ file, isMac, fallbackIcon, tile }: { file: FileItem; 
 }
 
 export default function FileGrid({ files, preferences }: FileGridProps) {
-  const { selectedFiles, setSelectedFiles, navigateTo } = useAppStore()
+  const { selectedFiles, setSelectedFiles, navigateTo, currentPath } = useAppStore()
   const [draggedFile, setDraggedFile] = useState<string | null>(null)
   
   // Tile width from preferences (default 120)
@@ -234,6 +236,27 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     }
   }
 
+  const handleContextMenuForFile = async (e: React.MouseEvent, file: FileItem) => {
+    e.preventDefault()
+    e.stopPropagation()
+    if (!selectedFiles.includes(file.path)) {
+      setSelectedFiles([file.path])
+    }
+    try {
+      const win = getCurrentWindow()
+      await invoke('show_native_context_menu', {
+        window_label: win.label,
+        x: e.clientX,
+        y: e.clientY,
+        sort_by: preferences.sortBy,
+        sort_order: preferences.sortOrder,
+        path: currentPath,
+      })
+    } catch (_) {
+      // ignore
+    }
+  }
+
   const nameCollator = useMemo(() => new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' }), [])
   const sortedFiles = [...files].sort((a, b) => {
     // Treat .app as files for sorting purposes
@@ -314,6 +337,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
               onDragStart={() => setDraggedFile(file.path)}
               onDragEnd={() => setDraggedFile(null)}
               draggable
+              onContextMenu={(e) => handleContextMenuForFile(e, file)}
             >
               <div className="mb-2 flex-shrink-0" style={{ width: tile, display: 'flex', justifyContent: 'center', height: Math.max(48, Math.min(tile - Math.max(3, Math.min(8, Math.round(tile * 0.03))) * 2, 320)) }}>
                 <GridFilePreview file={file} isMac={isMac} fallbackIcon={getFileIcon(file)} tile={tile} />

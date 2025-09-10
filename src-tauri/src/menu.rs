@@ -270,6 +270,12 @@ pub fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, event: &tauri::menu::Me
             if let Ok(mut asc) = state.sort_order_asc_checked.lock() { *asc = false; }
             let _ = app.emit("menu:sort_order_desc", ());
         }
+        "ctx:copy_name" => {
+            let _ = app.emit("menu:copy_name", ());
+        }
+        "ctx:copy_full_name" => {
+            let _ = app.emit("menu:copy_full_name", ());
+        }
         "menu:folders_first" => {
             // Toggle and emit new value
             let state: tauri::State<crate::state::MenuState<R>> = app.state();

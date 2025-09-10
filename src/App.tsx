@@ -384,6 +384,49 @@ function App() {
       await register('menu:sort_type', () => setSortBy('type'))
       await register('menu:sort_order_asc', () => setSortOrder('asc'))
       await register('menu:sort_order_desc', () => setSortOrder('desc'))
+
+      // Copy actions from context menu
+      const copyToClipboard = async (text: string) => {
+        try {
+          await navigator.clipboard.writeText(text)
+          return
+        } catch (_) {
+          // Fallback: use a temporary textarea
+          try {
+            const ta = document.createElement('textarea')
+            ta.value = text
+            ta.style.position = 'fixed'
+            ta.style.opacity = '0'
+            document.body.appendChild(ta)
+            ta.focus()
+            ta.select()
+            document.execCommand('copy')
+            document.body.removeChild(ta)
+          } catch (e) {
+            console.error('Failed to copy to clipboard', e)
+          }
+        }
+      }
+
+      const copyNames = async (fullPath: boolean) => {
+        const state = useAppStore.getState()
+        const selected = state.selectedFiles
+        if (!selected || selected.length === 0) return
+        const byPath = new Map(state.files.map(f => [f.path, f]))
+        const parts: string[] = []
+        for (const p of selected) {
+          const f = byPath.get(p)
+          if (!f) continue
+          // fullPath => copy absolute path; else => copy file name with extension
+          parts.push(fullPath ? f.path : f.name)
+        }
+        if (parts.length > 0) {
+          await copyToClipboard(parts.join('\n'))
+        }
+      }
+
+      await register('menu:copy_name', () => { void copyNames(false) })
+      await register('menu:copy_full_name', () => { void copyNames(true) })
       
       await register('menu:new_window', () => {
         // Create new window in current directory

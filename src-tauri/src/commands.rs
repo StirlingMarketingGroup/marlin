@@ -792,7 +792,20 @@ pub fn show_native_context_menu(
         .build()
         .map_err(|e| e.to_string())?;
 
+    // File-specific actions
+    let copy_name_item = MenuItemBuilder::with_id("ctx:copy_name", "Copy File Name")
+        .build(&app)
+        .map_err(|e| e.to_string())?;
+    let copy_full_name_item = MenuItemBuilder::with_id("ctx:copy_full_name", "Copy Full Path")
+        .build(&app)
+        .map_err(|e| e.to_string())?;
+
     let ctx_menu = MenuBuilder::new(&app)
+        .items(&[
+            &copy_name_item,
+            &copy_full_name_item,
+        ])
+        .separator()
         .items(&[
             &show_hidden_item,
             &sort_submenu,
