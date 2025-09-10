@@ -1,8 +1,48 @@
-import { House, Desktop, FileText, DownloadSimple, ImageSquare, SquaresFour, UsersThree, HardDrives } from 'phosphor-react'
+import { House, Desktop, FileText, DownloadSimple, ImageSquare, SquaresFour, UsersThree, HardDrives, Eject } from 'phosphor-react'
 import { useAppStore } from '../store/useAppStore'
+import { useEffect, useState } from 'react'
+import { invoke } from '@tauri-apps/api/core'
+import { SystemDrive } from '../types'
 
 export default function Sidebar() {
   const { currentPath, navigateTo, showSidebar, sidebarWidth, homeDir } = useAppStore()
+  const [systemDrives, setSystemDrives] = useState<SystemDrive[]>([])
+  const [ejectingDrives, setEjectingDrives] = useState<Set<string>>(new Set())
+  
+  // Fetch system drives on component mount
+  useEffect(() => {
+    fetchSystemDrives()
+  }, [])
+
+  const fetchSystemDrives = async () => {
+    try {
+      const drives = await invoke<SystemDrive[]>('get_system_drives')
+      setSystemDrives(drives)
+    } catch (error) {
+      console.error('Failed to fetch system drives:', error)
+    }
+  }
+
+  const handleEjectDrive = async (drive: SystemDrive, event: React.MouseEvent) => {
+    event.stopPropagation() // Prevent navigation when clicking eject
+    
+    setEjectingDrives(prev => new Set(prev).add(drive.path))
+    
+    try {
+      await invoke('eject_drive', { path: drive.path })
+      // Refresh the drives list after successful ejection
+      await fetchSystemDrives()
+    } catch (error) {
+      console.error('Failed to eject drive:', error)
+      // TODO: Show error notification to user
+    } finally {
+      setEjectingDrives(prev => {
+        const newSet = new Set(prev)
+        newSet.delete(drive.path)
+        return newSet
+      })
+    }
+  }
   
   if (!showSidebar) return null
   // Safe join that returns null until base (home) is known
@@ -20,17 +60,21 @@ export default function Sidebar() {
     const parts = home.split(/[/\\\\]+/).filter(Boolean)
     return parts[parts.length - 1] || 'Home'
   })()
+  const createIcon = (IconComponent: any, weight: "fill" | "regular" = "fill", isActive: boolean) => (
+    <IconComponent className={`w-4 h-4 ${isActive ? 'text-accent' : ''}`} weight={weight} />
+  )
+
   const links = [
-    { name: userLabel, path: home || '/', icon: <House className="w-4 h-4 text-accent" weight="fill" /> },
-    { name: 'Desktop', path: join(home, 'Desktop'), icon: <Desktop className="w-4 h-4" weight="fill" /> },
-    { name: 'Documents', path: join(home, 'Documents'), icon: <FileText className="w-4 h-4" weight="fill" /> },
-    { name: 'Downloads', path: join(home, 'Downloads'), icon: <DownloadSimple className="w-4 h-4" weight="fill" /> },
-    { name: 'Pictures', path: join(home, 'Pictures'), icon: <ImageSquare className="w-4 h-4" weight="fill" /> },
+    { name: userLabel, path: home || '/', iconType: House, weight: "fill" as const },
+    { name: 'Desktop', path: join(home, 'Desktop'), iconType: Desktop, weight: "fill" as const },
+    { name: 'Documents', path: join(home, 'Documents'), iconType: FileText, weight: "fill" as const },
+    { name: 'Downloads', path: join(home, 'Downloads'), iconType: DownloadSimple, weight: "fill" as const },
+    { name: 'Pictures', path: join(home, 'Pictures'), iconType: ImageSquare, weight: "fill" as const },
     // macOS locations
-    { name: 'Applications', path: '/Applications', icon: <SquaresFour className="w-4 h-4" weight="fill" /> },
-    { name: 'Users', path: '/Users', icon: <UsersThree className="w-4 h-4" weight="fill" /> },
-    { name: 'System', path: '/System', icon: <HardDrives className="w-4 h-4" weight="regular" /> },
-  ] as { name: string; path: string | null; icon: JSX.Element }[]
+    { name: 'Applications', path: '/Applications', iconType: SquaresFour, weight: "fill" as const },
+    { name: 'Users', path: '/Users', iconType: UsersThree, weight: "fill" as const },
+    { name: 'System', path: '/System', iconType: HardDrives, weight: "regular" as const },
+  ] as { name: string; path: string | null; iconType: any; weight: "fill" | "regular" }[]
 
   return (
     <div 
@@ -45,6 +89,7 @@ export default function Sidebar() {
 
       {/* Flat list */}
       <div className="flex-1 overflow-y-auto px-2 py-2 space-y-[2px] -mt-8">
+        {/* User directories */}
         {links.map(item => {
           const isDisabled = item.path == null
           const isActive = !isDisabled && currentPath === item.path
@@ -59,11 +104,55 @@ export default function Sidebar() {
               data-tauri-drag-region={false}
               disabled={isDisabled}
             >
-              {item.icon}
-              <span className="truncate">{item.name}</span>
+              {createIcon(item.iconType, item.weight, isActive)}
+              <span className={`truncate ${isActive ? 'text-accent' : ''}`}>{item.name}</span>
             </button>
           )
         })}
+        
+        {/* System drives */}
+        {systemDrives.length > 0 && (
+          <>
+            <div className="h-2" /> {/* Small separator */}
+            {systemDrives.map(drive => {
+              const isActive = currentPath === drive.path
+              const isEjecting = ejectingDrives.has(drive.path)
+              return (
+                <div
+                  key={drive.path}
+                  className={`w-full flex items-center gap-1 px-1.5 py-1 rounded-md text-left leading-5 text-[13px] group ${
+                    isActive ? 'bg-accent-soft' : 'hover:bg-app-light/70'
+                  }`}
+                >
+                  <button
+                    onClick={() => navigateTo(drive.path)}
+                    className="flex items-center gap-1 flex-1 min-w-0"
+                    title={drive.path}
+                    data-tauri-drag-region={false}
+                  >
+                    {createIcon(HardDrives, "regular", isActive)}
+                    <span className={`truncate ${isActive ? 'text-accent' : ''}`}>{drive.name}</span>
+                  </button>
+                  
+                  {drive.is_ejectable && (
+                    <button
+                      onClick={(e) => handleEjectDrive(drive, e)}
+                      disabled={isEjecting}
+                      className="ml-auto p-0.5 rounded hover:bg-app-light/50"
+                      title={isEjecting ? 'Ejecting...' : 'Eject drive'}
+                      data-tauri-drag-region={false}
+                    >
+                      <Eject 
+                        className={`w-3 h-3 ${isEjecting ? 'animate-pulse text-app-muted' : 'text-app-text hover:text-accent'}`} 
+                        weight="regular" 
+                      />
+                    </button>
+                  )}
+                </div>
+              )
+            })}
+          </>
+        )}
       </div>
     </div>
   )

@@ -32,7 +32,6 @@ export default function AppIcon({
   const isMac = typeof navigator !== 'undefined' && navigator.platform.toUpperCase().includes('MAC')
   const shouldShowThumbnail = isMac && (
     path.toLowerCase().endsWith('.app') || 
-    path.toLowerCase().endsWith('.dmg') || 
     path.toLowerCase().endsWith('.pkg')
   )
 

@@ -31,10 +31,13 @@ pub fn run() {
       commands::get_system_accent_color,
       commands::get_application_icon,
       commands::update_hidden_files_menu,
+      commands::get_system_drives,
+      commands::eject_drive,
       commands::request_thumbnail,
       commands::cancel_thumbnail,
       commands::get_thumbnail_cache_stats,
       commands::clear_thumbnail_cache,
+      commands::open_path,
     ])
     .setup(|app| {
       if cfg!(debug_assertions) {

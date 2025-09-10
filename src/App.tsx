@@ -112,6 +112,30 @@ function App() {
         setError(undefined)
         const files = await invoke<any[]>('read_directory', { path: currentPath })
         setFiles(files)
+        
+        // Auto-default to grid view for media-heavy folders
+        try {
+          const { directoryPreferences, updateDirectoryPreferences } = useAppStore.getState()
+          const existing = directoryPreferences[currentPath]?.viewMode
+          if (!existing) {
+            // Count media files (excluding folders)
+            const nonFolderFiles = files.filter(f => !f.is_directory)
+            if (nonFolderFiles.length > 0) {
+              const mediaExtensions = new Set([
+                'jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'heic', 'raw',
+                'mp4', 'mkv', 'avi', 'mov', 'webm', 'flv', 'm4v'
+              ])
+              const mediaFiles = nonFolderFiles.filter(f => {
+                const ext = f.extension?.toLowerCase()
+                return ext && mediaExtensions.has(ext)
+              })
+              const mediaPercentage = mediaFiles.length / nonFolderFiles.length
+              if (mediaPercentage >= 0.75) {
+                updateDirectoryPreferences(currentPath, { viewMode: 'grid' })
+              }
+            }
+          }
+        } catch (_) {}
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error)
         const hint = errorMessage.includes('Operation not permitted')

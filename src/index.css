@@ -91,4 +91,9 @@
     -webkit-box-orient: vertical;
     overflow: hidden;
   }
+  /* Allow breaking anywhere to keep extensions visible on narrow tiles */
+  .overflow-anywhere {
+    overflow-wrap: anywhere;
+    word-break: break-word; /* sensible fallback */
+  }
 }

@@ -11,6 +11,7 @@ export default function MainPanel() {
     globalPreferences,
     currentPath,
     directoryPreferences,
+    setSelectedFiles,
   } = useAppStore()
 
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
@@ -36,7 +37,13 @@ export default function MainPanel() {
     if (el) el.scrollTo({ top: 0, left: 0, behavior: 'auto' })
   }, [currentPath])
 
-  // View and sort are now controlled via the system menu and keyboard shortcuts
+  // Clear selection when clicking anywhere that's not an interactive control
+  const handleContainerBackgroundClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    const target = e.target as HTMLElement
+    // Ignore clicks on obvious controls
+    if (target.closest('button, a, input, select, textarea, [role="button"], [data-prevent-deselect]')) return
+    setSelectedFiles([])
+  }
 
   if (error) {
     return (
@@ -51,7 +58,12 @@ export default function MainPanel() {
   return (
     <div className="flex-1 flex flex-col select-none min-h-0">
       {/* File content only */}
-      <div ref={scrollRef} className="flex-1 min-h-0 overflow-auto" onContextMenu={handleContextMenu}>
+      <div
+        ref={scrollRef}
+        className="flex-1 min-h-0 overflow-auto"
+        onContextMenu={handleContextMenu}
+        onClick={handleContainerBackgroundClick}
+      >
         {currentPrefs.viewMode === 'grid' ? (
           <FileGrid files={files} preferences={currentPrefs} />
         ) : (

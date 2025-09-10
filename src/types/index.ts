@@ -24,3 +24,10 @@ export interface DirectoryState {
 }
 
 export type Theme = 'system' | 'dark' | 'light'
+
+export interface SystemDrive {
+  name: string
+  path: string
+  drive_type: string
+  is_ejectable: boolean
+}

@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react'
-import { Folder, File, ImageSquare, MusicNote, VideoCamera, FileZip, Code, FileText, CaretUp, CaretDown, AppWindow } from 'phosphor-react'
+import { Folder, File, ImageSquare, MusicNote, VideoCamera, FileZip, Code, FileText, CaretUp, CaretDown, AppWindow, HardDrive } from 'phosphor-react'
 import { FileItem, ViewPreferences } from '../types'
 import { useAppStore } from '../store/useAppStore'
 import AppIcon from '@/components/AppIcon'
+import { open } from '@tauri-apps/plugin-shell'
+import { useThumbnail } from '@/hooks/useThumbnail'
 
 interface FileListProps {
   files: FileItem[]
@@ -38,7 +40,6 @@ export default function FileList({ files, preferences }: FileListProps) {
     const initial = files.filter(f => {
       const fileName = f.name.toLowerCase()
       return (f.is_directory && fileName.endsWith('.app')) || 
-             fileName.endsWith('.dmg') || 
              fileName.endsWith('.pkg')
     }).slice(0, 6)
     initial.forEach(f => { void fetchAppIcon(f.path, 64) })
@@ -48,7 +49,6 @@ export default function FileList({ files, preferences }: FileListProps) {
     if (isMac) {
       const fileName = file.name.toLowerCase()
       if ((file.is_directory && fileName.endsWith('.app')) || 
-          fileName.endsWith('.dmg') || 
           fileName.endsWith('.pkg')) {
         return (
           <AppIcon
@@ -60,6 +60,11 @@ export default function FileList({ files, preferences }: FileListProps) {
             fallback={<AppWindow className="w-5 h-5 text-accent" />}
           />
         )
+      }
+      
+      // DMG files use a custom icon since they don't have embedded icons
+      if (fileName.endsWith('.dmg')) {
+        return <HardDrive className="w-5 h-5 text-orange-500" weight="fill" />
       }
     }
     if (file.is_directory) {
@@ -92,24 +97,72 @@ export default function FileList({ files, preferences }: FileListProps) {
     return <File className="w-5 h-5 text-app-muted" />
   }
 
+  function FilePreview({ file }: { file: FileItem }) {
+    const ext = file.extension?.toLowerCase()
+    const isImage = !!ext && ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'tiff', 'tga', 'ico'].includes(ext)
+
+    // Prefer native app icons/DMG on macOS
+    if (isMac) {
+      const fileName = file.name.toLowerCase()
+      if ((file.is_directory && fileName.endsWith('.app')) || fileName.endsWith('.pkg')) {
+        return (
+          <AppIcon
+            path={file.path}
+            size={64}
+            className="w-5 h-5"
+            rounded={false}
+            priority="medium"
+            fallback={<AppWindow className="w-5 h-5 text-accent" />}
+          />
+        )
+      }
+      if (fileName.endsWith('.dmg')) {
+        return <HardDrive className="w-5 h-5 text-orange-500" weight="fill" />
+      }
+    }
+
+    if (isImage) {
+      const { dataUrl, loading } = useThumbnail(file.path, { size: 64, quality: 'medium', priority: 'medium', format: 'png' })
+      if (dataUrl) {
+        return <img src={dataUrl} alt="" className="w-5 h-5 rounded-sm object-cover border border-app-border bg-app-darker" draggable={false} />
+      }
+      if (loading) {
+        return <div className="w-5 h-5 rounded-sm border border-app-border bg-app-darker animate-pulse" />
+      }
+      return <ImageSquare className="w-5 h-5 text-app-green" />
+    }
+
+    return getFileIcon(file)
+  }
+
   const handleFileClick = (file: FileItem, isCtrlClick = false) => {
     if (isCtrlClick) {
       const newSelection = selectedFiles.includes(file.path)
         ? selectedFiles.filter(path => path !== file.path)
         : [...selectedFiles, file.path]
       setSelectedFiles(newSelection)
-    } else if (file.is_directory) {
-      navigateTo(file.path)
     } else {
+      // Single click just selects (no navigation)
       setSelectedFiles([file.path])
     }
   }
 
-  const handleDoubleClick = (file: FileItem) => {
-    if (file.is_directory) {
+  const handleDoubleClick = async (file: FileItem) => {
+    if (file.is_directory && !file.name.toLowerCase().endsWith('.app')) {
       navigateTo(file.path)
     } else {
-      // TODO: Open file with system default app
+      // Open file or app with system default
+      try {
+        await open(file.path)
+      } catch (error) {
+        // Fallback to backend command if plugin shell is unavailable/blocked
+        try {
+          const { invoke } = await import('@tauri-apps/api/core')
+          await invoke('open_path', { path: file.path })
+        } catch (err2) {
+          console.error('Failed to open file:', error, err2)
+        }
+      }
     }
   }
 
@@ -154,8 +207,15 @@ export default function FileList({ files, preferences }: FileListProps) {
     )
   }
 
+  const handleBackgroundClick = (e: React.MouseEvent) => {
+    // Only clear when the click is directly on the background container
+    if (e.target === e.currentTarget) {
+      setSelectedFiles([])
+    }
+  }
+
   return (
-    <div className="h-full">
+    <div className="h-full" onClick={handleBackgroundClick}>
       {/* Header */}
       <div className="grid grid-cols-12 gap-3 px-3 py-2 border-b border-app-border border-t-0 text-[12px] font-medium text-app-muted bg-transparent select-none mb-1">
         <button className={`col-span-5 text-left hover:text-app-text pl-2 ${sortBy === 'name' ? 'text-app-text' : ''}`} onClick={() => toggleSort('name')} data-tauri-drag-region={false}>
@@ -181,21 +241,23 @@ export default function FileList({ files, preferences }: FileListProps) {
           return (
             <div
               key={file.path}
-              className={`grid grid-cols-12 gap-3 py-[2px] leading-5 text-[13px] cursor-pointer transition-colors odd:bg-app-gray odd:rounded-full ${
-                isSelected ? 'bg-accent-soft' : ''
+              className={`grid grid-cols-12 gap-3 py-[2px] leading-5 text-[13px] cursor-pointer transition-colors rounded-full ${
+                isSelected ? 'bg-accent-soft outline outline-1 outline-accent' : 'odd:bg-app-gray'
               } ${isDragged ? 'opacity-50' : ''} ${
                 file.is_hidden ? 'opacity-60' : ''
               }`}
               data-tauri-drag-region={false}
-              onClick={(e) => handleFileClick(file, e.ctrlKey || e.metaKey)}
-              onDoubleClick={() => handleDoubleClick(file)}
+              onClick={(e) => { e.stopPropagation(); handleFileClick(file, e.ctrlKey || e.metaKey) }}
+              onDoubleClick={(e) => { e.stopPropagation(); handleDoubleClick(file) }}
               onDragStart={() => setDraggedFile(file.path)}
               onDragEnd={() => setDraggedFile(null)}
               draggable
             >
               {/* Name column */}
               <div className="col-span-5 flex items-center gap-2 min-w-0 pl-2">
-                {getFileIcon(file)}
+                <span className="flex-shrink-0">
+                  <FilePreview file={file} />
+                </span>
                 <span className="truncate text-sm" title={file.name}>
                   {(isMac && file.is_directory && file.name.toLowerCase().endsWith('.app'))
                     ? file.name.replace(/\.app$/i, '')

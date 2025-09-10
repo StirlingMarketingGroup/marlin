@@ -1,8 +1,10 @@
 import { useState } from 'react'
-import { Folder, File, ImageSquare, MusicNote, VideoCamera, FileZip, Code, FileText, AppWindow } from 'phosphor-react'
+import { Folder, File, ImageSquare, MusicNote, VideoCamera, FileZip, Code, FileText, AppWindow, HardDrive } from 'phosphor-react'
 import { FileItem, ViewPreferences } from '../types'
 import { useAppStore } from '../store/useAppStore'
 import AppIcon from '@/components/AppIcon'
+import { open } from '@tauri-apps/plugin-shell'
+import { useThumbnail } from '@/hooks/useThumbnail'
 
 interface FileGridProps {
   files: FileItem[]
@@ -20,57 +22,108 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     if (isMac) {
       const fileName = file.name.toLowerCase()
       if ((file.is_directory && fileName.endsWith('.app')) || 
-          fileName.endsWith('.dmg') || 
           fileName.endsWith('.pkg')) {
         return (
           <AppIcon
             path={file.path}
             size={64}
-            className="w-12 h-12"
+            className="w-16 h-16"
             priority="high"
-            fallback={<AppWindow className="w-10 h-10 text-accent" />}
+            fallback={<AppWindow className="w-14 h-14 text-accent" />}
           />
         )
       }
+      
+      // DMG files use a custom icon since they don't have embedded icons
+      if (fileName.endsWith('.dmg')) {
+        return <HardDrive className="w-12 h-12 text-orange-500" weight="fill" />
+      }
     }
     if (file.is_directory) {
-      return <Folder className="w-8 h-8 text-accent" weight="fill" />
+      return <Folder className="w-12 h-12 text-accent" weight="fill" />
     }
 
     const ext = file.extension?.toLowerCase()
-    if (!ext) return <File className="w-8 h-8 text-app-muted" />
+    if (!ext) return <File className="w-12 h-12 text-app-muted" />
 
     // Image files
     if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp'].includes(ext)) {
-      return <ImageSquare className="w-8 h-8 text-app-green" />
+      return <ImageSquare className="w-12 h-12 text-app-green" />
     }
 
     // Audio files
     if (['mp3', 'wav', 'flac', 'aac', 'm4a', 'ogg'].includes(ext)) {
-      return <MusicNote className="w-8 h-8 text-app-yellow" />
+      return <MusicNote className="w-12 h-12 text-app-yellow" />
     }
 
     // Video files
     if (['mp4', 'mkv', 'avi', 'mov', 'webm', 'flv'].includes(ext)) {
-      return <VideoCamera className="w-8 h-8 text-app-red" />
+      return <VideoCamera className="w-12 h-12 text-app-red" />
     }
 
     // Archive files
     if (['zip', 'rar', '7z', 'tar', 'gz', 'bz2'].includes(ext)) {
-      return <FileZip className="w-8 h-8 text-app-muted" />
+      return <FileZip className="w-12 h-12 text-app-muted" />
     }
 
     // Code files
     if (['js', 'ts', 'jsx', 'tsx', 'py', 'rs', 'go', 'java', 'cpp', 'c', 'h'].includes(ext)) {
-      return <Code className="w-8 h-8 text-accent" />
+      return <Code className="w-12 h-12 text-accent" />
     }
 
     // Text files
     if (['txt', 'md', 'json', 'xml', 'yml', 'yaml'].includes(ext)) {
-      return <FileText className="w-8 h-8 text-app-text" />
+      return <FileText className="w-12 h-12 text-app-text" />
     }
 
-    return <File className="w-8 h-8 text-app-muted" />
+    return <File className="w-12 h-12 text-app-muted" />
+  }
+
+  // Lightweight component that renders either an image thumbnail or a fallback icon
+  function FilePreview({ file }: { file: FileItem }) {
+    const ext = file.extension?.toLowerCase()
+    const isImage = !!ext && ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'tiff', 'tga', 'ico'].includes(ext)
+
+    // Prefer native app icons/DMG if applicable
+    if (isMac) {
+      const fileName = file.name.toLowerCase()
+      if ((file.is_directory && fileName.endsWith('.app')) || fileName.endsWith('.pkg')) {
+        return (
+          <AppIcon
+            path={file.path}
+            size={96}
+            className="w-16 h-16"
+            priority="high"
+            fallback={<AppWindow className="w-14 h-14 text-accent" />}
+          />
+        )
+      }
+      if (fileName.endsWith('.dmg')) {
+        return <HardDrive className="w-12 h-12 text-orange-500" weight="fill" />
+      }
+    }
+
+    if (isImage) {
+      const { dataUrl, loading } = useThumbnail(file.path, { size: 192, quality: 'medium', priority: 'high', format: 'png' })
+      if (dataUrl) {
+        return (
+          <img
+            src={dataUrl}
+            alt={file.name}
+            className="w-16 h-16 rounded-md object-cover border border-app-border bg-app-darker"
+            draggable={false}
+          />
+        )
+      }
+      if (loading) {
+        return <div className="w-16 h-16 rounded-md border border-app-border bg-app-darker animate-pulse" />
+      }
+      // Fall through to generic image icon if thumbnail fails
+      return <ImageSquare className="w-12 h-12 text-app-green" />
+    }
+
+    // Non-image fallback icon
+    return getFileIcon(file)
   }
 
   const handleFileClick = (file: FileItem, isCtrlClick = false) => {
@@ -79,18 +132,28 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
         ? selectedFiles.filter(path => path !== file.path)
         : [...selectedFiles, file.path]
       setSelectedFiles(newSelection)
-    } else if (file.is_directory) {
-      navigateTo(file.path)
     } else {
+      // Single click just selects (no navigation)
       setSelectedFiles([file.path])
     }
   }
 
-  const handleDoubleClick = (file: FileItem) => {
-    if (file.is_directory) {
+  const handleDoubleClick = async (file: FileItem) => {
+    if (file.is_directory && !file.name.toLowerCase().endsWith('.app')) {
       navigateTo(file.path)
     } else {
-      // TODO: Open file with system default app
+      // Open file or app with system default
+      try {
+        await open(file.path)
+      } catch (error) {
+        // Fallback to backend command if plugin shell is unavailable/blocked
+        try {
+          const { invoke } = await import('@tauri-apps/api/core')
+          await invoke('open_path', { path: file.path })
+        } catch (err2) {
+          console.error('Failed to open file:', error, err2)
+        }
+      }
     }
   }
 
@@ -135,9 +198,16 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     )
   }
 
+  const handleBackgroundClick = (e: React.MouseEvent) => {
+    // Only clear when the click is directly on the background container
+    if (e.target === e.currentTarget) {
+      setSelectedFiles([])
+    }
+  }
+
   return (
-    <div className="p-4 select-none">
-      <div className="grid gap-4" style={{
+    <div className="p-2 select-none" onClick={handleBackgroundClick}>
+      <div className="grid gap-2" style={{
         gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))'
       }}>
         {filteredFiles.map((file) => {
@@ -147,27 +217,32 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
           return (
             <div
               key={file.path}
-              className={`flex flex-col items-center p-3 rounded-md cursor-pointer transition-colors hover:bg-app-light ${
+              className={`flex flex-col items-center px-1 py-2 rounded-md cursor-pointer transition-colors hover:bg-app-light ${
                 isSelected ? 'bg-accent-soft outline outline-1 outline-accent' : ''
               } ${isDragged ? 'opacity-50' : ''} ${
                 file.is_hidden ? 'opacity-60' : ''
               }`}
               data-tauri-drag-region={false}
-              onClick={(e) => handleFileClick(file, e.ctrlKey || e.metaKey)}
-              onDoubleClick={() => handleDoubleClick(file)}
+              onClick={(e) => { e.stopPropagation(); handleFileClick(file, e.ctrlKey || e.metaKey) }}
+              onDoubleClick={(e) => { e.stopPropagation(); handleDoubleClick(file) }}
               onDragStart={() => setDraggedFile(file.path)}
               onDragEnd={() => setDraggedFile(null)}
               draggable
             >
-              <div className="mb-2">
-                {getFileIcon(file)}
+              <div className="mb-2 flex-shrink-0">
+                <FilePreview file={file} />
               </div>
               
               <div className="text-center">
-                <div className="text-sm font-medium w-full max-w-[120px] line-clamp-2" title={file.name}>
-                  {(isMac && file.is_directory && file.name.toLowerCase().endsWith('.app'))
-                    ? file.name.replace(/\.app$/i, '')
-                    : file.name}
+                <div className="text-sm font-medium w-full max-w-[120px] line-clamp-2 overflow-anywhere whitespace-normal" title={file.name}>
+                  {(() => {
+                    const raw = (isMac && file.is_directory && file.name.toLowerCase().endsWith('.app'))
+                      ? file.name.replace(/\.app$/i, '')
+                      : file.name
+                    // Insert a zero-width space before the last dot to prefer breaking before the extension
+                    const withBreakBeforeExt = raw.replace(/\.(?=[^.]*$)/, '\u200B.')
+                    return withBreakBeforeExt
+                  })()}
                 </div>
                 {!file.is_directory && (
                   <div className="text-xs text-app-muted mt-1">

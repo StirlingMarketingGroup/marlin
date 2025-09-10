@@ -198,6 +198,134 @@ pub fn update_hidden_files_menu(
     Ok(())
 }
 
+#[derive(serde::Serialize)]
+pub struct SystemDrive {
+    pub name: String,
+    pub path: String,
+    pub drive_type: String,
+    pub is_ejectable: bool,
+}
+
+#[command]
+pub fn get_system_drives() -> Result<Vec<SystemDrive>, String> {
+    let mut drives = Vec::new();
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt;
+        
+        // Get all logical drives on Windows
+        let mut drive_strings = vec![0u16; 256];
+        let length = unsafe {
+            windows::Win32::Storage::FileSystem::GetLogicalDriveStringsW(
+                drive_strings.len() as u32,
+                drive_strings.as_mut_ptr(),
+            )
+        };
+        
+        if length > 0 && length < drive_strings.len() as u32 {
+            drive_strings.truncate(length as usize);
+            let drives_str = OsString::from_wide(&drive_strings);
+            let drives_string = drives_str.to_string_lossy();
+            
+            for drive in drives_string.split('\0').filter(|s| !s.is_empty()) {
+                if drive.len() >= 3 {
+                    drives.push(SystemDrive {
+                        name: format!("Local Disk ({})", &drive[..2]),
+                        path: drive.to_string(),
+                        drive_type: "system".to_string(),
+                        is_ejectable: false, // TODO: Check if removable drive
+                    });
+                }
+            }
+        }
+    }
+    
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        // On Unix-like systems, add the root filesystem
+        drives.push(SystemDrive {
+            name: "Root".to_string(),
+            path: "/".to_string(),
+            drive_type: "system".to_string(),
+            is_ejectable: false,
+        });
+        
+        // On macOS, also try to add mounted volumes
+        #[cfg(target_os = "macos")]
+        {
+            if let Ok(entries) = std::fs::read_dir("/Volumes") {
+                for entry in entries.flatten() {
+                    if let Ok(metadata) = entry.metadata() {
+                        if metadata.is_dir() {
+                            let name = entry.file_name().to_string_lossy().to_string();
+                            if name != "Macintosh HD" { // Skip default system volume
+                                drives.push(SystemDrive {
+                                    name: name.clone(),
+                                    path: format!("/Volumes/{}", name),
+                                    drive_type: "volume".to_string(),
+                                    is_ejectable: true,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(drives)
+}
+
+#[command]
+pub fn eject_drive(path: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        // On macOS, use diskutil to eject the volume
+        let output = OsCommand::new("diskutil")
+            .arg("eject")
+            .arg(&path)
+            .output()
+            .map_err(|e| format!("Failed to run diskutil: {}", e))?;
+        
+        if output.status.success() {
+            Ok(())
+        } else {
+            let error_msg = String::from_utf8_lossy(&output.stderr);
+            Err(format!("Failed to eject drive: {}", error_msg))
+        }
+    }
+    
+    #[cfg(target_os = "linux")]
+    {
+        // On Linux, use umount command
+        let output = OsCommand::new("umount")
+            .arg(&path)
+            .output()
+            .map_err(|e| format!("Failed to run umount: {}", e))?;
+        
+        if output.status.success() {
+            Ok(())
+        } else {
+            let error_msg = String::from_utf8_lossy(&output.stderr);
+            Err(format!("Failed to eject drive: {}", error_msg))
+        }
+    }
+    
+    #[cfg(target_os = "windows")]
+    {
+        // On Windows, we would need to use Windows API for safe removal
+        // For now, return an error as it requires more complex implementation
+        Err("Drive ejection not yet implemented for Windows".to_string())
+    }
+    
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        Err("Drive ejection not supported on this platform".to_string())
+    }
+}
+
 // Global thumbnail service instance
 static THUMBNAIL_SERVICE: OnceCell<Result<Arc<crate::thumbnails::ThumbnailService>, String>> = OnceCell::const_new();
 
@@ -268,4 +396,51 @@ pub async fn get_thumbnail_cache_stats() -> Result<crate::thumbnails::cache::Cac
 pub async fn clear_thumbnail_cache() -> Result<(), String> {
     let service = get_thumbnail_service().await?;
     service.clear_cache().await
+}
+
+#[command]
+pub fn open_path(path: String) -> Result<(), String> {
+    // Normalize path (~ expansion is already handled on the frontend for navigation)
+    let path_str = path;
+
+    #[cfg(target_os = "macos")]
+    {
+        let status = OsCommand::new("open")
+            .arg(&path_str)
+            .status()
+            .map_err(|e| format!("Failed to spawn 'open': {}", e))?;
+        if status.success() { Ok(()) } else { Err(format!("'open' exited with status: {}", status)) }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // Use cmd start to let the shell decide the default handler
+        // start requires a window title arg (empty string)
+        let status = OsCommand::new("cmd")
+            .args(["/C", "start", "", &path_str])
+            .status()
+            .map_err(|e| format!("Failed to spawn 'start': {}", e))?;
+        if status.success() { Ok(()) } else { Err(format!("'start' exited with status: {}", status)) }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // Try xdg-open first, then gio as a fallback
+        let try_xdg = OsCommand::new("xdg-open").arg(&path_str).status();
+        match try_xdg {
+            Ok(status) if status.success() => Ok(()),
+            _ => {
+                let status = OsCommand::new("gio")
+                    .args(["open", &path_str])
+                    .status()
+                    .map_err(|e| format!("Failed to spawn 'gio open': {}", e))?;
+                if status.success() { Ok(()) } else { Err(format!("'gio open' exited with status: {}", status)) }
+            }
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        Err("open_path is not supported on this platform".to_string())
+    }
 }
