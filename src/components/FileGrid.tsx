@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { Folder, File, ImageSquare, MusicNote, VideoCamera, FileZip, Code, FileText, AppWindow, HardDrive } from 'phosphor-react'
+import { useState, type ReactNode } from 'react'
+import { Folder, File, ImageSquare, MusicNote, VideoCamera, FileZip, Code, FileText, AppWindow, HardDrive, Package } from 'phosphor-react'
 import { FileItem, ViewPreferences } from '../types'
 import { useAppStore } from '../store/useAppStore'
 import AppIcon from '@/components/AppIcon'
@@ -9,6 +9,54 @@ import { useThumbnail } from '@/hooks/useThumbnail'
 interface FileGridProps {
   files: FileItem[]
   preferences: ViewPreferences
+}
+
+// Stable, top-level preview component to avoid remount flicker
+function GridFilePreview({ file, isMac, fallbackIcon }: { file: FileItem; isMac: boolean; fallbackIcon: ReactNode }) {
+  const ext = file.extension?.toLowerCase()
+  const isImage = !!ext && ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'tiff', 'tga', 'ico'].includes(ext || '')
+
+  // Prefer native app icons/DMG if applicable
+  if (isMac) {
+    const fileName = file.name.toLowerCase()
+    if (file.is_directory && fileName.endsWith('.app')) {
+      return (
+        <AppIcon
+          path={file.path}
+          size={96}
+          className="w-16 h-16"
+          priority="high"
+          fallback={<AppWindow className="w-14 h-14 text-accent" />}
+        />
+      )
+    }
+    if (fileName.endsWith('.pkg')) {
+      return <Package className="w-12 h-12 text-blue-500" weight="fill" />
+    }
+    if (fileName.endsWith('.dmg')) {
+      return <HardDrive className="w-12 h-12 text-orange-500" weight="fill" />
+    }
+  }
+
+  if (isImage) {
+    const { dataUrl, loading } = useThumbnail(file.path, { size: 192, quality: 'medium', priority: 'high', format: 'png' })
+    if (dataUrl) {
+      return (
+        <img
+          src={dataUrl}
+          alt={file.name}
+          className="w-16 h-16 rounded-md object-cover border border-app-border bg-app-darker"
+          draggable={false}
+        />
+      )
+    }
+    if (loading) {
+      return <div className="w-16 h-16 rounded-md border border-app-border bg-app-darker animate-pulse" />
+    }
+  }
+
+  // Non-image fallback icon
+  return <>{fallbackIcon}</>
 }
 
 export default function FileGrid({ files, preferences }: FileGridProps) {
@@ -21,8 +69,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     // Special-case: macOS files with system icons
     if (isMac) {
       const fileName = file.name.toLowerCase()
-      if ((file.is_directory && fileName.endsWith('.app')) || 
-          fileName.endsWith('.pkg')) {
+      if (file.is_directory && fileName.endsWith('.app')) {
         return (
           <AppIcon
             path={file.path}
@@ -32,6 +79,11 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
             fallback={<AppWindow className="w-14 h-14 text-accent" />}
           />
         )
+      }
+      
+      // PKG files use a package icon
+      if (fileName.endsWith('.pkg')) {
+        return <Package className="w-12 h-12 text-blue-500" weight="fill" />
       }
       
       // DMG files use a custom icon since they don't have embedded icons
@@ -79,52 +131,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     return <File className="w-12 h-12 text-app-muted" />
   }
 
-  // Lightweight component that renders either an image thumbnail or a fallback icon
-  function FilePreview({ file }: { file: FileItem }) {
-    const ext = file.extension?.toLowerCase()
-    const isImage = !!ext && ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'tiff', 'tga', 'ico'].includes(ext)
-
-    // Prefer native app icons/DMG if applicable
-    if (isMac) {
-      const fileName = file.name.toLowerCase()
-      if ((file.is_directory && fileName.endsWith('.app')) || fileName.endsWith('.pkg')) {
-        return (
-          <AppIcon
-            path={file.path}
-            size={96}
-            className="w-16 h-16"
-            priority="high"
-            fallback={<AppWindow className="w-14 h-14 text-accent" />}
-          />
-        )
-      }
-      if (fileName.endsWith('.dmg')) {
-        return <HardDrive className="w-12 h-12 text-orange-500" weight="fill" />
-      }
-    }
-
-    if (isImage) {
-      const { dataUrl, loading } = useThumbnail(file.path, { size: 192, quality: 'medium', priority: 'high', format: 'png' })
-      if (dataUrl) {
-        return (
-          <img
-            src={dataUrl}
-            alt={file.name}
-            className="w-16 h-16 rounded-md object-cover border border-app-border bg-app-darker"
-            draggable={false}
-          />
-        )
-      }
-      if (loading) {
-        return <div className="w-16 h-16 rounded-md border border-app-border bg-app-darker animate-pulse" />
-      }
-      // Fall through to generic image icon if thumbnail fails
-      return <ImageSquare className="w-12 h-12 text-app-green" />
-    }
-
-    // Non-image fallback icon
-    return getFileIcon(file)
-  }
+  // (moved FilePreview to top-level GridFilePreview to avoid remounting)
 
   const handleFileClick = (file: FileItem, isCtrlClick = false) => {
     if (isCtrlClick) {
@@ -158,9 +165,17 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
   }
 
   const sortedFiles = [...files].sort((a, b) => {
-    // Directories first
-    if (a.is_directory && !b.is_directory) return -1
-    if (!a.is_directory && b.is_directory) return 1
+    // Treat .app as files for sorting purposes
+    const aIsApp = a.is_directory && a.name.toLowerCase().endsWith('.app')
+    const bIsApp = b.is_directory && b.name.toLowerCase().endsWith('.app')
+    const aIsFolder = a.is_directory && !aIsApp
+    const bIsFolder = b.is_directory && !bIsApp
+    
+    // Optionally sort directories first (but not .app files)
+    if (preferences.foldersFirst) {
+      if (aIsFolder && !bIsFolder) return -1
+      if (!aIsFolder && bIsFolder) return 1
+    }
 
     let compareValue = 0
     switch (preferences.sortBy) {
@@ -217,8 +232,8 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
           return (
             <div
               key={file.path}
-              className={`flex flex-col items-center px-1 py-2 rounded-md cursor-pointer transition-colors hover:bg-app-light ${
-                isSelected ? 'bg-accent-soft outline outline-1 outline-accent' : ''
+              className={`flex flex-col items-center px-1 py-2 rounded-md cursor-pointer transition-colors duration-75 ${
+                isSelected ? 'bg-accent-selected' : 'hover:bg-app-light/70'
               } ${isDragged ? 'opacity-50' : ''} ${
                 file.is_hidden ? 'opacity-60' : ''
               }`}
@@ -230,11 +245,11 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
               draggable
             >
               <div className="mb-2 flex-shrink-0">
-                <FilePreview file={file} />
+                <GridFilePreview file={file} isMac={isMac} fallbackIcon={getFileIcon(file)} />
               </div>
               
               <div className="text-center">
-                <div className="text-sm font-medium w-full max-w-[120px] line-clamp-2 overflow-anywhere whitespace-normal" title={file.name}>
+                <div className={`text-sm font-medium w-full max-w-[120px] line-clamp-2 overflow-anywhere whitespace-normal ${isSelected ? 'text-accent' : ''}`} title={file.name}>
                   {(() => {
                     const raw = (isMac && file.is_directory && file.name.toLowerCase().endsWith('.app'))
                       ? file.name.replace(/\.app$/i, '')

@@ -1,6 +1,7 @@
 import { useEffect, useState, KeyboardEvent, MouseEvent } from 'react'
 import { CaretLeft, CaretRight, SquaresFour, List, ArrowUp, ArrowClockwise } from 'phosphor-react'
 import { useAppStore } from '../store/useAppStore'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 
 export default function PathBar() {
   const {
@@ -24,8 +25,29 @@ export default function PathBar() {
     setEditPath(currentPath)
   }, [currentPath])
 
+  // Manual dragging fallback function
+  const handleManualDrag = async (e: MouseEvent<HTMLDivElement>) => {
+    // Only start drag on primary button (left click)
+    if (e.button !== 0) return
+    
+    // Check if clicked element is interactive (has data-tauri-drag-region=false)
+    const target = e.target as HTMLElement
+    if (target.closest('[data-tauri-drag-region="false"], button, input, select, textarea')) return
+    
+    try {
+      const window = getCurrentWindow()
+      await window.startDragging()
+    } catch (error) {
+      console.error('Failed to start window dragging:', error)
+    }
+  }
+
   return (
-    <div className="toolbar gap-3 select-none" data-tauri-drag-region>
+    <div 
+      className="toolbar gap-3 select-none" 
+      data-tauri-drag-region
+      onMouseDown={handleManualDrag}
+    >
       {/* Back/Forward */}
       <div className="flex items-center">
         {(() => { const isMac = navigator.platform.toUpperCase().includes('MAC');

@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { Folder, File, ImageSquare, MusicNote, VideoCamera, FileZip, Code, FileText, CaretUp, CaretDown, AppWindow, HardDrive } from 'phosphor-react'
+import { useEffect, useState, type ReactNode } from 'react'
+import { Folder, File, ImageSquare, MusicNote, VideoCamera, FileZip, Code, FileText, CaretUp, CaretDown, AppWindow, HardDrive, Package } from 'phosphor-react'
 import { FileItem, ViewPreferences } from '../types'
 import { useAppStore } from '../store/useAppStore'
 import AppIcon from '@/components/AppIcon'
@@ -9,6 +9,46 @@ import { useThumbnail } from '@/hooks/useThumbnail'
 interface FileListProps {
   files: FileItem[]
   preferences: ViewPreferences
+}
+
+// Stable, top-level preview component to avoid remount flicker
+function ListFilePreview({ file, isMac, fallbackIcon }: { file: FileItem; isMac: boolean; fallbackIcon: ReactNode }) {
+  const ext = file.extension?.toLowerCase()
+  const isImage = !!ext && ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'tiff', 'tga', 'ico'].includes(ext || '')
+
+  if (isMac) {
+    const fileName = file.name.toLowerCase()
+    if (file.is_directory && fileName.endsWith('.app')) {
+      return (
+        <AppIcon
+          path={file.path}
+          size={64}
+          className="w-5 h-5"
+          rounded={false}
+          priority="high"
+          fallback={<AppWindow className="w-5 h-5 text-accent" />}
+        />
+      )
+    }
+    if (fileName.endsWith('.pkg')) {
+      return <Package className="w-5 h-5 text-blue-500" weight="fill" />
+    }
+    if (fileName.endsWith('.dmg')) {
+      return <HardDrive className="w-5 h-5 text-orange-500" weight="fill" />
+    }
+  }
+
+  if (isImage) {
+    const { dataUrl, loading } = useThumbnail(file.path, { size: 64, quality: 'medium', priority: 'medium', format: 'png' })
+    if (dataUrl) {
+      return <img src={dataUrl} alt="" className="w-5 h-5 rounded-sm object-cover border border-app-border bg-app-darker" draggable={false} />
+    }
+    if (loading) {
+      return <div className="w-5 h-5 rounded-sm border border-app-border bg-app-darker animate-pulse" />
+    }
+  }
+
+  return <>{fallbackIcon}</>
 }
 
 export default function FileList({ files, preferences }: FileListProps) {
@@ -25,9 +65,10 @@ export default function FileList({ files, preferences }: FileListProps) {
         sortOrder: sortOrder === 'asc' ? 'desc' : 'asc'
       })
     } else {
+      const defaultOrder: 'asc' | 'desc' = (field === 'size' || field === 'modified') ? 'desc' : 'asc'
       updateDirectoryPreferences(useAppStore.getState().currentPath, {
         sortBy: field,
-        sortOrder: 'asc'
+        sortOrder: defaultOrder
       })
     }
   }
@@ -39,8 +80,7 @@ export default function FileList({ files, preferences }: FileListProps) {
     if (!isMac) return
     const initial = files.filter(f => {
       const fileName = f.name.toLowerCase()
-      return (f.is_directory && fileName.endsWith('.app')) || 
-             fileName.endsWith('.pkg')
+      return f.is_directory && fileName.endsWith('.app')
     }).slice(0, 6)
     initial.forEach(f => { void fetchAppIcon(f.path, 64) })
   }, [isMac, files, fetchAppIcon])
@@ -48,8 +88,7 @@ export default function FileList({ files, preferences }: FileListProps) {
   const getFileIcon = (file: FileItem) => {
     if (isMac) {
       const fileName = file.name.toLowerCase()
-      if ((file.is_directory && fileName.endsWith('.app')) || 
-          fileName.endsWith('.pkg')) {
+      if (file.is_directory && fileName.endsWith('.app')) {
         return (
           <AppIcon
             path={file.path}
@@ -60,6 +99,11 @@ export default function FileList({ files, preferences }: FileListProps) {
             fallback={<AppWindow className="w-5 h-5 text-accent" />}
           />
         )
+      }
+      
+      // PKG files use a package icon
+      if (fileName.endsWith('.pkg')) {
+        return <Package className="w-5 h-5 text-blue-500" weight="fill" />
       }
       
       // DMG files use a custom icon since they don't have embedded icons
@@ -97,43 +141,7 @@ export default function FileList({ files, preferences }: FileListProps) {
     return <File className="w-5 h-5 text-app-muted" />
   }
 
-  function FilePreview({ file }: { file: FileItem }) {
-    const ext = file.extension?.toLowerCase()
-    const isImage = !!ext && ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'tiff', 'tga', 'ico'].includes(ext)
-
-    // Prefer native app icons/DMG on macOS
-    if (isMac) {
-      const fileName = file.name.toLowerCase()
-      if ((file.is_directory && fileName.endsWith('.app')) || fileName.endsWith('.pkg')) {
-        return (
-          <AppIcon
-            path={file.path}
-            size={64}
-            className="w-5 h-5"
-            rounded={false}
-            priority="medium"
-            fallback={<AppWindow className="w-5 h-5 text-accent" />}
-          />
-        )
-      }
-      if (fileName.endsWith('.dmg')) {
-        return <HardDrive className="w-5 h-5 text-orange-500" weight="fill" />
-      }
-    }
-
-    if (isImage) {
-      const { dataUrl, loading } = useThumbnail(file.path, { size: 64, quality: 'medium', priority: 'medium', format: 'png' })
-      if (dataUrl) {
-        return <img src={dataUrl} alt="" className="w-5 h-5 rounded-sm object-cover border border-app-border bg-app-darker" draggable={false} />
-      }
-      if (loading) {
-        return <div className="w-5 h-5 rounded-sm border border-app-border bg-app-darker animate-pulse" />
-      }
-      return <ImageSquare className="w-5 h-5 text-app-green" />
-    }
-
-    return getFileIcon(file)
-  }
+  // (moved FilePreview to top-level ListFilePreview to avoid remounting)
 
   const handleFileClick = (file: FileItem, isCtrlClick = false) => {
     if (isCtrlClick) {
@@ -167,9 +175,17 @@ export default function FileList({ files, preferences }: FileListProps) {
   }
 
   const sortedFiles = [...files].sort((a, b) => {
-    // Directories first
-    if (a.is_directory && !b.is_directory) return -1
-    if (!a.is_directory && b.is_directory) return 1
+    // Treat .app as files for sorting purposes
+    const aIsApp = a.is_directory && a.name.toLowerCase().endsWith('.app')
+    const bIsApp = b.is_directory && b.name.toLowerCase().endsWith('.app')
+    const aIsFolder = a.is_directory && !aIsApp
+    const bIsFolder = b.is_directory && !bIsApp
+    
+    // Optionally sort directories first (but not .app files)
+    if (preferences.foldersFirst) {
+      if (aIsFolder && !bIsFolder) return -1
+      if (!aIsFolder && bIsFolder) return 1
+    }
 
     let compareValue = 0
     switch (preferences.sortBy) {
@@ -241,8 +257,8 @@ export default function FileList({ files, preferences }: FileListProps) {
           return (
             <div
               key={file.path}
-              className={`grid grid-cols-12 gap-3 py-[2px] leading-5 text-[13px] cursor-pointer transition-colors rounded-full ${
-                isSelected ? 'bg-accent-soft outline outline-1 outline-accent' : 'odd:bg-app-gray'
+              className={`grid grid-cols-12 gap-3 py-[2px] leading-5 text-[13px] cursor-pointer transition-colors duration-75 rounded-full ${
+                isSelected ? 'bg-accent-selected' : 'odd:bg-app-gray hover:bg-app-light'
               } ${isDragged ? 'opacity-50' : ''} ${
                 file.is_hidden ? 'opacity-60' : ''
               }`}
@@ -256,9 +272,9 @@ export default function FileList({ files, preferences }: FileListProps) {
               {/* Name column */}
               <div className="col-span-5 flex items-center gap-2 min-w-0 pl-2">
                 <span className="flex-shrink-0">
-                  <FilePreview file={file} />
+                  <ListFilePreview file={file} isMac={isMac} fallbackIcon={getFileIcon(file)} />
                 </span>
-                <span className="truncate text-sm" title={file.name}>
+                <span className={`truncate text-sm ${isSelected ? 'text-accent' : ''}`} title={file.name}>
                   {(isMac && file.is_directory && file.name.toLowerCase().endsWith('.app'))
                     ? file.name.replace(/\.app$/i, '')
                     : file.name}
@@ -272,7 +288,11 @@ export default function FileList({ files, preferences }: FileListProps) {
 
               {/* Type column */}
               <div className="col-span-2 flex items-center text-app-muted">
-                {file.is_directory ? 'Folder' : (file.extension?.toUpperCase() || 'File')}
+                {file.is_directory && file.name.toLowerCase().endsWith('.app') 
+                  ? 'Application' 
+                  : file.is_directory 
+                    ? 'Folder' 
+                    : (file.extension?.toUpperCase() || 'File')}
               </div>
 
               {/* Modified column */}

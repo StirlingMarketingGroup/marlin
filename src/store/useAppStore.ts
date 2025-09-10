@@ -76,11 +76,29 @@ interface AppState {
   goUp: () => void
   canGoUp: () => boolean
   toggleHiddenFiles: () => Promise<void>
+  toggleFoldersFirst: () => Promise<void>
   refreshCurrentDirectory: () => Promise<void>
   fetchAppIcon: (path: string, size?: number) => Promise<string | undefined>
+  resetDirectoryPreferences: () => void
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
+  // Helpers
+  // Normalize paths for consistent per-directory keys
+  // - converts backslashes to slashes
+  // - collapses duplicate slashes
+  // - trims trailing slash except root
+  // - ensures Windows drive roots like C: become C:/
+  _normalizePath: (p: string): string => {
+    let s = p || '/'
+    s = s.replace(/\\/g, '/')
+    s = s.replace(/\/+/, '/')
+    s = s.replace(/\/+/, '/')
+    if (/^[A-Za-z]:$/.test(s)) s = s + '/'
+    if (s.length > 1 && s.endsWith('/')) s = s.slice(0, -1)
+    if (!s) s = '/'
+    return s
+  },
   // Initial state
   currentPath: '/', // Will be replaced at init
   pathHistory: ['/'],
@@ -96,6 +114,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     sortBy: 'name',
     sortOrder: 'asc',
     showHidden: false,
+    foldersFirst: true,
   },
   directoryPreferences: {},
   theme: 'system',
@@ -106,7 +125,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   showPreviewPanel: false,
   
   // Actions
-  setCurrentPath: (path) => set({ currentPath: path }),
+  setCurrentPath: (path) => set({ currentPath: (get() as any)._normalizePath(path) }),
   setHomeDir: (path) => set({ homeDir: path }),
   setFiles: (files) => set({ files }),
   setLoading: (loading) => set({ loading }),
@@ -119,12 +138,15 @@ export const useAppStore = create<AppState>((set, get) => ({
     })),
     
   updateDirectoryPreferences: (path, preferences) =>
-    set((state) => ({
-      directoryPreferences: {
-        ...state.directoryPreferences,
-        [path]: { ...state.directoryPreferences[path], ...preferences },
-      },
-    })),
+    set((state) => {
+      const norm = (get() as any)._normalizePath(path)
+      return {
+        directoryPreferences: {
+          ...state.directoryPreferences,
+          [norm]: { ...state.directoryPreferences[norm], ...preferences },
+        },
+      }
+    }),
     
   setTheme: (theme) => set({ theme }),
   setSidebarWidth: (width) => set({ sidebarWidth: Math.max(200, Math.min(400, width)) }),
@@ -133,9 +155,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   
   navigateTo: (path) => {
     const { pathHistory, historyIndex } = get()
-    const newHistory = [...pathHistory.slice(0, historyIndex + 1), path]
+    const norm = (get() as any)._normalizePath(path)
+    const newHistory = [...pathHistory.slice(0, historyIndex + 1), norm]
     set({
-      currentPath: path,
+      currentPath: norm,
       pathHistory: newHistory,
       historyIndex: newHistory.length - 1,
     })
@@ -200,21 +223,18 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   toggleHiddenFiles: async () => {
-    const { globalPreferences, updateGlobalPreferences, currentPath, setFiles, setLoading, setError } = get()
-    const timestamp = new Date().toISOString()
-    
-    const newShowHidden = !globalPreferences.showHidden
-    
-    // Update the global preferences
-    updateGlobalPreferences({ showHidden: newShowHidden })
-    
+    const { currentPath, directoryPreferences, updateDirectoryPreferences, setFiles, setLoading, setError } = get()
+    const current = directoryPreferences[currentPath]?.showHidden ?? false
+    const newShowHidden = !current
+    updateDirectoryPreferences(currentPath, { showHidden: newShowHidden })
+
     // Sync the native menu checkbox state
     try {
       const { invoke } = await import('@tauri-apps/api/core')
       await invoke('update_hidden_files_menu', { checked: newShowHidden, source: 'frontend' })
     } catch (_) {}
-    
-    // Reload files to apply the new filter (menu sync removed to test)
+
+    // Reload files to apply filter
     try {
       const { invoke } = await import('@tauri-apps/api/core')
       setLoading(true)
@@ -227,6 +247,20 @@ export const useAppStore = create<AppState>((set, get) => ({
     } finally {
       setLoading(false)
     }
+  },
+
+  toggleFoldersFirst: async () => {
+    const { globalPreferences, updateGlobalPreferences } = get()
+    const newValue = !globalPreferences.foldersFirst
+
+    // Update preference
+    updateGlobalPreferences({ foldersFirst: newValue })
+
+    // Sync the native menu checkbox state
+    try {
+      const { invoke } = await import('@tauri-apps/api/core')
+      await invoke('update_folders_first_menu', { checked: newValue, source: 'frontend' })
+    } catch (_) {}
   },
 
   refreshCurrentDirectory: async () => {
@@ -259,5 +293,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         return undefined
       }
     })
+  },
+
+  resetDirectoryPreferences: () => {
+    set({ directoryPreferences: {} })
   },
 }))

@@ -19,7 +19,7 @@ pub fn run() {
     .plugin(tauri_plugin_shell::init())
     .plugin(tauri_plugin_dialog::init())
     .plugin(tauri_plugin_decorum::init())
-    .invoke_handler(tauri::generate_handler![
+      .invoke_handler(tauri::generate_handler![
       commands::get_home_directory,
       commands::read_directory,
       commands::get_file_metadata,
@@ -31,6 +31,7 @@ pub fn run() {
       commands::get_system_accent_color,
       commands::get_application_icon,
       commands::update_hidden_files_menu,
+      commands::update_folders_first_menu,
       commands::get_system_drives,
       commands::eject_drive,
       commands::request_thumbnail,
@@ -38,6 +39,14 @@ pub fn run() {
       commands::get_thumbnail_cache_stats,
       commands::clear_thumbnail_cache,
       commands::open_path,
+      commands::new_window,
+      commands::show_native_context_menu,
+      commands::read_preferences,
+      commands::write_preferences,
+      commands::get_dir_prefs,
+      commands::set_dir_prefs,
+      commands::clear_all_dir_prefs,
+      commands::set_last_dir,
     ])
     .setup(|app| {
       if cfg!(debug_assertions) {
@@ -58,13 +67,16 @@ pub fn run() {
       }
 
       // Create and set the menu
-      let (app_menu, show_hidden_item) = menu::create_menu(&app.handle())?;
+      let (app_menu, show_hidden_item, folders_first_item) = menu::create_menu(&app.handle())?;
       app.set_menu(app_menu)?;
 
       // Store the menu item in managed state
       app.manage(MenuState {
         show_hidden_item: Mutex::new(Some(show_hidden_item)),
         show_hidden_checked: Mutex::new(false),
+        folders_first_item: Mutex::new(Some(folders_first_item)),
+        folders_first_checked: Mutex::new(true),
+        sort_order_asc_checked: Mutex::new(true),
       });
 
       Ok(())
@@ -77,14 +89,14 @@ pub fn run() {
       {
         use tauri::Manager;
         use tauri_plugin_decorum::WebviewWindowExt;
-        
+
         // Reapply traffic light position after events that might reset it
         match event {
-          tauri::WindowEvent::Resized(_) | 
+          tauri::WindowEvent::Resized(_) |
           tauri::WindowEvent::Focused(_) |
           tauri::WindowEvent::ThemeChanged(_) => {
-            // Get the WebviewWindow from the app handle to call decorum methods
-            if let Some(webview_window) = window.app_handle().get_webview_window("main") {
+            let label = window.label().to_string();
+            if let Some(webview_window) = window.app_handle().get_webview_window(&label) {
               let _ = webview_window.set_traffic_lights_inset(16.0, 24.0);
             }
           }

@@ -13,6 +13,7 @@ export interface ViewPreferences {
   sortBy: 'name' | 'size' | 'modified' | 'type'
   sortOrder: 'asc' | 'desc'
   showHidden: boolean
+  foldersFirst: boolean
 }
 
 export interface DirectoryState {

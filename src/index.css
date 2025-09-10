@@ -25,10 +25,21 @@
     @apply min-h-screen;
   }
 
+  /* Ensure drag regions work reliably across windows */
+  [data-tauri-drag-region] {
+    -webkit-app-region: drag;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  [data-tauri-drag-region="false"] {
+    -webkit-app-region: no-drag;
+  }
+
   :root {
     /* Runtime-themable accent variables (updated from system on launch) */
     --accent: #3584e4;
     --accent-soft: rgba(53, 132, 228, 0.15);
+    --accent-selected: rgba(53, 132, 228, 0.28);
   }
 
   /* Scrollbar styling */
@@ -84,6 +95,7 @@
   .text-accent { color: var(--accent); }
   .bg-accent { background-color: var(--accent); }
   .bg-accent-soft { background-color: var(--accent-soft); }
+  .bg-accent-selected { background-color: var(--accent-selected); }
   .outline-accent { outline-color: var(--accent); }
   .line-clamp-2 {
     display: -webkit-box;

@@ -1,9 +1,14 @@
 use std::path::Path;
-use tauri::command;
+use tauri::{command, AppHandle, Manager};
 use dirs;
 use std::process::Command as OsCommand;
+use tokio::process::Command as TokioCommand;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
+use std::fs;
+use std::io::{Read, Write};
+use std::path::{PathBuf};
+use serde_json::{json, Value};
 
 use crate::fs_utils::{
     self, FileItem, read_directory_contents, get_file_info, 
@@ -198,6 +203,28 @@ pub fn update_hidden_files_menu(
     Ok(())
 }
 
+#[tauri::command]
+pub fn update_folders_first_menu(
+    _app: tauri::AppHandle,
+    menu_state: tauri::State<crate::state::MenuState<tauri::Wry>>,
+    checked: bool,
+    _source: Option<String>
+) -> Result<(), String> {
+    // Update the menu item checked state if available
+    if let Ok(item_guard) = menu_state.folders_first_item.lock() {
+        if let Some(ref item) = *item_guard {
+            item.set_checked(checked).map_err(|e| e.to_string())?;
+        }
+    }
+
+    // Update the stored boolean
+    if let Ok(mut flag) = menu_state.folders_first_checked.lock() {
+        *flag = checked;
+    }
+
+    Ok(())
+}
+
 #[derive(serde::Serialize)]
 pub struct SystemDrive {
     pub name: String,
@@ -279,14 +306,15 @@ pub fn get_system_drives() -> Result<Vec<SystemDrive>, String> {
 }
 
 #[command]
-pub fn eject_drive(path: String) -> Result<(), String> {
+pub async fn eject_drive(path: String) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         // On macOS, use diskutil to eject the volume
-        let output = OsCommand::new("diskutil")
+        let output = TokioCommand::new("diskutil")
             .arg("eject")
             .arg(&path)
             .output()
+            .await
             .map_err(|e| format!("Failed to run diskutil: {}", e))?;
         
         if output.status.success() {
@@ -300,9 +328,10 @@ pub fn eject_drive(path: String) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
         // On Linux, use umount command
-        let output = OsCommand::new("umount")
+        let output = TokioCommand::new("umount")
             .arg(&path)
             .output()
+            .await
             .map_err(|e| format!("Failed to run umount: {}", e))?;
         
         if output.status.success() {
@@ -443,4 +472,268 @@ pub fn open_path(path: String) -> Result<(), String> {
     {
         Err("open_path is not supported on this platform".to_string())
     }
+}
+
+#[command]
+pub fn new_window(app: AppHandle, path: Option<String>) -> Result<(), String> {
+    let window_label = format!("window-{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0));
+    
+    let mut url = tauri::WebviewUrl::App("index.html".into());
+    
+    // If a path is provided, pass it as a query parameter
+    if let Some(initial_path) = path {
+        let encoded_path = urlencoding::encode(&initial_path);
+        url = tauri::WebviewUrl::App(format!("index.html?path={}", encoded_path).into());
+    }
+
+    let window = tauri::WebviewWindowBuilder::new(
+        &app,
+        &window_label,
+        url
+    )
+    .title("")
+    .inner_size(1200.0, 800.0)
+    .resizable(true)
+    .fullscreen(false)
+    .title_bar_style(tauri::TitleBarStyle::Overlay)
+    .build()
+    .map_err(|e| format!("Failed to create window: {}", e))?;
+
+    #[cfg(target_os = "macos")]
+    {
+        use tauri_plugin_decorum::WebviewWindowExt;
+        let _ = window.set_traffic_lights_inset(16.0, 24.0);
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn show_native_context_menu(
+    app: AppHandle,
+    window_label: Option<String>,
+    x: f64,
+    y: f64,
+    sort_by: Option<String>,
+    sort_order: Option<String>,
+) -> Result<(), String> {
+    // Resolve window
+    let webview = if let Some(label) = window_label {
+        app.get_webview_window(&label).ok_or_else(|| "Window not found".to_string())?
+    } else {
+        app.get_webview_window("main").ok_or_else(|| "Main window not found".to_string())?
+    };
+
+    // Build a native menu mirroring our React context menu
+    use tauri::menu::{CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
+
+    let state: tauri::State<crate::state::MenuState<tauri::Wry>> = app.state();
+    let show_hidden_checked = state
+        .show_hidden_checked
+        .lock()
+        .map_err(|e| e.to_string())
+        .map(|v| *v)
+        .unwrap_or(false);
+    let folders_first_checked = state
+        .folders_first_checked
+        .lock()
+        .map_err(|e| e.to_string())
+        .map(|v| *v)
+        .unwrap_or(true);
+
+    let show_hidden_item = CheckMenuItemBuilder::with_id("ctx:toggle_hidden", "Show Hidden Files")
+        .checked(show_hidden_checked)
+        .build(&app)
+        .map_err(|e| e.to_string())?;
+
+    let sort_by_val = sort_by.unwrap_or_else(|| "name".to_string());
+    let sort_name = CheckMenuItemBuilder::with_id("ctx:sort_name", "Name")
+        .checked(matches!(sort_by_val.as_str(), "name"))
+        .build(&app)
+        .map_err(|e| e.to_string())?;
+    let sort_size = CheckMenuItemBuilder::with_id("ctx:sort_size", "Size")
+        .checked(matches!(sort_by_val.as_str(), "size"))
+        .build(&app)
+        .map_err(|e| e.to_string())?;
+    let sort_type = CheckMenuItemBuilder::with_id("ctx:sort_type", "Type")
+        .checked(matches!(sort_by_val.as_str(), "type"))
+        .build(&app)
+        .map_err(|e| e.to_string())?;
+    let sort_modified = CheckMenuItemBuilder::with_id("ctx:sort_modified", "Date Modified")
+        .checked(matches!(sort_by_val.as_str(), "modified"))
+        .build(&app)
+        .map_err(|e| e.to_string())?;
+
+    // Determine current sort order from arg or fallback to stored state
+    let sort_order_asc_checked = if let Some(ord) = sort_order.as_deref() {
+        ord.eq_ignore_ascii_case("asc")
+    } else {
+        state
+            .sort_order_asc_checked
+            .lock()
+            .map_err(|e| e.to_string())
+            .map(|v| *v)
+            .unwrap_or(true)
+    };
+    // Keep backend state roughly in sync if parameter provided
+    if sort_order.is_some() {
+        if let Ok(mut asc) = state.sort_order_asc_checked.lock() {
+            *asc = sort_order_asc_checked;
+        }
+    }
+
+    let sort_order_asc = CheckMenuItemBuilder::with_id("ctx:sort_order_asc", "Ascending")
+        .checked(sort_order_asc_checked)
+        .build(&app)
+        .map_err(|e| e.to_string())?;
+    let sort_order_desc = CheckMenuItemBuilder::with_id("ctx:sort_order_desc", "Descending")
+        .checked(!sort_order_asc_checked)
+        .build(&app)
+        .map_err(|e| e.to_string())?;
+
+    let sort_submenu = SubmenuBuilder::new(&app, "Sort by")
+        .item(&sort_name)
+        .item(&sort_size)
+        .item(&sort_type)
+        .item(&sort_modified)
+        .separator()
+        .item(&sort_order_asc)
+        .item(&sort_order_desc)
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let folders_first_item = CheckMenuItemBuilder::with_id("ctx:folders_first", "Folders on Top")
+        .checked(folders_first_checked)
+        .build(&app)
+        .map_err(|e| e.to_string())?;
+
+    let sort_submenu = SubmenuBuilder::new(&app, "Sort by")
+        .item(&sort_name)
+        .item(&sort_size)
+        .item(&sort_type)
+        .item(&sort_modified)
+        .separator()
+        .item(&sort_order_asc)
+        .item(&sort_order_desc)
+        .separator()
+        .item(&folders_first_item)
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let ctx_menu = MenuBuilder::new(&app)
+        .items(&[
+            &show_hidden_item,
+            &sort_submenu,
+        ])
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    // Popup at screen coordinates
+    // Prefer using physical coordinates to avoid scaling issues.
+    use tauri::{LogicalPosition, Position};
+
+    // Some platforms may not support popup positioning; try without position if needed.
+    webview
+        .popup_menu_at(&ctx_menu, Position::Logical(LogicalPosition { x, y }))
+        .map_err(|e| e.to_string())
+}
+
+fn preferences_path() -> Result<PathBuf, String> {
+    let base = dirs::config_dir().ok_or_else(|| "Could not resolve config directory".to_string())?;
+    let app_dir = base.join("Marlin");
+    if !app_dir.exists() {
+        fs::create_dir_all(&app_dir).map_err(|e| format!("Failed to create config dir: {}", e))?;
+    }
+    Ok(app_dir.join("preferences.json"))
+}
+
+#[tauri::command]
+pub fn read_preferences() -> Result<String, String> {
+    let path = preferences_path()?;
+    if !path.exists() {
+        return Ok("{}".to_string());
+    }
+    let mut file = fs::File::open(&path).map_err(|e| format!("Failed to open preferences: {}", e))?;
+    let mut contents = String::new();
+    file.read_to_string(&mut contents).map_err(|e| format!("Failed to read preferences: {}", e))?;
+    Ok(contents)
+}
+
+#[tauri::command]
+pub fn write_preferences(json: String) -> Result<(), String> {
+    let path = preferences_path()?;
+    let mut file = fs::File::create(&path).map_err(|e| format!("Failed to create preferences: {}", e))?;
+    file.write_all(json.as_bytes()).map_err(|e| format!("Failed to write preferences: {}", e))?;
+    Ok(())
+}
+
+fn normalize_path(mut s: String) -> String {
+    if s.is_empty() { return "/".to_string(); }
+    s = s.replace('\\', "/");
+    while s.contains("//") { s = s.replace("//", "/"); }
+    if s.len() > 1 && s.ends_with('/') { s.pop(); }
+    if s.len() == 2 && s.chars().nth(1) == Some(':') { s.push('/'); }
+    if s.is_empty() { s = "/".into(); }
+    s
+}
+
+fn read_prefs_value() -> Result<Value, String> {
+    let path = preferences_path()?;
+    if !path.exists() {
+        return Ok(json!({}));
+    }
+    let mut file = fs::File::open(&path).map_err(|e| format!("Failed to open preferences: {}", e))?;
+    let mut contents = String::new();
+    file.read_to_string(&mut contents).map_err(|e| format!("Failed to read preferences: {}", e))?;
+    let v: Value = serde_json::from_str(&contents).unwrap_or_else(|_| json!({}));
+    Ok(v)
+}
+
+fn write_prefs_value(v: &Value) -> Result<(), String> {
+    let path = preferences_path()?;
+    let mut file = fs::File::create(&path).map_err(|e| format!("Failed to create preferences: {}", e))?;
+    let s = serde_json::to_string_pretty(v).map_err(|e| e.to_string())?;
+    file.write_all(s.as_bytes()).map_err(|e| format!("Failed to write preferences: {}", e))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_dir_prefs(path: String) -> Result<String, String> {
+    let norm = normalize_path(path);
+    let mut v = read_prefs_value()?;
+    let dirs = v.get("directoryPreferences").and_then(|d| d.as_object()).cloned().unwrap_or_default();
+    let out = dirs.get(&norm).cloned().unwrap_or(json!({}));
+    Ok(out.to_string())
+}
+
+#[tauri::command]
+pub fn set_dir_prefs(path: String, prefs: String) -> Result<(), String> {
+    let norm = normalize_path(path);
+    let mut v = read_prefs_value()?;
+    let mut dirs = v.get("directoryPreferences").and_then(|d| d.as_object()).cloned().unwrap_or_default();
+    let incoming: Value = serde_json::from_str(&prefs).map_err(|e| format!("Invalid prefs JSON: {}", e))?;
+    let mut merged = dirs.get(&norm).cloned().unwrap_or(json!({}));
+    if let (Some(obj_in), Some(obj_existing)) = (incoming.as_object(), merged.as_object_mut()) {
+        for (k, val) in obj_in.iter() { obj_existing.insert(k.clone(), val.clone()); }
+    } else {
+        merged = incoming;
+    }
+    let mut new_dirs = serde_json::Map::from_iter(dirs.into_iter());
+    new_dirs.insert(norm, merged);
+    v["directoryPreferences"] = Value::Object(new_dirs);
+    write_prefs_value(&v)
+}
+
+#[tauri::command]
+pub fn clear_all_dir_prefs() -> Result<(), String> {
+    let mut v = read_prefs_value()?;
+    v["directoryPreferences"] = json!({});
+    write_prefs_value(&v)
+}
+
+#[tauri::command]
+pub fn set_last_dir(path: String) -> Result<(), String> {
+    let mut v = read_prefs_value()?;
+    v["lastDir"] = Value::String(normalize_path(path));
+    write_prefs_value(&v)
 }

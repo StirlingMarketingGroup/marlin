@@ -8,9 +8,66 @@ import { useAppStore } from './store/useAppStore'
 import { open } from '@tauri-apps/plugin-dialog'
 
 function App() {
-  const { currentPath, setCurrentPath, navigateTo, setLoading, setError, setFiles, loading, error, setHomeDir, globalPreferences, toggleHiddenFiles } = useAppStore()
+  const { currentPath, setCurrentPath, navigateTo, setLoading, setError, setFiles, loading, error, setHomeDir, toggleHiddenFiles, toggleFoldersFirst, directoryPreferences } = useAppStore()
   const initializedRef = useRef(false)
   const [showLoadingOverlay, setShowLoadingOverlay] = useState(false)
+  const prefsLoadedRef = useRef(false)
+
+  // Apply smart default view and sort preferences based on folder name or contents
+  const applySmartViewDefaults = (path: string, files?: any[]) => {
+    try {
+      const { directoryPreferences, updateDirectoryPreferences } = useAppStore.getState()
+      const existing = directoryPreferences[path]
+      
+      // Don't override if user has already set preferences for this folder
+      if (existing && (existing.viewMode || existing.sortBy)) return
+
+      const normalized = path.replace(/\\/g, '/').replace(/\/+$/g, '') || '/'
+      const base = normalized.split('/').pop()?.toLowerCase() || ''
+      
+      // Smart defaults based on folder name
+      const folderDefaults: Record<string, Partial<typeof existing>> = {
+        'downloads': { sortBy: 'modified', sortOrder: 'desc' },
+        'download': { sortBy: 'modified', sortOrder: 'desc' },
+        'pictures': { viewMode: 'grid', sortBy: 'modified', sortOrder: 'desc' },
+        'photos': { viewMode: 'grid', sortBy: 'modified', sortOrder: 'desc' },
+        'screenshots': { viewMode: 'grid', sortBy: 'modified', sortOrder: 'desc' },
+        'videos': { viewMode: 'grid', sortBy: 'modified', sortOrder: 'desc' },
+        'movies': { viewMode: 'grid', sortBy: 'modified', sortOrder: 'desc' },
+        'applications': { viewMode: 'grid', sortBy: 'name', sortOrder: 'asc' },
+        'documents': { sortBy: 'modified', sortOrder: 'desc' },
+        'desktop': { sortBy: 'modified', sortOrder: 'desc' }
+      }
+      
+      // Apply folder-specific defaults if found
+      if (folderDefaults[base]) {
+        updateDirectoryPreferences(path, folderDefaults[base])
+        return
+      }
+
+      // Media-heavy folders default to grid with date sorting (>= 75% media)
+      if (files && Array.isArray(files)) {
+        const nonFolder = files.filter((f) => !f.is_directory)
+        if (nonFolder.length > 0) {
+          const mediaExtensions = new Set([
+            'jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'heic', 'raw',
+            'mp4', 'mkv', 'avi', 'mov', 'webm', 'flv', 'm4v'
+          ])
+          const mediaFiles = nonFolder.filter((f) => {
+            const ext = f.extension?.toLowerCase()
+            return ext && mediaExtensions.has(ext)
+          })
+          if (mediaFiles.length / nonFolder.length >= 0.75) {
+            updateDirectoryPreferences(path, { 
+              viewMode: 'grid',
+              sortBy: 'modified',
+              sortOrder: 'desc'
+            })
+          }
+        }
+      }
+    } catch (_) {}
+  }
 
   // Only show the blocking loading overlay if loading lasts > 500ms
   useEffect(() => {
@@ -23,6 +80,8 @@ function App() {
     return () => { if (timer) window.clearTimeout(timer) }
   }, [loading])
 
+  // Remove global subscriptions that write the entire file to avoid clobbering across windows
+
   useEffect(() => {
     // Initialize the app by getting the home directory
     async function initializeApp() {
@@ -30,16 +89,42 @@ function App() {
         setLoading(true)
         setError(undefined)
         
+        // Load persisted preferences first
+        let lastDir: string | undefined
+        try {
+          const raw = await invoke<string>('read_preferences')
+          if (raw) {
+            const parsed = JSON.parse(raw || '{}') as any
+            if (parsed && typeof parsed === 'object') {
+              if (parsed.globalPreferences && typeof parsed.globalPreferences === 'object') {
+                useAppStore.getState().updateGlobalPreferences(parsed.globalPreferences)
+              }
+              if (parsed.directoryPreferences && typeof parsed.directoryPreferences === 'object') {
+                Object.entries(parsed.directoryPreferences).forEach(([path, prefs]) => {
+                  useAppStore.getState().updateDirectoryPreferences(path, prefs as any)
+                })
+              }
+              if (typeof parsed.lastDir === 'string') lastDir = parsed.lastDir
+            }
+          }
+        } catch { /* ignore */ }
+
         const homeDir = await invoke<string>('get_home_directory')
-        
+
         setHomeDir(homeDir)
-        setCurrentPath(homeDir)
-        navigateTo(homeDir)
+
+        // Check if a path was provided via URL parameter (for new windows)
+        const urlParams = new URLSearchParams(window.location.search)
+        const initialPath = urlParams.get('path')
+        const startPath = initialPath ? decodeURIComponent(initialPath) : (lastDir || homeDir)
         
-        // Load initial files
-        const files = await invoke<any[]>('read_directory', { path: homeDir })
+        setCurrentPath(startPath)
+        navigateTo(startPath)
         
+        // Load initial files and apply smart defaults
+        const files = await invoke<any[]>('read_directory', { path: startPath })
         setFiles(files)
+        applySmartViewDefaults(startPath, files)
         
         // Apply system accent color (macOS) to CSS variables
         try {
@@ -50,13 +135,16 @@ function App() {
             const g = parseInt(hex.substring(2,4), 16)
             const b = parseInt(hex.substring(4,6), 16)
             const soft = `rgba(${r}, ${g}, ${b}, 0.15)`
+            const selected = `rgba(${r}, ${g}, ${b}, 0.28)`
             document.documentElement.style.setProperty('--accent', `#${hex}`)
             document.documentElement.style.setProperty('--accent-soft', soft)
+            document.documentElement.style.setProperty('--accent-selected', selected)
           }
         } catch (e) {
           // Ignore accent color lookup failures
         }
         setError(undefined)
+        prefsLoadedRef.current = true
         
         initializedRef.current = true
       } catch (error) {
@@ -82,60 +170,40 @@ function App() {
     initializeApp()
   }, [setCurrentPath, navigateTo, setLoading, setError, setFiles, setHomeDir])
 
+  // Persist lastDir on navigation
+  useEffect(() => {
+    if (!prefsLoadedRef.current) return
+    ;(async () => {
+      try {
+        await invoke('set_last_dir', { path: useAppStore.getState().currentPath })
+      } catch {}
+    })()
+  }, [currentPath])
+
   // Note: Menu checkbox sync is now handled directly in the centralized toggleHiddenFiles function
 
-  // Load files when currentPath changes (after initial load)
+  // Load directory preferences and files when currentPath changes
   useEffect(() => {
     // Skip if not initialized yet or if this is the initial setup
     if (!initializedRef.current) return
-    
-    // macOS: default certain folders to grid (thumb) view if not set yet
-    try {
-      const isMac = typeof navigator !== 'undefined' && navigator.platform.toUpperCase().includes('MAC')
-      if (isMac) {
-        const normalized = currentPath.replace(/\\/g, '/').replace(/\/+$/g, '') || '/'
-        const base = normalized.split('/').pop()?.toLowerCase() || ''
-        const gridDefaults = new Set(['pictures', 'photos', 'videos', 'movies', 'applications'])
-        if (gridDefaults.has(base)) {
-          const { directoryPreferences, updateDirectoryPreferences } = useAppStore.getState()
-          const existing = directoryPreferences[currentPath]?.viewMode
-          if (!existing) {
-            updateDirectoryPreferences(currentPath, { viewMode: 'grid' })
-          }
-        }
-      }
-    } catch (_) {}
     
     async function loadDirectory() {
       try {
         setLoading(true)
         setError(undefined)
-        const files = await invoke<any[]>('read_directory', { path: currentPath })
-        setFiles(files)
-        
-        // Auto-default to grid view for media-heavy folders
+        // Load per-directory preferences first (so sort applies before rendering)
         try {
-          const { directoryPreferences, updateDirectoryPreferences } = useAppStore.getState()
-          const existing = directoryPreferences[currentPath]?.viewMode
-          if (!existing) {
-            // Count media files (excluding folders)
-            const nonFolderFiles = files.filter(f => !f.is_directory)
-            if (nonFolderFiles.length > 0) {
-              const mediaExtensions = new Set([
-                'jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'heic', 'raw',
-                'mp4', 'mkv', 'avi', 'mov', 'webm', 'flv', 'm4v'
-              ])
-              const mediaFiles = nonFolderFiles.filter(f => {
-                const ext = f.extension?.toLowerCase()
-                return ext && mediaExtensions.has(ext)
-              })
-              const mediaPercentage = mediaFiles.length / nonFolderFiles.length
-              if (mediaPercentage >= 0.75) {
-                updateDirectoryPreferences(currentPath, { viewMode: 'grid' })
-              }
+          const raw = await invoke<string>('get_dir_prefs', { path: currentPath })
+          if (raw) {
+            const prefs = JSON.parse(raw || '{}') as any
+            if (prefs && typeof prefs === 'object') {
+              useAppStore.getState().updateDirectoryPreferences(currentPath, prefs)
             }
           }
-        } catch (_) {}
+        } catch { /* ignore */ }
+        const files = await invoke<any[]>('read_directory', { path: currentPath })
+        setFiles(files)
+        applySmartViewDefaults(currentPath, files)
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error)
         const hint = errorMessage.includes('Operation not permitted')
@@ -149,6 +217,19 @@ function App() {
 
     loadDirectory()
   }, [currentPath, setLoading, setError, setFiles])
+
+  // Persist only current directory prefs on change to avoid global clobbering
+  useEffect(() => {
+    if (!initializedRef.current) return
+    const state = useAppStore.getState()
+    const prefs = state.directoryPreferences[state.currentPath]
+    if (!prefs) return
+    ;(async () => {
+      try {
+        await invoke('set_dir_prefs', { path: state.currentPath, prefs: JSON.stringify(prefs) })
+      } catch { /* ignore */ }
+    })()
+  }, [currentPath, directoryPreferences[currentPath]])
 
   // View and sort controls via system menu or keyboard
   useEffect(() => {
@@ -175,9 +256,10 @@ function App() {
       )
     }
     const setSortBy = (sortBy: 'name' | 'size' | 'modified' | 'type') => {
+      const defaultOrder: 'asc' | 'desc' = (sortBy === 'size' || sortBy === 'modified') ? 'desc' : 'asc'
       useAppStore.getState().updateDirectoryPreferences(
         useAppStore.getState().currentPath,
-        { sortBy }
+        { sortBy, sortOrder: defaultOrder }
       )
     }
     const setSortOrder = (sortOrder: 'asc' | 'desc') => {
@@ -193,12 +275,12 @@ function App() {
     // Register all listeners asynchronously
     ;(async () => {
       await register('menu:toggle_hidden', (e) => {
-        const payload = e && typeof e.payload === 'boolean' ? e.payload as boolean : undefined
+        const payload = e && typeof e.payload === 'boolean' ? (e.payload as boolean) : undefined
         if (typeof payload === 'boolean') {
-          // Set the value directly from backend (no extra reload needed)
-          useAppStore.getState().updateGlobalPreferences({ showHidden: payload })
+          // Per-directory hidden toggle
+          const { currentPath, updateDirectoryPreferences } = useAppStore.getState()
+          updateDirectoryPreferences(currentPath, { showHidden: payload })
         } else {
-          // Fallback for older backends: toggle locally
           toggleHidden()
         }
       })
@@ -211,6 +293,33 @@ function App() {
       await register('menu:sort_type', () => setSortBy('type'))
       await register('menu:sort_order_asc', () => setSortOrder('asc'))
       await register('menu:sort_order_desc', () => setSortOrder('desc'))
+      
+      await register('menu:new_window', () => {
+        // Create new window in current directory
+        const currentPath = useAppStore.getState().currentPath
+        invoke('new_window', { path: currentPath }).catch(err => {
+          console.error('Failed to create new window:', err)
+        })
+      })
+
+      await register('menu:folders_first', (e) => {
+        const payload = e && typeof e.payload === 'boolean' ? (e.payload as boolean) : undefined
+        if (typeof payload === 'boolean') {
+          useAppStore.getState().updateGlobalPreferences({ foldersFirst: payload })
+        } else {
+          toggleFoldersFirst()
+        }
+      })
+
+      await register('menu:reset_folder_defaults', async () => {
+        // Clear all directory preferences and persist the change
+        useAppStore.getState().resetDirectoryPreferences()
+        try {
+          await invoke('clear_all_dir_prefs')
+        } catch (err) {
+          console.error('Failed to clear directory preferences:', err)
+        }
+      })
       
     })()
 
@@ -265,6 +374,17 @@ function App() {
 
       const meta = e.metaKey || e.ctrlKey
       if (!meta) return
+      
+      // New window: Cmd/Ctrl+N
+      if (e.key === 'n' || e.key === 'N') {
+        e.preventDefault()
+        const currentPath = useAppStore.getState().currentPath
+        invoke('new_window', { path: currentPath }).catch(err => {
+          console.error('Failed to create new window:', err)
+        })
+        return
+      }
+      
       if (e.key === '1') { e.preventDefault(); setView('grid') }
       if (e.key === '2') { e.preventDefault(); setView('list') }
       // Toggle hidden: Cmd+Shift+.
@@ -275,6 +395,17 @@ function App() {
 
     return () => { unsubs.forEach((u) => u()) }
   }, [])
+
+  // Keep native menu checkboxes in sync when changing directories (per-dir)
+  useEffect(() => {
+    const state = useAppStore.getState()
+    const prefs = { ...state.globalPreferences, ...state.directoryPreferences[state.currentPath] }
+    const sync = async () => {
+      try { await invoke('update_hidden_files_menu', { checked: !!prefs.showHidden, source: 'frontend' }) } catch {}
+      try { await invoke('update_folders_first_menu', { checked: !!prefs.foldersFirst, source: 'frontend' }) } catch {}
+    }
+    sync()
+  }, [currentPath])
   
   // No verbose debug logging in production UI
 
@@ -350,7 +481,9 @@ function App() {
   return (
     <div className="h-screen flex bg-app-dark text-app-text overflow-hidden">
       {/* Sidebar full-height */}
-      <Sidebar />
+      <div className="h-screen p-2">
+        <Sidebar />
+      </div>
 
       {/* Content column with path bar + panel */}
       <div className="flex-1 flex flex-col overflow-hidden min-h-0">

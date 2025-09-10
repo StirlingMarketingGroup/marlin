@@ -1,8 +1,10 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, MouseEvent } from 'react'
 import { useAppStore } from '../store/useAppStore'
 import FileGrid from './FileGrid'
 import FileList from './FileList'
 import ContextMenu from './ContextMenu'
+import { getCurrentWindow } from '@tauri-apps/api/window'
+import { invoke } from '@tauri-apps/api/core'
 
 export default function MainPanel() {
   const {
@@ -22,9 +24,30 @@ export default function MainPanel() {
     ...directoryPreferences[currentPath],
   }
 
-  const handleContextMenu = (e: React.MouseEvent) => {
+  const handleContextMenu = async (e: React.MouseEvent) => {
     e.preventDefault()
-    setContextMenu({ x: e.clientX, y: e.clientY })
+    try {
+      const win = getCurrentWindow()
+      // Prefer native OS context menu
+      // Derive effective preferences for the current path
+      const state = useAppStore.getState()
+      const dirPrefs = state.directoryPreferences[state.currentPath]
+      const sortBy = dirPrefs?.sortBy ?? state.globalPreferences.sortBy
+      const sortOrder = dirPrefs?.sortOrder ?? state.globalPreferences.sortOrder
+
+      await invoke('show_native_context_menu', {
+        window_label: win.label,
+        // Tauri expects position relative to window's top-left (logical coords)
+        x: e.clientX,
+        y: e.clientY,
+        sort_by: sortBy,
+        sort_order: sortOrder,
+      })
+      return
+    } catch (_) {
+      // Fallback to custom React menu
+      setContextMenu({ x: e.clientX, y: e.clientY })
+    }
   }
 
   const closeContextMenu = () => {
@@ -43,6 +66,23 @@ export default function MainPanel() {
     // Ignore clicks on obvious controls
     if (target.closest('button, a, input, select, textarea, [role="button"], [data-prevent-deselect]')) return
     setSelectedFiles([])
+  }
+
+  // Manual dragging fallback function for MainPanel
+  const handleManualDrag = async (e: MouseEvent<HTMLDivElement>) => {
+    // Only start drag on primary button (left click)
+    if (e.button !== 0) return
+    
+    // Check if clicked element is interactive or a file item
+    const target = e.target as HTMLElement
+    if (target.closest('[data-tauri-drag-region="false"], button, input, select, textarea, [role="button"]')) return
+    
+    try {
+      const window = getCurrentWindow()
+      await window.startDragging()
+    } catch (error) {
+      console.error('Failed to start window dragging from MainPanel:', error)
+    }
   }
 
   if (error) {
