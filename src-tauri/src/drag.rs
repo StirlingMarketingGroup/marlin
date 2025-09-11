@@ -1,7 +1,7 @@
 #![allow(unexpected_cfgs)]
 
 #[cfg(target_os = "macos")]
-use cocoa::base::{id, nil};
+use cocoa::base::{id, nil, YES};
 use base64::Engine as _;
 #[cfg(target_os = "macos")]
 use cocoa::foundation::{NSAutoreleasePool, NSString, NSPoint, NSSize};
@@ -22,68 +22,90 @@ pub fn start_file_drag(paths: Vec<String>, drag_image_png: Option<String>) -> Re
     let view: id = msg_send![window, contentView];
     if view == nil { return Err("No content view".into()); }
 
-    // Prepare pasteboard with both legacy and modern formats
-    let pb: id = msg_send![class!(NSPasteboard), generalPasteboard];
-    if pb == nil { return Err("No general pasteboard".into()); }
-    
-    // Clear pasteboard before writing new content
-    let _: () = msg_send![pb, clearContents];
-    
-    // Create array of file paths for legacy NSFilenamesPboardType
-    let paths_array: id = msg_send![class!(NSMutableArray), array];
-    for p in paths.iter() {
-      let nsstr: id = NSString::alloc(nil).init_str(p);
-      let _: () = msg_send![paths_array, addObject: nsstr];
-    }
-    
-    // Set legacy NSFilenamesPboardType (required by many apps including Bambu Studio)
-    let nsfilenames_type: id = NSString::alloc(nil).init_str("NSFilenamesPboardType");
-    let legacy_set: bool = msg_send![pb, setPropertyList: paths_array forType: nsfilenames_type];
-    if !legacy_set { return Err("Failed to set legacy pasteboard type".into()); }
+    // Get current event for starting the drag
+    let ev: id = msg_send![ns_app, currentEvent];
+    if ev == nil { return Err("No current event".into()); }
 
-    // Create drag image (custom if provided, else tiny transparent)
-    let img: id = if let Some(ref data_url) = drag_image_png {
-      // Expect data:image/png;base64,.... or raw base64
+    // Create NSDragPboard for drag operation
+    let drag_pboard_name: id = NSString::alloc(nil).init_str("NSDragPboard");
+    let pb: id = msg_send![class!(NSPasteboard), pasteboardWithName: drag_pboard_name];
+    if pb == nil { return Err("Failed to create NSDragPboard".into()); }
+
+    // Clear the pasteboard and declare types
+    let _: () = msg_send![pb, declareTypes: nil owner: nil];
+    
+    // Create NSArray with file paths
+    let paths_array: id = msg_send![class!(NSMutableArray), array];
+    for path in paths.iter() {
+      let path_nsstring: id = NSString::alloc(nil).init_str(path);
+      let _: () = msg_send![paths_array, addObject: path_nsstring];
+    }
+
+    // Set NSFilenamesPboardType with file paths array
+    let nsfilenames_type: id = NSString::alloc(nil).init_str("NSFilenamesPboardType");
+    let types_array: id = msg_send![class!(NSArray), arrayWithObject: nsfilenames_type];
+    let _: () = msg_send![pb, declareTypes: types_array owner: nil];
+    let legacy_set: bool = msg_send![pb, setPropertyList: paths_array forType: nsfilenames_type];
+    
+    if !legacy_set {
+      return Err("Failed to set NSFilenamesPboardType".into());
+    }
+
+    // Create drag image
+    let drag_img: id = if let Some(ref data_url) = drag_image_png {
+      // Use custom image if provided
       let b64 = if let Some(idx) = data_url.find(",") { &data_url[(idx+1)..] } else { data_url.as_str() };
       let bytes = match base64::engine::general_purpose::STANDARD.decode(b64) {
         Ok(v) => v,
         Err(_) => Vec::new(),
       };
       if !bytes.is_empty() {
-        let nsdata: id = msg_send![class!(NSData), dataWithBytes: bytes.as_ptr() length: bytes.len()];
+        let data: id = msg_send![class!(NSData), alloc];
+        let data: id = msg_send![data, initWithBytes: bytes.as_ptr() length: bytes.len()];
         let img: id = msg_send![class!(NSImage), alloc];
-        let img: id = msg_send![img, initWithData: nsdata];
-        img
+        let img: id = msg_send![img, initWithData: data];
+        if img != nil { img } else {
+          // Fallback to file icon
+          let path_nsstring: id = NSString::alloc(nil).init_str(&paths[0]);
+          let ws: id = msg_send![class!(NSWorkspace), sharedWorkspace];
+          msg_send![ws, iconForFile: path_nsstring]
+        }
       } else {
-        let size = NSSize::new(1.0, 1.0);
-        let img: id = msg_send![class!(NSImage), alloc];
-        let img: id = msg_send![img, initWithSize: size];
-        img
+        // Fallback to file icon
+        let path_nsstring: id = NSString::alloc(nil).init_str(&paths[0]);
+        let ws: id = msg_send![class!(NSWorkspace), sharedWorkspace];
+        msg_send![ws, iconForFile: path_nsstring]
       }
     } else {
-      let size = NSSize::new(1.0, 1.0);
-      let img: id = msg_send![class!(NSImage), alloc];
-      let img: id = msg_send![img, initWithSize: size];
-      img
+      // Use file icon from system
+      let path_nsstring: id = NSString::alloc(nil).init_str(&paths[0]);
+      let ws: id = msg_send![class!(NSWorkspace), sharedWorkspace];
+      msg_send![ws, iconForFile: path_nsstring]
     };
 
-    // Get current mouse location in window coords from the current event
-    let ev: id = msg_send![ns_app, currentEvent];
-    let mut at: NSPoint = NSPoint::new(10.0, 10.0);
-    if ev != nil {
-      at = msg_send![ev, locationInWindow];
+    if drag_img == nil {
+      return Err("Failed to create drag image".into());
     }
 
-    // Start a legacy drag session from the view
-    let zero = NSSize::new(0.0, 0.0);
+    // Get drag image size and mouse location
+    let image_size: NSSize = msg_send![drag_img, size];
+    let mouse_location: NSPoint = msg_send![ev, locationInWindow];
+    
+    // Calculate drag position (center the image at mouse location)
+    let drag_position = NSPoint::new(
+      mouse_location.x - image_size.width / 2.0,
+      mouse_location.y - image_size.height / 2.0
+    );
+
+    // Use deprecated but working dragImage method
     let _: () = msg_send![view,
-      dragImage: img
-      at: at
-      offset: zero
+      dragImage: drag_img
+      at: drag_position
+      offset: NSSize::new(0.0, 0.0)
       event: ev
       pasteboard: pb
       source: view
-      slideBack: true
+      slideBack: YES
     ];
 
     Ok(())

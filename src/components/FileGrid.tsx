@@ -5,7 +5,7 @@ import { useAppStore } from '../store/useAppStore'
 import AppIcon from '@/components/AppIcon'
 import { FileTypeIcon, resolveVSCodeIcon } from '@/components/FileTypeIcon'
 import { open } from '@tauri-apps/plugin-shell'
-import { createDragImageForSelection } from '@/utils/dragImage'
+
 import { toFileUrl } from '@/utils/fileUrl'
 // no direct invoke here; background opens the menu
 import { useThumbnail } from '@/hooks/useThumbnail'
@@ -339,18 +339,15 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     }
   }
 
+
+
   return (
-    <div className="p-2 select-none" onClick={handleBackgroundClick}>
+    <div 
+      className="p-2 select-none" 
+      onClick={handleBackgroundClick}
+    >
       <div
         className="grid gap-2 file-grid"
-        onDragStart={() => {
-          const grid = document.querySelector('.file-grid') as HTMLElement
-          if (grid) grid.setAttribute('data-dragging', 'true')
-        }}
-        onDragEnd={() => {
-          const grid = document.querySelector('.file-grid') as HTMLElement
-          if (grid) grid.setAttribute('data-dragging', 'false')
-        }}
         style={{
         gridTemplateColumns: `repeat(auto-fill, minmax(${tile}px, 1fr))`
         }}
@@ -378,21 +375,16 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
                 requestAnimationFrame(() => {
                   element.classList.add('dragging')
                 })
+                
                 // Determine which files to drag
                 const selected = selectedFiles.includes(file.path) && selectedFiles.length > 0
                   ? files.filter(f => selectedFiles.includes(f.path))
                   : [file]
 
-                // Build a custom drag image (stack + count)
-                let dragVisual: { element: HTMLCanvasElement; dataUrl: string } | undefined
-                try {
-                  dragVisual = createDragImageForSelection(selected, document.body)
-                } catch {}
-
-                // Always set up web drag data + image so a ghost is visible
+                // Set up web drag data
                 const dt = e.dataTransfer
                 if (dt) {
-                  if (dragVisual) dt.setDragImage(dragVisual.element, Math.floor(dragVisual.element.width * 0.3), Math.floor(dragVisual.element.height * 0.3))
+                  // Let the system show its default drag image
                   dt.effectAllowed = 'copy'
                   try { dt.dropEffect = 'copy' } catch {}
                   const paths = selected.map(f => f.path)
@@ -404,28 +396,37 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
                   } catch {}
                 }
 
-                // On macOS, start a native drag so external apps (e.g., Bambu Studio) accept files
-                if (isMac) {
-                  void (async () => {
+                // Use our native drag implementation for external apps compatibility
+                void (async () => {
+                  try {
+                    const { invoke } = await import('@tauri-apps/api/core')
+                    // Create a custom drag preview using our existing drag image utility
+                    let dragImageDataUrl: string | undefined
                     try {
-                      const { invoke } = await import('@tauri-apps/api/core')
-                      await invoke('start_file_drag', { paths: selected.map(f => f.path), drag_image_png: dragVisual?.dataUrl })
-                    } catch (error) {
-                      console.warn('Native drag failed:', error)
-                    } finally {
-                      // Some native drags swallow dragend; ensure we reset
-                      setTimeout(() => {
-                        const el = document.querySelector('.draggable-item.dragging')
-                        if (el) el.classList.remove('dragging')
-                      }, 0)
+                      const { createDragImageForSelection } = await import('@/utils/dragImage')
+                      const dragVisual = createDragImageForSelection(selected, document.body)
+                      dragImageDataUrl = dragVisual.dataUrl
+                    } catch (e) {
+                      console.warn('Failed to create drag image:', e)
                     }
-                  })()
-                }
+                    
+                    await invoke('start_file_drag', { 
+                      paths: selected.map(f => f.path),
+                      drag_image_png: dragImageDataUrl
+                    })
+                  } catch (error) {
+                    console.warn('Native drag failed:', error)
+                  } finally {
+                    // Remove dragging class
+                    setTimeout(() => element.classList.remove('dragging'), 0)
+                  }
+                })()
               }}
               onDragEnd={(e) => {
                 e.currentTarget.classList.remove('dragging')
               }}
               draggable={true}
+
             >
               <div className="mb-2 flex-shrink-0" style={{ width: tile, display: 'flex', justifyContent: 'center', height: Math.max(48, Math.min(tile - Math.max(3, Math.min(8, Math.round(tile * 0.03))) * 2, 320)) }}>
                 <GridFilePreview file={file} isMac={isMac} fallbackIcon={getFileIcon(file)} tile={tile} />
@@ -499,7 +500,6 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
           )
         })}
       </div>
-      
     </div>
   )
 }

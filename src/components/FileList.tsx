@@ -456,19 +456,20 @@ export default function FileList({ files, preferences }: FileListProps) {
                   } catch {}
                 }
 
-                // On macOS, start native drag for external apps compatibility
-                if (isMac) {
-                  void (async () => {
-                    try {
-                      const { invoke } = await import('@tauri-apps/api/core')
-                      await invoke('start_file_drag', { paths: selected.map(f => f.path), drag_image_png: dragVisual?.dataUrl })
-                    } catch (error) {
-                      console.warn('Native drag failed:', error)
-                    } finally {
-                      setTimeout(() => setDraggedFile(null), 0)
-                    }
-                  })()
-                }
+                // Use our native drag implementation for external apps compatibility
+                void (async () => {
+                  try {
+                    const { invoke } = await import('@tauri-apps/api/core')
+                    await invoke('start_file_drag', { 
+                      paths: selected.map(f => f.path), 
+                      drag_image_png: dragVisual?.dataUrl 
+                    })
+                  } catch (error) {
+                    console.warn('Native drag failed:', error)
+                  } finally {
+                    setTimeout(() => setDraggedFile(null), 0)
+                  }
+                })()
               }}
               onDragEnd={() => setDraggedFile(null)}
               draggable={true}

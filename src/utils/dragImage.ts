@@ -34,9 +34,10 @@ function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: numbe
 function drawThumbOrBadge(ctx: CanvasRenderingContext2D, vis: DragVisual, x: number, y: number, size: number) {
   const pad = Math.max(6, Math.floor(size * 0.08))
   const radius = Math.floor(size * 0.08)
-  // Card background
-  ctx.fillStyle = 'rgba(17, 24, 39, 0.90)'
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.18)'
+  // Card background - more opaque for visibility
+  ctx.fillStyle = 'rgba(17, 24, 39, 0.95)'
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.25)'
+  ctx.lineWidth = 1.5
   roundRect(ctx, x, y, size, size, radius)
   ctx.fill()
   ctx.stroke()
@@ -87,7 +88,8 @@ export function createDragImageForSelection(
   options?: { size?: number }
 ): { element: HTMLCanvasElement; dataUrl: string } {
   const count = Math.max(1, Math.min(files.length, 3))
-  const base = Math.max(96, Math.min(196, options?.size ?? 128))
+  // Make it bigger for visibility
+  const base = Math.max(128, Math.min(256, options?.size ?? 160))
   const spread = Math.floor(base * 0.18)
   const w = base + spread * (count - 1)
   const h = base + spread * (count - 1)
@@ -95,6 +97,8 @@ export function createDragImageForSelection(
   canvas.width = w
   canvas.height = h
   const ctx = canvas.getContext('2d')!
+  
+
 
   // Pick the top N visuals from current selection (first 3)
   const visuals: DragVisual[] = files.slice(0, count).map((file) => {
@@ -135,5 +139,14 @@ export function createDragImageForSelection(
   }
 
   const dataUrl = canvas.toDataURL('image/png')
+  
+  // Debug: log canvas info
+  console.log('Created drag image canvas:', {
+    width: canvas.width,
+    height: canvas.height,
+    fileCount: files.length,
+    dataUrlLength: dataUrl.length
+  })
+  
   return { element: canvas, dataUrl }
 }
