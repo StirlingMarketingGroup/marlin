@@ -5,6 +5,7 @@ import { useAppStore } from '../store/useAppStore'
 import AppIcon from '@/components/AppIcon'
 import { FileTypeIcon, resolveVSCodeIcon } from '@/components/FileTypeIcon'
 import { open } from '@tauri-apps/plugin-shell'
+import { toFileUrl, downloadUrlDescriptor } from '@/utils/fileUrl'
 // no direct invoke here; background opens the menu
 import { useThumbnail } from '@/hooks/useThumbnail'
 import { useVisibility } from '@/hooks/useVisibility'
@@ -360,7 +361,24 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
               onClick={(e) => { e.stopPropagation(); handleFileClick(file, e.ctrlKey || e.metaKey) }}
               onDoubleClick={(e) => { e.stopPropagation(); handleDoubleClick(file) }}
               onMouseDown={(e) => handleMouseDownForFile(e, file)}
-              onDragStart={() => setDraggedFile(file.path)}
+              onDragStart={async (e) => {
+                setDraggedFile(file.path)
+                
+                // Prevent default web drag behavior - we'll use only native drag
+                e.preventDefault()
+
+                // Initiate native OS drag with file URLs
+                try {
+                  const { invoke } = await import('@tauri-apps/api/core')
+                  await invoke('start_file_drag', { paths: [file.path] })
+                  // Clear the dragged state since native drag takes over
+                  setDraggedFile(null)
+                } catch (error) { 
+                  // Native drag failed, reset state
+                  setDraggedFile(null)
+                  console.warn('Native drag failed:', error)
+                }
+              }}
               onDragEnd={() => setDraggedFile(null)}
               draggable
             >
