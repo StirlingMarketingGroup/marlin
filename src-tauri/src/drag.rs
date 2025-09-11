@@ -2,12 +2,13 @@
 
 #[cfg(target_os = "macos")]
 use cocoa::base::{id, nil};
+use base64::Engine as _;
 #[cfg(target_os = "macos")]
 use cocoa::foundation::{NSAutoreleasePool, NSString, NSPoint, NSSize};
 #[cfg(target_os = "macos")]
 use objc::{class, msg_send, sel, sel_impl};
 
-pub fn start_file_drag(paths: Vec<String>) -> Result<(), String> {
+pub fn start_file_drag(paths: Vec<String>, drag_image_png: Option<String>) -> Result<(), String> {
   #[cfg(target_os = "macos")]
   unsafe {
     if paths.is_empty() { return Err("No paths provided".into()); }
@@ -40,10 +41,31 @@ pub fn start_file_drag(paths: Vec<String>) -> Result<(), String> {
     let legacy_set: bool = msg_send![pb, setPropertyList: paths_array forType: nsfilenames_type];
     if !legacy_set { return Err("Failed to set legacy pasteboard type".into()); }
 
-    // Create a tiny transparent image as drag image (system may replace it)
-    let size = NSSize::new(1.0, 1.0);
-    let img: id = msg_send![class!(NSImage), alloc];
-    let img: id = msg_send![img, initWithSize: size];
+    // Create drag image (custom if provided, else tiny transparent)
+    let img: id = if let Some(ref data_url) = drag_image_png {
+      // Expect data:image/png;base64,.... or raw base64
+      let b64 = if let Some(idx) = data_url.find(",") { &data_url[(idx+1)..] } else { data_url.as_str() };
+      let bytes = match base64::engine::general_purpose::STANDARD.decode(b64) {
+        Ok(v) => v,
+        Err(_) => Vec::new(),
+      };
+      if !bytes.is_empty() {
+        let nsdata: id = msg_send![class!(NSData), dataWithBytes: bytes.as_ptr() length: bytes.len()];
+        let img: id = msg_send![class!(NSImage), alloc];
+        let img: id = msg_send![img, initWithData: nsdata];
+        img
+      } else {
+        let size = NSSize::new(1.0, 1.0);
+        let img: id = msg_send![class!(NSImage), alloc];
+        let img: id = msg_send![img, initWithSize: size];
+        img
+      }
+    } else {
+      let size = NSSize::new(1.0, 1.0);
+      let img: id = msg_send![class!(NSImage), alloc];
+      let img: id = msg_send![img, initWithSize: size];
+      img
+    };
 
     // Get current mouse location in window coords from the current event
     let ev: id = msg_send![ns_app, currentEvent];

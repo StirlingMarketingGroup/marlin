@@ -936,6 +936,6 @@ pub fn set_last_dir(path: String) -> Result<(), String> {
     write_prefs_value(&v)
 }
 #[tauri::command]
-pub fn start_file_drag(paths: Vec<String>) -> Result<(), String> {
-    crate::drag::start_file_drag(paths)
+pub fn start_file_drag(paths: Vec<String>, drag_image_png: Option<String>) -> Result<(), String> {
+    crate::drag::start_file_drag(paths, drag_image_png)
 }

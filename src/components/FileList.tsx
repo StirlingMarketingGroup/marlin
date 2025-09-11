@@ -6,6 +6,7 @@ import AppIcon from '@/components/AppIcon'
 import { FileTypeIcon, resolveVSCodeIcon } from '@/components/FileTypeIcon'
 import { open } from '@tauri-apps/plugin-shell'
 import { toFileUrl, downloadUrlDescriptor } from '@/utils/fileUrl'
+import { createDragImageForSelection } from '@/utils/dragImage'
 // no direct invoke here; background opens the menu
 import { useThumbnail } from '@/hooks/useThumbnail'
 import { useVisibility } from '@/hooks/useVisibility'
@@ -422,20 +423,38 @@ export default function FileList({ files, preferences }: FileListProps) {
               onMouseDown={(e) => handleMouseDownForFile(e, file)}
               onDragStart={async (e) => {
                 setDraggedFile(file.path)
-                
-                // Prevent default web drag behavior - we'll use only native drag
-                e.preventDefault()
+                const selected = selectedFiles.includes(file.path) && selectedFiles.length > 0
+                  ? files.filter(f => selectedFiles.includes(f.path))
+                  : [file]
 
-                // Initiate native OS drag with file URLs
+                let dragImage: HTMLImageElement | undefined
                 try {
-                  const { invoke } = await import('@tauri-apps/api/core')
-                  await invoke('start_file_drag', { paths: [file.path] })
-                  // Clear the dragged state since native drag takes over
-                  setDraggedFile(null)
-                } catch (error) { 
-                  // Native drag failed, reset state
-                  setDraggedFile(null)
-                  console.warn('Native drag failed:', error)
+                  dragImage = createDragImageForSelection(selected, document.body)
+                } catch {}
+
+                // Always set the web drag data and image for a visible ghost
+                const dt = e.dataTransfer
+                if (dt) {
+                  if (dragImage) dt.setDragImage(dragImage, Math.floor(dragImage.width * 0.3), Math.floor(dragImage.height * 0.3))
+                  dt.effectAllowed = 'copy'
+                  try { dt.dropEffect = 'copy' } catch {}
+                  const paths = selected.map(f => f.path)
+                  for (const p of paths) {
+                    const url = (await import('@/utils/fileUrl')).toFileUrl(p)
+                    try { dt.setData('text/uri-list', (dt.getData('text/uri-list') || '') + url + '\n') } catch {}
+                  }
+                  try { dt.setData('text/plain', paths.join('\n')) } catch {}
+                }
+
+                if (isMac) {
+                  try {
+                    const { invoke } = await import('@tauri-apps/api/core')
+                    await invoke('start_file_drag', { paths: selected.map(f => f.path), drag_image_png: dragImage?.src })
+                  } catch (error) {
+                    console.warn('Native drag failed:', error)
+                  } finally {
+                    setTimeout(() => setDraggedFile(null), 0)
+                  }
                 }
               }}
               onDragEnd={() => setDraggedFile(null)}
