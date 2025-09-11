@@ -27,6 +27,13 @@
 - Use concise, typed prefixes: `feat:`, `fix:`, `refactor:`, `docs:`, `chore:` (project history includes `Fix:` and `Refactor:`).
 - PRs should include: clear description, linked issues, platform(s) tested (Windows/macOS/Linux), and screenshots/GIFs for UI changes.
 
+## Development Process & Auto-Restart Behavior
+- This project automatically restarts when Rust code changes are detected in `src-tauri/`.
+- The frontend also has hot reload capabilities for React/TypeScript changes.
+- **For agents**: DO NOT manually kill running processes or search for PIDs to restart the application. The auto-restart functionality handles this automatically.
+- If you believe a restart is truly necessary (rare), simply request the user to restart rather than attempting to kill processes.
+- Note: Manual restarts are typically unnecessary - the auto-reload on both Rust backend and client frontend handles most development scenarios effectively.
+
 ## Security & Configuration Tips
 - Respect Tauri capabilities; only request permissions you use (`src-tauri/capabilities/`).
 - Avoid hardcoded user paths; use Tauri plugins (`@tauri-apps/plugin-fs`, `plugin-os`) and Rust helpers.

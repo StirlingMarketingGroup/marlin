@@ -12,8 +12,8 @@ use serde_json::{json, Value};
 use base64::Engine as _;
 
 use crate::fs_utils::{
-    self, FileItem, read_directory_contents, get_file_info, 
-    delete_file_or_directory, 
+    self, FileItem, read_directory_contents, get_file_info,
+    delete_file_or_directory,
     rename_file_or_directory, copy_file_or_directory, expand_path
 };
 
@@ -28,15 +28,15 @@ pub fn get_home_directory() -> Result<String, String> {
 pub fn read_directory(path: String) -> Result<Vec<FileItem>, String> {
     let expanded_path = expand_path(&path)?;
     let path = Path::new(&expanded_path);
-    
+
     if !path.exists() {
         return Err("Path does not exist".to_string());
     }
-    
+
     if !path.is_dir() {
         return Err("Path is not a directory".to_string());
     }
-    
+
     read_directory_contents(path)
 }
 
@@ -44,11 +44,11 @@ pub fn read_directory(path: String) -> Result<Vec<FileItem>, String> {
 pub fn get_file_metadata(path: String) -> Result<FileItem, String> {
     let expanded_path = expand_path(&path)?;
     let path = Path::new(&expanded_path);
-    
+
     if !path.exists() {
         return Err("Path does not exist".to_string());
     }
-    
+
     get_file_info(path)
 }
 
@@ -56,7 +56,7 @@ pub fn get_file_metadata(path: String) -> Result<FileItem, String> {
 pub fn create_directory_command(path: String) -> Result<(), String> {
     let expanded_path = expand_path(&path)?;
     let path = Path::new(&expanded_path);
-    
+
     fs_utils::create_directory(path)
 }
 
@@ -64,11 +64,11 @@ pub fn create_directory_command(path: String) -> Result<(), String> {
 pub fn delete_file(path: String) -> Result<(), String> {
     let expanded_path = expand_path(&path)?;
     let path = Path::new(&expanded_path);
-    
+
     if !path.exists() {
         return Err("Path does not exist".to_string());
     }
-    
+
     delete_file_or_directory(path)
 }
 
@@ -78,15 +78,15 @@ pub fn rename_file(from_path: String, to_path: String) -> Result<(), String> {
     let expanded_to = expand_path(&to_path)?;
     let from = Path::new(&expanded_from);
     let to = Path::new(&expanded_to);
-    
+
     if !from.exists() {
         return Err("Source path does not exist".to_string());
     }
-    
+
     if to.exists() {
         return Err("Destination path already exists".to_string());
     }
-    
+
     rename_file_or_directory(from, to)
 }
 
@@ -96,11 +96,11 @@ pub fn copy_file(from_path: String, to_path: String) -> Result<(), String> {
     let expanded_to = expand_path(&to_path)?;
     let from = Path::new(&expanded_from);
     let to = Path::new(&expanded_to);
-    
+
     if !from.exists() {
         return Err("Source path does not exist".to_string());
     }
-    
+
     copy_file_or_directory(from, to)
 }
 
@@ -110,15 +110,15 @@ pub fn move_file(from_path: String, to_path: String) -> Result<(), String> {
     let expanded_to = expand_path(&to_path)?;
     let from = Path::new(&expanded_from);
     let to = Path::new(&expanded_to);
-    
+
     if !from.exists() {
         return Err("Source path does not exist".to_string());
     }
-    
+
     if to.exists() {
         return Err("Destination path already exists".to_string());
     }
-    
+
     rename_file_or_directory(from, to)
 }
 
@@ -246,14 +246,14 @@ pub fn render_svg_to_png(svg: String, size: Option<u32>) -> Result<String, Strin
 #[tauri::command]
 pub fn update_hidden_files_menu(
     _app: tauri::AppHandle,
-    menu_state: tauri::State<crate::state::MenuState<tauri::Wry>>, 
+    menu_state: tauri::State<crate::state::MenuState<tauri::Wry>>,
     checked: bool,
     source: Option<String>
 ) -> Result<(), String> {
     let _source_str = source.unwrap_or_else(|| "UNKNOWN".to_string());
-    
+
     let item_guard = menu_state.show_hidden_item.lock().map_err(|e| format!("Failed to acquire lock: {}", e))?;
-    
+
     if let Some(ref item) = *item_guard {
         item.set_checked(checked).map_err(|e| e.to_string())?;
     } else {
@@ -263,7 +263,7 @@ pub fn update_hidden_files_menu(
     if let Ok(mut flag) = menu_state.show_hidden_checked.lock() {
         *flag = checked;
     }
-    
+
     Ok(())
 }
 
@@ -370,7 +370,7 @@ pub fn get_system_drives() -> Result<Vec<SystemDrive>, String> {
     {
         use std::ffi::OsString;
         use std::os::windows::ffi::OsStringExt;
-        
+
         // Get all logical drives on Windows
         let mut drive_strings = vec![0u16; 256];
         let length = unsafe {
@@ -379,12 +379,12 @@ pub fn get_system_drives() -> Result<Vec<SystemDrive>, String> {
                 drive_strings.as_mut_ptr(),
             )
         };
-        
+
         if length > 0 && length < drive_strings.len() as u32 {
             drive_strings.truncate(length as usize);
             let drives_str = OsString::from_wide(&drive_strings);
             let drives_string = drives_str.to_string_lossy();
-            
+
             for drive in drives_string.split('\0').filter(|s| !s.is_empty()) {
                 if drive.len() >= 3 {
                     drives.push(SystemDrive {
@@ -397,7 +397,7 @@ pub fn get_system_drives() -> Result<Vec<SystemDrive>, String> {
             }
         }
     }
-    
+
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         // On Unix-like systems, add the root filesystem
@@ -407,7 +407,7 @@ pub fn get_system_drives() -> Result<Vec<SystemDrive>, String> {
             drive_type: "system".to_string(),
             is_ejectable: false,
         });
-        
+
         // On macOS, also try to add mounted volumes
         #[cfg(target_os = "macos")]
         {
@@ -445,7 +445,7 @@ pub async fn eject_drive(path: String) -> Result<(), String> {
             .output()
             .await
             .map_err(|e| format!("Failed to run diskutil: {}", e))?;
-        
+
         if output.status.success() {
             Ok(())
         } else {
@@ -453,7 +453,7 @@ pub async fn eject_drive(path: String) -> Result<(), String> {
             Err(format!("Failed to eject drive: {}", error_msg))
         }
     }
-    
+
     #[cfg(target_os = "linux")]
     {
         // On Linux, use umount command
@@ -462,7 +462,7 @@ pub async fn eject_drive(path: String) -> Result<(), String> {
             .output()
             .await
             .map_err(|e| format!("Failed to run umount: {}", e))?;
-        
+
         if output.status.success() {
             Ok(())
         } else {
@@ -470,14 +470,14 @@ pub async fn eject_drive(path: String) -> Result<(), String> {
             Err(format!("Failed to eject drive: {}", error_msg))
         }
     }
-    
+
     #[cfg(target_os = "windows")]
     {
         // On Windows, we would need to use Windows API for safe removal
         // For now, return an error as it requires more complex implementation
         Err("Drive ejection not yet implemented for Windows".to_string())
     }
-    
+
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         Err("Drive ejection not supported on this platform".to_string())
@@ -507,19 +507,19 @@ pub async fn request_thumbnail(
     format: Option<String>,
 ) -> Result<crate::thumbnails::ThumbnailResponse, String> {
     let service = get_thumbnail_service().await?;
-    
+
     let quality = match quality.as_deref() {
         Some("low") => crate::thumbnails::ThumbnailQuality::Low,
         Some("high") => crate::thumbnails::ThumbnailQuality::High,
         _ => crate::thumbnails::ThumbnailQuality::Medium,
     };
-    
+
     let priority = match priority.as_deref() {
         Some("high") => crate::thumbnails::ThumbnailPriority::High,
         Some("low") => crate::thumbnails::ThumbnailPriority::Low,
         _ => crate::thumbnails::ThumbnailPriority::Medium,
     };
-    
+
     let format = match format.as_deref() {
         Some("jpeg") => crate::thumbnails::ThumbnailFormat::JPEG,
         Some("png") => crate::thumbnails::ThumbnailFormat::PNG,
@@ -606,9 +606,9 @@ pub fn open_path(path: String) -> Result<(), String> {
 #[command]
 pub fn new_window(app: AppHandle, path: Option<String>) -> Result<(), String> {
     let window_label = format!("window-{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0));
-    
+
     let mut url = tauri::WebviewUrl::App("index.html".into());
-    
+
     // If a path is provided, pass it as a query parameter
     if let Some(initial_path) = path {
         let encoded_path = urlencoding::encode(&initial_path);
