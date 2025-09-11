@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { Folder, File, ImageSquare, MusicNote, VideoCamera, FileZip, FileText, CaretUp, CaretDown, AppWindow, Package, FilePdf, PaintBrush, Palette, Disc } from 'phosphor-react'
+import { Folder, File, ImageSquare, MusicNote, VideoCamera, FileZip, FileText, CaretUp, CaretDown, AppWindow, Package, FilePdf, PaintBrush, Palette, Disc, Cube } from 'phosphor-react'
 import { FileItem, ViewPreferences } from '../types'
 import { useAppStore } from '../store/useAppStore'
 import AppIcon from '@/components/AppIcon'
@@ -25,6 +25,7 @@ function ListFilePreview({ file, isMac, fallbackIcon }: { file: FileItem; isMac:
   const isAi = ext === 'ai' || ext === 'eps'
   const isPsd = ext === 'psd' || ext === 'psb'
   const isSvg = ext === 'svg'
+  const isStl = ext === 'stl'
 
   if (isMac) {
     const fileName = file.name.toLowerCase()
@@ -48,7 +49,7 @@ function ListFilePreview({ file, isMac, fallbackIcon }: { file: FileItem; isMac:
     }
   }
 
-  if (isImage || isPdf || isAi || isPsd) {
+  if (isImage || isPdf || isAi || isPsd || isStl) {
     const dpr = typeof window !== 'undefined' ? Math.min(2, Math.max(1, window.devicePixelRatio || 1)) : 1
     const shouldLoad = stage !== 'far'
     const priority = stage === 'visible' ? 'high' : 'medium'
@@ -229,6 +230,10 @@ export default function FileList({ files, preferences }: FileListProps) {
     }
     if (['zip', 'rar', '7z', 'tar', 'gz', 'bz2'].includes(ext)) {
       return <FileZip className="w-5 h-5 text-app-muted" />
+    }
+    // 3D model: STL
+    if (ext === 'stl') {
+      return <Cube className="w-5 h-5 text-app-green" />
     }
     // VSCode-style file icons for code/config types
     if (resolveVSCodeIcon(file.name, ext)) {

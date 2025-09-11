@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect, useRef, type ReactNode } from 'react'
-import { Folder, File, ImageSquare, MusicNote, VideoCamera, FileZip, FileText, AppWindow, Package, FilePdf, PaintBrush, Palette, Disc } from 'phosphor-react'
+import { Folder, File, ImageSquare, MusicNote, VideoCamera, FileZip, FileText, AppWindow, Package, FilePdf, PaintBrush, Palette, Disc, Cube } from 'phosphor-react'
 import { FileItem, ViewPreferences } from '../types'
 import { useAppStore } from '../store/useAppStore'
 import AppIcon from '@/components/AppIcon'
@@ -24,6 +24,7 @@ function GridFilePreview({ file, isMac, fallbackIcon, tile }: { file: FileItem; 
   const isAi = ext === 'ai' || ext === 'eps'
   const isPsd = ext === 'psd' || ext === 'psb'
   const isSvg = ext === 'svg'
+  const isStl = ext === 'stl'
   const isAppBundle = isMac && file.is_directory && file.name.toLowerCase().endsWith('.app')
 
   // (Rendering handled below with a fixed preview box for alignment)
@@ -48,7 +49,7 @@ function GridFilePreview({ file, isMac, fallbackIcon, tile }: { file: FileItem; 
   }
 
   // Image-like previews (real thumbnails)
-  if (isImage || isPdf || isAi || isPsd) {
+  if (isImage || isPdf || isAi || isPsd || isStl) {
     const requestSize = pickBucket(Math.round((box - pad * 2) * dpr))
     const shouldLoad = stage !== 'far'
     const priority = stage === 'visible' ? 'high' : 'medium'
@@ -190,6 +191,11 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     // Archive files
     if (['zip', 'rar', '7z', 'tar', 'gz', 'bz2'].includes(ext)) {
       return <FileZip className="w-12 h-12 text-app-muted" />
+    }
+
+    // 3D model: STL
+    if (ext === 'stl') {
+      return <Cube className="w-12 h-12 text-app-green" />
     }
 
     // VSCode-style file icons for code/config types

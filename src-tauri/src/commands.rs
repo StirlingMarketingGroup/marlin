@@ -779,17 +779,6 @@ pub fn show_native_context_menu(
         .build(&app)
         .map_err(|e| e.to_string())?;
 
-    let sort_submenu = SubmenuBuilder::new(&app, "Sort by")
-        .item(&sort_name)
-        .item(&sort_size)
-        .item(&sort_type)
-        .item(&sort_modified)
-        .separator()
-        .item(&sort_order_asc)
-        .item(&sort_order_desc)
-        .build()
-        .map_err(|e| e.to_string())?;
-
     let folders_first_item = CheckMenuItemBuilder::with_id("ctx:folders_first", "Folders on Top")
         .checked(folders_first_checked)
         .build(&app)
@@ -909,7 +898,7 @@ fn write_prefs_value(v: &Value) -> Result<(), String> {
 #[tauri::command]
 pub fn get_dir_prefs(path: String) -> Result<String, String> {
     let norm = normalize_path(path);
-    let mut v = read_prefs_value()?;
+    let v = read_prefs_value()?;
     let dirs = v.get("directoryPreferences").and_then(|d| d.as_object()).cloned().unwrap_or_default();
     let out = dirs.get(&norm).cloned().unwrap_or(json!({}));
     Ok(out.to_string())
@@ -919,7 +908,7 @@ pub fn get_dir_prefs(path: String) -> Result<String, String> {
 pub fn set_dir_prefs(path: String, prefs: String) -> Result<(), String> {
     let norm = normalize_path(path);
     let mut v = read_prefs_value()?;
-    let mut dirs = v.get("directoryPreferences").and_then(|d| d.as_object()).cloned().unwrap_or_default();
+    let dirs = v.get("directoryPreferences").and_then(|d| d.as_object()).cloned().unwrap_or_default();
     let incoming: Value = serde_json::from_str(&prefs).map_err(|e| format!("Invalid prefs JSON: {}", e))?;
     let mut merged = dirs.get(&norm).cloned().unwrap_or(json!({}));
     if let (Some(obj_in), Some(obj_existing)) = (incoming.as_object(), merged.as_object_mut()) {

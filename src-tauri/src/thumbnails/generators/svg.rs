@@ -1,4 +1,4 @@
-use super::super::{ThumbnailRequest, ThumbnailFormat, ThumbnailQuality};
+use super::super::ThumbnailRequest;
 use image::{DynamicImage};
 use std::fs;
 

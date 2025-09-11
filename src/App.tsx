@@ -72,6 +72,14 @@ function App() {
             const prefs = { viewMode: 'grid' as const, sortBy: 'modified' as const, sortOrder: 'desc' as const }
             updateDirectoryPreferences(path, prefs)
             try { await invoke('set_dir_prefs', { path, prefs: JSON.stringify(prefs) }) } catch {}
+          } else {
+            // STL-heavy folders (>= 60% .stl) default to grid thumbnails
+            const stlFiles = nonFolder.filter((f) => (f.extension || '').toLowerCase() === 'stl')
+            if (stlFiles.length >= 2 && stlFiles.length / nonFolder.length >= 0.60) {
+              const prefs = { viewMode: 'grid' as const }
+              updateDirectoryPreferences(path, prefs)
+              try { await invoke('set_dir_prefs', { path, prefs: JSON.stringify(prefs) }) } catch {}
+            }
           }
         }
       }

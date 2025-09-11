@@ -10,6 +10,7 @@ pub mod apps;
 pub mod pdf;
 pub mod psd;
 pub mod svg;
+pub mod stl;
 
 pub struct ThumbnailGenerator;
 
@@ -65,6 +66,11 @@ impl ThumbnailGenerator {
             return pdf::PdfGenerator::generate(request);
         }
 
+        // Check if it's an STL 3D model
+        if Self::is_stl_file(path) {
+            return stl::StlGenerator::generate(request);
+        }
+
         // TODO: Add support for videos, documents
         Err("Unsupported file type for thumbnail generation".to_string())
     }
@@ -102,6 +108,13 @@ impl ThumbnailGenerator {
     fn is_svg_file(path: &Path) -> bool {
         match path.extension().and_then(|s| s.to_str()) {
             Some(ext) => ext.eq_ignore_ascii_case("svg"),
+            None => false,
+        }
+    }
+
+    fn is_stl_file(path: &Path) -> bool {
+        match path.extension().and_then(|s| s.to_str()) {
+            Some(ext) => ext.eq_ignore_ascii_case("stl"),
             None => false,
         }
     }
