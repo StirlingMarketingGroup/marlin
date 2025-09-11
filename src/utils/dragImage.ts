@@ -85,7 +85,7 @@ export function createDragImageForSelection(
   files: FileItem[],
   container: HTMLElement,
   options?: { size?: number }
-): HTMLImageElement {
+): { element: HTMLCanvasElement; dataUrl: string } {
   const count = Math.max(1, Math.min(files.length, 3))
   const base = Math.max(96, Math.min(196, options?.size ?? 128))
   const spread = Math.floor(base * 0.18)
@@ -134,8 +134,6 @@ export function createDragImageForSelection(
     ctx.fillText(text, cx, cy)
   }
 
-  const img = new Image()
-  img.src = canvas.toDataURL('image/png')
-  return img
+  const dataUrl = canvas.toDataURL('image/png')
+  return { element: canvas, dataUrl }
 }
-

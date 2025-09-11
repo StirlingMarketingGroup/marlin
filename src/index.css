@@ -119,4 +119,9 @@
     background-size: 16px 16px;
     background-position: 0 0, 0 8px, 8px -8px, -8px 0;
   }
+  
+  /* Dragging state for file items */
+  .draggable-item.dragging {
+    opacity: 0.5 !important;
+  }
 }

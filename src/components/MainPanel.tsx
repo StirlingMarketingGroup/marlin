@@ -134,6 +134,8 @@ export default function MainPanel() {
           )}
         </div>
 
+        {/* In-app drag ghost removed; rely on setDragImage */}
+
         {loading && (
           <div className="absolute inset-0 flex items-center justify-center bg-app-dark">
             <div className="animate-spin w-6 h-6 border-2 border-[var(--accent)] border-t-transparent rounded-full" />

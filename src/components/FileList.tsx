@@ -402,7 +402,16 @@ export default function FileList({ files, preferences }: FileListProps) {
       </div>
 
       {/* File rows */}
-      <div className="space-y-[2px] px-3 py-1 mt-1">
+      <div
+        className="space-y-[2px] px-3 py-1 mt-1"
+        onDragStartCapture={(e) => {
+          const target = e.target as HTMLElement | null
+          const host = target?.closest('[data-file-item="true"]') as HTMLElement | null
+          const path = host?.getAttribute('data-file-path')
+          if (path) setDraggedFile(path)
+        }}
+        onDragEndCapture={() => setDraggedFile(null)}
+      >
         {filteredFiles.map((file) => {
           const isSelected = selectedFiles.includes(file.path)
           const isDragged = draggedFile === file.path
@@ -410,7 +419,7 @@ export default function FileList({ files, preferences }: FileListProps) {
           return (
             <div
               key={file.path}
-              className={`grid grid-cols-12 gap-3 py-[2px] leading-5 text-[13px] cursor-pointer transition-colors duration-75 rounded-full ${
+              className={`relative grid grid-cols-12 gap-3 py-[2px] leading-5 text-[13px] cursor-pointer transition-colors duration-75 rounded-full ${
                 isSelected ? 'bg-accent-selected text-white' : 'odd:bg-app-gray hover:bg-app-light'
               } ${isDragged ? 'opacity-50' : ''} ${
                 file.is_hidden ? 'opacity-60' : ''
@@ -421,47 +430,56 @@ export default function FileList({ files, preferences }: FileListProps) {
               onClick={(e) => { e.stopPropagation(); handleFileClick(file, e.ctrlKey || e.metaKey) }}
               onDoubleClick={(e) => { e.stopPropagation(); handleDoubleClick(file) }}
               onMouseDown={(e) => handleMouseDownForFile(e, file)}
-              onDragStart={async (e) => {
+              onDragStartCapture={(e) => {
                 setDraggedFile(file.path)
                 const selected = selectedFiles.includes(file.path) && selectedFiles.length > 0
                   ? files.filter(f => selectedFiles.includes(f.path))
                   : [file]
 
-                let dragImage: HTMLImageElement | undefined
+                let dragVisual: { element: HTMLCanvasElement; dataUrl: string } | undefined
                 try {
-                  dragImage = createDragImageForSelection(selected, document.body)
+                  dragVisual = createDragImageForSelection(selected, document.body)
                 } catch {}
 
                 // Always set the web drag data and image for a visible ghost
                 const dt = e.dataTransfer
                 if (dt) {
-                  if (dragImage) dt.setDragImage(dragImage, Math.floor(dragImage.width * 0.3), Math.floor(dragImage.height * 0.3))
+                  if (dragVisual) dt.setDragImage(dragVisual.element, Math.floor(dragVisual.element.width * 0.3), Math.floor(dragVisual.element.height * 0.3))
                   dt.effectAllowed = 'copy'
                   try { dt.dropEffect = 'copy' } catch {}
                   const paths = selected.map(f => f.path)
-                  for (const p of paths) {
-                    const url = (await import('@/utils/fileUrl')).toFileUrl(p)
-                    try { dt.setData('text/uri-list', (dt.getData('text/uri-list') || '') + url + '\n') } catch {}
-                  }
+                  // Ensure at least one synchronous payload so ghost appears
                   try { dt.setData('text/plain', paths.join('\n')) } catch {}
+                  try {
+                    const uris = paths.map(p => toFileUrl(p)).join('\n')
+                    dt.setData('text/uri-list', uris)
+                  } catch {}
                 }
 
+                // On macOS, start native drag for external apps compatibility
                 if (isMac) {
-                  try {
-                    const { invoke } = await import('@tauri-apps/api/core')
-                    await invoke('start_file_drag', { paths: selected.map(f => f.path), drag_image_png: dragImage?.src })
-                  } catch (error) {
-                    console.warn('Native drag failed:', error)
-                  } finally {
-                    setTimeout(() => setDraggedFile(null), 0)
-                  }
+                  void (async () => {
+                    try {
+                      const { invoke } = await import('@tauri-apps/api/core')
+                      await invoke('start_file_drag', { paths: selected.map(f => f.path), drag_image_png: dragVisual?.dataUrl })
+                    } catch (error) {
+                      console.warn('Native drag failed:', error)
+                    } finally {
+                      setTimeout(() => setDraggedFile(null), 0)
+                    }
+                  })()
                 }
               }}
               onDragEnd={() => setDraggedFile(null)}
-              draggable
+              draggable={true}
             >
               {/* Name column */}
-              <div className="col-span-5 flex items-center gap-2 min-w-0 pl-2">
+              <div
+                className="col-span-5 flex items-center gap-2 min-w-0 pl-2"
+                draggable
+                onDragStart={() => setDraggedFile(file.path)}
+                onDragEnd={() => setDraggedFile(null)}
+              >
                 <span className="flex-shrink-0">
                   <ListFilePreview file={file} isMac={isMac} fallbackIcon={getFileIcon(file)} />
                 </span>

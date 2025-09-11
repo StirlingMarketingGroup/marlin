@@ -6,7 +6,7 @@ import AppIcon from '@/components/AppIcon'
 import { FileTypeIcon, resolveVSCodeIcon } from '@/components/FileTypeIcon'
 import { open } from '@tauri-apps/plugin-shell'
 import { createDragImageForSelection } from '@/utils/dragImage'
-import { toFileUrl, downloadUrlDescriptor } from '@/utils/fileUrl'
+import { toFileUrl } from '@/utils/fileUrl'
 // no direct invoke here; background opens the menu
 import { useThumbnail } from '@/hooks/useThumbnail'
 import { useVisibility } from '@/hooks/useVisibility'
@@ -25,7 +25,7 @@ function GridFilePreview({ file, isMac, fallbackIcon, tile }: { file: FileItem; 
   const isPdf = ext === 'pdf'
   const isAi = ext === 'ai' || ext === 'eps'
   const isPsd = ext === 'psd' || ext === 'psb'
-  const isSvg = ext === 'svg'
+
   const isStl = ext === 'stl'
   const isAppBundle = isMac && file.is_directory && file.name.toLowerCase().endsWith('.app')
 
@@ -109,11 +109,11 @@ function GridFilePreview({ file, isMac, fallbackIcon, tile }: { file: FileItem; 
 }
 
 export default function FileGrid({ files, preferences }: FileGridProps) {
-  const { selectedFiles, setSelectedFiles, navigateTo, currentPath } = useAppStore()
+  const { selectedFiles, setSelectedFiles, navigateTo } = useAppStore()
   const { renameTargetPath, setRenameTarget, renameFile } = useAppStore()
   const [renameText, setRenameText] = useState<string>('')
   const renameInputRef = useRef<HTMLInputElement>(null)
-  const [draggedFile, setDraggedFile] = useState<string | null>(null)
+
   
   // Tile width from preferences (default 120)
   // Allow full range up to 320 to match ZoomSlider
@@ -341,75 +341,99 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
 
   return (
     <div className="p-2 select-none" onClick={handleBackgroundClick}>
-      <div className="grid gap-2" style={{
+      <div
+        className="grid gap-2 file-grid"
+        onDragStart={() => {
+          const grid = document.querySelector('.file-grid') as HTMLElement
+          if (grid) grid.setAttribute('data-dragging', 'true')
+        }}
+        onDragEnd={() => {
+          const grid = document.querySelector('.file-grid') as HTMLElement
+          if (grid) grid.setAttribute('data-dragging', 'false')
+        }}
+        style={{
         gridTemplateColumns: `repeat(auto-fill, minmax(${tile}px, 1fr))`
-      }}>
+        }}
+      >
         {filteredFiles.map((file) => {
           const isSelected = selectedFiles.includes(file.path)
-          const isDragged = draggedFile === file.path
           
           return (
             <div
               key={file.path}
-              className={`relative flex flex-col items-center px-1 py-2 rounded-md cursor-pointer transition-colors duration-75 ${
+              className={`relative flex flex-col items-center px-1 py-2 rounded-md cursor-pointer transition-all duration-75 ${
                 isSelected ? 'bg-accent-selected' : 'hover:bg-app-light/70'
-              } ${isDragged ? 'opacity-50' : ''} ${
+              } ${
                 file.is_hidden ? 'opacity-60' : ''
-              }`}
+              } draggable-item`}
               data-file-item="true"
               data-file-path={file.path}
               data-tauri-drag-region={false}
               onClick={(e) => { e.stopPropagation(); handleFileClick(file, e.ctrlKey || e.metaKey) }}
               onDoubleClick={(e) => { e.stopPropagation(); handleDoubleClick(file) }}
               onMouseDown={(e) => handleMouseDownForFile(e, file)}
-              onDragStart={async (e) => {
-                setDraggedFile(file.path)
+              onDragStart={(e) => {
+                // Add dragging class after a tiny delay so it applies after ghost image is captured
+                const element = e.currentTarget
+                requestAnimationFrame(() => {
+                  element.classList.add('dragging')
+                })
                 // Determine which files to drag
                 const selected = selectedFiles.includes(file.path) && selectedFiles.length > 0
                   ? files.filter(f => selectedFiles.includes(f.path))
                   : [file]
 
                 // Build a custom drag image (stack + count)
-                let dragImage: HTMLImageElement | undefined
+                let dragVisual: { element: HTMLCanvasElement; dataUrl: string } | undefined
                 try {
-                  dragImage = createDragImageForSelection(selected, document.body)
+                  dragVisual = createDragImageForSelection(selected, document.body)
                 } catch {}
 
                 // Always set up web drag data + image so a ghost is visible
                 const dt = e.dataTransfer
                 if (dt) {
-                  if (dragImage) dt.setDragImage(dragImage, Math.floor(dragImage.width * 0.3), Math.floor(dragImage.height * 0.3))
+                  if (dragVisual) dt.setDragImage(dragVisual.element, Math.floor(dragVisual.element.width * 0.3), Math.floor(dragVisual.element.height * 0.3))
                   dt.effectAllowed = 'copy'
                   try { dt.dropEffect = 'copy' } catch {}
                   const paths = selected.map(f => f.path)
-                  for (const p of paths) {
-                    const url = (await import('@/utils/fileUrl')).toFileUrl(p)
-                    try { dt.setData('text/uri-list', (dt.getData('text/uri-list') || '') + url + '\n') } catch {}
-                  }
+                  // Ensure at least one synchronous payload so ghost appears
                   try { dt.setData('text/plain', paths.join('\n')) } catch {}
+                  try {
+                    const uris = paths.map(p => toFileUrl(p)).join('\n')
+                    dt.setData('text/uri-list', uris)
+                  } catch {}
                 }
 
-                // On macOS, also start a native drag with the same image so external apps accept files reliably
+                // On macOS, start a native drag so external apps (e.g., Bambu Studio) accept files
                 if (isMac) {
-                  try {
-                    const { invoke } = await import('@tauri-apps/api/core')
-                    await invoke('start_file_drag', { paths: selected.map(f => f.path), drag_image_png: dragImage?.src })
-                  } catch (error) {
-                    console.warn('Native drag failed:', error)
-                  } finally {
-                    // In some cases native drag consumes the dragend; ensure we reset state.
-                    setTimeout(() => setDraggedFile(null), 0)
-                  }
+                  void (async () => {
+                    try {
+                      const { invoke } = await import('@tauri-apps/api/core')
+                      await invoke('start_file_drag', { paths: selected.map(f => f.path), drag_image_png: dragVisual?.dataUrl })
+                    } catch (error) {
+                      console.warn('Native drag failed:', error)
+                    } finally {
+                      // Some native drags swallow dragend; ensure we reset
+                      setTimeout(() => {
+                        const el = document.querySelector('.draggable-item.dragging')
+                        if (el) el.classList.remove('dragging')
+                      }, 0)
+                    }
+                  })()
                 }
               }}
-              onDragEnd={() => setDraggedFile(null)}
-              draggable
+              onDragEnd={(e) => {
+                e.currentTarget.classList.remove('dragging')
+              }}
+              draggable={true}
             >
               <div className="mb-2 flex-shrink-0" style={{ width: tile, display: 'flex', justifyContent: 'center', height: Math.max(48, Math.min(tile - Math.max(3, Math.min(8, Math.round(tile * 0.03))) * 2, 320)) }}>
                 <GridFilePreview file={file} isMac={isMac} fallbackIcon={getFileIcon(file)} tile={tile} />
               </div>
               
-              <div className={`text-center`}>
+              <div
+                className={`text-center`}
+              >
                 {renameTargetPath === file.path ? (
                   <input
                     ref={renameInputRef}
