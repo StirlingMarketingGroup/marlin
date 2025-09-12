@@ -8,7 +8,7 @@ import { useAppStore } from './store/useAppStore'
 import { message } from '@tauri-apps/plugin-dialog'
 
 function App() {
-  const { currentPath, setCurrentPath, navigateTo, setLoading, setError, setFiles, loading, setHomeDir, toggleHiddenFiles, toggleFoldersFirst, directoryPreferences } = useAppStore()
+  const { currentPath, setCurrentPath, navigateTo, setLoading, setError, setFiles, loading, setHomeDir, toggleHiddenFiles, toggleFoldersFirst, directoryPreferences, globalPreferences } = useAppStore()
   const initializedRef = useRef(false)
   const [showLoadingOverlay, setShowLoadingOverlay] = useState(false)
   const prefsLoadedRef = useRef(false)
@@ -20,11 +20,12 @@ function App() {
       const { directoryPreferences, updateDirectoryPreferences } = useAppStore.getState()
       const existing = directoryPreferences[path]
       
-      // If user already set sortBy, don't override it — but fill in a missing sortOrder
-      if (existing && (existing as any).sortBy) {
-        const sb = (existing as any).sortBy as 'name' | 'size' | 'modified' | 'type'
+      // If user already set any preferences, don't override them — but fill in missing defaults
+      if (existing && Object.keys(existing).length > 0) {
+        const sb = (existing as any).sortBy as 'name' | 'size' | 'modified' | 'type' | undefined
         const so = (existing as any).sortOrder as 'asc' | 'desc' | undefined
-        if (!so) {
+        // Only fill in missing sortOrder if sortBy is set but sortOrder is not
+        if (sb && !so) {
           const defaultOrder: 'asc' | 'desc' = (sb === 'size' || sb === 'modified') ? 'desc' : 'asc'
           updateDirectoryPreferences(path, { sortOrder: defaultOrder })
           try { await invoke('set_dir_prefs', { path, prefs: JSON.stringify({ sortOrder: defaultOrder }) }) } catch {}
@@ -361,27 +362,9 @@ function App() {
     
     // Register all listeners asynchronously
     ;(async () => {
-      await register('menu:toggle_hidden', async (e) => {
-        const payload = e && typeof e.payload === 'boolean' ? (e.payload as boolean) : undefined
-        if (typeof payload === 'boolean') {
-          // Set per-directory and remember as global last-used, then reload
-          const { currentPath, updateDirectoryPreferences, setFiles, setLoading, setError, setLastUsedShowHidden } = useAppStore.getState() as any
-          updateDirectoryPreferences(currentPath, { showHidden: payload })
-          await setLastUsedShowHidden(payload)
-          try {
-            setLoading(true)
-            const files = await invoke<any[]>('read_directory', { path: currentPath })
-            setFiles(files)
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err)
-            setError(`Failed to reload files: ${msg}`)
-          } finally {
-            setLoading(false)
-          }
-          try { await invoke('update_hidden_files_menu', { checked: payload, source: 'frontend' }) } catch {}
-        } else {
-          toggleHidden()
-        }
+      await register('menu:toggle_hidden', async () => {
+        // Always use the unified toggle function
+        await toggleHidden()
       })
       
       await register('menu:view_list', () => setView('list'))
@@ -578,17 +561,41 @@ function App() {
     return () => { unsubs.forEach((u) => u()) }
   }, [])
 
-  // Keep native menu checkboxes in sync when changing directories (per-dir)
+  // Sync native menu checkboxes when preferences change
   useEffect(() => {
+    if (!initializedRef.current) return
+    
     const state = useAppStore.getState()
-    const prefs = { ...state.globalPreferences, ...state.directoryPreferences[state.currentPath] }
+    const currentDirPrefs = state.directoryPreferences[state.currentPath] || {}
+    const effectivePrefs = { ...state.globalPreferences, ...currentDirPrefs }
+    
     const sync = async () => {
-      try { await invoke('update_hidden_files_menu', { checked: !!prefs.showHidden, source: 'frontend' }) } catch {}
-      try { await invoke('update_folders_first_menu', { checked: !!prefs.foldersFirst, source: 'frontend' }) } catch {}
-      try { await invoke('update_sort_menu_state', { sort_by: prefs.sortBy, ascending: prefs.sortOrder === 'asc' }) } catch {}
+      try { 
+        await invoke('update_hidden_files_menu', { checked: !!effectivePrefs.showHidden, source: 'frontend' }) 
+      } catch (e) {
+        console.warn('Failed to sync hidden files menu:', e)
+      }
+      
+      try { 
+        await invoke('update_folders_first_menu', { checked: !!effectivePrefs.foldersFirst, source: 'frontend' }) 
+      } catch (e) {
+        console.warn('Failed to sync folders first menu:', e)
+      }
+      
+      try { 
+        await invoke('update_sort_menu_state', { 
+          sort_by: effectivePrefs.sortBy, 
+          ascending: effectivePrefs.sortOrder === 'asc' 
+        }) 
+      } catch (e) {
+        console.warn('Failed to sync sort menu:', e)
+      }
     }
-    sync()
-  }, [currentPath])
+    
+    // Sync after a small delay to ensure all state updates are complete
+    const timeoutId = setTimeout(sync, 10)
+    return () => clearTimeout(timeoutId)
+  }, [currentPath, directoryPreferences[currentPath], globalPreferences.showHidden, globalPreferences.foldersFirst])
   
   // No verbose debug logging in production UI
 

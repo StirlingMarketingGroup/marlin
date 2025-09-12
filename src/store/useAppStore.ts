@@ -73,8 +73,6 @@ interface AppState {
   setSidebarWidth: (width: number) => void
   toggleSidebar: () => void
   togglePreviewPanel: () => void
-  // Remember last used hidden files preference globally
-  setLastUsedShowHidden: (show: boolean) => Promise<void>
   showZoomSliderNow: () => void
   hideZoomSliderNow: () => void
   scheduleHideZoomSlider: (delayMs?: number) => void
@@ -270,30 +268,54 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   toggleHiddenFiles: async () => {
-    const { currentPath, directoryPreferences, updateDirectoryPreferences, setFiles, setLoading, setError } = get()
-    const current = directoryPreferences[currentPath]?.showHidden ?? get().globalPreferences.showHidden ?? false
-    const newShowHidden = !current
-    updateDirectoryPreferences(currentPath, { showHidden: newShowHidden })
-    // Also remember this as the global "last used" default for new directories
-    await (get() as any).setLastUsedShowHidden(newShowHidden)
+    const { currentPath } = get()
+    
+    // Get current state fresh each time to avoid stale closure values
+    const getCurrentState = () => {
+      const state = get()
+      return {
+        directoryPrefs: state.directoryPreferences[currentPath] || {},
+        globalPrefs: state.globalPreferences,
+        currentShowHidden: state.directoryPreferences[currentPath]?.showHidden ?? state.globalPreferences.showHidden
+      }
+    }
+    
+    const { currentShowHidden } = getCurrentState()
+    const newShowHidden = !currentShowHidden
+    
+    // Update directory preference first
+    get().updateDirectoryPreferences(currentPath, { showHidden: newShowHidden })
+    
+    // Also update global preference as default for new directories
+    get().updateGlobalPreferences({ showHidden: newShowHidden })
+    
+    // Get fresh state after updates for saving
+    const { directoryPrefs, globalPrefs } = getCurrentState()
+    const updatedDirPrefs = { ...directoryPrefs, showHidden: newShowHidden }
+    const updatedGlobalPrefs = { ...globalPrefs, showHidden: newShowHidden }
+    
+    // Save to backend with updated values
+    try {
+      await invoke('set_dir_prefs', { path: currentPath, prefs: JSON.stringify(updatedDirPrefs) })
+      
+      const freshState = get()
+      await invoke('write_preferences', { json: JSON.stringify({ 
+        globalPreferences: updatedGlobalPrefs,
+        directoryPreferences: { ...freshState.directoryPreferences, [currentPath]: updatedDirPrefs }
+      })})
+    } catch (error) {
+      console.warn('Failed to save preferences:', error)
+    }
 
-    // Sync the native menu checkbox state
+    // Sync native menu state
     try {
       await invoke('update_hidden_files_menu', { checked: newShowHidden, source: 'frontend' })
-    } catch (_) {}
-
-    // Reload files to apply filter
-    try {
-      setLoading(true)
-      setError(undefined)
-      const files = await invoke<any[]>('read_directory', { path: currentPath })
-      setFiles(files)
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      setError(`Failed to reload files: ${msg}`)
-    } finally {
-      setLoading(false)
+    } catch (error) {
+      console.warn('Failed to sync menu:', error)
     }
+
+    // Refresh directory to apply new filter
+    await get().refreshCurrentDirectory()
   },
 
   toggleFoldersFirst: async () => {
@@ -382,18 +404,5 @@ export const useAppStore = create<AppState>((set, get) => ({
         // ignore
       }
     }
-  },
-  
-  // Persist the global "last used" showHidden setting so new folders default to it
-  setLastUsedShowHidden: async (show: boolean) => {
-    set((state) => ({ globalPreferences: { ...state.globalPreferences, showHidden: show } }))
-    try {
-      // Read, merge, and write to avoid clobbering other prefs
-      const raw = await invoke<string>('read_preferences').catch(() => '{}')
-      const obj = (() => { try { return JSON.parse(raw || '{}') } catch { return {} } })() as any
-      const gp = { ...(obj.globalPreferences || {}), showHidden: show }
-      const out = { ...obj, globalPreferences: gp }
-      await invoke('write_preferences', { json: JSON.stringify(out) })
-    } catch (_) { /* ignore persistence errors */ }
   },
 }))
