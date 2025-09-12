@@ -257,12 +257,31 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
       return
     }
     
-    // Left-click: Initiate drag after a short delay
+    // Left-click: Add drag threshold to prevent accidental drags
     if (e.button === 0) {
+      const startX = e.clientX
+      const startY = e.clientY
+      const dragThreshold = 5 // pixels
+      let dragStarted = false
+
       const startDrag = () => {
-        // Determine which files to drag
-        const selected = selectedFiles.includes(file.path) && selectedFiles.length > 0
-          ? files.filter(f => selectedFiles.includes(f.path))
+        if (dragStarted) return
+        dragStarted = true
+        
+        // Clean up listeners
+        document.removeEventListener('mousemove', onMouseMove)
+        document.removeEventListener('mouseup', onMouseUp)
+        
+        // Update selection if dragging a non-selected file
+        let actualSelectedFiles = selectedFiles
+        if (!selectedFiles.includes(file.path)) {
+          actualSelectedFiles = [file.path]
+          setSelectedFiles([file.path])
+        }
+        
+        // Determine which files to drag using the actual selection
+        const selected = actualSelectedFiles.includes(file.path) && actualSelectedFiles.length > 0
+          ? files.filter(f => actualSelectedFiles.includes(f.path))
           : [file]
         
         // Add dragging visual feedback
@@ -307,8 +326,24 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
         })()
       }
 
-      // Start drag immediately for better positioning
-      startDrag()
+      const onMouseMove = (moveEvent: MouseEvent) => {
+        const deltaX = moveEvent.clientX - startX
+        const deltaY = moveEvent.clientY - startY
+        const distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY)
+        
+        if (distance >= dragThreshold) {
+          startDrag()
+        }
+      }
+
+      const onMouseUp = () => {
+        document.removeEventListener('mousemove', onMouseMove)
+        document.removeEventListener('mouseup', onMouseUp)
+      }
+
+      // Add temporary listeners to detect movement
+      document.addEventListener('mousemove', onMouseMove)
+      document.addEventListener('mouseup', onMouseUp)
     }
   }
 
