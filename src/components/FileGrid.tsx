@@ -6,9 +6,8 @@ import AppIcon from '@/components/AppIcon'
 import { FileTypeIcon, resolveVSCodeIcon } from '@/components/FileTypeIcon'
 import { open } from '@tauri-apps/plugin-shell'
 
-import { toFileUrl } from '@/utils/fileUrl'
 import { invoke } from '@tauri-apps/api/core'
-import { createDragImageForSelection } from '@/utils/dragImage'
+import { createDragImageForSelection, createDragImageForSelectionAsync } from '@/utils/dragImage'
 // no direct invoke here; background opens the menu
 import { useThumbnail } from '@/hooks/useThumbnail'
 import { useVisibility } from '@/hooks/useVisibility'
@@ -115,6 +114,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
   const { renameTargetPath, setRenameTarget, renameFile } = useAppStore()
   const [renameText, setRenameText] = useState<string>('')
   const [draggedFile, setDraggedFile] = useState<string | null>(null)
+  const [hoveredFile, setHoveredFile] = useState<string | null>(null)
   const renameInputRef = useRef<HTMLInputElement>(null)
 
   
@@ -291,15 +291,21 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
         // Perform native drag
         void (async () => {
           try {
-            // Create drag preview image
+            // Create drag preview image with nice icons
             let dragImageDataUrl: string | undefined
-            let dragCanvas: HTMLCanvasElement | undefined
             try {
-              const dragVisual = createDragImageForSelection(selected, document.body)
+              // Try to use async version to render SVG icons properly
+              const dragVisual = await createDragImageForSelectionAsync(selected, document.body)
               dragImageDataUrl = dragVisual.dataUrl
-              dragCanvas = dragVisual.element
             } catch (e) {
-              console.warn('Failed to create drag image:', e)
+              console.warn('Failed to create async drag image, falling back:', e)
+              // Fallback to synchronous version
+              try {
+                const dragVisual = createDragImageForSelection(selected, document.body)
+                dragImageDataUrl = dragVisual.dataUrl
+              } catch (e2) {
+                console.warn('Failed to create drag image:', e2)
+              }
             }
             
             // Use new unified native drag API
@@ -311,8 +317,9 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
           } catch (error) {
             console.warn('Native drag failed:', error)
           } finally {
-            // Clear dragging state
+            // Clear dragging state and hover state
             setDraggedFile(null)
+            setHoveredFile(null)
           }
         })()
       }
@@ -443,7 +450,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
             <div
               key={file.path}
               className={`relative flex flex-col items-center px-1 py-2 rounded-md cursor-pointer transition-all duration-75 ${
-                isSelected ? 'bg-accent-selected' : 'hover:bg-app-light/70'
+                isSelected ? 'bg-accent-selected' : hoveredFile === file.path ? 'bg-app-light/70' : ''
               } ${isDragged ? 'opacity-50' : ''} ${
                 file.is_hidden ? 'opacity-60' : ''
               }`}
@@ -453,6 +460,8 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
               onClick={(e) => { e.stopPropagation(); handleFileClick(file, e.ctrlKey || e.metaKey) }}
               onDoubleClick={(e) => { e.stopPropagation(); handleDoubleClick(file) }}
               onMouseDown={(e) => handleMouseDownForFile(e, file)}
+              onMouseEnter={() => setHoveredFile(file.path)}
+              onMouseLeave={() => setHoveredFile(null)}
               draggable={false}
 
             >

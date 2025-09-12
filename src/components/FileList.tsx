@@ -5,8 +5,8 @@ import { useAppStore } from '../store/useAppStore'
 import AppIcon from '@/components/AppIcon'
 import { FileTypeIcon, resolveVSCodeIcon } from '@/components/FileTypeIcon'
 import { open } from '@tauri-apps/plugin-shell'
-import { toFileUrl, downloadUrlDescriptor } from '@/utils/fileUrl'
-import { createDragImageForSelection } from '@/utils/dragImage'
+
+import { createDragImageForSelection, createDragImageForSelectionAsync } from '@/utils/dragImage'
 import { invoke } from '@tauri-apps/api/core'
 // no direct invoke here; background opens the menu
 import { useThumbnail } from '@/hooks/useThumbnail'
@@ -95,12 +95,13 @@ function ListFilePreview({ file, isMac, fallbackIcon }: { file: FileItem; isMac:
 }
 
 export default function FileList({ files, preferences }: FileListProps) {
-  const { selectedFiles, setSelectedFiles, navigateTo, currentPath } = useAppStore()
+  const { selectedFiles, setSelectedFiles, navigateTo } = useAppStore()
   const { renameTargetPath, setRenameTarget, renameFile } = useAppStore()
   const [renameText, setRenameText] = useState<string>('')
   const renameInputRef = useRef<HTMLInputElement>(null)
   const { fetchAppIcon } = useAppStore()
   const [draggedFile, setDraggedFile] = useState<string | null>(null)
+  const [hoveredFile, setHoveredFile] = useState<string | null>(null)
   
   // Dynamically compute a safe middle-truncation length for the Name column
   const nameHeaderRef = useRef<HTMLButtonElement>(null)
@@ -358,15 +359,21 @@ export default function FileList({ files, preferences }: FileListProps) {
         // Perform native drag
         void (async () => {
           try {
-            // Create drag preview image
+            // Create drag preview image with nice icons
             let dragImageDataUrl: string | undefined
-            let dragCanvas: HTMLCanvasElement | undefined
             try {
-              const dragVisual = createDragImageForSelection(selected, document.body)
+              // Try to use async version to render SVG icons properly
+              const dragVisual = await createDragImageForSelectionAsync(selected, document.body)
               dragImageDataUrl = dragVisual.dataUrl
-              dragCanvas = dragVisual.element
             } catch (e) {
-              console.warn('Failed to create drag image:', e)
+              console.warn('Failed to create async drag image, falling back:', e)
+              // Fallback to synchronous version
+              try {
+                const dragVisual = createDragImageForSelection(selected, document.body)
+                dragImageDataUrl = dragVisual.dataUrl
+              } catch (e2) {
+                console.warn('Failed to create drag image:', e2)
+              }
             }
             
             // Use new unified native drag API
@@ -378,8 +385,9 @@ export default function FileList({ files, preferences }: FileListProps) {
           } catch (error) {
             console.warn('Native drag failed:', error)
           } finally {
-            // Clear dragging state
+            // Clear dragging state and hover state
             setDraggedFile(null)
+            setHoveredFile(null)
           }
         })()
       }
@@ -491,7 +499,7 @@ export default function FileList({ files, preferences }: FileListProps) {
             <div
               key={file.path}
               className={`relative grid grid-cols-12 gap-3 py-[2px] leading-5 text-[13px] cursor-pointer transition-colors duration-75 rounded-full ${
-                isSelected ? 'bg-accent-selected text-white' : 'odd:bg-app-gray hover:bg-app-light'
+                isSelected ? 'bg-accent-selected text-white' : hoveredFile === file.path ? 'bg-app-light' : 'odd:bg-app-gray'
               } ${isDragged ? 'opacity-50' : ''} ${
                 file.is_hidden ? 'opacity-60' : ''
               }`}
@@ -501,6 +509,8 @@ export default function FileList({ files, preferences }: FileListProps) {
               onClick={(e) => { e.stopPropagation(); handleFileClick(file, e.ctrlKey || e.metaKey) }}
               onDoubleClick={(e) => { e.stopPropagation(); handleDoubleClick(file) }}
               onMouseDown={(e) => handleMouseDownForFile(e, file)}
+              onMouseEnter={() => setHoveredFile(file.path)}
+              onMouseLeave={() => setHoveredFile(null)}
               draggable={false}
             >
               {/* Name column */}

@@ -46,7 +46,50 @@ function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: numbe
   ctx.closePath()
 }
 
-function drawThumbOrBadge(ctx: CanvasRenderingContext2D, vis: DragVisual, x: number, y: number, size: number) {
+function drawFolderIcon(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number) {
+  // Draw a simple folder icon
+  const folderHeight = h * 0.7
+  const tabWidth = w * 0.3
+  const tabHeight = h * 0.15
+  const cornerRadius = Math.min(w, h) * 0.06
+  
+  ctx.save()
+  
+  // Get the accent color from CSS variable (falls back to default if not found)
+  const computedStyle = getComputedStyle(document.documentElement)
+  const accentColor = computedStyle.getPropertyValue('--accent').trim() || '#3584e4'
+  
+  // Folder color (using the app's accent color)
+  ctx.fillStyle = accentColor
+  
+  // Draw folder tab
+  ctx.beginPath()
+  ctx.moveTo(x + cornerRadius, y + h - folderHeight)
+  ctx.lineTo(x + tabWidth, y + h - folderHeight)
+  ctx.lineTo(x + tabWidth + tabHeight, y + h - folderHeight + tabHeight)
+  ctx.lineTo(x + w - cornerRadius, y + h - folderHeight + tabHeight)
+  ctx.arcTo(x + w, y + h - folderHeight + tabHeight, x + w, y + h - folderHeight + tabHeight + cornerRadius, cornerRadius)
+  ctx.lineTo(x + w, y + h - cornerRadius)
+  ctx.arcTo(x + w, y + h, x + w - cornerRadius, y + h, cornerRadius)
+  ctx.lineTo(x + cornerRadius, y + h)
+  ctx.arcTo(x, y + h, x, y + h - cornerRadius, cornerRadius)
+  ctx.lineTo(x, y + h - folderHeight + cornerRadius)
+  ctx.arcTo(x, y + h - folderHeight, x + cornerRadius, y + h - folderHeight, cornerRadius)
+  ctx.closePath()
+  ctx.fill()
+  
+  // Add subtle gradient for depth using the accent color
+  const gradient = ctx.createLinearGradient(x, y + h - folderHeight, x, y + h)
+  gradient.addColorStop(0, accentColor)
+  // Darken the accent color slightly for the gradient
+  gradient.addColorStop(1, accentColor + 'dd') // Adding transparency for subtle darkening
+  ctx.fillStyle = gradient
+  ctx.fill()
+  
+  ctx.restore()
+}
+
+function drawThumbOrBadgeWithIcon(ctx: CanvasRenderingContext2D, vis: DragVisual, x: number, y: number, size: number, prerenderedIcon?: HTMLImageElement | null) {
   const pad = Math.max(4, Math.floor(size * 0.06))
   const radius = Math.floor(size * 0.12)
   
@@ -85,7 +128,26 @@ function drawThumbOrBadge(ctx: CanvasRenderingContext2D, vis: DragVisual, x: num
     return
   }
 
-  // Fallback: draw extension badge with muted colors
+  // Check if it's a directory
+  if (file.is_directory) {
+    // Draw folder icon for directories
+    const iconSize = Math.min(innerW, innerH) * 0.6
+    const iconX = innerX + (innerW - iconSize) / 2
+    const iconY = innerY + (innerH - iconSize) / 2
+    drawFolderIcon(ctx, iconX, iconY, iconSize, iconSize)
+    return
+  }
+
+  // If we have a prerendered icon, use it
+  if (prerenderedIcon) {
+    const iconSize = Math.min(innerW, innerH) * 0.65
+    const iconX = innerX + (innerW - iconSize) / 2
+    const iconY = innerY + (innerH - iconSize) / 2
+    ctx.drawImage(prerenderedIcon, iconX, iconY, iconSize, iconSize)
+    return
+  }
+
+  // Fallback: draw extension badge with muted colors for files
   const { bg, fg } = extColors(file.extension)
   ctx.fillStyle = bg
   roundRect(ctx, innerX, innerY, innerW, innerH, Math.floor(radius * 0.8))
@@ -97,7 +159,7 @@ function drawThumbOrBadge(ctx: CanvasRenderingContext2D, vis: DragVisual, x: num
   roundRect(ctx, innerX, innerY, innerW, innerH, Math.floor(radius * 0.8))
   ctx.stroke()
   
-  const label = (file.extension || (file.is_directory ? 'DIR' : 'FILE')).toUpperCase().slice(0, 6)
+  const label = (file.extension || 'FILE').toUpperCase().slice(0, 6)
   ctx.fillStyle = fg
   ctx.font = `600 ${Math.floor(size * 0.18)}px -apple-system, ui-sans-serif, system-ui, Segoe UI, Roboto`
   ctx.textAlign = 'center'
@@ -105,11 +167,11 @@ function drawThumbOrBadge(ctx: CanvasRenderingContext2D, vis: DragVisual, x: num
   ctx.fillText(label, innerX + innerW / 2, innerY + innerH / 2)
 }
 
-export function createDragImageForSelection(
+export async function createDragImageForSelectionAsync(
   files: FileItem[],
   container: HTMLElement,
   options?: { size?: number }
-): { element: HTMLCanvasElement; dataUrl: string } {
+): Promise<{ element: HTMLCanvasElement; dataUrl: string }> {
   const count = Math.max(1, Math.min(files.length, 3))
   // Slightly smaller for more subtle appearance
   const base = Math.max(96, Math.min(144, options?.size ?? 120))
@@ -128,6 +190,61 @@ export function createDragImageForSelection(
     return { file, el }
   })
 
+  // Pre-render all SVG icons to images
+  const prerenderedIcons: (HTMLImageElement | null)[] = await Promise.all(
+    visuals.map(async (vis) => {
+      const svgEl = vis.el?.querySelector('svg') as SVGElement | null
+      if (!svgEl) return null
+      
+      try {
+        const svgClone = svgEl.cloneNode(true) as SVGElement
+        const viewBox = svgEl.getAttribute('viewBox') || '0 0 24 24'
+        svgClone.setAttribute('viewBox', viewBox)
+        svgClone.setAttribute('width', '100')
+        svgClone.setAttribute('height', '100')
+        
+        // Force white/light color for all paths and elements in the SVG
+        svgClone.setAttribute('fill', 'currentColor')
+        svgClone.style.color = '#e6e6e7' // app-text color
+        
+        // Also update any child elements that might have explicit fill
+        const elements = svgClone.querySelectorAll('*')
+        elements.forEach(el => {
+          if (el.hasAttribute('fill') && el.getAttribute('fill') !== 'none') {
+            el.setAttribute('fill', '#e6e6e7')
+          }
+          if (el.hasAttribute('stroke') && el.getAttribute('stroke') !== 'none') {
+            el.setAttribute('stroke', '#e6e6e7')
+          }
+        })
+        
+        const svgString = new XMLSerializer().serializeToString(svgClone)
+        const blob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' })
+        const url = URL.createObjectURL(blob)
+        
+        return new Promise<HTMLImageElement | null>((resolve) => {
+          const img = new Image()
+          img.onload = () => {
+            URL.revokeObjectURL(url)
+            resolve(img)
+          }
+          img.onerror = () => {
+            URL.revokeObjectURL(url)
+            resolve(null)
+          }
+          img.src = url
+        })
+      } catch {
+        return null
+      }
+    })
+  )
+
+  // Store prerendered icons on visuals
+  visuals.forEach((vis, i) => {
+    (vis as any).prerenderedIcon = prerenderedIcons[i]
+  })
+
   // Softer, more subtle shadow
   ctx.save()
   ctx.shadowColor = 'rgba(0,0,0,0.25)'
@@ -139,7 +256,7 @@ export function createDragImageForSelection(
   for (let i = count - 1; i >= 0; i--) {
     const dx = spread * i
     const dy = spread * i
-    drawThumbOrBadge(ctx, visuals[i], dx, dy, base)
+    drawThumbOrBadgeWithIcon(ctx, visuals[i], dx, dy, base, (visuals[i] as any).prerenderedIcon)
   }
   ctx.restore()
 
@@ -205,5 +322,93 @@ export function createDragImageForSelection(
 
   const dataUrl = canvas.toDataURL('image/png')
   
+  return { element: canvas, dataUrl }
+}
+
+// Keep the synchronous version as a fallback
+export function createDragImageForSelection(
+  files: FileItem[],
+  container: HTMLElement,
+  options?: { size?: number }
+): { element: HTMLCanvasElement; dataUrl: string } {
+  const count = Math.max(1, Math.min(files.length, 3))
+  const base = Math.max(96, Math.min(144, options?.size ?? 120))
+  const spread = Math.floor(base * 0.12)
+  const textHeight = 24
+  const w = base + spread * (count - 1)
+  const h = base + spread * (count - 1) + textHeight
+  const canvas = document.createElement('canvas')
+  canvas.width = w
+  canvas.height = h
+  const ctx = canvas.getContext('2d')!
+
+  const visuals: DragVisual[] = files.slice(0, count).map((file) => {
+    const el = container.querySelector(`[data-file-path="${CSS.escape(file.path)}"]`) as HTMLElement | null
+    return { file, el }
+  })
+
+  ctx.save()
+  ctx.shadowColor = 'rgba(0,0,0,0.25)'
+  ctx.shadowBlur = Math.floor(base * 0.1)
+  ctx.shadowOffsetX = 0
+  ctx.shadowOffsetY = Math.floor(base * 0.03)
+
+  for (let i = count - 1; i >= 0; i--) {
+    const dx = spread * i
+    const dy = spread * i
+    drawThumbOrBadgeWithIcon(ctx, visuals[i], dx, dy, base, null)
+  }
+  ctx.restore()
+
+  // Count badge and text (same as async version)
+  if (files.length > 1) {
+    const badgeR = Math.max(11, Math.floor(base * 0.15))
+    const cx = w - badgeR - 6
+    const cy = badgeR + 6
+    
+    ctx.beginPath()
+    ctx.fillStyle = 'rgba(53, 132, 228, 0.9)'
+    ctx.arc(cx, cy, badgeR, 0, Math.PI * 2)
+    ctx.fill()
+    
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)'
+    ctx.lineWidth = 1
+    ctx.beginPath()
+    ctx.arc(cx, cy, badgeR, 0, Math.PI * 2)
+    ctx.stroke()
+    
+    ctx.font = `600 ${Math.floor(badgeR * 1.0)}px -apple-system, ui-sans-serif, system-ui, Segoe UI, Roboto`
+    ctx.fillStyle = '#ffffff'
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    const text = String(files.length)
+    ctx.fillText(text, cx, cy)
+  }
+
+  const cardStackHeight = base + spread * (count - 1)
+  const textY = cardStackHeight + 14
+  
+  let displayText: string
+  if (files.length === 1) {
+    const fileName = files[0].name
+    displayText = fileName.length > 30 ? fileName.substring(0, 27) + '...' : fileName
+  } else {
+    displayText = `${files.length} items`
+  }
+  
+  ctx.save()
+  const fontSize = 11
+  ctx.font = `400 ${fontSize}px -apple-system, ui-sans-serif, system-ui, Segoe UI, Roboto`
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.5)'
+  ctx.shadowBlur = 2
+  ctx.shadowOffsetX = 0
+  ctx.shadowOffsetY = 1
+  ctx.fillStyle = 'rgba(230, 230, 231, 0.9)'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.fillText(displayText, w / 2, textY)
+  ctx.restore()
+
+  const dataUrl = canvas.toDataURL('image/png')
   return { element: canvas, dataUrl }
 }
