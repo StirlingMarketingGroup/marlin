@@ -1,70 +1,10 @@
 #![allow(unexpected_cfgs)]
 
 use cocoa::base::{id, nil, YES, NO};
-use cocoa::foundation::{NSAutoreleasePool, NSString, NSPoint, NSRect, NSSize};
-use objc::{class, declare::ClassDecl, runtime::{Class, Object, Sel, BOOL}, sel, sel_impl, msg_send};
+use cocoa::foundation::{NSAutoreleasePool, NSString, NSPoint, NSSize};
+use objc::{class, msg_send, runtime::BOOL, sel, sel_impl};
 use base64::Engine as _;
 
-// NSDraggingSource implementation
-extern "C" fn dragging_source_operation_mask_for_dragging_context(
-    _this: &Object, 
-    _sel: Sel, 
-    _session: id, 
-    context: u64
-) -> u64 {
-    // NSDraggingContext: 0 = OutsideApplication, 1 = WithinApplication  
-    // Return Copy (1) for outside, Every (!0) for inside
-    if context == 0 { 1 } else { !0 }
-}
-
-extern "C" fn ignore_modifier_keys_while_dragging(_this: &Object, _sel: Sel) -> BOOL {
-    YES // Ignore modifier keys for consistent operation
-}
-
-extern "C" fn dragging_session_ended_at_point_operation(
-    _this: &Object,
-    _sel: Sel,
-    _session: id,
-    _screen_point: NSPoint,
-    _operation: u64,
-) {
-    // Optional cleanup - no-op for our use case
-}
-
-fn ensure_drag_source_class() -> *const Class {
-    use std::sync::Once;
-    static mut CLS: *const Class = std::ptr::null();
-    static INIT: Once = Once::new();
-    
-    INIT.call_once(|| unsafe {
-        let superclass = class!(NSObject);
-        let mut decl = ClassDecl::new("MarlinNativeDragSource", superclass)
-            .expect("Failed to create MarlinNativeDragSource class");
-        
-        decl.add_method(
-            sel!(draggingSession:sourceOperationMaskForDraggingContext:),
-            dragging_source_operation_mask_for_dragging_context as extern "C" fn(&Object, Sel, id, u64) -> u64
-        );
-        decl.add_method(
-            sel!(ignoreModifierKeysWhileDragging),
-            ignore_modifier_keys_while_dragging as extern "C" fn(&Object, Sel) -> BOOL
-        );
-        decl.add_method(
-            sel!(draggingSession:endedAtPoint:operation:),
-            dragging_session_ended_at_point_operation as extern "C" fn(&Object, Sel, id, NSPoint, u64)
-        );
-        
-        let cls = decl.register();
-        CLS = cls;
-    });
-    
-    unsafe { CLS }
-}
-
-fn create_drag_source() -> id {
-    let cls = ensure_drag_source_class();
-    unsafe { msg_send![cls, new] }
-}
 
 pub fn start_native_drag(paths: Vec<String>, preview_image: Option<String>, _drag_offset_y: Option<f64>) -> Result<(), String> {
     unsafe {
@@ -111,8 +51,8 @@ pub fn start_native_drag(paths: Vec<String>, preview_image: Option<String>, _dra
         
         let image_size: NSSize = msg_send![drag_img, size];
         
-        // Ensure image has a reasonable size for visibility
-        let final_image_size = if image_size.width < 64.0 || image_size.height < 64.0 {
+        // Ensure image has a reasonable size and handle zero-size images
+        let final_image_size = if image_size.width <= 0.0 || image_size.height <= 0.0 || image_size.width < 64.0 || image_size.height < 64.0 {
             let new_size = NSSize::new(128.0, 128.0);
             let _: () = msg_send![drag_img, setSize: new_size];
             new_size
@@ -120,90 +60,55 @@ pub fn start_native_drag(paths: Vec<String>, preview_image: Option<String>, _dra
             image_size
         };
         
-        // Create NSMutableArray for dragging items
-        let dragging_items: id = msg_send![class!(NSMutableArray), array];
+        // Use the deprecated but more reliable dragImage method for better positioning control
+        // Create NSDragPboard with file paths
+        let drag_pboard_name: id = NSString::alloc(nil).init_str("NSDragPboard");
+        let pb: id = msg_send![class!(NSPasteboard), pasteboardWithName: drag_pboard_name];
         
-        for (index, path) in paths.iter().enumerate() {
-            // Create NSURL for file
+        if pb == nil {
+            return Err("Failed to create NSDragPboard".into());
+        }
+        
+        // Clear and set pasteboard types
+        let _: () = msg_send![pb, clearContents];
+        let nsfilenames_type: id = NSString::alloc(nil).init_str("NSFilenamesPboardType");
+        let types_array: id = msg_send![class!(NSArray), arrayWithObject: nsfilenames_type];
+        let _: BOOL = msg_send![pb, declareTypes: types_array owner: nil];
+        
+        // Create NSArray of file paths
+        let paths_array: id = msg_send![class!(NSMutableArray), array];
+        for path in &paths {
             let path_nsstring: id = NSString::alloc(nil).init_str(path);
-            let file_url: id = msg_send![class!(NSURL), fileURLWithPath: path_nsstring];
-            
-            if file_url == nil {
-                continue; // Skip invalid paths
-            }
-            
-            // Create NSDraggingItem with the URL as pasteboard writer
-            let dragging_item: id = msg_send![class!(NSDraggingItem), alloc];
-            let dragging_item: id = msg_send![dragging_item, initWithPasteboardWriter: file_url];
-            
-            // Position frame exactly at cursor with proper image size
-            // This should minimize or eliminate the flying animation
-            let stack_offset = index as f64 * 4.0;
-            let frame = NSRect {
-                origin: NSPoint::new(
-                    mouse_in_source.x - final_image_size.width / 2.0 + stack_offset,
-                    mouse_in_source.y - final_image_size.height / 2.0 + stack_offset
-                ),
-                size: final_image_size,
-            };
-            
-            // Set dragging frame and contents (image)
-            let _: () = msg_send![dragging_item, setDraggingFrame: frame contents: drag_img];
-            
-            // Note: Legacy pasteboard types removed due to API incompatibility  
-            // Modern NSURL pasteboard writers should be compatible with most apps
-            
-            // Add to items array
-            let _: () = msg_send![dragging_items, addObject: dragging_item];
+            let _: () = msg_send![paths_array, addObject: path_nsstring];
         }
         
-        // Synthesize NSEvent (like Electron does)
+        // Set the paths on the pasteboard
+        let success: BOOL = msg_send![pb, setPropertyList: paths_array forType: nsfilenames_type];
+        if success == NO {
+            return Err("Failed to set file paths on pasteboard".into());
+        }
+        
+        // Get current event for the drag
         let current_event: id = msg_send![ns_app, currentEvent];
-        let timestamp: f64 = if current_event != nil {
-            msg_send![current_event, timestamp]
-        } else {
-            0.0
-        };
         
-        let window_number: i64 = msg_send![window, windowNumber];
+        // Calculate drag position - center the image exactly on the mouse cursor
+        let drag_point = NSPoint::new(
+            mouse_in_source.x - (final_image_size.width / 2.0),
+            mouse_in_source.y + (final_image_size.height / 2.0)  // Adjust for flipped coordinates
+        );
         
-        // Create NSEventTypeLeftMouseDragged (6)
-        let drag_event: id = msg_send![
-            class!(NSEvent),
-            mouseEventWithType: 6u64
-            location: mouse_in_source
-            modifierFlags: 0u64
-            timestamp: timestamp
-            windowNumber: window_number
-            context: nil
-            eventNumber: 0
-            clickCount: 1
-            pressure: 1.0f64
-        ];
-        
-        if drag_event == nil {
-            return Err("Failed to synthesize drag event".into());
-        }
-        
-        // Create drag source
-        let drag_source = create_drag_source();
-        
-        // Begin dragging session
-        let session: id = msg_send![
+        // Use the deprecated but working dragImage method
+        let slide_back: BOOL = YES;
+        let _: () = msg_send![
             source_view,
-            beginDraggingSessionWithItems: dragging_items
-            event: drag_event
-            source: drag_source
+            dragImage: drag_img
+            at: drag_point
+            offset: NSPoint::new(0.0, 0.0)
+            event: current_event
+            pasteboard: pb
+            source: source_view
+            slideBack: slide_back
         ];
-        
-        // Disable animations to prevent "flying in" effect
-        let _: () = msg_send![session, setAnimatesToStartingPositionsOnCancelOrFail: NO];
-        
-        // Set dragging formation for multiple files (stack formation looks nice)
-        if paths.len() > 1 {
-            // NSDraggingFormationStack = 1
-            let _: () = msg_send![session, setDraggingFormation: 1u64];
-        }
         
         Ok(())
     }

@@ -292,7 +292,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
             await invoke('start_native_drag', { 
               paths: selected.map(f => f.path),
               preview_image: dragImageDataUrl,
-              drag_offset_y: 0  // Centered on cursor
+              drag_offset_y: 0  // Will be handled in backend
             })
           } catch (error) {
             console.warn('Native drag failed:', error)
@@ -307,8 +307,8 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
         })()
       }
 
-      // Start drag on next frame to avoid interfering with click handling
-      requestAnimationFrame(startDrag)
+      // Start drag immediately for better positioning
+      startDrag()
     }
   }
 
