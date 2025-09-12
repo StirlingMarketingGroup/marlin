@@ -91,8 +91,9 @@ export function createDragImageForSelection(
   // Make it bigger for visibility
   const base = Math.max(128, Math.min(256, options?.size ?? 160))
   const spread = Math.floor(base * 0.18)
+  const textHeight = 32 // Extra space for file name text
   const w = base + spread * (count - 1)
-  const h = base + spread * (count - 1)
+  const h = base + spread * (count - 1) + textHeight
   const canvas = document.createElement('canvas')
   canvas.width = w
   canvas.height = h
@@ -138,15 +139,48 @@ export function createDragImageForSelection(
     ctx.fillText(text, cx, cy)
   }
 
-  const dataUrl = canvas.toDataURL('image/png')
+  // File name text
+  const cardStackHeight = base + spread * (count - 1)
+  const textY = cardStackHeight + 20 // 20px below the cards
+  const maxTextWidth = w - 16 // 8px padding on each side
   
-  // Debug: log canvas info
-  console.log('Created drag image canvas:', {
-    width: canvas.width,
-    height: canvas.height,
-    fileCount: files.length,
-    dataUrlLength: dataUrl.length
-  })
+  // Determine what text to show
+  let displayText: string
+  if (files.length === 1) {
+    // Single file: show the file name
+    const fileName = files[0].name
+    displayText = fileName.length > 25 ? fileName.substring(0, 22) + '...' : fileName
+  } else {
+    // Multiple files: show count summary
+    displayText = `${files.length} files`
+  }
+  
+  // Draw text background (rounded rectangle)
+  ctx.save()
+  const fontSize = 12
+  ctx.font = `${fontSize}px -apple-system, system-ui, Segoe UI, Roboto`
+  const textMetrics = ctx.measureText(displayText)
+  const textWidth = textMetrics.width
+  const bgWidth = Math.min(textWidth + 12, maxTextWidth) // 6px padding on each side
+  const bgHeight = 18
+  const bgX = (w - bgWidth) / 2
+  const bgY = textY - bgHeight / 2
+  
+  // Semi-transparent background
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.75)'
+  const cornerRadius = 4
+  ctx.beginPath()
+  ctx.roundRect(bgX, bgY, bgWidth, bgHeight, cornerRadius)
+  ctx.fill()
+  
+  // Text
+  ctx.fillStyle = '#ffffff'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.fillText(displayText, w / 2, textY)
+  ctx.restore()
+
+  const dataUrl = canvas.toDataURL('image/png')
   
   return { element: canvas, dataUrl }
 }

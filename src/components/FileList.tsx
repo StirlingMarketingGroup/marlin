@@ -372,8 +372,8 @@ export default function FileList({ files, preferences }: FileListProps) {
             // Use new unified native drag API
             await invoke('start_native_drag', { 
               paths: selected.map(f => f.path),
-              preview_image: dragImageDataUrl,
-              drag_offset_y: 0  // Will be handled in backend
+              previewImage: dragImageDataUrl,
+              dragOffsetY: 0
             })
           } catch (error) {
             console.warn('Native drag failed:', error)

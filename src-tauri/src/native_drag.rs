@@ -12,6 +12,7 @@ pub fn start_native_drag(paths: Vec<String>, preview_image: Option<String>, _dra
             return Err("No paths provided".into());
         }
         
+        
         let _pool: id = NSAutoreleasePool::new(nil);
 
         // Get NSApplication and key window
@@ -44,7 +45,10 @@ pub fn start_native_drag(paths: Vec<String>, preview_image: Option<String>, _dra
         
         // Create drag image
         let drag_img: id = if let Some(ref data_url) = preview_image {
-            create_drag_image_from_data_url(data_url)?
+            match create_drag_image_from_data_url(data_url) {
+                Ok(img) => img,
+                Err(_) => create_drag_image_from_file_icon(&paths[0])?
+            }
         } else {
             create_drag_image_from_file_icon(&paths[0])?
         };

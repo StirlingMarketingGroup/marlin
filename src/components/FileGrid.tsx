@@ -114,6 +114,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
   const { selectedFiles, setSelectedFiles, navigateTo } = useAppStore()
   const { renameTargetPath, setRenameTarget, renameFile } = useAppStore()
   const [renameText, setRenameText] = useState<string>('')
+  const [draggedFile, setDraggedFile] = useState<string | null>(null)
   const renameInputRef = useRef<HTMLInputElement>(null)
 
   
@@ -284,14 +285,8 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
           ? files.filter(f => actualSelectedFiles.includes(f.path))
           : [file]
         
-        // Add dragging visual feedback
-        const addDraggingClasses = (paths: string[]) => {
-          for (const p of paths) {
-            const el = document.querySelector(`[data-file-path="${CSS.escape(p)}"]`)
-            if (el) el.classList.add('dragging')
-          }
-        }
-        addDraggingClasses(selected.map(f => f.path))
+        // Set dragging state for visual feedback
+        setDraggedFile(file.path)
 
         // Perform native drag
         void (async () => {
@@ -308,20 +303,16 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
             }
             
             // Use new unified native drag API
-            await invoke('start_native_drag', { 
+            await invoke('start_native_drag', {
               paths: selected.map(f => f.path),
-              preview_image: dragImageDataUrl,
-              drag_offset_y: 0  // Will be handled in backend
+              previewImage: dragImageDataUrl,
+              dragOffsetY: 0
             })
           } catch (error) {
             console.warn('Native drag failed:', error)
           } finally {
-            // Remove dragging visual feedback
-            const paths = selected.map(f => f.path)
-            for (const p of paths) {
-              const el = document.querySelector(`[data-file-path="${CSS.escape(p)}"]`)
-              if (el) el.classList.remove('dragging')
-            }
+            // Clear dragging state
+            setDraggedFile(null)
           }
         })()
       }
@@ -446,15 +437,16 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
       >
         {filteredFiles.map((file) => {
           const isSelected = selectedFiles.includes(file.path)
+          const isDragged = draggedFile !== null && (draggedFile === file.path || selectedFiles.includes(file.path))
           
           return (
             <div
               key={file.path}
               className={`relative flex flex-col items-center px-1 py-2 rounded-md cursor-pointer transition-all duration-75 ${
                 isSelected ? 'bg-accent-selected' : 'hover:bg-app-light/70'
-              } ${
+              } ${isDragged ? 'opacity-50' : ''} ${
                 file.is_hidden ? 'opacity-60' : ''
-              } draggable-item`}
+              }`}
               data-file-item="true"
               data-file-path={file.path}
               data-tauri-drag-region={false}
