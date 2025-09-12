@@ -1,5 +1,7 @@
 import { create } from 'zustand'
 import { FileItem, ViewPreferences, Theme } from '../types'
+import { invoke } from '@tauri-apps/api/core'
+import { message } from '@tauri-apps/plugin-dialog'
 
 // Concurrency limiter for app icon generation requests (macOS)
 let __iconQueue: Array<() => void> = []
@@ -151,7 +153,6 @@ export const useAppStore = create<AppState>((set, get) => ({
     // Update native menu selection state (ignore errors in dev)
     ;(async () => {
       try {
-        const { invoke } = await import('@tauri-apps/api/core')
         await invoke('update_selection_menu_state', { has_selection: Array.isArray(files) && files.length > 0 })
       } catch { /* ignore */ }
     })()
@@ -278,13 +279,11 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     // Sync the native menu checkbox state
     try {
-      const { invoke } = await import('@tauri-apps/api/core')
       await invoke('update_hidden_files_menu', { checked: newShowHidden, source: 'frontend' })
     } catch (_) {}
 
     // Reload files to apply filter
     try {
-      const { invoke } = await import('@tauri-apps/api/core')
       setLoading(true)
       setError(undefined)
       const files = await invoke<any[]>('read_directory', { path: currentPath })
@@ -306,7 +305,6 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     // Sync the native menu checkbox state
     try {
-      const { invoke } = await import('@tauri-apps/api/core')
       await invoke('update_folders_first_menu', { checked: newValue, source: 'frontend' })
     } catch (_) {}
   },
@@ -314,7 +312,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   refreshCurrentDirectory: async () => {
     const { currentPath, setFiles, setLoading, setError } = get()
     try {
-      const { invoke } = await import('@tauri-apps/api/core')
       setLoading(true)
       setError(undefined)
       const files = await invoke<any[]>('read_directory', { path: currentPath })
@@ -332,7 +329,6 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (appIconCache[path]) return appIconCache[path]
     return __scheduleIconTask(async () => {
       try {
-        const { invoke } = await import('@tauri-apps/api/core')
         const dataUrl = await invoke<string>('get_application_icon', { path, size })
         // dataUrl is already a data:image/png;base64,... string on macOS
         set((state) => ({ appIconCache: { ...state.appIconCache, [path]: dataUrl } }))
@@ -364,7 +360,6 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (/[\\/]/.test(trimmed)) {
       // Invalid characters for a single path segment
       try {
-        const { message } = await import('@tauri-apps/plugin-dialog')
         await message('Name cannot contain slashes.', { title: 'Invalid Name', kind: 'warning', okLabel: 'OK' })
       } catch (_) {}
       return
@@ -375,7 +370,6 @@ export const useAppStore = create<AppState>((set, get) => ({
     const parent = lastSep >= 0 ? target.slice(0, lastSep) : state.currentPath
     const toPath = parent ? `${parent}${sep}${trimmed}` : trimmed
     try {
-      const { invoke } = await import('@tauri-apps/api/core')
       await invoke('rename_file', { from_path: target, to_path: toPath })
       set({ renameTargetPath: undefined })
       state.setSelectedFiles([toPath])
@@ -383,7 +377,6 @@ export const useAppStore = create<AppState>((set, get) => ({
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       try {
-        const { message } = await import('@tauri-apps/plugin-dialog')
         await message(`Failed to rename:\n${msg}`, { title: 'Rename Error', kind: 'error', okLabel: 'OK' })
       } catch (_) {
         // ignore
@@ -395,7 +388,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   setLastUsedShowHidden: async (show: boolean) => {
     set((state) => ({ globalPreferences: { ...state.globalPreferences, showHidden: show } }))
     try {
-      const { invoke } = await import('@tauri-apps/api/core')
       // Read, merge, and write to avoid clobbering other prefs
       const raw = await invoke<string>('read_preferences').catch(() => '{}')
       const obj = (() => { try { return JSON.parse(raw || '{}') } catch { return {} } })() as any

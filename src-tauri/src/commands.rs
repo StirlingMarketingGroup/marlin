@@ -936,7 +936,22 @@ pub fn set_last_dir(path: String) -> Result<(), String> {
     write_prefs_value(&v)
 }
 
+#[cfg(target_os = "macos")]
 #[tauri::command]
-pub fn start_file_drag(paths: Vec<String>, drag_image_png: Option<String>) -> Result<(), String> {
-    crate::drag::start_file_drag(paths, drag_image_png)
+pub fn start_native_drag(
+    paths: Vec<String>,
+    preview_image: Option<String>,
+    drag_offset_y: Option<f64>,
+) -> Result<(), String> {
+    crate::native_drag::start_native_drag(paths, preview_image, drag_offset_y)
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+pub fn start_native_drag(
+    _paths: Vec<String>,
+    _preview_image: Option<String>,
+    _drag_offset_y: Option<f64>,
+) -> Result<(), String> {
+    Err("Native drag is only supported on macOS".to_string())
 }

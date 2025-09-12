@@ -5,7 +5,8 @@ mod state;
 mod thumbnails;
 #[cfg(target_os = "macos")]
 mod macos_icons;
-mod drag;
+#[cfg(target_os = "macos")]
+mod native_drag;
 
 use std::sync::Mutex;
 use tauri::Manager;
@@ -52,7 +53,7 @@ pub fn run() {
       commands::set_dir_prefs,
       commands::clear_all_dir_prefs,
       commands::set_last_dir,
-      commands::start_file_drag,
+      commands::start_native_drag,
     ])
     .setup(|app| {
       if cfg!(debug_assertions) {

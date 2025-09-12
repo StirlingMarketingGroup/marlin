@@ -7,6 +7,7 @@ import { FileTypeIcon, resolveVSCodeIcon } from '@/components/FileTypeIcon'
 import { open } from '@tauri-apps/plugin-shell'
 import { toFileUrl, downloadUrlDescriptor } from '@/utils/fileUrl'
 import { createDragImageForSelection } from '@/utils/dragImage'
+import { invoke } from '@tauri-apps/api/core'
 // no direct invoke here; background opens the menu
 import { useThumbnail } from '@/hooks/useThumbnail'
 import { useVisibility } from '@/hooks/useVisibility'
@@ -276,7 +277,6 @@ export default function FileList({ files, preferences }: FileListProps) {
       } catch (error) {
         // Fallback to backend command if plugin shell is unavailable/blocked
         try {
-          const { invoke } = await import('@tauri-apps/api/core')
           await invoke('open_path', { path: file.path })
         } catch (err2) {
           console.error('Failed to open file:', error, err2)
@@ -315,13 +315,58 @@ export default function FileList({ files, preferences }: FileListProps) {
   }
   const cancelRename = () => setRenameTarget(undefined)
 
-  // Pre-select on right click so background handler can include file actions
+  // Handle mouse down for drag initiation and right-click selection
   const handleMouseDownForFile = (e: React.MouseEvent, file: FileItem) => {
+    // Right-click: Pre-select for context menu
     if (e.button === 2) {
-      // Right button
       if (!selectedFiles.includes(file.path)) {
         setSelectedFiles([file.path])
       }
+      return
+    }
+    
+    // Left-click: Initiate drag after a short delay
+    if (e.button === 0) {
+      const startDrag = () => {
+        // Determine which files to drag
+        const selected = selectedFiles.includes(file.path) && selectedFiles.length > 0
+          ? files.filter(f => selectedFiles.includes(f.path))
+          : [file]
+        
+        // Set dragging state for visual feedback
+        setDraggedFile(file.path)
+
+        // Perform native drag
+        void (async () => {
+          try {
+            // Create drag preview image
+            let dragImageDataUrl: string | undefined
+            let dragCanvas: HTMLCanvasElement | undefined
+            try {
+              const dragVisual = createDragImageForSelection(selected, document.body)
+              dragImageDataUrl = dragVisual.dataUrl
+              dragCanvas = dragVisual.element
+            } catch (e) {
+              console.warn('Failed to create drag image:', e)
+            }
+            
+            // Use new unified native drag API
+            await invoke('start_native_drag', { 
+              paths: selected.map(f => f.path),
+              preview_image: dragImageDataUrl,
+              drag_offset_y: 0  // Centered on cursor
+            })
+          } catch (error) {
+            console.warn('Native drag failed:', error)
+          } finally {
+            // Clear dragging state
+            setDraggedFile(null)
+          }
+        })()
+      }
+
+      // Start drag on next frame to avoid interfering with click handling
+      requestAnimationFrame(startDrag)
     }
   }
 
@@ -402,19 +447,10 @@ export default function FileList({ files, preferences }: FileListProps) {
       </div>
 
       {/* File rows */}
-      <div
-        className="space-y-[2px] px-3 py-1 mt-1"
-        onDragStartCapture={(e) => {
-          const target = e.target as HTMLElement | null
-          const host = target?.closest('[data-file-item="true"]') as HTMLElement | null
-          const path = host?.getAttribute('data-file-path')
-          if (path) setDraggedFile(path)
-        }}
-        onDragEndCapture={() => setDraggedFile(null)}
-      >
+      <div className="space-y-[2px] px-3 py-1 mt-1">
         {filteredFiles.map((file) => {
           const isSelected = selectedFiles.includes(file.path)
-          const isDragged = draggedFile === file.path
+          const isDragged = draggedFile !== null && (draggedFile === file.path || selectedFiles.includes(file.path))
           
           return (
             <div
@@ -430,57 +466,10 @@ export default function FileList({ files, preferences }: FileListProps) {
               onClick={(e) => { e.stopPropagation(); handleFileClick(file, e.ctrlKey || e.metaKey) }}
               onDoubleClick={(e) => { e.stopPropagation(); handleDoubleClick(file) }}
               onMouseDown={(e) => handleMouseDownForFile(e, file)}
-              onDragStartCapture={(e) => {
-                setDraggedFile(file.path)
-                const selected = selectedFiles.includes(file.path) && selectedFiles.length > 0
-                  ? files.filter(f => selectedFiles.includes(f.path))
-                  : [file]
-
-                let dragVisual: { element: HTMLCanvasElement; dataUrl: string } | undefined
-                try {
-                  dragVisual = createDragImageForSelection(selected, document.body)
-                } catch {}
-
-                // Always set the web drag data and image for a visible ghost
-                const dt = e.dataTransfer
-                if (dt) {
-                  if (dragVisual) dt.setDragImage(dragVisual.element, Math.floor(dragVisual.element.width * 0.3), Math.floor(dragVisual.element.height * 0.3))
-                  dt.effectAllowed = 'copy'
-                  try { dt.dropEffect = 'copy' } catch {}
-                  const paths = selected.map(f => f.path)
-                  // Ensure at least one synchronous payload so ghost appears
-                  try { dt.setData('text/plain', paths.join('\n')) } catch {}
-                  try {
-                    const uris = paths.map(p => toFileUrl(p)).join('\n')
-                    dt.setData('text/uri-list', uris)
-                  } catch {}
-                }
-
-                // Use our native drag implementation for external apps compatibility
-                void (async () => {
-                  try {
-                    const { invoke } = await import('@tauri-apps/api/core')
-                    await invoke('start_file_drag', { 
-                      paths: selected.map(f => f.path), 
-                      drag_image_png: dragVisual?.dataUrl 
-                    })
-                  } catch (error) {
-                    console.warn('Native drag failed:', error)
-                  } finally {
-                    setTimeout(() => setDraggedFile(null), 0)
-                  }
-                })()
-              }}
-              onDragEnd={() => setDraggedFile(null)}
-              draggable={true}
+              draggable={false}
             >
               {/* Name column */}
-              <div
-                className="col-span-5 flex items-center gap-2 min-w-0 pl-2"
-                draggable
-                onDragStart={() => setDraggedFile(file.path)}
-                onDragEnd={() => setDraggedFile(null)}
-              >
+              <div className="col-span-5 flex items-center gap-2 min-w-0 pl-2">
                 <span className="flex-shrink-0">
                   <ListFilePreview file={file} isMac={isMac} fallbackIcon={getFileIcon(file)} />
                 </span>

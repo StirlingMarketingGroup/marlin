@@ -7,6 +7,8 @@ import { FileTypeIcon, resolveVSCodeIcon } from '@/components/FileTypeIcon'
 import { open } from '@tauri-apps/plugin-shell'
 
 import { toFileUrl } from '@/utils/fileUrl'
+import { invoke } from '@tauri-apps/api/core'
+import { createDragImageForSelection } from '@/utils/dragImage'
 // no direct invoke here; background opens the menu
 import { useThumbnail } from '@/hooks/useThumbnail'
 import { useVisibility } from '@/hooks/useVisibility'
@@ -237,7 +239,6 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
       } catch (error) {
         // Fallback to backend command if plugin shell is unavailable/blocked
         try {
-          const { invoke } = await import('@tauri-apps/api/core')
           await invoke('open_path', { path: file.path })
         } catch (err2) {
           console.error('Failed to open file:', error, err2)
@@ -246,12 +247,68 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     }
   }
 
-  // Pre-select on right click so background handler can include file actions
+  // Handle mouse down for drag initiation and right-click selection
   const handleMouseDownForFile = (e: React.MouseEvent, file: FileItem) => {
+    // Right-click: Pre-select for context menu
     if (e.button === 2) {
       if (!selectedFiles.includes(file.path)) {
         setSelectedFiles([file.path])
       }
+      return
+    }
+    
+    // Left-click: Initiate drag after a short delay
+    if (e.button === 0) {
+      const startDrag = () => {
+        // Determine which files to drag
+        const selected = selectedFiles.includes(file.path) && selectedFiles.length > 0
+          ? files.filter(f => selectedFiles.includes(f.path))
+          : [file]
+        
+        // Add dragging visual feedback
+        const addDraggingClasses = (paths: string[]) => {
+          for (const p of paths) {
+            const el = document.querySelector(`[data-file-path="${CSS.escape(p)}"]`)
+            if (el) el.classList.add('dragging')
+          }
+        }
+        addDraggingClasses(selected.map(f => f.path))
+
+        // Perform native drag
+        void (async () => {
+          try {
+            // Create drag preview image
+            let dragImageDataUrl: string | undefined
+            let dragCanvas: HTMLCanvasElement | undefined
+            try {
+              const dragVisual = createDragImageForSelection(selected, document.body)
+              dragImageDataUrl = dragVisual.dataUrl
+              dragCanvas = dragVisual.element
+            } catch (e) {
+              console.warn('Failed to create drag image:', e)
+            }
+            
+            // Use new unified native drag API
+            await invoke('start_native_drag', { 
+              paths: selected.map(f => f.path),
+              preview_image: dragImageDataUrl,
+              drag_offset_y: 0  // Centered on cursor
+            })
+          } catch (error) {
+            console.warn('Native drag failed:', error)
+          } finally {
+            // Remove dragging visual feedback
+            const paths = selected.map(f => f.path)
+            for (const p of paths) {
+              const el = document.querySelector(`[data-file-path="${CSS.escape(p)}"]`)
+              if (el) el.classList.remove('dragging')
+            }
+          }
+        })()
+      }
+
+      // Start drag on next frame to avoid interfering with click handling
+      requestAnimationFrame(startDrag)
     }
   }
 
@@ -369,63 +426,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
               onClick={(e) => { e.stopPropagation(); handleFileClick(file, e.ctrlKey || e.metaKey) }}
               onDoubleClick={(e) => { e.stopPropagation(); handleDoubleClick(file) }}
               onMouseDown={(e) => handleMouseDownForFile(e, file)}
-              onDragStart={(e) => {
-                // Add dragging class after a tiny delay so it applies after ghost image is captured
-                const element = e.currentTarget
-                requestAnimationFrame(() => {
-                  element.classList.add('dragging')
-                })
-                
-                // Determine which files to drag
-                const selected = selectedFiles.includes(file.path) && selectedFiles.length > 0
-                  ? files.filter(f => selectedFiles.includes(f.path))
-                  : [file]
-
-                // Set up web drag data
-                const dt = e.dataTransfer
-                if (dt) {
-                  // Let the system show its default drag image
-                  dt.effectAllowed = 'copy'
-                  try { dt.dropEffect = 'copy' } catch {}
-                  const paths = selected.map(f => f.path)
-                  // Ensure at least one synchronous payload so ghost appears
-                  try { dt.setData('text/plain', paths.join('\n')) } catch {}
-                  try {
-                    const uris = paths.map(p => toFileUrl(p)).join('\n')
-                    dt.setData('text/uri-list', uris)
-                  } catch {}
-                }
-
-                // Use our native drag implementation for external apps compatibility
-                void (async () => {
-                  try {
-                    const { invoke } = await import('@tauri-apps/api/core')
-                    // Create a custom drag preview using our existing drag image utility
-                    let dragImageDataUrl: string | undefined
-                    try {
-                      const { createDragImageForSelection } = await import('@/utils/dragImage')
-                      const dragVisual = createDragImageForSelection(selected, document.body)
-                      dragImageDataUrl = dragVisual.dataUrl
-                    } catch (e) {
-                      console.warn('Failed to create drag image:', e)
-                    }
-                    
-                    await invoke('start_file_drag', { 
-                      paths: selected.map(f => f.path),
-                      drag_image_png: dragImageDataUrl
-                    })
-                  } catch (error) {
-                    console.warn('Native drag failed:', error)
-                  } finally {
-                    // Remove dragging class
-                    setTimeout(() => element.classList.remove('dragging'), 0)
-                  }
-                })()
-              }}
-              onDragEnd={(e) => {
-                e.currentTarget.classList.remove('dragging')
-              }}
-              draggable={true}
+              draggable={false}
 
             >
               <div className="mb-2 flex-shrink-0" style={{ width: tile, display: 'flex', justifyContent: 'center', height: Math.max(48, Math.min(tile - Math.max(3, Math.min(8, Math.round(tile * 0.03))) * 2, 320)) }}>
