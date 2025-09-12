@@ -1,0 +1,119 @@
+import { memo, useMemo } from 'react'
+import { FileItem } from '../types'
+import { truncateTextToWidth } from '../utils/textMeasure'
+import QuickTooltip from './QuickTooltip'
+
+interface FileNameDisplayProps {
+  file: FileItem
+  maxWidth?: number
+  isSelected?: boolean
+  variant: 'grid' | 'list'
+  showSize?: boolean
+  className?: string
+  style?: React.CSSProperties
+}
+
+function FileNameDisplayInner({ 
+  file, 
+  maxWidth, 
+  isSelected = false, 
+  variant, 
+  showSize = false,
+  className = '',
+  style 
+}: FileNameDisplayProps) {
+  const isMac = typeof navigator !== 'undefined' && navigator.userAgent.toUpperCase().includes('MAC')
+  
+  const displayName = (isMac && file.is_directory && file.name.toLowerCase().endsWith('.app'))
+    ? file.name.replace(/\.app$/i, '')
+    : file.name
+
+  const { truncatedText, isTruncated } = useMemo(() => {
+    if (!maxWidth || maxWidth <= 0 || variant === 'grid') {
+      return { truncatedText: displayName, isTruncated: false }
+    }
+    
+    const fontSize = 13
+    const fontFamily = 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'
+    
+    const result = truncateTextToWidth(displayName, maxWidth, fontSize, fontFamily, true)
+    return { truncatedText: result.text, isTruncated: result.isTruncated }
+  }, [displayName, maxWidth, variant])
+
+  const formatFileSize = (bytes: number): string => {
+    if (bytes === 0) return '0 B'
+    
+    const k = 1024
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB']
+    const i = Math.floor(Math.log(bytes) / Math.log(k))
+    
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i]
+  }
+
+  const content = (
+    <div style={style}>
+      {variant === 'grid' ? (
+        <div className="flex flex-col items-center">
+          <div 
+            className={`text-sm font-medium text-center ${isSelected ? 'text-white' : ''} ${className}`}
+            style={{
+              minHeight: '2.5rem',
+              lineHeight: '1.25rem',
+              wordBreak: 'break-word',
+              display: '-webkit-box',
+              WebkitLineClamp: 2,
+              WebkitBoxOrient: 'vertical',
+              overflow: 'hidden',
+              width: '100%'
+            }}
+          >
+            {displayName}
+          </div>
+          {!file.is_directory && showSize && (
+            <div className={`text-xs mt-1 ${isSelected ? 'text-white/80' : 'text-app-muted'}`}>
+              {formatFileSize(file.size)}
+            </div>
+          )}
+        </div>
+      ) : (
+        <span 
+          className={`text-sm font-medium ${isSelected ? 'text-white' : ''} ${className}`}
+          style={{
+            display: 'block',
+            overflow: 'hidden',
+            whiteSpace: 'nowrap',
+            textOverflow: 'clip'
+          }}
+        >
+          {truncatedText}
+        </span>
+      )}
+    </div>
+  )
+
+  if (isTruncated && variant === 'list') {
+    const tooltipContent = displayName
+
+    return (
+      <QuickTooltip text={tooltipContent}>
+        {({ onMouseEnter, onMouseLeave, onFocus, onBlur, ref }) => (
+          <div
+            onMouseEnter={onMouseEnter}
+            onMouseLeave={onMouseLeave}
+            onFocus={onFocus}
+            onBlur={onBlur}
+            ref={ref}
+            style={{ minWidth: 0 }}
+          >
+            {content}
+          </div>
+        )}
+      </QuickTooltip>
+    )
+  }
+
+  return content
+}
+
+export const FileNameDisplay = memo(FileNameDisplayInner)
+export default FileNameDisplay

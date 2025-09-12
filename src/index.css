@@ -40,6 +40,10 @@
     --accent: #3584e4;
     --accent-soft: rgba(53, 132, 228, 0.15);
     --accent-selected: rgba(53, 132, 228, 0.28);
+    
+    /* RGB values for background colors (for rgba usage) */
+    --bg-rgb: 30, 30, 30;  /* #1e1e1e */
+    --accent-rgb: 53, 132, 228;  /* #3584e4 */
   }
 
   /* Scrollbar styling */
@@ -139,5 +143,24 @@
   
   .drag-preview {
     animation: dragPreviewFadeIn 0.15s ease-out;
+  }
+
+  /* Clean file name display with better truncation support */
+  .file-name-display {
+    /* Ensure consistent text rendering */
+    text-rendering: optimizeLegibility;
+  }
+  
+  /* Support for webkit line clamping in grid view */
+  .webkit-line-clamp-2 {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  /* Visual indicator for truncated text */
+  .truncated-text {
+    position: relative;
   }
 }

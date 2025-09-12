@@ -11,8 +11,7 @@ import { invoke } from '@tauri-apps/api/core'
 // no direct invoke here; background opens the menu
 import { useThumbnail } from '@/hooks/useThumbnail'
 import { useVisibility } from '@/hooks/useVisibility'
-import { truncateMiddle } from '@/utils/truncate'
-import QuickTooltip from '@/components/QuickTooltip'
+import FileNameDisplay from './FileNameDisplay'
 
 interface FileListProps {
   files: FileItem[]
@@ -103,30 +102,23 @@ export default function FileList({ files, preferences }: FileListProps) {
   const [draggedFile, setDraggedFile] = useState<string | null>(null)
   const [hoveredFile, setHoveredFile] = useState<string | null>(null)
   
-  // Dynamically compute a safe middle-truncation length for the Name column
+  // Dynamically compute available width for the Name column
   const nameHeaderRef = useRef<HTMLButtonElement>(null)
   const measureRef = useRef<HTMLSpanElement>(null)
-  const [nameCharLimit, setNameCharLimit] = useState<number>(40)
+  const [nameColumnWidth, setNameColumnWidth] = useState<number>(200)
 
   useEffect(() => {
     const recalc = () => {
       const header = nameHeaderRef.current
-      const measure = measureRef.current
-      if (!header || !measure) return
+      if (!header) return
 
       const colWidth = header.getBoundingClientRect().width
       if (!colWidth || colWidth <= 0) return
 
-      // Measure average character width for text-sm in our font stack
-      const sample = measure.textContent || ''
-      const sampleWidth = measure.getBoundingClientRect().width || 7.5 * sample.length
-      const avgChar = sampleWidth / Math.max(1, sample.length)
-
       // Leave room for icon + gap + padding within the cell
-      const reserved = 44 // ≈ 20 (icon) + 8 (gap) + 8 (pl-2) + small buffer
-      const available = Math.max(0, colWidth - reserved - 12) // extra safety buffer
-      const maxChars = Math.max(8, Math.floor(available / Math.max(5, avgChar)))
-      setNameCharLimit(maxChars)
+      const reserved = 36 // ≈ 20 (icon) + 8 (gap) + 8 (pl-2)
+      const available = Math.max(120, colWidth - reserved) // less conservative buffer
+      setNameColumnWidth(available)
     }
 
     // Initial calc
@@ -514,7 +506,7 @@ export default function FileList({ files, preferences }: FileListProps) {
               draggable={false}
             >
               {/* Name column */}
-              <div className="col-span-5 flex items-center gap-2 min-w-0 pl-2">
+              <div className="col-span-5 flex items-center gap-2 min-w-0 pl-2 pr-2">
                 <span className="flex-shrink-0">
                   <ListFilePreview file={file} isMac={isMac} fallbackIcon={getFileIcon(file)} />
                 </span>
@@ -532,32 +524,15 @@ export default function FileList({ files, preferences }: FileListProps) {
                     data-tauri-drag-region={false}
                   />
                 ) : (
-                  (() => {
-                    const displayName = (isMac && file.is_directory && file.name.toLowerCase().endsWith('.app'))
-                      ? file.name.replace(/\.app$/i, '')
-                      : file.name
-                    const truncated = truncateMiddle(displayName, nameCharLimit)
-                    const needsTooltip = truncated !== displayName
-                    if (!needsTooltip) {
-                      return <span className={`block truncate text-sm ${isSelected ? 'text-white' : ''}`}>{truncated}</span>
-                    }
-                    return (
-                      <QuickTooltip text={displayName}>
-                        {({ onMouseEnter, onMouseLeave, onFocus, onBlur, ref }) => (
-                          <span
-                            className={`block truncate text-sm ${isSelected ? 'text-white' : ''}`}
-                            onMouseEnter={onMouseEnter}
-                            onMouseLeave={onMouseLeave}
-                            onFocus={onFocus}
-                            onBlur={onBlur}
-                            ref={ref as any}
-                          >
-                            {truncated}
-                          </span>
-                        )}
-                      </QuickTooltip>
-                    )
-                  })()
+                  <div className="flex-1 min-w-0 overflow-hidden">
+                    <FileNameDisplay
+                      file={file}
+                      maxWidth={nameColumnWidth}
+                      isSelected={isSelected}
+                      variant="list"
+                      className="block"
+                    />
+                  </div>
                 )}
               </div>
 

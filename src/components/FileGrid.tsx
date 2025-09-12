@@ -11,7 +11,7 @@ import { createDragImageForSelection, createDragImageForSelectionAsync } from '@
 // no direct invoke here; background opens the menu
 import { useThumbnail } from '@/hooks/useThumbnail'
 import { useVisibility } from '@/hooks/useVisibility'
-import { truncateMiddle } from '@/utils/truncate'
+import FileNameDisplay from './FileNameDisplay'
 
 interface FileGridProps {
   files: FileItem[]
@@ -121,8 +121,6 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
   // Tile width from preferences (default 120)
   // Allow full range up to 320 to match ZoomSlider
   const tile = Math.max(80, Math.min(320, preferences.gridSize ?? 120))
-  // Name char limit scales roughly with tile width (40 at 120)
-  const gridNameCharLimit = Math.max(20, Math.round(40 * (tile / 120)))
 
   const isMac = typeof navigator !== 'undefined' && navigator.platform.toUpperCase().includes('MAC')
 
@@ -469,9 +467,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
                 <GridFilePreview file={file} isMac={isMac} fallbackIcon={getFileIcon(file)} tile={tile} />
               </div>
               
-              <div
-                className={`text-center`}
-              >
+              <div className="text-center w-full">
                 {renameTargetPath === file.path ? (
                   <input
                     ref={renameInputRef}
@@ -486,52 +482,16 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
                     onBlur={cancelRename}
                     data-tauri-drag-region={false}
                   />
-                ) : (() => {
-                  const raw = (isMac && file.is_directory && file.name.toLowerCase().endsWith('.app'))
-                    ? file.name.replace(/\.app$/i, '')
-                    : file.name
-                  
-                  const needsTruncation = raw.length > gridNameCharLimit
-                  const needsExpansion = false // keep row heights stable; rely on tooltip for full name
-                  
-                  return (
-                    <>
-                      <div 
-                        className={`text-sm font-medium ${isSelected ? 'text-white' : ''}`}
-                        style={{
-                          wordBreak: 'break-word',
-                          maxWidth: `${tile}px`,
-                          height: '2.5rem',
-                          lineHeight: '1.25rem',
-                          overflow: 'hidden',
-                          textAlign: 'center'
-                        }}
-                        
-                        title={file.name}
-                      >
-                        {(() => {
-                          // When selected AND long, show full name
-                          if (needsExpansion) {
-                            return raw
-                          }
-
-                          // If it fits naturally, show it as-is
-                          if (!needsTruncation) {
-                            return raw
-                          }
-                          
-                          // Otherwise use middle truncation to ensure extension is visible
-                          return truncateMiddle(raw, gridNameCharLimit)
-                        })()}
-                      </div>
-                      {!file.is_directory && !needsExpansion && (
-                        <div className={`text-xs mt-1 ${isSelected ? 'text-white/80' : 'text-app-muted'}`}>
-                          {formatFileSize(file.size)}
-                        </div>
-                      )}
-                    </>
-                  )
-                })()}
+                ) : (
+                  <FileNameDisplay
+                    file={file}
+                    maxWidth={tile - 16} // Account for padding
+                    isSelected={isSelected}
+                    variant="grid"
+                    showSize={true}
+                    style={{ width: '100%' }}
+                  />
+                )}
               </div>
             </div>
           )
@@ -541,12 +501,4 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
   )
 }
 
-function formatFileSize(bytes: number): string {
-  if (bytes === 0) return '0 B'
-  
-  const k = 1024
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB']
-  const i = Math.floor(Math.log(bytes) / Math.log(k))
-  
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i]
-}
+
