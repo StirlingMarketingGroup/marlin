@@ -56,10 +56,10 @@ function GridFilePreview({ file, isMac, fallbackIcon, tile }: { file: FileItem; 
     const requestSize = pickBucket(Math.round((box - pad * 2) * dpr))
     const shouldLoad = stage !== 'far'
     const priority = stage === 'visible' ? 'high' : 'medium'
-    const { dataUrl, loading } = useThumbnail(shouldLoad ? file.path : undefined, { size: requestSize, quality: 'medium', priority })
+    const { dataUrl, loading, hasTransparency } = useThumbnail(shouldLoad ? file.path : undefined, { size: requestSize, quality: 'medium', priority })
     if (dataUrl) {
       return (
-        <div ref={ref as any} className={`rounded-md border border-app-border bg-checker overflow-hidden`} style={{ width: box, height: box, padding: pad, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <div ref={ref as any} className={`rounded-md border border-app-border ${hasTransparency ? 'bg-checker' : ''} overflow-hidden`} style={{ width: box, height: box, padding: pad, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           <img
             src={dataUrl}
             alt={file.name}
@@ -71,9 +71,9 @@ function GridFilePreview({ file, isMac, fallbackIcon, tile }: { file: FileItem; 
       )
     }
     if (loading) {
-      return <div ref={ref as any} className="rounded-md border border-app-border bg-checker animate-pulse" style={{ width: box, height: box, padding: pad }} />
+      return <div ref={ref as any} className="rounded-md border border-app-border animate-pulse" style={{ width: box, height: box, padding: pad }} />
     }
-    return <div ref={ref as any} className="rounded-md border border-app-border bg-checker" style={{ width: box, height: box, padding: pad }} />
+    return <div ref={ref as any} className="rounded-md border border-app-border" style={{ width: box, height: box, padding: pad }} />
   }
 
   // macOS .app Application icons (native icons)

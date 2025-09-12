@@ -15,7 +15,7 @@ pub mod stl;
 pub struct ThumbnailGenerator;
 
 impl ThumbnailGenerator {
-    pub fn generate(request: &ThumbnailRequest) -> Result<String, String> {
+    pub fn generate(request: &ThumbnailRequest) -> Result<(String, bool), String> {
         let path = Path::new(&request.path);
         
         if !path.exists() {

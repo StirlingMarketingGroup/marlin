@@ -5,7 +5,7 @@ use std::fs;
 pub struct SvgGenerator;
 
 impl SvgGenerator {
-    pub fn generate(request: &ThumbnailRequest) -> Result<String, String> {
+    pub fn generate(request: &ThumbnailRequest) -> Result<(String, bool), String> {
         let svg_data = fs::read(&request.path).map_err(|e| format!("Failed to read SVG: {}", e))?;
 
         // Parse SVG using resvg/usvg
@@ -54,14 +54,19 @@ impl SvgGenerator {
             }
         }
 
-        let img = image::ImageBuffer::<image::Rgba<u8>, _>::from_vec(target, target, rgba)
+        let img = image::ImageBuffer::<image::Rgba<u8>, _>::from_vec(target, target, rgba.clone())
             .ok_or_else(|| "Failed to create image buffer".to_string())?;
         let di = DynamicImage::ImageRgba8(img);
 
-        super::ThumbnailGenerator::encode_to_data_url(
+        // Check for transparency by looking for any alpha values < 255
+        let has_transparency = rgba.chunks_exact(4).any(|pixel| pixel[3] < 255);
+
+        let data_url = super::ThumbnailGenerator::encode_to_data_url(
             &di,
             request.format,
             request.quality,
-        )
+        )?;
+        
+        Ok((data_url, has_transparency))
     }
 }

@@ -15,6 +15,7 @@ pub struct CacheEntry {
     pub last_accessed: DateTime<Utc>,
     pub size_bytes: usize,
     pub generation_time_ms: u64,
+    pub has_transparency: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -83,7 +84,7 @@ impl ThumbnailCache {
         Ok(cache)
     }
 
-    pub async fn get(&self, path: &str, size: u32) -> Option<String> {
+    pub async fn get(&self, path: &str, size: u32) -> Option<(String, bool)> {
         let cache_key = self.generate_cache_key(path, size).await?;
         
         // Try L1 memory cache first
@@ -92,29 +93,29 @@ impl ThumbnailCache {
             if let Some(entry) = memory_cache.get_mut(&cache_key) {
                 entry.last_accessed = Utc::now();
                 self.record_hit().await;
-                return Some(entry.data_url.clone());
+                return Some((entry.data_url.clone(), entry.has_transparency));
             }
         }
 
         // Try L2 disk cache
-        if let Some(data_url) = self.get_from_disk(&cache_key).await {
+        if let Some((data_url, has_transparency)) = self.get_from_disk(&cache_key).await {
             // Promote to memory cache
-            self.put_memory(&cache_key, &data_url, 0).await;
+            self.put_memory(&cache_key, &data_url, 0, has_transparency).await;
             self.record_hit().await;
-            return Some(data_url);
+            return Some((data_url, has_transparency));
         }
 
         self.record_miss().await;
         None
     }
 
-    pub async fn put(&self, path: &str, size: u32, data_url: String, generation_time_ms: u64) -> Result<(), String> {
+    pub async fn put(&self, path: &str, size: u32, data_url: String, generation_time_ms: u64, has_transparency: bool) -> Result<(), String> {
         let cache_key = self.generate_cache_key(path, size).await
             .ok_or("Failed to generate cache key")?;
         
         // Store in both memory and disk cache
-        self.put_memory(&cache_key, &data_url, generation_time_ms).await;
-        self.put_disk(&cache_key, &data_url, generation_time_ms).await?;
+        self.put_memory(&cache_key, &data_url, generation_time_ms, has_transparency).await;
+        self.put_disk(&cache_key, &data_url, generation_time_ms, has_transparency).await?;
         
         // Cleanup if necessary
         self.cleanup_if_needed().await?;
@@ -122,13 +123,14 @@ impl ThumbnailCache {
         Ok(())
     }
 
-    async fn put_memory(&self, key: &str, data_url: &str, generation_time_ms: u64) {
+    async fn put_memory(&self, key: &str, data_url: &str, generation_time_ms: u64, has_transparency: bool) {
         let entry = CacheEntry {
             data_url: data_url.to_string(),
             created_at: Utc::now(),
             last_accessed: Utc::now(),
             size_bytes: data_url.len(),
             generation_time_ms,
+            has_transparency,
         };
 
         let mut memory_cache = self.memory_cache.write().await;
@@ -158,13 +160,14 @@ impl ThumbnailCache {
         memory_cache.put(key.to_string(), entry);
     }
 
-    async fn put_disk(&self, key: &str, data_url: &str, generation_time_ms: u64) -> Result<(), String> {
+    async fn put_disk(&self, key: &str, data_url: &str, generation_time_ms: u64, has_transparency: bool) -> Result<(), String> {
         let entry = CacheEntry {
             data_url: data_url.to_string(),
             created_at: Utc::now(),
             last_accessed: Utc::now(),
             size_bytes: data_url.len(),
             generation_time_ms,
+            has_transparency,
         };
 
         // Write to disk
@@ -182,7 +185,7 @@ impl ThumbnailCache {
         Ok(())
     }
 
-    async fn get_from_disk(&self, key: &str) -> Option<String> {
+    async fn get_from_disk(&self, key: &str) -> Option<(String, bool)> {
         // Check index first
         {
             let index = self.disk_cache_index.read().await;
@@ -204,7 +207,7 @@ impl ThumbnailCache {
             }
         }
 
-        Some(entry.data_url)
+        Some((entry.data_url, entry.has_transparency))
     }
 
     async fn generate_cache_key(&self, path: &str, size: u32) -> Option<String> {
@@ -227,7 +230,11 @@ impl ThumbnailCache {
                 if extension == "json" {
                     if let Some(stem) = entry.path().file_stem().and_then(|s| s.to_str()) {
                         if let Ok(json) = fs::read_to_string(&entry.path()).await {
-                            if let Ok(cache_entry) = serde_json::from_str::<CacheEntry>(&json) {
+                            if let Ok(mut cache_entry) = serde_json::from_str::<CacheEntry>(&json) {
+                                // Handle backward compatibility for entries without has_transparency
+                                if !json.contains("has_transparency") {
+                                    cache_entry.has_transparency = false; // Default to false for existing entries
+                                }
                                 total_size += cache_entry.size_bytes as u64;
                                 index.insert(stem.to_string(), cache_entry);
                             }

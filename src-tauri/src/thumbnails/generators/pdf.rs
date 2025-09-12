@@ -7,7 +7,7 @@ use crate::thumbnails::generators::ThumbnailGenerator;
 pub struct PdfGenerator;
 
 impl PdfGenerator {
-    pub fn generate(request: &ThumbnailRequest) -> Result<String, String> {
+    pub fn generate(request: &ThumbnailRequest) -> Result<(String, bool), String> {
         let path = Path::new(&request.path);
         
         if !path.exists() {
@@ -18,7 +18,7 @@ impl PdfGenerator {
         Self::generate_with_mupdf(request)
     }
 
-    fn generate_with_mupdf(request: &ThumbnailRequest) -> Result<String, String> {
+    fn generate_with_mupdf(request: &ThumbnailRequest) -> Result<(String, bool), String> {
         // Open the PDF document with MuPDF
         let doc = Document::open(&request.path)
             .map_err(|e| format!("Failed to open PDF: {:?}", e))?;
@@ -107,7 +107,11 @@ impl PdfGenerator {
             dynamic_image
         };
         
+        // Check for transparency (PDFs rendered with white background are typically opaque)
+        let has_transparency = false; // PDFs are rendered with opaque background
+        
         // Encode to data URL
-        ThumbnailGenerator::encode_to_data_url(&final_image, request.format, request.quality)
+        let data_url = ThumbnailGenerator::encode_to_data_url(&final_image, request.format, request.quality)?;
+        Ok((data_url, has_transparency))
     }
 }

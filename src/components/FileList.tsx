@@ -56,11 +56,11 @@ function ListFilePreview({ file, isMac, fallbackIcon }: { file: FileItem; isMac:
     const dpr = typeof window !== 'undefined' ? Math.min(2, Math.max(1, window.devicePixelRatio || 1)) : 1
     const shouldLoad = stage !== 'far'
     const priority = stage === 'visible' ? 'high' : 'medium'
-    const { dataUrl, loading } = useThumbnail(shouldLoad ? file.path : undefined, { size: Math.round(64 * dpr), quality: 'medium', priority })
+    const { dataUrl, loading, hasTransparency } = useThumbnail(shouldLoad ? file.path : undefined, { size: Math.round(64 * dpr), quality: 'medium', priority })
     if (dataUrl) {
       const isRaster = isImage && !isSvg
       return (
-        <div ref={ref as any} className={`w-5 h-5 rounded-sm border border-app-border bg-checker ${isRaster ? '' : 'p-[1px]'} overflow-hidden`}>
+        <div ref={ref as any} className={`w-5 h-5 rounded-sm border border-app-border ${hasTransparency ? 'bg-checker' : ''} ${isRaster ? '' : 'p-[1px]'} overflow-hidden`}>
           <img
             src={dataUrl}
             alt=""
@@ -86,9 +86,9 @@ function ListFilePreview({ file, isMac, fallbackIcon }: { file: FileItem; isMac:
       )
     }
     if (loading) {
-      return <div ref={ref as any} className="w-5 h-5 rounded-sm border border-app-border bg-checker animate-pulse" />
+      return <div ref={ref as any} className="w-5 h-5 rounded-sm border border-app-border animate-pulse" />
     }
-    return <div ref={ref as any} className="w-5 h-5 rounded-sm border border-app-border bg-checker" />
+    return <div ref={ref as any} className="w-5 h-5 rounded-sm border border-app-border" />
   }
 
   return <span ref={ref as any}>{fallbackIcon}</span>

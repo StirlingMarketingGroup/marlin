@@ -48,6 +48,7 @@ pub struct ThumbnailResponse {
     pub data_url: String,
     pub cached: bool,
     pub generation_time_ms: u64,
+    pub has_transparency: bool,
 }
 
 pub struct ThumbnailService {
@@ -68,12 +69,13 @@ impl ThumbnailService {
 
     pub async fn request_thumbnail(&self, request: ThumbnailRequest) -> Result<ThumbnailResponse, String> {
         // Try cache first (L1 memory, then L2 disk)
-        if let Some(cached_data) = self.cache.get(&request.path, request.size).await {
+        if let Some((cached_data, has_transparency)) = self.cache.get(&request.path, request.size).await {
             return Ok(ThumbnailResponse {
                 id: request.id,
                 data_url: cached_data,
                 cached: true,
                 generation_time_ms: 0,
+                has_transparency,
             });
         }
 

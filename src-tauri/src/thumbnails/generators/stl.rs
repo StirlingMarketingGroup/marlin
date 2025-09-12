@@ -26,7 +26,7 @@ struct Tri { v0: Vec3, v1: Vec3, v2: Vec3 }
 pub struct StlGenerator;
 
 impl StlGenerator {
-    pub fn generate(request: &ThumbnailRequest) -> Result<String, String> {
+    pub fn generate(request: &ThumbnailRequest) -> Result<(String, bool), String> {
         let path = Path::new(&request.path);
         if !path.exists() { return Err("STL file does not exist".into()); }
 
@@ -171,7 +171,9 @@ impl StlGenerator {
             .write_to(&mut cursor, image::ImageOutputFormat::Png)
             .map_err(|e| format!("Failed to encode PNG: {}", e))?;
 
-        Ok(format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(out)))
+        let data_url = format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(out));
+        // STL renders typically have transparent backgrounds
+        Ok((data_url, true))
     }
 }
 

@@ -144,10 +144,10 @@ impl ThumbnailWorker {
                         }).await;
 
                         let response = match result {
-                            Ok(Ok(data_url)) => {
+                            Ok(Ok((data_url, has_transparency))) => {
                                 let generation_time_ms = start_time.elapsed().as_millis() as u64;
                                 // Store in cache
-                                if let Err(e) = cache_clone.put(&request.path, request.size, data_url.clone(), generation_time_ms).await {
+                                if let Err(e) = cache_clone.put(&request.path, request.size, data_url.clone(), generation_time_ms, has_transparency).await {
                                     log::warn!("Failed to cache thumbnail: {}", e);
                                 }
                                 Ok(ThumbnailResponse {
@@ -155,6 +155,7 @@ impl ThumbnailWorker {
                                     data_url,
                                     cached: false,
                                     generation_time_ms,
+                                    has_transparency,
                                 })
                             }
                             Ok(Err(e)) => Err(format!("Thumbnail generation failed: {}", e)),

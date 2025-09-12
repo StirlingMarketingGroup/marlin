@@ -14,6 +14,7 @@ export interface ThumbnailResponse {
   data_url: string;
   cached: boolean;
   generation_time_ms: number;
+  has_transparency: boolean;
 }
 
 export interface ThumbnailCacheStats {
@@ -41,6 +42,7 @@ export function useThumbnail(
   const [error, setError] = useState<string | undefined>(undefined);
   const [cached, setCached] = useState(false);
   const [generationTimeMs, setGenerationTimeMs] = useState<number>(0);
+  const [hasTransparency, setHasTransparency] = useState<boolean>(false);
   
   const abortControllerRef = useRef<AbortController>();
   const currentPathRef = useRef<string>();
@@ -114,6 +116,7 @@ export function useThumbnail(
           setDataUrl(response.data_url);
           setCached(response.cached);
           setGenerationTimeMs(response.generation_time_ms);
+          setHasTransparency(response.has_transparency);
           requestIdRef.current = response.id;
           setLoading(false);
         }
@@ -153,6 +156,7 @@ export function useThumbnail(
             setDataUrl(response.data_url);
             setCached(response.cached);
             setGenerationTimeMs(response.generation_time_ms);
+            setHasTransparency(response.has_transparency);
             requestIdRef.current = response.id;
             setLoading(false);
           }
@@ -172,6 +176,7 @@ export function useThumbnail(
     error,
     cached,
     generationTimeMs,
+    hasTransparency,
     retry,
   };
 }
