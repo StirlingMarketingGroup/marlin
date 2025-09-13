@@ -474,6 +474,155 @@ function App() {
         active.isContentEditable
       )
 
+      // Arrow-key file navigation (no modifiers, not typing in inputs)
+      if (!inEditable && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        const key = e.key
+        if (key === 'ArrowUp' || key === 'ArrowDown' || key === 'ArrowLeft' || key === 'ArrowRight') {
+          const state = useAppStore.getState()
+          const selected = state.selectedFiles || []
+
+          // Determine current visible items in DOM order
+          const nodes = Array.from(document.querySelectorAll<HTMLElement>('[data-file-item="true"][data-file-path]'))
+          const order = nodes.map(n => n.getAttribute('data-file-path') || '').filter(Boolean)
+          if (order.length === 0) return
+
+          // Helper: ensure a given index is selected and scrolled into view
+          const wrap = (v: number, n: number) => {
+            if (n <= 0) return 0
+            let r = v % n
+            if (r < 0) r += n
+            return r
+          }
+          const selectIndex = (idx: number) => {
+            const index = wrap(idx, order.length)
+            const path = order[index]
+            state.setSelectedFiles([path])
+            // Scroll into view
+            const el = nodes[index]
+            if (el && typeof el.scrollIntoView === 'function') {
+              try {
+                el.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+              } catch (_) {
+                // ignore
+              }
+            }
+          }
+
+          // Determine if we're in grid (thumb) view to support 4-way nav
+          const gridEl = document.querySelector<HTMLElement>('.file-grid')
+          let cols = 1
+          if (gridEl) {
+            // Estimate columns by counting how many items share the first row's top
+            const firstRowTop = nodes[0]?.offsetTop ?? 0
+            let count = 0
+            for (let i = 0; i < nodes.length; i++) {
+              if (Math.abs((nodes[i].offsetTop ?? 0) - firstRowTop) < 1) count++
+              else break
+            }
+            cols = Math.max(1, count || 1)
+          }
+
+          // Map current selection to visible indices
+          const visibleSelectedIdx = selected
+            .map(p => order.indexOf(p))
+            .filter(i => i >= 0)
+            .sort((a, b) => a - b)
+
+          const noneSelectedVisible = visibleSelectedIdx.length === 0
+          const highest = noneSelectedVisible ? -1 : visibleSelectedIdx[0]
+          const lowest = noneSelectedVisible ? -1 : visibleSelectedIdx[visibleSelectedIdx.length - 1]
+
+          // Compute target index based on rules
+          let targetIdx: number | null = null
+
+          if (key === 'ArrowUp') {
+            if (noneSelectedVisible) {
+              // If none selected: Up selects last
+              targetIdx = order.length - 1
+            } else {
+              // Up from highest selection
+              targetIdx = (gridEl ? highest - cols : highest - 1)
+            }
+          } else if (key === 'ArrowDown') {
+            if (noneSelectedVisible) {
+              // If none selected: Down selects first
+              targetIdx = 0
+            } else {
+              // Down from lowest selection
+              targetIdx = (gridEl ? lowest + cols : lowest + 1)
+            }
+          } else if (key === 'ArrowLeft') {
+            if (!gridEl) {
+              // List view: ignore Left/Right
+              return
+            }
+            if (noneSelectedVisible) {
+              // Start at last on Left if nothing selected
+              targetIdx = order.length - 1
+            } else {
+              // Left from highest selection (reading order)
+              targetIdx = highest - 1
+            }
+          } else if (key === 'ArrowRight') {
+            if (!gridEl) {
+              // List view: ignore Left/Right
+              return
+            }
+            if (noneSelectedVisible) {
+              // Start at first on Right if nothing selected
+              targetIdx = 0
+            } else {
+              // Right from lowest selection (reading order)
+              targetIdx = lowest + 1
+            }
+          }
+
+          if (targetIdx === null) return
+
+          // Rollover behavior for grid Up/Down to preserve column when wrapping
+          if (gridEl && (key === 'ArrowUp' || key === 'ArrowDown')) {
+            const refIdx = key === 'ArrowUp' ? (noneSelectedVisible ? 0 : highest) : (noneSelectedVisible ? 0 : lowest)
+            const col = Math.max(0, refIdx % cols)
+            if (key === 'ArrowUp' && targetIdx < 0) {
+              // Wrap to last row same column
+              const lastRowStart = Math.floor((order.length - 1) / cols) * cols
+              let cand = lastRowStart + col
+              while (cand >= order.length && cand >= 0) cand -= cols
+              targetIdx = cand >= 0 ? cand : order.length - 1
+            } else if (key === 'ArrowDown' && targetIdx >= order.length) {
+              // Wrap to first row same column (or last if fewer items)
+              let cand = col
+              if (cand >= order.length) cand = order.length - 1
+              targetIdx = cand
+            }
+          }
+
+          // List rollover: wrap top<->bottom
+          if (!gridEl && (key === 'ArrowUp' || key === 'ArrowDown')) {
+            if (key === 'ArrowUp' && (noneSelectedVisible || (highest <= 0))) {
+              targetIdx = order.length - 1
+            }
+            if (key === 'ArrowDown' && (noneSelectedVisible || (lowest >= order.length - 1))) {
+              targetIdx = 0
+            }
+          }
+
+          // Horizontal grid rollover: wrap ends
+          if (gridEl && (key === 'ArrowLeft' || key === 'ArrowRight')) {
+            if (key === 'ArrowLeft' && (noneSelectedVisible || (highest <= 0))) {
+              targetIdx = order.length - 1
+            }
+            if (key === 'ArrowRight' && (noneSelectedVisible || (lowest >= order.length - 1))) {
+              targetIdx = 0
+            }
+          }
+
+          e.preventDefault()
+          selectIndex(targetIdx)
+          return
+        }
+      }
+
       // Back: macOS Cmd+[ , Windows/Linux Alt+Left
       if ((isMac && e.metaKey && e.key === '[') || (!isMac && e.altKey && e.key === 'ArrowLeft')) {
         e.preventDefault()
