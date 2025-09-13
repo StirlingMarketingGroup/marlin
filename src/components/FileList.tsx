@@ -530,7 +530,8 @@ export default function FileList({ files, preferences }: FileListProps) {
                 {renameTargetPath === file.path ? (
                   <input
                     ref={renameInputRef}
-                    className={`flex-1 min-w-0 text-[13px] leading-5 h-5 bg-transparent border-0 rounded-none px-0 py-0 m-0 outline-none appearance-none ${isSelected ? 'text-white' : 'text-app-text'} truncate`}
+                    className={`block flex-1 min-w-0 text-sm font-medium leading-5 h-5 bg-transparent border-0 rounded-none px-0 py-0 m-0 outline-none appearance-none ${isSelected ? 'text-white' : 'text-app-text'} truncate`}
+                    style={{ fontFamily: 'inherit', transform: 'translateY(-0.5px)' }}
                     value={renameText}
                     onChange={(e) => setRenameText(e.target.value)}
                     onKeyDown={(e) => {
