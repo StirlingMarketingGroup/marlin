@@ -24,6 +24,7 @@ function FileNameDisplayInner({
   style 
 }: FileNameDisplayProps) {
   const isMac = typeof navigator !== 'undefined' && navigator.userAgent.toUpperCase().includes('MAC')
+  const X_PAD = 4 // subtle horizontal padding for selected background
   
   const displayName = (isMac && file.is_directory && file.name.toLowerCase().endsWith('.app'))
     ? file.name.replace(/\.app$/i, '')
@@ -36,6 +37,9 @@ function FileNameDisplayInner({
   const containerRef = useRef<HTMLSpanElement | null>(null)
   const [needsTooltip, setNeedsTooltip] = useState(false)
   const [renderText, setRenderText] = useState<string>(displayName)
+  // Track when the name spills beyond 2 lines in grid/selected state
+  const [bgHeight, setBgHeight] = useState<number>(0)
+  const [hadOverflow, setHadOverflow] = useState<boolean>(false)
 
   useEffect(() => {
     if (variant === 'grid') {
@@ -59,6 +63,23 @@ function FileNameDisplayInner({
           // Show full text and allow overflow when selected
           setRenderText(displayName)
           setNeedsTooltip(false)
+          // Measure full content height so we can paint
+          // a background across all lines for readability.
+          try {
+            const actual = el.scrollHeight
+            setBgHeight(actual > 1 ? Math.ceil(actual) : 0)
+          } catch {
+            setBgHeight(0)
+          }
+          // Determine if it would have been truncated in 2 lines
+          const { isTruncated } = truncateToTwoLines(
+            displayName,
+            width,
+            { fontSize, fontFamily, fontWeight, fontStyle, lineHeightPx, textAlign: 'center' },
+            true,
+            2
+          )
+          setHadOverflow(isTruncated)
         } else {
           const { text, isTruncated } = truncateToTwoLines(
             displayName,
@@ -69,6 +90,8 @@ function FileNameDisplayInner({
           )
           setRenderText(text)
           setNeedsTooltip(isTruncated)
+          setBgHeight(0)
+          setHadOverflow(isTruncated)
         }
       }
       compute()
@@ -135,6 +158,18 @@ function FileNameDisplayInner({
                   onBlur={handlers.onBlur}
                   style={{ overflow: 'visible' }}
                 >
+                  {isSelected && hadOverflow && bgHeight > 0 && (
+                    <div
+                      className="absolute bg-app-dark/80 pointer-events-none rounded"
+                      style={{
+                        left: X_PAD,
+                        right: X_PAD,
+                        top: 0,
+                        height: `${bgHeight}px`,
+                        zIndex: 25,
+                      }}
+                    />
+                  )}
                   <div
                     ref={(el) => { textRef.current = el as any }}
                     className={`text-sm font-medium text-center ${isSelected ? 'text-white' : ''} ${className}`}
@@ -149,7 +184,9 @@ function FileNameDisplayInner({
                       width: '100%',
                       position: isSelected ? 'relative' : undefined,
                       zIndex: isSelected ? 30 : undefined,
-                      pointerEvents: isSelected ? ('none' as any) : undefined
+                      pointerEvents: isSelected ? ('none' as any) : undefined,
+                      paddingLeft: isSelected && hadOverflow ? X_PAD : undefined,
+                      paddingRight: isSelected && hadOverflow ? X_PAD : undefined
                     }}
                   >
                     {renderText}
@@ -159,6 +196,18 @@ function FileNameDisplayInner({
             </QuickTooltip>
           ) : (
             <div className="relative w-full" style={{ overflow: 'visible' }}>
+              {isSelected && hadOverflow && bgHeight > 0 && (
+                <div
+                  className="absolute bg-app-dark/80 pointer-events-none rounded"
+                  style={{
+                    left: X_PAD,
+                    right: X_PAD,
+                    top: 0,
+                    height: `${bgHeight}px`,
+                    zIndex: 25,
+                  }}
+                />
+              )}
               <div
                 ref={(el) => { textRef.current = el as any }}
                 className={`text-sm font-medium text-center ${isSelected ? 'text-white' : ''} ${className}`}
@@ -173,7 +222,9 @@ function FileNameDisplayInner({
                   width: '100%',
                   position: isSelected ? 'relative' : undefined,
                   zIndex: isSelected ? 30 : undefined,
-                  pointerEvents: isSelected ? ('none' as any) : undefined
+                  pointerEvents: isSelected ? ('none' as any) : undefined,
+                  paddingLeft: isSelected && hadOverflow ? X_PAD : undefined,
+                  paddingRight: isSelected && hadOverflow ? X_PAD : undefined
                 }}
               >
                 {renderText}
