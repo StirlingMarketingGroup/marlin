@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, MouseEvent } from 'react'
 import { useAppStore } from '../store/useAppStore'
 import FileGrid from './FileGrid'
 import FileList from './FileList'
+import ContextMenu from './ContextMenu'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { invoke } from '@tauri-apps/api/core'
 
@@ -21,6 +22,11 @@ export default function MainPanel() {
   const scrollRef = useRef<HTMLDivElement>(null)
   const fileCtxCaptureRef = useRef<boolean>(false)
   const fileCtxPathRef = useRef<string | null>(null)
+  const [fallbackCtx, setFallbackCtx] = useState<{
+    x: number;
+    y: number;
+    isFileCtx: boolean;
+  } | null>(null)
 
   const currentPrefs = {
     ...globalPreferences,
@@ -28,8 +34,8 @@ export default function MainPanel() {
   }
 
   const handleContextMenuCapture = (e: React.MouseEvent) => {
-    const targetEl = e.target as HTMLElement
-    const fileEl = targetEl && (targetEl.closest('[data-file-item="true"]') as HTMLElement | null)
+    const target = e.target as Element | null
+    const fileEl = target && 'closest' in target ? (target as Element).closest('[data-file-item="true"]') as HTMLElement | null : null
     fileCtxCaptureRef.current = !!fileEl
     fileCtxPathRef.current = fileEl ? (fileEl.getAttribute('data-file-path') || null) : null
   }
@@ -41,34 +47,51 @@ export default function MainPanel() {
       const state = useAppStore.getState()
       const path = state.currentPath
       const prefs = { ...state.globalPreferences, ...state.directoryPreferences[path] }
-      const sortBy = prefs.sortBy
-      const sortOrder = prefs.sortOrder
-      let filePaths = state.selectedFiles
-      const isFileCtx = fileCtxCaptureRef.current
-      const ctxPath = fileCtxPathRef.current
+      const sortBy = (prefs.sortBy ?? state.globalPreferences.sortBy) || 'name'
+      const sortOrder = (prefs.sortOrder ?? state.globalPreferences.sortOrder) || 'asc'
+
+      // Derive file context directly from event target for reliability
+      const tgt = e.target as Element | null
+      const fileEl = tgt && 'closest' in tgt ? (tgt as Element).closest('[data-file-item="true"]') as HTMLElement | null : null
+      const ctxPathFromTarget = fileEl ? (fileEl.getAttribute('data-file-path') || null) : null
+
+      // Prefer target-derived context; fall back to capture ref
+      const isFileCtx = !!ctxPathFromTarget || fileCtxCaptureRef.current
+      const ctxPath = ctxPathFromTarget || fileCtxPathRef.current
       // If right-clicked a file, ensure it is selected and pass it explicitly
+      let filePaths: string[] | undefined
       if (isFileCtx && ctxPath) {
-        if (!filePaths.includes(ctxPath)) {
+        if (!state.selectedFiles.includes(ctxPath)) {
           setSelectedFiles([ctxPath])
+          filePaths = [ctxPath]
+        } else {
+          // Right-clicked within existing selection: use full selection
+          filePaths = state.selectedFiles
         }
-        filePaths = [ctxPath]
+      } else {
+        filePaths = undefined
       }
       fileCtxCaptureRef.current = false
       fileCtxPathRef.current = null
 
       await invoke('show_native_context_menu', {
-        window_label: win.label,
+        windowLabel: win.label,
         x: e.clientX,
         y: e.clientY,
-        sort_by: sortBy,
-        sort_order: sortOrder,
+        sortBy: sortBy,
+        sortOrder: sortOrder,
         path,
-        has_file_context: isFileCtx || (Array.isArray(filePaths) && filePaths.length > 0),
-        file_paths: filePaths,
+        // Always send a boolean (never undefined)
+        hasFileContext: !!isFileCtx,
+        // Only send file paths when clicking on a file
+        filePaths: isFileCtx ? filePaths : undefined,
       })
       return
     } catch (_) {
-      // If native menu fails for some reason, silently ignore
+      // If native menu fails (e.g., web preview), show React fallback
+      const tgt = e.target as HTMLElement
+      const isFile = !!(tgt && tgt.closest && tgt.closest('[data-file-item="true"]'))
+      setFallbackCtx({ x: e.clientX, y: e.clientY, isFileCtx: isFile })
     }
   }
 
@@ -143,7 +166,15 @@ export default function MainPanel() {
         )}
       </div>
       
-      {/* No React context menu fallback */}
+      {/* React context menu fallback (web preview or native failure) */}
+      {fallbackCtx && (
+        <ContextMenu
+          x={fallbackCtx.x}
+          y={fallbackCtx.y}
+          isFileContext={fallbackCtx.isFileCtx}
+          onRequestClose={() => setFallbackCtx(null)}
+        />
+      )}
     </div>
   )
 }

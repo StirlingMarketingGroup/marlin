@@ -160,7 +160,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     // Update native menu selection state (ignore errors in dev)
     ;(async () => {
       try {
-        await invoke('update_selection_menu_state', { has_selection: Array.isArray(files) && files.length > 0 })
+        await invoke('update_selection_menu_state', { hasSelection: Array.isArray(files) && files.length > 0 })
       } catch { /* ignore */ }
     })()
   },

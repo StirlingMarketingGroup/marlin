@@ -649,17 +649,6 @@ pub fn show_native_context_menu(
     has_file_context: Option<bool>,
     file_paths: Option<Vec<String>>,
 ) -> Result<(), String> {
-    // Helpful debug to ensure frontend is passing expected values
-    #[cfg(debug_assertions)]
-    log::info!(
-        "ContextMenu request: sort_by={:?} sort_order={:?} has_file_context={:?} file_paths_len={} at ({}, {})",
-        sort_by,
-        sort_order,
-        has_file_context,
-        file_paths.as_ref().map(|v| v.len()).unwrap_or(0),
-        x,
-        y
-    );
     // Resolve window
     let webview = if let Some(label) = window_label {
         app.get_webview_window(&label).ok_or_else(|| "Window not found".to_string())?
@@ -797,15 +786,10 @@ pub fn show_native_context_menu(
         .build()
         .map_err(|e| e.to_string())?;
 
-    // Only include file-specific actions when a selection exists or click is on a file
+    // Only include file-specific actions when the right-click is on a file
+    // (or explicit file paths are provided by the frontend).
     let selection_len = file_paths.as_ref().map(|v| v.len()).unwrap_or(0);
-    let selection_from_state = app
-        .state::<crate::state::MenuState<tauri::Wry>>()
-        .has_selection
-        .lock()
-        .map(|v| *v)
-        .unwrap_or(false);
-    let is_file_ctx = has_file_context.unwrap_or(false) || selection_len > 0 || selection_from_state;
+    let is_file_ctx = has_file_context.unwrap_or(false) || selection_len > 0;
 
     let mut builder = MenuBuilder::new(&app);
     if is_file_ctx {

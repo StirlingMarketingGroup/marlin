@@ -313,7 +313,7 @@ function App() {
         if (prefs.sortBy || prefs.sortOrder) {
           const sortBy = prefs.sortBy ?? state.globalPreferences.sortBy
           const sortOrder = prefs.sortOrder ?? state.globalPreferences.sortOrder
-          try { await invoke('update_sort_menu_state', { sort_by: sortBy, ascending: sortOrder === 'asc' }) } catch {}
+          try { await invoke('update_sort_menu_state', { sortBy, ascending: sortOrder === 'asc' }) } catch {}
         }
       } catch { /* ignore */ }
     })()
