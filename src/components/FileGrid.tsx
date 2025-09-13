@@ -448,7 +448,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
             <div
               key={file.path}
               className={`relative flex flex-col items-center px-3 py-2 rounded-md cursor-pointer transition-all duration-75 ${
-                isSelected ? 'bg-accent-selected' : hoveredFile === file.path ? 'bg-app-light/70' : ''
+                isSelected ? 'bg-accent-selected z-20 overflow-visible' : hoveredFile === file.path ? 'bg-app-light/70' : ''
               } ${isDragged ? 'opacity-50' : ''} ${
                 file.is_hidden ? 'opacity-60' : ''
               }`}
@@ -500,5 +500,4 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     </div>
   )
 }
-
 

@@ -55,15 +55,21 @@ function FileNameDisplayInner({
           if (Number.isFinite(parsed)) return parsed
           return Math.round(fontSize * 1.2)
         })()
-        const { text, isTruncated } = truncateToTwoLines(
-          displayName,
-          width,
-          { fontSize, fontFamily, fontWeight, fontStyle, lineHeightPx, textAlign: 'center' },
-          true,
-          2
-        )
-        setRenderText(text)
-        setNeedsTooltip(isTruncated)
+        if (isSelected) {
+          // Show full text and allow overflow when selected
+          setRenderText(displayName)
+          setNeedsTooltip(false)
+        } else {
+          const { text, isTruncated } = truncateToTwoLines(
+            displayName,
+            width,
+            { fontSize, fontFamily, fontWeight, fontStyle, lineHeightPx, textAlign: 'center' },
+            true,
+            2
+          )
+          setRenderText(text)
+          setNeedsTooltip(isTruncated)
+        }
       }
       compute()
       const ro = new ResizeObserver(() => compute())
@@ -119,44 +125,59 @@ function FileNameDisplayInner({
       {variant === 'grid' ? (
         <div className="flex flex-col items-center">
           {needsTooltip ? (
-          <QuickTooltip text={displayName}>
-            {(handlers) => (
-              <div
-                  ref={(el) => { textRef.current = el as any; handlers.ref(el) }}
+            <QuickTooltip text={displayName}>
+              {(handlers) => (
+                <div className="relative w-full" 
+                  ref={(el) => { handlers.ref(el as any) }}
                   onMouseEnter={handlers.onMouseEnter}
                   onMouseLeave={handlers.onMouseLeave}
                   onFocus={handlers.onFocus}
                   onBlur={handlers.onBlur}
-                  className={`text-sm font-medium text-center ${isSelected ? 'text-white' : ''} ${className}`}
-                  style={{
-                    lineHeight: '1.25rem',
-                    wordBreak: 'break-word',
-                    display: '-webkit-box',
-                    WebkitLineClamp: 2,
-                    WebkitBoxOrient: 'vertical',
-                    overflow: 'hidden',
-                    width: '100%'
-                  }}
+                  style={{ overflow: 'visible' }}
                 >
-                  {renderText}
+                  <div
+                    ref={(el) => { textRef.current = el as any }}
+                    className={`text-sm font-medium text-center ${isSelected ? 'text-white' : ''} ${className}`}
+                    style={{
+                      lineHeight: '1.25rem',
+                      wordBreak: 'break-word',
+                      display: isSelected ? 'block' : ('-webkit-box' as any),
+                      WebkitLineClamp: isSelected ? undefined : 2,
+                      WebkitBoxOrient: isSelected ? undefined : ('vertical' as any),
+                      overflow: isSelected ? 'visible' : 'hidden',
+                      maxHeight: isSelected ? '2.5rem' : undefined,
+                      width: '100%',
+                      position: isSelected ? 'relative' : undefined,
+                      zIndex: isSelected ? 30 : undefined,
+                      pointerEvents: isSelected ? ('none' as any) : undefined
+                    }}
+                  >
+                    {renderText}
+                  </div>
                 </div>
               )}
             </QuickTooltip>
           ) : (
-            <div
-              ref={(el) => { textRef.current = el as any }}
-              className={`text-sm font-medium text-center ${isSelected ? 'text-white' : ''} ${className}`}
-              style={{
-                lineHeight: '1.25rem',
-                wordBreak: 'break-word',
-                display: '-webkit-box',
-                WebkitLineClamp: 2,
-                WebkitBoxOrient: 'vertical',
-                overflow: 'hidden',
-                width: '100%'
-              }}
-            >
-              {renderText}
+            <div className="relative w-full" style={{ overflow: 'visible' }}>
+              <div
+                ref={(el) => { textRef.current = el as any }}
+                className={`text-sm font-medium text-center ${isSelected ? 'text-white' : ''} ${className}`}
+                style={{
+                  lineHeight: '1.25rem',
+                  wordBreak: 'break-word',
+                  display: isSelected ? 'block' : ('-webkit-box' as any),
+                  WebkitLineClamp: isSelected ? undefined : 2,
+                  WebkitBoxOrient: isSelected ? undefined : ('vertical' as any),
+                  overflow: isSelected ? 'visible' : 'hidden',
+                  maxHeight: isSelected ? '2.5rem' : undefined,
+                  width: '100%',
+                  position: isSelected ? 'relative' : undefined,
+                  zIndex: isSelected ? 30 : undefined,
+                  pointerEvents: isSelected ? ('none' as any) : undefined
+                }}
+              >
+                {renderText}
+              </div>
             </div>
           )}
           {!file.is_directory && showSize && (
