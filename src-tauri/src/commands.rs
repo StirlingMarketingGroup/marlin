@@ -83,8 +83,44 @@ pub fn rename_file(from_path: String, to_path: String) -> Result<(), String> {
         return Err("Source path does not exist".to_string());
     }
 
-    if to.exists() {
+    // Allow case-only renames on case-insensitive filesystems by using a two-step rename.
+    // If the destination exists but only differs by letter casing, perform: from -> temp -> to
+    let same_parent = from.parent() == to.parent();
+    let from_name = from.file_name().and_then(|s| s.to_str());
+    let to_name = to.file_name().and_then(|s| s.to_str());
+    let is_case_only = same_parent
+        && from_name.is_some()
+        && to_name.is_some()
+        && from_name != to_name
+        && from_name.unwrap().eq_ignore_ascii_case(to_name.unwrap());
+
+    if to.exists() && !is_case_only {
         return Err("Destination path already exists".to_string());
+    }
+
+    if is_case_only {
+        // Two-step rename to update case where FS is case-insensitive
+        let parent = from.parent().ok_or_else(|| "Invalid source path".to_string())?;
+        // Generate a temporary name that shouldn't collide
+        let mut counter: u32 = 0;
+        let mut temp_path;
+        loop {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_else(|_| std::time::Duration::from_millis(0))
+                .as_millis();
+            let temp_name = format!(".__rename_tmp_{}_{}", ts, counter);
+            temp_path = parent.join(&temp_name);
+            if !temp_path.exists() { break; }
+            counter += 1;
+            if counter > 1000 { return Err("Failed to allocate temporary name for rename".to_string()); }
+        }
+
+        fs::rename(from, &temp_path)
+            .map_err(|e| format!("Failed to rename (stage 1): {}", e))?;
+        fs::rename(&temp_path, to)
+            .map_err(|e| format!("Failed to rename (stage 2): {}", e))?;
+        return Ok(());
     }
 
     rename_file_or_directory(from, to)
