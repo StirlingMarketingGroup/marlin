@@ -234,7 +234,8 @@ export default function FileList({ files, preferences }: FileListProps) {
     if (!renameTargetPath) return
     const f = files.find(ff => ff.path === renameTargetPath)
     if (!f) return
-    setRenameText(f.name)
+    // Clear first to avoid flashing previous value
+    setRenameText('')
     const baseLen = (() => {
       if (f.is_directory) {
         return f.name.toLowerCase().endsWith('.app') ? Math.max(0, f.name.length - 4) : f.name.length
@@ -247,14 +248,12 @@ export default function FileList({ files, preferences }: FileListProps) {
       if (!el) return
       el.focus()
       try {
-        // Ensure correct value is present on the very first frame
-        if (el.value !== f.name) el.value = f.name
         el.setSelectionRange(0, baseLen)
       } catch {}
     }
-    // Run twice to cover initial mount + state paint in React
+    // Fill value on next frame, then select the base name
     requestAnimationFrame(() => {
-      focusAndSelect()
+      setRenameText(f.name)
       requestAnimationFrame(focusAndSelect)
     })
   }, [renameTargetPath, files])
@@ -263,8 +262,26 @@ export default function FileList({ files, preferences }: FileListProps) {
     const name = (renameText || '').trim()
     if (!name) { setRenameTarget(undefined); return }
     await renameFile(name)
+    // Clear to avoid flashing previous value on next rename
+    setRenameText('')
   }
-  const cancelRename = () => setRenameTarget(undefined)
+  const cancelRename = () => {
+    const el = renameInputRef.current
+    const scroller = el ? (el.closest('.overflow-auto') as HTMLElement | null) : null
+    const top = scroller?.scrollTop ?? 0
+    const left = scroller?.scrollLeft ?? 0
+    setRenameText('')
+    setRenameTarget(undefined)
+    requestAnimationFrame(() => {
+      if (scroller) scroller.scrollTo({ top, left, behavior: 'auto' })
+      requestAnimationFrame(() => {
+        if (scroller) scroller.scrollTo({ top, left, behavior: 'auto' })
+        requestAnimationFrame(() => {
+          if (scroller) scroller.scrollTo({ top, left, behavior: 'auto' })
+        })
+      })
+    })
+  }
 
   // Handle mouse down for drag initiation and right-click selection
   const handleMouseDownForFile = (e: React.MouseEvent, file: FileItem) => {
@@ -535,8 +552,8 @@ export default function FileList({ files, preferences }: FileListProps) {
                     value={renameText}
                     onChange={(e) => setRenameText(e.target.value)}
                     onKeyDown={(e) => {
-                      if (e.key === 'Enter') { e.preventDefault(); void commitRename() }
-                      if (e.key === 'Escape') { e.preventDefault(); cancelRename() }
+                      if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); void commitRename() }
+                      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); cancelRename() }
                     }}
                     // Prevent row drag/open when interacting with the input
                     onMouseDown={(e) => { e.stopPropagation() }}

@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useRef, type ReactNode } from 'react'
+import { useState, useMemo, useEffect, useLayoutEffect, useRef, type ReactNode } from 'react'
 import { Folder, File, ImageSquare, MusicNote, VideoCamera, FileText, AppWindow, Package, FilePdf, PaintBrush, Palette, Disc, Cube } from 'phosphor-react'
 import { FileItem, ViewPreferences } from '../types'
 import { useAppStore } from '../store/useAppStore'
@@ -116,6 +116,9 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
   const [draggedFile, setDraggedFile] = useState<string | null>(null)
   const [hoveredFile, setHoveredFile] = useState<string | null>(null)
   const renameInputRef = useRef<HTMLInputElement>(null)
+  
+  const [renameInputOffset, setRenameInputOffset] = useState<number>(0)
+  const [renameInputWidth, setRenameInputWidth] = useState<number | undefined>(undefined)
 
   
   // Tile width from preferences (default 120)
@@ -342,7 +345,8 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     if (!renameTargetPath) return
     const f = files.find(ff => ff.path === renameTargetPath)
     if (!f) return
-    setRenameText(f.name)
+    // Clear first to avoid flashing a previous value
+    setRenameText('')
     const baseLen = (() => {
       if (f.is_directory) return f.name.toLowerCase().endsWith('.app') ? Math.max(0, f.name.length - 4) : f.name.length
       const idx = f.name.lastIndexOf('.')
@@ -357,18 +361,103 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
         el.setSelectionRange(0, baseLen)
       } catch {}
     }
+    // Fill value on next frame, then select the base name
     requestAnimationFrame(() => {
-      focusAndSelect()
+      setRenameText(f.name)
       requestAnimationFrame(focusAndSelect)
     })
   }, [renameTargetPath, files])
+
+  // Auto-size and edge-aware centering for the rename input in grid view
+  useLayoutEffect(() => {
+    if (!renameTargetPath) return
+    const el = renameInputRef.current
+    if (!el) return
+
+    const computeLayout = () => {
+      const tileEl = el.closest('[data-file-item="true"]') as HTMLElement | null
+      const tileRect = tileEl ? tileEl.getBoundingClientRect() : undefined
+      const centerX = tileRect ? (tileRect.left + tileRect.width / 2) : (window.innerWidth / 2)
+      // Use nearest overflow-auto scroller to avoid overlapping sidebar
+      const scroller = (tileEl && (tileEl.closest('.overflow-auto') as HTMLElement | null)) || undefined
+      const containerRect = scroller ? scroller.getBoundingClientRect() : ({ left: 0, right: window.innerWidth } as any)
+      const margin = 16
+
+      // Measure text width using canvas to compute desired width
+      const cs = window.getComputedStyle(el)
+      const font = `${cs.fontStyle} ${cs.fontVariant || 'normal'} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`
+      const canvas = document.createElement('canvas')
+      const ctx = canvas.getContext('2d')
+      let textWidth = 0
+      if (ctx) {
+        ctx.font = font
+        textWidth = Math.ceil(ctx.measureText(renameText || '').width)
+      } else {
+        textWidth = (renameText || '').length * (parseFloat(cs.fontSize) || 13) * 0.6
+      }
+
+      const horizPad = 8 + 8 + 1 + 1 // px-2 padding + 1px borders
+      const desiredWidth = Math.max(tile, textWidth + horizPad)
+      const minX = containerRect.left + margin
+      const maxX = containerRect.right - margin
+      const containerAvail = Math.max(0, maxX - minX)
+      const width = Math.min(desiredWidth, containerAvail)
+
+      // Shift left/right to keep entire input within container instead of shrinking first
+      const minCenter = minX + width / 2
+      const maxCenter = maxX - width / 2
+      const clampedCenter = Math.max(minCenter, Math.min(maxCenter, centerX))
+      const offset = clampedCenter - centerX
+
+      setRenameInputWidth(width)
+      setRenameInputOffset(offset)
+    }
+
+    computeLayout()
+    const onResize = () => computeLayout()
+    window.addEventListener('resize', onResize)
+    const tileEl = el.closest('[data-file-item="true"]') as HTMLElement | null
+    const scroller = (tileEl && (tileEl.closest('.overflow-auto') as HTMLElement | null)) || undefined
+    const onScroll = () => computeLayout()
+    if (scroller) scroller.addEventListener('scroll', onScroll)
+    return () => {
+      window.removeEventListener('resize', onResize)
+      if (scroller) scroller.removeEventListener('scroll', onScroll)
+    }
+  }, [renameTargetPath, renameText, tile])
+
 
   const commitRename = async () => {
     const name = (renameText || '').trim()
     if (!name) { setRenameTarget(undefined); return }
     await renameFile(name)
+    // Clear local value to avoid flashing on next rename session
+    setRenameText('')
   }
-  const cancelRename = () => setRenameTarget(undefined)
+  const cancelRename = () => {
+    // Preserve scroll position of the main scroller to prevent jump-to-top
+    const el = renameInputRef.current
+    const scroller = el ? (el.closest('.overflow-auto') as HTMLElement | null) : null
+    const top = scroller?.scrollTop ?? 0
+    const left = scroller?.scrollLeft ?? 0
+    // Clear local value and sizing so the next open starts empty and measured fresh
+    setRenameText('')
+    setRenameInputWidth(undefined)
+    setRenameInputOffset(0)
+    setRenameTarget(undefined)
+    // Restore on next frame after reflow
+    requestAnimationFrame(() => {
+      if (scroller) scroller.scrollTo({ top, left, behavior: 'auto' })
+      // Do another frame to counter subsequent layout shifts
+      requestAnimationFrame(() => {
+        if (scroller) scroller.scrollTo({ top, left, behavior: 'auto' })
+        // One more just in case React updates late on some platforms
+        requestAnimationFrame(() => {
+          if (scroller) scroller.scrollTo({ top, left, behavior: 'auto' })
+        })
+      })
+    })
+  }
 
   const nameCollator = useMemo(() => new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' }), [])
   const sortedFiles = [...files].sort((a, b) => {
@@ -495,12 +584,13 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
         {filteredFiles.map((file) => {
           const isSelected = selectedFiles.includes(file.path)
           const isDragged = draggedFile !== null && (draggedFile === file.path || selectedFiles.includes(file.path))
+          const isRenaming = renameTargetPath === file.path
           
           return (
             <div
               key={file.path}
               className={`relative flex flex-col items-center px-3 py-2 rounded-md cursor-pointer transition-all duration-75 ${
-                isSelected ? 'bg-accent-selected z-20 overflow-visible' : hoveredFile === file.path ? 'bg-app-light/70' : ''
+                (isSelected || isRenaming) ? 'bg-accent-selected z-20 overflow-visible' : hoveredFile === file.path ? 'bg-app-light/70' : ''
               } ${isDragged ? 'opacity-50' : ''} ${
                 file.is_hidden ? 'opacity-60' : ''
               }`}
@@ -519,17 +609,22 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
                 <GridFilePreview file={file} isMac={isMac} fallbackIcon={getFileIcon(file)} tile={tile} />
               </div>
               
-              <div className="text-center w-full">
-                {renameTargetPath === file.path ? (
+              {isRenaming ? (
+                <div className="text-center w-full relative overflow-visible" style={{ height: '1.25rem' }}>
                   <input
                     ref={renameInputRef}
-                    className={`text-sm font-medium bg-app-dark border border-app-border rounded px-2 py-[3px] ${isSelected ? 'text-white' : ''}`}
-                    style={{ maxWidth: `${tile}px` }}
+                    className={`text-sm font-medium bg-app-dark border border-app-border rounded px-2 py-[2px] ${isSelected ? 'text-white' : ''} whitespace-nowrap absolute left-1/2 text-center`}
+                    style={{
+                      minWidth: `${tile}px`,
+                      width: renameInputWidth ? `${renameInputWidth}px` : `${tile}px`,
+                      transform: `translateX(-50%) translateX(${renameInputOffset}px)`,
+                      zIndex: 50,
+                    }}
                     value={renameText}
                     onChange={(e) => setRenameText(e.target.value)}
                     onKeyDown={(e) => {
-                      if (e.key === 'Enter') { e.preventDefault(); void commitRename() }
-                      if (e.key === 'Escape') { e.preventDefault(); cancelRename() }
+                      if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); void commitRename() }
+                      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); cancelRename() }
                     }}
                     // Prevent grid item drag/open when interacting with the input
                     onMouseDown={(e) => { e.stopPropagation() }}
@@ -540,7 +635,9 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
                     data-tauri-drag-region={false}
                     draggable={false}
                   />
-                ) : (
+                </div>
+              ) : (
+                <div className="text-center w-full">
                   <FileNameDisplay
                     file={file}
                     maxWidth={tile - 16} // Account for padding
@@ -549,8 +646,8 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
                     showSize={true}
                     style={{ width: '100%' }}
                   />
-                )}
-              </div>
+                </div>
+              )}
             </div>
           )
         })}
