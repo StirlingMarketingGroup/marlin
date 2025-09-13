@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect, useRef, type ReactNode } from 'react'
-import { Folder, File, ImageSquare, MusicNote, VideoCamera, FileZip, FileText, AppWindow, Package, FilePdf, PaintBrush, Palette, Disc, Cube } from 'phosphor-react'
+import { Folder, File, ImageSquare, MusicNote, VideoCamera, FileText, AppWindow, Package, FilePdf, PaintBrush, Palette, Disc, Cube } from 'phosphor-react'
 import { FileItem, ViewPreferences } from '../types'
 import { useAppStore } from '../store/useAppStore'
 import AppIcon from '@/components/AppIcon'
@@ -192,8 +192,8 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     }
 
     // Archive files
-    if (['zip', 'rar', '7z', 'tar', 'gz', 'bz2'].includes(ext)) {
-      return <FileZip className="w-12 h-12 text-app-muted" />
+    if (['zip', 'rar', '7z', '7zip', 'tar', 'gz', 'tgz', 'bz2', 'tbz2', 'xz', 'txz', 'zst', 'lz', 'lzma'].includes(ext)) {
+      return <FileTypeIcon name={file.name} ext={ext} size="large" />
     }
 
     // 3D model: STL
@@ -236,6 +236,12 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
 
   // Handle mouse down for drag initiation and right-click selection
   const handleMouseDownForFile = (e: React.MouseEvent, file: FileItem) => {
+    // If we're renaming this item and the event started in an input, ignore to allow text selection
+    const target = e.target as HTMLElement
+    if (renameTargetPath === file.path && target && target.closest('input, textarea, [contenteditable="true"]')) {
+      e.stopPropagation()
+      return
+    }
     // Right-click: Pre-select for context menu
     if (e.button === 2) {
       if (!selectedFiles.includes(file.path)) {
@@ -337,17 +343,23 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     const f = files.find(ff => ff.path === renameTargetPath)
     if (!f) return
     setRenameText(f.name)
-    requestAnimationFrame(() => {
+    const baseLen = (() => {
+      if (f.is_directory) return f.name.toLowerCase().endsWith('.app') ? Math.max(0, f.name.length - 4) : f.name.length
+      const idx = f.name.lastIndexOf('.')
+      return idx > 0 ? idx : f.name.length
+    })()
+    const focusAndSelect = () => {
       const el = renameInputRef.current
-      if (el) {
-        el.focus()
-        const baseLen = (() => {
-          if (f.is_directory) return f.name.toLowerCase().endsWith('.app') ? Math.max(0, f.name.length - 4) : f.name.length
-          const idx = f.name.lastIndexOf('.')
-          return idx > 0 ? idx : f.name.length
-        })()
-        try { el.setSelectionRange(0, baseLen) } catch {}
-      }
+      if (!el) return
+      el.focus()
+      try {
+        if (el.value !== f.name) el.value = f.name
+        el.setSelectionRange(0, baseLen)
+      } catch {}
+    }
+    requestAnimationFrame(() => {
+      focusAndSelect()
+      requestAnimationFrame(focusAndSelect)
     })
   }, [renameTargetPath, files])
 
@@ -519,8 +531,14 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
                       if (e.key === 'Enter') { e.preventDefault(); void commitRename() }
                       if (e.key === 'Escape') { e.preventDefault(); cancelRename() }
                     }}
+                    // Prevent grid item drag/open when interacting with the input
+                    onMouseDown={(e) => { e.stopPropagation() }}
+                    onClick={(e) => { e.stopPropagation() }}
+                    onDoubleClick={(e) => { e.stopPropagation() }}
+                    onDragStart={(e) => { e.stopPropagation() }}
                     onBlur={cancelRename}
                     data-tauri-drag-region={false}
+                    draggable={false}
                   />
                 ) : (
                   <FileNameDisplay

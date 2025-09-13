@@ -404,7 +404,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     const parent = lastSep >= 0 ? target.slice(0, lastSep) : state.currentPath
     const toPath = parent ? `${parent}${sep}${trimmed}` : trimmed
     try {
-      await invoke('rename_file', { from_path: target, to_path: toPath })
+      // Tauri command args expect camelCase keys
+      await invoke('rename_file', { fromPath: target, toPath })
       set({ renameTargetPath: undefined })
       state.setSelectedFiles([toPath])
       await state.refreshCurrentDirectory()

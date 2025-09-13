@@ -26,6 +26,22 @@ export function resolveVSCodeIcon(name: string, ext?: string): string | undefine
   if (filename === '.env' || filename.startsWith('.env.')) return 'vscode-icons:file-type-dotenv'
 
   const map: Record<string, string> = {
+    // Archives (use the standard VSCode zip icon for all)
+    zip: 'vscode-icons:file-type-zip',
+    rar: 'vscode-icons:file-type-zip',
+    '7z': 'vscode-icons:file-type-zip',
+    '7zip': 'vscode-icons:file-type-zip',
+    tar: 'vscode-icons:file-type-zip',
+    gz: 'vscode-icons:file-type-zip',
+    tgz: 'vscode-icons:file-type-zip',
+    bz2: 'vscode-icons:file-type-zip',
+    tbz2: 'vscode-icons:file-type-zip',
+    xz: 'vscode-icons:file-type-zip',
+    txz: 'vscode-icons:file-type-zip',
+    zst: 'vscode-icons:file-type-zip',
+    lz: 'vscode-icons:file-type-zip',
+    lzma: 'vscode-icons:file-type-zip',
+
     // Web
     html: 'vscode-icons:file-type-html',
     htm: 'vscode-icons:file-type-html',

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { Folder, File, ImageSquare, MusicNote, VideoCamera, FileZip, FileText, CaretUp, CaretDown, AppWindow, Package, FilePdf, PaintBrush, Palette, Disc, Cube } from 'phosphor-react'
+import { Folder, File, ImageSquare, MusicNote, VideoCamera, FileText, CaretUp, CaretDown, AppWindow, Package, FilePdf, PaintBrush, Palette, Disc, Cube } from 'phosphor-react'
 import { FileItem, ViewPreferences } from '../types'
 import { useAppStore } from '../store/useAppStore'
 import AppIcon from '@/components/AppIcon'
@@ -187,8 +187,8 @@ export default function FileList({ files, preferences }: FileListProps) {
     if (['mp4', 'mkv', 'avi', 'mov', 'webm', 'flv'].includes(ext)) {
       return <VideoCamera className="w-5 h-5 text-app-red" />
     }
-    if (['zip', 'rar', '7z', 'tar', 'gz', 'bz2'].includes(ext)) {
-      return <FileZip className="w-5 h-5 text-app-muted" />
+    if (['zip', 'rar', '7z', '7zip', 'tar', 'gz', 'tgz', 'bz2', 'tbz2', 'xz', 'txz', 'zst', 'lz', 'lzma'].includes(ext)) {
+      return <FileTypeIcon name={file.name} ext={ext} size="small" />
     }
     // 3D model: STL
     if (ext === 'stl') {
@@ -242,13 +242,20 @@ export default function FileList({ files, preferences }: FileListProps) {
       const idx = f.name.lastIndexOf('.')
       return idx > 0 ? idx : f.name.length
     })()
-    // Focus/select on next frame after input mounts
-    requestAnimationFrame(() => {
+    const focusAndSelect = () => {
       const el = renameInputRef.current
-      if (el) {
-        el.focus()
-        try { el.setSelectionRange(0, baseLen) } catch {}
-      }
+      if (!el) return
+      el.focus()
+      try {
+        // Ensure correct value is present on the very first frame
+        if (el.value !== f.name) el.value = f.name
+        el.setSelectionRange(0, baseLen)
+      } catch {}
+    }
+    // Run twice to cover initial mount + state paint in React
+    requestAnimationFrame(() => {
+      focusAndSelect()
+      requestAnimationFrame(focusAndSelect)
     })
   }, [renameTargetPath, files])
 
@@ -261,6 +268,12 @@ export default function FileList({ files, preferences }: FileListProps) {
 
   // Handle mouse down for drag initiation and right-click selection
   const handleMouseDownForFile = (e: React.MouseEvent, file: FileItem) => {
+    // If we're renaming this item and the event started in an input, ignore to allow text selection
+    const target = e.target as HTMLElement
+    if (renameTargetPath === file.path && target && target.closest('input, textarea, [contenteditable="true"]')) {
+      e.stopPropagation()
+      return
+    }
     // Right-click: Pre-select for context menu
     if (e.button === 2) {
       if (!selectedFiles.includes(file.path)) {
@@ -517,15 +530,21 @@ export default function FileList({ files, preferences }: FileListProps) {
                 {renameTargetPath === file.path ? (
                   <input
                     ref={renameInputRef}
-                    className={`flex-1 min-w-0 text-sm bg-app-dark border border-app-border rounded px-2 py-[3px] outline-none ${isSelected ? 'text-white' : 'text-app-text'} focus:border-[var(--accent)] truncate`}
+                    className={`flex-1 min-w-0 text-[13px] leading-5 h-5 bg-transparent border-0 rounded-none px-0 py-0 m-0 outline-none appearance-none ${isSelected ? 'text-white' : 'text-app-text'} truncate`}
                     value={renameText}
                     onChange={(e) => setRenameText(e.target.value)}
                     onKeyDown={(e) => {
                       if (e.key === 'Enter') { e.preventDefault(); void commitRename() }
                       if (e.key === 'Escape') { e.preventDefault(); cancelRename() }
                     }}
+                    // Prevent row drag/open when interacting with the input
+                    onMouseDown={(e) => { e.stopPropagation() }}
+                    onClick={(e) => { e.stopPropagation() }}
+                    onDoubleClick={(e) => { e.stopPropagation() }}
+                    onDragStart={(e) => { e.stopPropagation() }}
                     onBlur={cancelRename}
                     data-tauri-drag-region={false}
+                    draggable={false}
                   />
                 ) : (
                   <div className="flex-1 min-w-0 overflow-hidden" data-name-cell="true">
