@@ -78,17 +78,18 @@ export function truncateToTwoLines(
   const hasExtension = preserveExtension && lastDotIndex > 0 && lastDotIndex < text.length - 1
   const extension = hasExtension ? text.substring(lastDotIndex) : ''
   const baseName = hasExtension ? text.substring(0, lastDotIndex) : text
+  const baseSegs = segmentGraphemes(baseName)
 
   // Binary search by total kept basename characters
   let low = 0
-  let high = baseName.length
+  let high = baseSegs.length
   let best: string = ellipsis + extension // fallback
 
   const buildCandidate = (keep: number): string => {
     const startLen = Math.ceil(keep / 2)
     const endLen = Math.floor(keep / 2)
-    const start = baseName.substring(0, Math.max(0, startLen))
-    const end = baseName.substring(Math.max(0, baseName.length - endLen))
+    const start = joinSlice(baseSegs, 0, Math.max(0, startLen))
+    const end = joinSlice(baseSegs, Math.max(0, baseSegs.length - endLen))
     return hasExtension ? `${start}${ellipsis}${end}${extension}` : `${start}${ellipsis}${end}`
   }
 
@@ -122,5 +123,5 @@ export function truncateToTwoLines(
   return res
 }
 
+import { segmentGraphemes, joinSlice } from '@/utils/graphemes'
 export function clearTwoLineCache() { cache.clear() }
-

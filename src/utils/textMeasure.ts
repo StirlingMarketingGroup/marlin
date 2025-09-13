@@ -1,3 +1,5 @@
+import { segmentGraphemes, joinSlice, lengthG } from '@/utils/graphemes'
+
 let measureCanvas: HTMLCanvasElement | null = null
 let measureContext: CanvasRenderingContext2D | null = null
 
@@ -75,6 +77,7 @@ export function truncateTextToWidth(
       const extension = text.substring(lastDotIndex)
       const extensionWidth = measureText(extension, fontSize, fontFamily, fontWeight, fontStyle)
       const baseName = text.substring(0, lastDotIndex)
+      const baseSegments = segmentGraphemes(baseName)
       
       const availableWidth = maxWidth - extensionWidth - ellipsisWidth
       
@@ -91,8 +94,9 @@ export function truncateTextToWidth(
       
       const halfWidth = availableWidth / 2
       
-      const startPart = truncateFromStart(baseName, halfWidth, fontSize, fontFamily, fontWeight, fontStyle)
-      const endPart = truncateFromEnd(baseName, halfWidth, fontSize, fontFamily, fontWeight, fontStyle, baseName.length - startPart.length)
+      const startPart = truncateFromStart(baseName, halfWidth, fontSize, fontFamily, fontWeight, fontStyle, baseSegments)
+      const startGCount = segmentGraphemes(startPart).length
+      const endPart = truncateFromEnd(baseName, halfWidth, fontSize, fontFamily, fontWeight, fontStyle, lengthG(baseSegments) - startGCount, baseSegments)
       
       return { 
         text: `${startPart}${ellipsis}${endPart}${extension}`, 
@@ -104,8 +108,10 @@ export function truncateTextToWidth(
   const availableWidth = maxWidth - ellipsisWidth
   const halfWidth = availableWidth / 2
   
-  const startPart = truncateFromStart(text, halfWidth, fontSize, fontFamily, fontWeight, fontStyle)
-  const endPart = truncateFromEnd(text, halfWidth, fontSize, fontFamily, fontWeight, fontStyle, text.length - startPart.length)
+  const textSegments = segmentGraphemes(text)
+  const startPart = truncateFromStart(text, halfWidth, fontSize, fontFamily, fontWeight, fontStyle, textSegments)
+  const startGCount = segmentGraphemes(startPart).length
+  const endPart = truncateFromEnd(text, halfWidth, fontSize, fontFamily, fontWeight, fontStyle, lengthG(textSegments) - startGCount, textSegments)
   
   return { 
     text: `${startPart}${ellipsis}${endPart}`, 
@@ -119,15 +125,17 @@ function truncateFromStart(
   fontSize: number,
   fontFamily: string,
   fontWeight: string,
-  fontStyle: string
+  fontStyle: string,
+  segments?: string[]
 ): string {
+  const segs = segments || segmentGraphemes(text)
   let low = 0
-  let high = text.length
+  let high = segs.length
   let result = ''
   
   while (low <= high) {
     const mid = Math.floor((low + high) / 2)
-    const substr = text.substring(0, mid)
+    const substr = joinSlice(segs, 0, mid)
     const width = measureText(substr, fontSize, fontFamily, fontWeight, fontStyle)
     
     if (width <= maxWidth) {
@@ -148,15 +156,17 @@ function truncateFromEnd(
   fontFamily: string,
   fontWeight: string,
   fontStyle: string,
-  minChars: number = 0
+  minGraphemes: number = 0,
+  segments?: string[]
 ): string {
-  let low = Math.max(0, text.length - minChars)
-  let high = text.length
+  const segs = segments || segmentGraphemes(text)
+  let low = Math.max(0, segs.length - (minGraphemes || 0))
+  let high = segs.length
   let result = ''
   
   while (low <= high) {
     const mid = Math.floor((low + high) / 2)
-    const substr = text.substring(mid)
+    const substr = joinSlice(segs, mid)
     const width = measureText(substr, fontSize, fontFamily, fontWeight, fontStyle)
     
     if (width <= maxWidth) {
