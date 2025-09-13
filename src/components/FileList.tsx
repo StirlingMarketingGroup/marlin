@@ -94,7 +94,7 @@ function ListFilePreview({ file, isMac, fallbackIcon }: { file: FileItem; isMac:
 }
 
 export default function FileList({ files, preferences }: FileListProps) {
-  const { selectedFiles, setSelectedFiles, navigateTo } = useAppStore()
+  const { selectedFiles, setSelectedFiles, navigateTo, selectionAnchor, setSelectionAnchor, setSelectionLead } = useAppStore()
   const { renameTargetPath, setRenameTarget, renameFile } = useAppStore()
   const [renameText, setRenameText] = useState<string>('')
   const renameInputRef = useRef<HTMLInputElement>(null)
@@ -210,18 +210,6 @@ export default function FileList({ files, preferences }: FileListProps) {
   }
 
   // (moved FilePreview to top-level ListFilePreview to avoid remounting)
-
-  const handleFileClick = (file: FileItem, isCtrlClick = false) => {
-    if (isCtrlClick) {
-      const newSelection = selectedFiles.includes(file.path)
-        ? selectedFiles.filter(path => path !== file.path)
-        : [...selectedFiles, file.path]
-      setSelectedFiles(newSelection)
-    } else {
-      // Single click just selects (no navigation)
-      setSelectedFiles([file.path])
-    }
-  }
 
   const handleDoubleClick = async (file: FileItem) => {
     if (file.is_directory && !file.name.toLowerCase().endsWith('.app')) {
@@ -425,6 +413,59 @@ export default function FileList({ files, preferences }: FileListProps) {
     }
   }
 
+  // Click selection handling with Shift/Cmd/Ctrl support
+  function handleFileClick(e: React.MouseEvent, file: FileItem) {
+    const meta = e.ctrlKey || e.metaKey
+    const shift = e.shiftKey
+    const order = filteredFiles.map(f => f.path)
+
+    if (shift) {
+      const anchor = (selectionAnchor && order.includes(selectionAnchor))
+        ? selectionAnchor
+        : (selectedFiles.length > 0
+            ? selectedFiles[selectedFiles.length - 1]
+            : undefined)
+      if (!anchor || !order.includes(anchor)) {
+        // No anchor: add just this item without clearing others
+        const merged = Array.from(new Set([...selectedFiles, file.path]))
+        setSelectedFiles(merged)
+        return
+      }
+      const i1 = order.indexOf(anchor)
+      const i2 = order.indexOf(file.path)
+      if (i1 === -1 || i2 === -1) {
+        const merged = Array.from(new Set([...selectedFiles, file.path]))
+        setSelectedFiles(merged)
+        return
+      }
+      const start = Math.min(i1, i2)
+      const end = Math.max(i1, i2)
+      const range = order.slice(start, end + 1)
+      const merged = Array.from(new Set([...selectedFiles, ...range]))
+      setSelectedFiles(merged)
+      const el = e.currentTarget as HTMLElement
+      if (el && el.scrollIntoView) try { el.scrollIntoView({ block: 'nearest', inline: 'nearest' }) } catch {}
+      setSelectionLead(file.path)
+      return
+    }
+
+    if (meta) {
+      const exists = selectedFiles.includes(file.path)
+      const newSelection = exists
+        ? selectedFiles.filter(path => path !== file.path)
+        : [...selectedFiles, file.path]
+      setSelectedFiles(newSelection)
+      setSelectionAnchor(file.path)
+      setSelectionLead(file.path)
+      return
+    }
+
+    // Single click just selects (no navigation)
+    setSelectedFiles([file.path])
+    setSelectionAnchor(file.path)
+    setSelectionLead(file.path)
+  }
+
   return (
     <>
     <div className="h-full" onClick={handleBackgroundClick}>
@@ -461,7 +502,7 @@ export default function FileList({ files, preferences }: FileListProps) {
               data-file-item="true"
               data-file-path={file.path}
               data-tauri-drag-region={false}
-              onClick={(e) => { e.stopPropagation(); handleFileClick(file, e.ctrlKey || e.metaKey) }}
+              onClick={(e) => { e.stopPropagation(); handleFileClick(e, file) }}
               onDoubleClick={(e) => { e.stopPropagation(); handleDoubleClick(file) }}
               onMouseDown={(e) => handleMouseDownForFile(e, file)}
               onMouseEnter={() => setHoveredFile(file.path)}

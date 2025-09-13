@@ -41,6 +41,9 @@ interface AppState {
   // Files
   files: FileItem[]
   selectedFiles: string[]
+  selectionAnchor?: string
+  selectionLead?: string
+  shiftBaseSelection?: string[] | null
   loading: boolean
   error?: string
   
@@ -67,6 +70,9 @@ interface AppState {
   setLoading: (loading: boolean) => void
   setError: (error?: string) => void
   setSelectedFiles: (files: string[]) => void
+  setSelectionAnchor: (path?: string) => void
+  setSelectionLead: (path?: string) => void
+  setShiftBaseSelection: (paths: string[] | null) => void
   updateGlobalPreferences: (preferences: Partial<ViewPreferences>) => void
   updateDirectoryPreferences: (path: string, preferences: Partial<ViewPreferences>) => void
   setTheme: (theme: Theme) => void
@@ -119,6 +125,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   homeDir: undefined,
   files: [],
   selectedFiles: [],
+  selectionAnchor: undefined,
+  selectionLead: undefined,
+  shiftBaseSelection: null,
   loading: false,
   error: undefined,
   
@@ -155,6 +164,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       } catch { /* ignore */ }
     })()
   },
+  setSelectionAnchor: (path?: string) => set({ selectionAnchor: path }),
+  setSelectionLead: (path?: string) => set({ selectionLead: path }),
+  setShiftBaseSelection: (paths: string[] | null) => set({ shiftBaseSelection: paths }),
   
   updateGlobalPreferences: (preferences) =>
     set((state) => ({

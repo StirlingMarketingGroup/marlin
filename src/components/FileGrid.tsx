@@ -110,7 +110,7 @@ function GridFilePreview({ file, isMac, fallbackIcon, tile }: { file: FileItem; 
 }
 
 export default function FileGrid({ files, preferences }: FileGridProps) {
-  const { selectedFiles, setSelectedFiles, navigateTo } = useAppStore()
+  const { selectedFiles, setSelectedFiles, navigateTo, selectionAnchor, setSelectionAnchor, setSelectionLead } = useAppStore()
   const { renameTargetPath, setRenameTarget, renameFile } = useAppStore()
   const [renameText, setRenameText] = useState<string>('')
   const [draggedFile, setDraggedFile] = useState<string | null>(null)
@@ -215,18 +215,6 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
   }
 
   // (moved FilePreview to top-level GridFilePreview to avoid remounting)
-
-  const handleFileClick = (file: FileItem, isCtrlClick = false) => {
-    if (isCtrlClick) {
-      const newSelection = selectedFiles.includes(file.path)
-        ? selectedFiles.filter(path => path !== file.path)
-        : [...selectedFiles, file.path]
-      setSelectedFiles(newSelection)
-    } else {
-      // Single click just selects (no navigation)
-      setSelectedFiles([file.path])
-    }
-  }
 
   const handleDoubleClick = async (file: FileItem) => {
     if (file.is_directory && !file.name.toLowerCase().endsWith('.app')) {
@@ -427,6 +415,58 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     }
   }
 
+  // Click selection handling with Shift/Cmd/Ctrl support
+  function handleFileClick(e: React.MouseEvent, file: FileItem) {
+    const meta = e.ctrlKey || e.metaKey
+    const shift = e.shiftKey
+    const order = filteredFiles.map(f => f.path)
+
+    if (shift) {
+      const anchor = (selectionAnchor && order.includes(selectionAnchor))
+        ? selectionAnchor
+        : (selectedFiles.length > 0
+            ? selectedFiles[selectedFiles.length - 1]
+            : undefined)
+      if (!anchor || !order.includes(anchor)) {
+        const mergedNoAnchor = Array.from(new Set([...selectedFiles, file.path]))
+        setSelectedFiles(mergedNoAnchor)
+        return
+      }
+      const i1 = order.indexOf(anchor)
+      const i2 = order.indexOf(file.path)
+      if (i1 === -1 || i2 === -1) {
+        const mergedMissing = Array.from(new Set([...selectedFiles, file.path]))
+        setSelectedFiles(mergedMissing)
+        return
+      }
+      const start = Math.min(i1, i2)
+      const end = Math.max(i1, i2)
+      const range = order.slice(start, end + 1)
+      const merged = Array.from(new Set([...selectedFiles, ...range]))
+      setSelectedFiles(merged)
+      const el = e.currentTarget as HTMLElement
+      if (el && el.scrollIntoView) try { el.scrollIntoView({ block: 'nearest', inline: 'nearest' }) } catch {}
+      setSelectionLead(file.path)
+      return
+    }
+
+    if (meta) {
+      const exists = selectedFiles.includes(file.path)
+      const newSelection = exists
+        ? selectedFiles.filter(path => path !== file.path)
+        : [...selectedFiles, file.path]
+      setSelectedFiles(newSelection)
+      setSelectionAnchor(file.path)
+      setSelectionLead(file.path)
+      return
+    }
+
+    // Single click just selects (no navigation)
+    setSelectedFiles([file.path])
+    setSelectionAnchor(file.path)
+    setSelectionLead(file.path)
+  }
+
 
 
   return (
@@ -455,7 +495,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
               data-file-item="true"
               data-file-path={file.path}
               data-tauri-drag-region={false}
-              onClick={(e) => { e.stopPropagation(); handleFileClick(file, e.ctrlKey || e.metaKey) }}
+              onClick={(e) => { e.stopPropagation(); handleFileClick(e, file) }}
               onDoubleClick={(e) => { e.stopPropagation(); handleDoubleClick(file) }}
               onMouseDown={(e) => handleMouseDownForFile(e, file)}
               onMouseEnter={() => setHoveredFile(file.path)}
@@ -500,4 +540,3 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     </div>
   )
 }
-

@@ -497,6 +497,9 @@ function App() {
             const index = wrap(idx, order.length)
             const path = order[index]
             state.setSelectedFiles([path])
+            try { state.setSelectionAnchor(path) } catch {}
+            try { state.setSelectionLead(path) } catch {}
+            try { state.setShiftBaseSelection(null) } catch {}
             // Scroll into view
             const el = nodes[index]
             if (el && typeof el.scrollIntoView === 'function') {
@@ -579,42 +582,106 @@ function App() {
 
           if (targetIdx === null) return
 
-          // Rollover behavior for grid Up/Down to preserve column when wrapping
+          // Grid Up/Down: rollover when not using Shift; clamp when extending selection
           if (gridEl && (key === 'ArrowUp' || key === 'ArrowDown')) {
-            const refIdx = key === 'ArrowUp' ? (noneSelectedVisible ? 0 : highest) : (noneSelectedVisible ? 0 : lowest)
-            const col = Math.max(0, refIdx % cols)
-            if (key === 'ArrowUp' && targetIdx < 0) {
-              // Wrap to last row same column
-              const lastRowStart = Math.floor((order.length - 1) / cols) * cols
-              let cand = lastRowStart + col
-              while (cand >= order.length && cand >= 0) cand -= cols
-              targetIdx = cand >= 0 ? cand : order.length - 1
-            } else if (key === 'ArrowDown' && targetIdx >= order.length) {
-              // Wrap to first row same column (or last if fewer items)
-              let cand = col
-              if (cand >= order.length) cand = order.length - 1
-              targetIdx = cand
+            if (e.shiftKey) {
+              // Clamp to bounds when extending a range
+              if (targetIdx < 0) targetIdx = 0
+              if (targetIdx >= order.length) targetIdx = order.length - 1
+            } else {
+              const refIdx = key === 'ArrowUp' ? (noneSelectedVisible ? 0 : highest) : (noneSelectedVisible ? 0 : lowest)
+              const col = Math.max(0, refIdx % cols)
+              if (key === 'ArrowUp' && targetIdx < 0) {
+                // Wrap to last row same column
+                const lastRowStart = Math.floor((order.length - 1) / cols) * cols
+                let cand = lastRowStart + col
+                while (cand >= order.length && cand >= 0) cand -= cols
+                targetIdx = cand >= 0 ? cand : order.length - 1
+              } else if (key === 'ArrowDown' && targetIdx >= order.length) {
+                // Wrap to first row same column (or last if fewer items)
+                let cand = col
+                if (cand >= order.length) cand = order.length - 1
+                targetIdx = cand
+              }
             }
           }
 
-          // List rollover: wrap top<->bottom
+          // List: rollover when not using Shift; clamp when extending selection
           if (!gridEl && (key === 'ArrowUp' || key === 'ArrowDown')) {
-            if (key === 'ArrowUp' && (noneSelectedVisible || (highest <= 0))) {
-              targetIdx = order.length - 1
-            }
-            if (key === 'ArrowDown' && (noneSelectedVisible || (lowest >= order.length - 1))) {
-              targetIdx = 0
+            if (e.shiftKey) {
+              if (targetIdx < 0) targetIdx = 0
+              if (targetIdx >= order.length) targetIdx = order.length - 1
+            } else {
+              if (key === 'ArrowUp' && (noneSelectedVisible || (highest <= 0))) {
+                targetIdx = order.length - 1
+              }
+              if (key === 'ArrowDown' && (noneSelectedVisible || (lowest >= order.length - 1))) {
+                targetIdx = 0
+              }
             }
           }
 
-          // Horizontal grid rollover: wrap ends
+          // Horizontal grid: rollover when not using Shift; clamp with Shift
           if (gridEl && (key === 'ArrowLeft' || key === 'ArrowRight')) {
-            if (key === 'ArrowLeft' && (noneSelectedVisible || (highest <= 0))) {
-              targetIdx = order.length - 1
+            if (e.shiftKey) {
+              if (targetIdx < 0) targetIdx = 0
+              if (targetIdx >= order.length) targetIdx = order.length - 1
+            } else {
+              if (key === 'ArrowLeft' && (noneSelectedVisible || (highest <= 0))) {
+                targetIdx = order.length - 1
+              }
+              if (key === 'ArrowRight' && (noneSelectedVisible || (lowest >= order.length - 1))) {
+                targetIdx = 0
+              }
             }
-            if (key === 'ArrowRight' && (noneSelectedVisible || (lowest >= order.length - 1))) {
-              targetIdx = 0
+          }
+
+          // Shift+Arrow: extend selection as a contiguous range from anchor (preserve pre-selection)
+          if (e.shiftKey) {
+            // Initialize shift session base if needed
+            const base = state.shiftBaseSelection ?? state.selectedFiles
+            try { state.setShiftBaseSelection(base.slice()) } catch {}
+
+            // Establish anchor if missing or off-screen
+            let anchorPath = state.selectionAnchor
+            let anchorIdx = anchorPath ? order.indexOf(anchorPath) : -1
+            if (anchorIdx < 0) {
+              // If no anchor, set to the first visible selected index or current target
+              anchorIdx = noneSelectedVisible ? targetIdx : (visibleSelectedIdx[0] ?? targetIdx)
+              try { state.setSelectionAnchor(order[anchorIdx]) } catch {}
             }
+
+            // Establish current lead (caret)
+            let leadPath = state.selectionLead
+            let leadIdx = leadPath ? order.indexOf(leadPath) : -1
+            if (leadIdx < 0) {
+              // Start from anchor when no existing lead
+              leadIdx = anchorIdx
+            }
+
+            // Compute step for this key
+            const delta = key === 'ArrowUp' ? (gridEl ? -cols : -1)
+              : key === 'ArrowDown' ? (gridEl ? +cols : +1)
+              : key === 'ArrowLeft' ? -1
+              : key === 'ArrowRight' ? +1
+              : 0
+            let newLead = leadIdx + delta
+            // Clamp without wrap during shift
+            if (newLead < 0) newLead = 0
+            if (newLead >= order.length) newLead = order.length - 1
+
+            const start = Math.min(anchorIdx, newLead)
+            const end = Math.max(anchorIdx, newLead)
+            const range = order.slice(start, end + 1)
+            const merged = Array.from(new Set([...(state.shiftBaseSelection || []), ...range]))
+            e.preventDefault()
+            state.setSelectedFiles(merged)
+            try { state.setSelectionLead(order[newLead]) } catch {}
+            const el = nodes[newLead]
+            if (el && el.scrollIntoView) {
+              try { el.scrollIntoView({ block: 'nearest', inline: 'nearest' }) } catch {}
+            }
+            return
           }
 
           e.preventDefault()
@@ -706,6 +773,14 @@ function App() {
     }
     window.addEventListener('keydown', onKey)
     unsubs.push(() => window.removeEventListener('keydown', onKey))
+
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.key === 'Shift') {
+        try { useAppStore.getState().setShiftBaseSelection(null) } catch {}
+      }
+    }
+    window.addEventListener('keyup', onKeyUp)
+    unsubs.push(() => window.removeEventListener('keyup', onKeyUp))
 
     return () => { unsubs.forEach((u) => u()) }
   }, [])
