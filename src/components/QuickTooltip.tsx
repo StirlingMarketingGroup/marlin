@@ -61,7 +61,7 @@ export default function QuickTooltip({ text, delay = 120, children }: QuickToolt
       {open && pos && createPortal(
         <div
           role="tooltip"
-          className="fixed z-[1000] pointer-events-none select-none px-2 py-1 text-[12px] rounded bg-black/85 text-white shadow-lg"
+          className="fixed z-[1000] pointer-events-none select-none px-2 py-1 text-[12px] rounded bg-black/85 text-white shadow-lg text-center"
           style={{ left: pos.x, top: pos.y, transform: 'translateX(-50%)' }}
         >
           {text}
@@ -71,4 +71,3 @@ export default function QuickTooltip({ text, delay = 120, children }: QuickToolt
     </>
   )
 }
-
