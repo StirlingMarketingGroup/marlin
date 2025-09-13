@@ -362,10 +362,14 @@ function App() {
     
     // Register all listeners asynchronously
     ;(async () => {
-      await register('menu:toggle_hidden', async () => {
+      const handleToggleHidden = async () => {
         // Always use the unified toggle function
         await toggleHidden()
-      })
+      }
+      // Listen only to the canonical menu event. The native context menu
+      // already emits 'menu:toggle_hidden' and 'ctx:toggle_hidden'; registering
+      // to both would cause a double toggle.
+      await register('menu:toggle_hidden', handleToggleHidden)
       
       await register('menu:view_list', () => setView('list'))
       await register('menu:view_grid', () => setView('grid'))
@@ -430,14 +434,16 @@ function App() {
         })
       })
 
-      await register('menu:folders_first', (e) => {
+      const handleFoldersFirst = (e?: any) => {
         const payload = e && typeof e.payload === 'boolean' ? (e.payload as boolean) : undefined
         if (typeof payload === 'boolean') {
           useAppStore.getState().updateGlobalPreferences({ foldersFirst: payload })
         } else {
           toggleFoldersFirst()
         }
-      })
+      }
+      await register('menu:folders_first', handleFoldersFirst)
+      await register('ctx:folders_first', handleFoldersFirst)
 
       await register('menu:reset_folder_defaults', async () => {
         // Clear all directory preferences and persist the change
@@ -808,7 +814,7 @@ function App() {
       
       try { 
         await invoke('update_sort_menu_state', { 
-          sort_by: effectivePrefs.sortBy, 
+          sortBy: effectivePrefs.sortBy, 
           ascending: effectivePrefs.sortOrder === 'asc' 
         }) 
       } catch (e) {

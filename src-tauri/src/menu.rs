@@ -241,6 +241,8 @@ pub fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, event: &tauri::menu::Me
                 }
             }
             let _ = app.emit("menu:toggle_hidden", new_checked);
+            // Also emit a contextual event for clients that listen to ctx-specific events
+            let _ = app.emit("ctx:toggle_hidden", new_checked);
         }
         "ctx:folders_first" => {
             let state: tauri::State<crate::state::MenuState<R>> = app.state();
@@ -255,6 +257,7 @@ pub fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, event: &tauri::menu::Me
                 }
             }
             let _ = app.emit("menu:folders_first", new_checked);
+            let _ = app.emit("ctx:folders_first", new_checked);
         }
         "ctx:sort_name" => { let _ = app.emit("menu:sort_name", ()); }
         "ctx:sort_size" => { let _ = app.emit("menu:sort_size", ()); }
