@@ -2,6 +2,7 @@ import { memo, useEffect, useRef, useState } from 'react'
 import { FileItem } from '../types'
 import QuickTooltip from './QuickTooltip'
 import { truncateTextToWidth } from '@/utils/textMeasure'
+import { truncateToTwoLines } from '@/utils/multiLineTruncate'
 
 interface FileNameDisplayProps {
   file: FileItem
@@ -28,8 +29,8 @@ function FileNameDisplayInner({
     ? file.name.replace(/\.app$/i, '')
     : file.name
 
-  // For grid view, we don't truncate - CSS handles wrapping
-  // For list view, we perform middle-ellipsis truncation using canvas measurement
+  // Grid: 2 lines max with center-ellipsis via DOM multi-line measurement
+  // List: 1 line with center-ellipsis via canvas measurement
 
   const textRef = useRef<HTMLDivElement | HTMLSpanElement | null>(null)
   const containerRef = useRef<HTMLSpanElement | null>(null)
@@ -38,18 +39,37 @@ function FileNameDisplayInner({
 
   useEffect(() => {
     if (variant === 'grid') {
-      const el = textRef.current
-      if (!el) return
-      const measure = () => {
-        if (!textRef.current) return
-        const over = textRef.current.scrollHeight > textRef.current.clientHeight + 1
-        setNeedsTooltip(over)
+      const compute = () => {
+        const el = textRef.current as HTMLDivElement | null
+        if (!el) return
+        const width = el.clientWidth
+        if (width <= 1) return
+        const cs = window.getComputedStyle(el)
+        const fontSize = parseFloat(cs.fontSize) || 13
+        const fontFamily = cs.fontFamily || 'system-ui'
+        const fontWeight = cs.fontWeight || 'normal'
+        const fontStyle = cs.fontStyle || 'normal'
+        const lineHeightPx = (() => {
+          const lh = cs.lineHeight
+          const parsed = parseFloat(lh)
+          if (Number.isFinite(parsed)) return parsed
+          return Math.round(fontSize * 1.2)
+        })()
+        const { text, isTruncated } = truncateToTwoLines(
+          displayName,
+          width,
+          { fontSize, fontFamily, fontWeight, fontStyle, lineHeightPx, textAlign: 'center' },
+          true,
+          2
+        )
+        setRenderText(text)
+        setNeedsTooltip(isTruncated)
       }
-      measure()
-      const ro = new ResizeObserver(() => measure())
-      ro.observe(el)
-      window.addEventListener('resize', measure)
-      return () => { ro.disconnect(); window.removeEventListener('resize', measure) }
+      compute()
+      const ro = new ResizeObserver(() => compute())
+      if (textRef.current) ro.observe(textRef.current)
+      window.addEventListener('resize', compute)
+      return () => { ro.disconnect(); window.removeEventListener('resize', compute) }
     } else {
       const compute = () => {
         const el = containerRef.current
@@ -99,9 +119,9 @@ function FileNameDisplayInner({
       {variant === 'grid' ? (
         <div className="flex flex-col items-center">
           {needsTooltip ? (
-            <QuickTooltip text={displayName}>
-              {(handlers) => (
-                <div
+          <QuickTooltip text={displayName}>
+            {(handlers) => (
+              <div
                   ref={(el) => { textRef.current = el as any; handlers.ref(el) }}
                   onMouseEnter={handlers.onMouseEnter}
                   onMouseLeave={handlers.onMouseLeave}
@@ -118,7 +138,7 @@ function FileNameDisplayInner({
                     width: '100%'
                   }}
                 >
-                  {displayName}
+                  {renderText}
                 </div>
               )}
             </QuickTooltip>
@@ -136,7 +156,7 @@ function FileNameDisplayInner({
                 width: '100%'
               }}
             >
-              {displayName}
+              {renderText}
             </div>
           )}
           {!file.is_directory && showSize && (
