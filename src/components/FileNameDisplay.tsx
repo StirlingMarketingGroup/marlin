@@ -1,6 +1,5 @@
-import { memo, useMemo } from 'react'
+import { memo } from 'react'
 import { FileItem } from '../types'
-import { truncateTextToWidth } from '../utils/textMeasure'
 import QuickTooltip from './QuickTooltip'
 
 interface FileNameDisplayProps {
@@ -28,17 +27,8 @@ function FileNameDisplayInner({
     ? file.name.replace(/\.app$/i, '')
     : file.name
 
-  const { truncatedText, isTruncated } = useMemo(() => {
-    if (!maxWidth || maxWidth <= 0 || variant === 'grid') {
-      return { truncatedText: displayName, isTruncated: false }
-    }
-    
-    const fontSize = 13
-    const fontFamily = 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'
-    
-    const result = truncateTextToWidth(displayName, maxWidth, fontSize, fontFamily, true)
-    return { truncatedText: result.text, isTruncated: result.isTruncated }
-  }, [displayName, maxWidth, variant])
+  // For grid view, we don't truncate - CSS handles wrapping
+  // For list view, we use standard CSS ellipsis
 
   const formatFileSize = (bytes: number): string => {
     if (bytes === 0) return '0 B'
@@ -82,35 +72,15 @@ function FileNameDisplayInner({
             display: 'block',
             overflow: 'hidden',
             whiteSpace: 'nowrap',
-            textOverflow: 'clip'
+            textOverflow: 'ellipsis'
           }}
+          title={displayName}
         >
-          {truncatedText}
+          {displayName}
         </span>
       )}
     </div>
   )
-
-  if (isTruncated && variant === 'list') {
-    const tooltipContent = displayName
-
-    return (
-      <QuickTooltip text={tooltipContent}>
-        {({ onMouseEnter, onMouseLeave, onFocus, onBlur, ref }) => (
-          <div
-            onMouseEnter={onMouseEnter}
-            onMouseLeave={onMouseLeave}
-            onFocus={onFocus}
-            onBlur={onBlur}
-            ref={ref}
-            style={{ minWidth: 0 }}
-          >
-            {content}
-          </div>
-        )}
-      </QuickTooltip>
-    )
-  }
 
   return content
 }

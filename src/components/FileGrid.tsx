@@ -437,7 +437,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
       <div
         className="grid gap-2 file-grid"
         style={{
-        gridTemplateColumns: `repeat(auto-fill, minmax(${tile}px, 1fr))`
+        gridTemplateColumns: `repeat(auto-fill, minmax(${tile + 24}px, 1fr))`
         }}
       >
         {filteredFiles.map((file) => {
@@ -447,7 +447,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
           return (
             <div
               key={file.path}
-              className={`relative flex flex-col items-center px-1 py-2 rounded-md cursor-pointer transition-all duration-75 ${
+              className={`relative flex flex-col items-center px-3 py-2 rounded-md cursor-pointer transition-all duration-75 ${
                 isSelected ? 'bg-accent-selected' : hoveredFile === file.path ? 'bg-app-light/70' : ''
               } ${isDragged ? 'opacity-50' : ''} ${
                 file.is_hidden ? 'opacity-60' : ''

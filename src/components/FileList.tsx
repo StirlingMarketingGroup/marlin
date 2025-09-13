@@ -101,43 +101,6 @@ export default function FileList({ files, preferences }: FileListProps) {
   const { fetchAppIcon } = useAppStore()
   const [draggedFile, setDraggedFile] = useState<string | null>(null)
   const [hoveredFile, setHoveredFile] = useState<string | null>(null)
-  
-  // Dynamically compute available width for the Name column
-  const nameHeaderRef = useRef<HTMLButtonElement>(null)
-  const measureRef = useRef<HTMLSpanElement>(null)
-  const [nameColumnWidth, setNameColumnWidth] = useState<number>(200)
-
-  useEffect(() => {
-    const recalc = () => {
-      const header = nameHeaderRef.current
-      if (!header) return
-
-      const colWidth = header.getBoundingClientRect().width
-      if (!colWidth || colWidth <= 0) return
-
-      // Leave room for icon + gap + padding within the cell
-      const reserved = 36 // ≈ 20 (icon) + 8 (gap) + 8 (pl-2)
-      const available = Math.max(120, colWidth - reserved) // less conservative buffer
-      setNameColumnWidth(available)
-    }
-
-    // Initial calc
-    recalc()
-
-    // Observe column width changes
-    let ro: ResizeObserver | undefined
-    if (typeof ResizeObserver !== 'undefined' && nameHeaderRef.current) {
-      ro = new ResizeObserver(() => recalc())
-      ro.observe(nameHeaderRef.current)
-    }
-
-    // Also respond to window resizes (e.g., sidebar drag)
-    window.addEventListener('resize', recalc)
-    return () => {
-      window.removeEventListener('resize', recalc)
-      if (ro && nameHeaderRef.current) ro.disconnect()
-    }
-  }, [])
 
   const sortBy = preferences.sortBy
   const sortOrder = preferences.sortOrder
@@ -467,7 +430,7 @@ export default function FileList({ files, preferences }: FileListProps) {
     <div className="h-full" onClick={handleBackgroundClick}>
       {/* Header */}
       <div className="grid grid-cols-12 gap-3 px-3 py-2 border-b border-app-border border-t-0 text-[12px] font-medium text-app-muted bg-transparent select-none mb-1">
-        <button ref={nameHeaderRef} className={`col-span-5 text-left hover:text-app-text pl-2 ${sortBy === 'name' ? 'text-app-text' : ''}`} onClick={() => toggleSort('name')} data-tauri-drag-region={false}>
+        <button className={`col-span-5 text-left hover:text-app-text pl-2 ${sortBy === 'name' ? 'text-app-text' : ''}`} onClick={() => toggleSort('name')} data-tauri-drag-region={false}>
           <span className="inline-flex items-center gap-1">Name {sortBy === 'name' && (sortOrder === 'asc' ? <CaretUp className="w-3 h-3"/> : <CaretDown className="w-3 h-3"/> )}</span>
         </button>
         <button className={`col-span-2 text-left hover:text-app-text ${sortBy === 'size' ? 'text-app-text' : ''}`} onClick={() => toggleSort('size')} data-tauri-drag-region={false}>
@@ -527,7 +490,6 @@ export default function FileList({ files, preferences }: FileListProps) {
                   <div className="flex-1 min-w-0 overflow-hidden">
                     <FileNameDisplay
                       file={file}
-                      maxWidth={nameColumnWidth}
                       isSelected={isSelected}
                       variant="list"
                       className="block"
@@ -559,14 +521,6 @@ export default function FileList({ files, preferences }: FileListProps) {
         })}
       </div>
     </div>
-    {/* Hidden measurement element for accurate char width */}
-    <span
-      ref={measureRef}
-      className="absolute -left-[9999px] -top-[9999px] whitespace-nowrap text-sm"
-      aria-hidden
-    >
-      ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789
-    </span>
     </>
   )
 }
