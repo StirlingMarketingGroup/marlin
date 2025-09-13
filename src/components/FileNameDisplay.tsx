@@ -1,6 +1,7 @@
 import { memo, useEffect, useRef, useState } from 'react'
 import { FileItem } from '../types'
 import QuickTooltip from './QuickTooltip'
+import { truncateTextToWidth } from '@/utils/textMeasure'
 
 interface FileNameDisplayProps {
   file: FileItem
@@ -28,41 +29,60 @@ function FileNameDisplayInner({
     : file.name
 
   // For grid view, we don't truncate - CSS handles wrapping
-  // For list view, we use standard CSS ellipsis
+  // For list view, we perform middle-ellipsis truncation using canvas measurement
 
   const textRef = useRef<HTMLDivElement | HTMLSpanElement | null>(null)
+  const containerRef = useRef<HTMLSpanElement | null>(null)
   const [needsTooltip, setNeedsTooltip] = useState(false)
+  const [renderText, setRenderText] = useState<string>(displayName)
 
   useEffect(() => {
-    const el = textRef.current
-    if (!el) return
-
-    const measure = () => {
-      if (!textRef.current) return
-      if (variant === 'list') {
-        const over = textRef.current.scrollWidth > textRef.current.clientWidth + 1
-        setNeedsTooltip(over)
-      } else {
-        // grid: multiline clamp; detect vertical overflow
+    if (variant === 'grid') {
+      const el = textRef.current
+      if (!el) return
+      const measure = () => {
+        if (!textRef.current) return
         const over = textRef.current.scrollHeight > textRef.current.clientHeight + 1
         setNeedsTooltip(over)
       }
+      measure()
+      const ro = new ResizeObserver(() => measure())
+      ro.observe(el)
+      window.addEventListener('resize', measure)
+      return () => { ro.disconnect(); window.removeEventListener('resize', measure) }
+    } else {
+      const compute = () => {
+        const el = containerRef.current
+        if (!el) return
+        const measureTarget = (el.closest('[data-name-cell="true"]') as HTMLElement) || el.parentElement || el
+        const cs = window.getComputedStyle(el)
+        const width = measureTarget.clientWidth
+        if (width <= 1) return
+        const fontSize = parseFloat(cs.fontSize) || 13
+        const fontFamily = cs.fontFamily || 'system-ui'
+        const fontWeight = cs.fontWeight || 'normal'
+        const fontStyle = cs.fontStyle || 'normal'
+        const { text, isTruncated } = truncateTextToWidth(
+          displayName,
+          Math.max(0, width - 1),
+          fontSize,
+          fontFamily,
+          fontWeight,
+          fontStyle,
+          true
+        )
+        setRenderText(text)
+        setNeedsTooltip(isTruncated)
+      }
+
+      compute()
+      const target = (containerRef.current?.closest('[data-name-cell="true"]') as HTMLElement) || containerRef.current?.parentElement || containerRef.current
+      const ro = new ResizeObserver(() => compute())
+      if (target) ro.observe(target)
+      window.addEventListener('resize', compute)
+      return () => { ro.disconnect(); window.removeEventListener('resize', compute) }
     }
-
-    // Initial measurement
-    measure()
-
-    // Observe size changes
-    const ro = new ResizeObserver(() => measure())
-    ro.observe(el)
-
-    // Window resize fallback
-    window.addEventListener('resize', measure)
-    return () => {
-      ro.disconnect()
-      window.removeEventListener('resize', measure)
-    }
-  }, [displayName, variant])
+  }, [displayName, variant, isSelected])
 
   const formatFileSize = (bytes: number): string => {
     if (bytes === 0) return '0 B'
@@ -97,7 +117,6 @@ function FileNameDisplayInner({
                     overflow: 'hidden',
                     width: '100%'
                   }}
-                  title={displayName}
                 >
                   {displayName}
                 </div>
@@ -116,7 +135,6 @@ function FileNameDisplayInner({
                 overflow: 'hidden',
                 width: '100%'
               }}
-              title={displayName}
             >
               {displayName}
             </div>
@@ -132,7 +150,7 @@ function FileNameDisplayInner({
           <QuickTooltip text={displayName}>
             {(handlers) => (
               <span
-                ref={(el) => { textRef.current = el as any; handlers.ref(el) }}
+                ref={(el) => { textRef.current = el as any; handlers.ref(el); containerRef.current = el as any }}
                 onMouseEnter={handlers.onMouseEnter}
                 onMouseLeave={handlers.onMouseLeave}
                 onFocus={handlers.onFocus}
@@ -141,28 +159,24 @@ function FileNameDisplayInner({
                 style={{
                   display: 'block',
                   overflow: 'hidden',
-                  whiteSpace: 'nowrap',
-                  textOverflow: 'ellipsis'
+                  whiteSpace: 'nowrap'
                 }}
-                title={displayName}
               >
-                {displayName}
+                {renderText}
               </span>
             )}
           </QuickTooltip>
         ) : (
           <span
-            ref={(el) => { textRef.current = el as any }}
+            ref={(el) => { textRef.current = el as any; containerRef.current = el as any }}
             className={`text-sm font-medium ${isSelected ? 'text-white' : ''} ${className}`}
             style={{
               display: 'block',
               overflow: 'hidden',
-              whiteSpace: 'nowrap',
-              textOverflow: 'ellipsis'
+              whiteSpace: 'nowrap'
             }}
-            title={displayName}
           >
-            {displayName}
+            {renderText}
           </span>
         )
       )}

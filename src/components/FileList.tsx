@@ -487,7 +487,7 @@ export default function FileList({ files, preferences }: FileListProps) {
                     data-tauri-drag-region={false}
                   />
                 ) : (
-                  <div className="flex-1 min-w-0 overflow-hidden">
+                  <div className="flex-1 min-w-0 overflow-hidden" data-name-cell="true">
                     <FileNameDisplay
                       file={file}
                       isSelected={isSelected}
