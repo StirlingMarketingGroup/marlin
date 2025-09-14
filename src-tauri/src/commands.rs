@@ -16,6 +16,7 @@ use crate::fs_utils::{
     delete_file_or_directory,
     rename_file_or_directory, copy_file_or_directory, expand_path
 };
+use crate::fs_watcher;
 
 #[command]
 pub fn get_home_directory() -> Result<String, String> {
@@ -974,4 +975,51 @@ pub fn start_native_drag(
     _drag_offset_y: Option<f64>,
 ) -> Result<(), String> {
     Err("Native drag is only supported on macOS".to_string())
+}
+
+// File system watcher commands
+#[command]
+pub fn start_watching_directory(path: String) -> Result<(), String> {
+    if let Some(watcher) = fs_watcher::get_watcher() {
+        watcher.start_watching(&path)
+    } else {
+        Err("File system watcher not initialized".to_string())
+    }
+}
+
+#[command]
+pub fn stop_watching_directory(path: String) -> Result<(), String> {
+    if let Some(watcher) = fs_watcher::get_watcher() {
+        watcher.stop_watching(&path)
+    } else {
+        Err("File system watcher not initialized".to_string())
+    }
+}
+
+#[command]
+pub fn stop_all_watchers() -> Result<(), String> {
+    if let Some(watcher) = fs_watcher::get_watcher() {
+        watcher.stop_all_watchers();
+        Ok(())
+    } else {
+        Err("File system watcher not initialized".to_string())
+    }
+}
+
+#[command]
+pub fn is_watching_directory(path: String) -> Result<bool, String> {
+    if let Some(watcher) = fs_watcher::get_watcher() {
+        Ok(watcher.is_watching(&path))
+    } else {
+        Ok(false)
+    }
+}
+
+#[command]
+pub fn get_watched_directories() -> Result<Vec<String>, String> {
+    if let Some(watcher) = fs_watcher::get_watcher() {
+        Ok(watcher.get_watched_paths())
+    } else {
+        Ok(vec![])
+    }
 }

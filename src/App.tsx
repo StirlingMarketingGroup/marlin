@@ -111,21 +111,38 @@ function App() {
         let lastDir: string | undefined
         try {
           const raw = await invoke<string>('read_preferences')
+          console.log('🔍 Raw preferences:', raw)
           if (raw) {
             const parsed = JSON.parse(raw || '{}') as any
+            console.log('🔍 Parsed preferences:', parsed)
             if (parsed && typeof parsed === 'object') {
               if (parsed.globalPreferences && typeof parsed.globalPreferences === 'object') {
                 useAppStore.getState().updateGlobalPreferences(parsed.globalPreferences)
+                console.log('✅ Updated global preferences:', parsed.globalPreferences)
               }
               if (parsed.directoryPreferences && typeof parsed.directoryPreferences === 'object') {
                 Object.entries(parsed.directoryPreferences).forEach(([path, prefs]) => {
                   useAppStore.getState().updateDirectoryPreferences(path, prefs as any)
                 })
+                console.log('✅ Updated directory preferences:', Object.keys(parsed.directoryPreferences).length, 'directories')
               }
-              if (typeof parsed.lastDir === 'string') lastDir = parsed.lastDir
+              if (typeof parsed.lastDir === 'string') {
+                lastDir = parsed.lastDir
+                console.log('🎯 Found lastDir:', lastDir)
+              } else {
+                console.log('⚠️ No lastDir found in preferences')
+              }
             }
+          } else {
+            console.log('⚠️ No preferences data found')
           }
-        } catch { /* ignore */ }
+        } catch (e) {
+          console.error('❌ Error loading preferences:', e)
+        }
+
+        // Mark preferences as loaded regardless of whether we found any
+        prefsLoadedRef.current = true
+        console.log('🔧 Preferences loading completed, prefsLoadedRef set to true')
 
         const homeDir = await invoke<string>('get_home_directory')
         setHomeDir(homeDir)
@@ -134,6 +151,12 @@ function App() {
         const urlParams = new URLSearchParams(window.location.search)
         const initialPath = urlParams.get('path')
         const startPath = initialPath ? decodeURIComponent(initialPath) : (lastDir || homeDir)
+        console.log('🚀 Starting path decision:', {
+          initialPath,
+          lastDir,
+          homeDir,
+          finalStartPath: startPath
+        })
         
         // Apply system accent color (macOS) to CSS variables FIRST
         try {
@@ -204,7 +227,6 @@ function App() {
         // Mark initialization complete only if we successfully loaded something
         if (loadSuccess) {
           setError(undefined)
-          prefsLoadedRef.current = true
           initializedRef.current = true
           firstLoadRef.current = false
         }
@@ -226,11 +248,19 @@ function App() {
 
   // Persist lastDir on navigation
   useEffect(() => {
-    if (!prefsLoadedRef.current) return
+    if (!prefsLoadedRef.current) {
+      console.log('⏳ Skipping lastDir save, preferences not loaded yet')
+      return
+    }
+    const currentPath = useAppStore.getState().currentPath
+    console.log('💾 Saving lastDir:', currentPath)
     ;(async () => {
       try {
-        await invoke('set_last_dir', { path: useAppStore.getState().currentPath })
-      } catch {}
+        await invoke('set_last_dir', { path: currentPath })
+        console.log('✅ Successfully saved lastDir to disk:', currentPath)
+      } catch (error) {
+        console.error('❌ Failed to save lastDir:', error)
+      }
     })()
   }, [currentPath])
 
@@ -299,6 +329,82 @@ function App() {
 
     loadDirectory()
   }, [currentPath, setLoading, setError, setFiles, setCurrentPath])
+
+  // File system watcher for auto-reload
+  useEffect(() => {
+    let isActive = true
+    let debounceTimer: number | undefined
+    let cleanupFunction: (() => void) | undefined
+    
+    const handleDirectoryChanged = (event: any) => {
+      if (!isActive) return
+      
+      const payload = event.payload
+      if (payload && payload.path === currentPath) {
+        // Clear any existing debounce timer
+        if (debounceTimer) {
+          window.clearTimeout(debounceTimer)
+        }
+        
+        // Debounce the refresh to avoid excessive reloads
+        debounceTimer = window.setTimeout(async () => {
+          if (!isActive || loading) return
+          
+          try {
+            const { refreshCurrentDirectory, selectedFiles } = useAppStore.getState()
+            await refreshCurrentDirectory()
+            
+            // Preserve selection if possible after refresh
+            if (selectedFiles.length > 0) {
+              const { files, setSelectedFiles } = useAppStore.getState()
+              const stillExist = selectedFiles.filter(path => 
+                files.some(f => f.path === path)
+              )
+              if (stillExist.length !== selectedFiles.length) {
+                setSelectedFiles(stillExist)
+              }
+            }
+          } catch (error) {
+            console.warn('Auto-refresh failed:', error)
+          }
+        }, 500) // 500ms debounce
+      }
+    }
+
+    const setupWatcher = async () => {
+      if (!isActive) return
+      
+      try {
+        // Start watching current directory
+        await invoke('start_watching_directory', { path: currentPath })
+        
+        // Listen for directory change events
+        const unlisten = await listen('directory-changed', handleDirectoryChanged)
+        
+        // Store cleanup function
+        cleanupFunction = () => {
+          unlisten()
+          invoke('stop_watching_directory', { path: currentPath }).catch(() => {
+            // Ignore errors during cleanup
+          })
+        }
+      } catch (error) {
+        console.warn('Failed to setup file watcher:', error)
+      }
+    }
+
+    setupWatcher()
+
+    return () => {
+      isActive = false
+      if (debounceTimer) {
+        window.clearTimeout(debounceTimer)
+      }
+      if (cleanupFunction) {
+        cleanupFunction()
+      }
+    }
+  }, [currentPath, loading])
 
   // Persist only current directory prefs on change to avoid global clobbering
   useEffect(() => {

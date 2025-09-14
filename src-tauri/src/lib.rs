@@ -1,5 +1,6 @@
 mod commands;
 mod fs_utils;
+mod fs_watcher;
 mod menu;
 mod state;
 mod thumbnails;
@@ -54,6 +55,11 @@ pub fn run() {
       commands::clear_all_dir_prefs,
       commands::set_last_dir,
       commands::start_native_drag,
+      commands::start_watching_directory,
+      commands::stop_watching_directory,
+      commands::stop_all_watchers,
+      commands::is_watching_directory,
+      commands::get_watched_directories,
     ])
     .setup(|app| {
       if cfg!(debug_assertions) {
@@ -63,6 +69,9 @@ pub fn run() {
             .build(),
         )?;
       }
+
+      // Initialize the file system watcher
+      fs_watcher::init_watcher(app.handle().clone());  
 
       // Position traffic lights similar to Finder's sidebar style
       #[cfg(target_os = "macos")]
