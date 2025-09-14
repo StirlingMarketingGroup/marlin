@@ -1,11 +1,12 @@
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use notify::{Watcher, RecommendedWatcher, Config, RecursiveMode, Event, EventKind};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc;
 
+#[derive(Debug)]
 pub struct FsWatcher {
     watchers: Arc<Mutex<HashMap<String, RecommendedWatcher>>>,
     debounce_map: Arc<Mutex<HashMap<String, Instant>>>,
@@ -175,14 +176,13 @@ impl FsWatcher {
 }
 
 // Global watcher instance - will be initialized in main.rs
-static mut GLOBAL_WATCHER: Option<Arc<FsWatcher>> = None;
+static GLOBAL_WATCHER: OnceLock<Arc<FsWatcher>> = OnceLock::new();
 
 pub fn init_watcher(app_handle: AppHandle) {
-    unsafe {
-        GLOBAL_WATCHER = Some(Arc::new(FsWatcher::new(app_handle)));
-    }
+    GLOBAL_WATCHER.set(Arc::new(FsWatcher::new(app_handle)))
+        .expect("Watcher already initialized");
 }
 
 pub fn get_watcher() -> Option<Arc<FsWatcher>> {
-    unsafe { GLOBAL_WATCHER.as_ref().cloned() }
+    GLOBAL_WATCHER.get().cloned()
 }
