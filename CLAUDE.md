@@ -100,15 +100,31 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Testing & Code Quality
 
-### Current Status
-- No formal test suite configured yet
-- Manual testing across macOS, Windows, Linux
-- Performance testing with large directories (50k+ files target)
+### Test Infrastructure
+- **Unit Tests**: Vitest + @testing-library/react for React components and store logic
+- **E2E Tests**: Playwright for full application workflows
+- **Backend Tests**: Use `cargo test` with `*_test.rs` files
+- **Test Commands**:
+  - `npm test` - Run unit tests in watch mode
+  - `npm run test:run` - Run unit tests once
+  - `npm run test:ui` - Open Vitest UI
+  - `npm run test:e2e` - Run E2E tests
+  - `npm run test:e2e-ui` - Open Playwright UI
 
-### When Adding Tests
-- Frontend: Use Vitest + React Testing Library
-- Backend: Use `cargo test` with `*_test.rs` files
-- Focus on critical paths: navigation, file operations, thumbnail generation
+### Critical Test Areas
+- **State Management**: useAppStore actions like `toggleHiddenFiles`, navigation, preferences
+- **Regression Prevention**: 
+  - Directory-specific hidden file preferences
+  - Last-opened directory persistence
+  - View mode and sort preferences across navigation
+- **Navigation**: History, path editing, keyboard shortcuts
+- **File Operations**: Drag & drop, selection, rename operations
+- **Thumbnail Generation**: Cache behavior and performance
+
+### Running Tests
+- Unit tests run automatically with file changes during development
+- E2E tests require the dev server to be running (`npm run tauri dev`)
+- Focus tests on user-facing regressions and critical state management
 
 ## Performance Considerations
 

@@ -277,15 +277,30 @@ function App() {
         setError(undefined)
         
         // Load per-directory preferences first (so sort applies before rendering)
+        // Skip if preferences were recently updated to prevent race conditions
         try {
-          const raw = await invoke<string>('get_dir_prefs', { path: currentPath })
-          if (raw) {
-            const prefs = JSON.parse(raw || '{}') as any
-            if (prefs && typeof prefs === 'object') {
-              useAppStore.getState().updateDirectoryPreferences(currentPath, prefs)
+          const { lastPreferenceUpdate } = useAppStore.getState()
+          const timeSinceUpdate = Date.now() - lastPreferenceUpdate
+          const shouldSkipLoad = timeSinceUpdate < 2000 // Skip if updated within 2 seconds
+          
+          if (shouldSkipLoad) {
+            console.log('🛡️ Skipping preference load to prevent race condition', { 
+              timeSinceUpdate, 
+              path: currentPath 
+            })
+          } else {
+            const raw = await invoke<string>('get_dir_prefs', { path: currentPath })
+            if (raw) {
+              const prefs = JSON.parse(raw || '{}') as any
+              if (prefs && typeof prefs === 'object') {
+                console.log('📂 Loading directory preferences from disk:', { path: currentPath, prefs })
+                useAppStore.getState().updateDirectoryPreferences(currentPath, prefs)
+              }
             }
           }
-        } catch { /* ignore */ }
+        } catch (error) {
+          console.warn('Failed to load directory preferences:', error)
+        }
         
         // Try to load the directory
         const files = await invoke<any[]>('read_directory', { path: currentPath })

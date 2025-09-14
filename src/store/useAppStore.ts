@@ -50,6 +50,7 @@ interface AppState {
   // Preferences
   globalPreferences: ViewPreferences
   directoryPreferences: Record<string, Partial<ViewPreferences>>
+  lastPreferenceUpdate: number // Timestamp to prevent race conditions
   theme: Theme
   
   // App icon cache for macOS Applications view
@@ -140,6 +141,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     gridSize: 120,
   },
   directoryPreferences: {},
+  lastPreferenceUpdate: 0,
   theme: 'system',
   appIconCache: {},
   
@@ -176,11 +178,13 @@ export const useAppStore = create<AppState>((set, get) => ({
   updateDirectoryPreferences: (path, preferences) =>
     set((state) => {
       const norm = (get() as any)._normalizePath(path)
+      console.log('📝 updateDirectoryPreferences:', { path: norm, preferences, timestamp: Date.now() })
       return {
         directoryPreferences: {
           ...state.directoryPreferences,
           [norm]: { ...state.directoryPreferences[norm], ...preferences },
         },
+        lastPreferenceUpdate: Date.now(),
       }
     }),
     
@@ -295,10 +299,17 @@ export const useAppStore = create<AppState>((set, get) => ({
     
     const { currentShowHidden } = getCurrentState()
     const newShowHidden = !currentShowHidden
-    console.log('🔄 Toggle hidden files:', { currentShowHidden, newShowHidden })
+    console.log('🔄 Toggle hidden files:', { 
+      path: currentPath,
+      currentShowHidden, 
+      newShowHidden,
+      timestamp: Date.now()
+    })
     
     // Update directory preference first
+    console.log('📝 About to update directory preferences...')
     get().updateDirectoryPreferences(currentPath, { showHidden: newShowHidden })
+    console.log('✅ Directory preferences updated')
     
     // Also update global preference as default for new directories
     get().updateGlobalPreferences({ showHidden: newShowHidden })
