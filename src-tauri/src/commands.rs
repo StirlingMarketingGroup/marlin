@@ -10,6 +10,8 @@ use std::io::{Read, Write};
 use std::path::{PathBuf};
 use serde_json::{json, Value};
 use base64::Engine as _;
+use chrono::{DateTime, Utc};
+use serde::{Serialize, Deserialize};
 
 use crate::fs_utils::{
     self, FileItem, read_directory_contents, get_file_info,
@@ -1022,4 +1024,135 @@ pub fn get_watched_directories() -> Result<Vec<String>, String> {
     } else {
         Ok(vec![])
     }
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct PinnedDirectory {
+    pub name: String,
+    pub path: String,
+    pub pinned_at: DateTime<Utc>,
+}
+
+fn pinned_directories_path() -> Result<PathBuf, String> {
+    let base = dirs::config_dir().ok_or_else(|| "Could not resolve config directory".to_string())?;
+    let app_dir = base.join("Marlin");
+    if !app_dir.exists() {
+        fs::create_dir_all(&app_dir).map_err(|e| format!("Failed to create config dir: {}", e))?;
+    }
+    Ok(app_dir.join("pinned_directories.json"))
+}
+
+#[command]
+pub fn get_pinned_directories() -> Result<Vec<PinnedDirectory>, String> {
+    let path = pinned_directories_path()?;
+    if !path.exists() {
+        return Ok(vec![]);
+    }
+    
+    let mut file = fs::File::open(&path).map_err(|e| format!("Failed to open pinned directories: {}", e))?;
+    let mut contents = String::new();
+    file.read_to_string(&mut contents).map_err(|e| format!("Failed to read pinned directories: {}", e))?;
+    
+    let pinned_dirs: Vec<PinnedDirectory> = serde_json::from_str(&contents)
+        .map_err(|e| format!("Failed to parse pinned directories: {}", e))?;
+    
+    Ok(pinned_dirs)
+}
+
+#[command]
+pub fn add_pinned_directory(path: String, name: Option<String>) -> Result<PinnedDirectory, String> {
+    let expanded_path = expand_path(&path)?;
+    let path_obj = &expanded_path;
+    
+    if !path_obj.exists() {
+        return Err("Path does not exist".to_string());
+    }
+    
+    if !path_obj.is_dir() {
+        return Err("Path is not a directory".to_string());
+    }
+    
+    let expanded_path_str = expanded_path.to_string_lossy().to_string();
+    let mut pinned_dirs = get_pinned_directories()?;
+    
+    // Check if already pinned
+    if pinned_dirs.iter().any(|p| p.path == expanded_path_str) {
+        return Err("Directory is already pinned".to_string());
+    }
+    
+    // Limit to 20 pinned directories
+    if pinned_dirs.len() >= 20 {
+        return Err("Maximum number of pinned directories reached (20)".to_string());
+    }
+    
+    let dir_name = name.unwrap_or_else(|| {
+        path_obj.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("Unknown")
+            .to_string()
+    });
+    
+    let new_pin = PinnedDirectory {
+        name: dir_name,
+        path: expanded_path_str,
+        pinned_at: Utc::now(),
+    };
+    
+    pinned_dirs.push(new_pin.clone());
+    save_pinned_directories(&pinned_dirs)?;
+    
+    Ok(new_pin)
+}
+
+#[command]
+pub fn remove_pinned_directory(path: String) -> Result<bool, String> {
+    let expanded_path = expand_path(&path)?;
+    let expanded_path_str = expanded_path.to_string_lossy().to_string();
+    let mut pinned_dirs = get_pinned_directories()?;
+    
+    let initial_len = pinned_dirs.len();
+    pinned_dirs.retain(|p| p.path != expanded_path_str);
+    
+    if pinned_dirs.len() < initial_len {
+        save_pinned_directories(&pinned_dirs)?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+#[command]
+pub fn reorder_pinned_directories(paths: Vec<String>) -> Result<(), String> {
+    let current_pins = get_pinned_directories()?;
+    let mut reordered = Vec::new();
+    
+    // Reorder based on the provided paths list
+    for path in paths {
+        if let Some(pin) = current_pins.iter().find(|p| p.path == path) {
+            reordered.push(pin.clone());
+        }
+    }
+    
+    // Add any missing pins that weren't in the reorder list
+    for pin in &current_pins {
+        if !reordered.iter().any(|p| p.path == pin.path) {
+            reordered.push(pin.clone());
+        }
+    }
+    
+    save_pinned_directories(&reordered)
+}
+
+fn save_pinned_directories(pinned_dirs: &[PinnedDirectory]) -> Result<(), String> {
+    let path = pinned_directories_path()?;
+    let json = serde_json::to_string_pretty(pinned_dirs)
+        .map_err(|e| format!("Failed to serialize pinned directories: {}", e))?;
+    
+    let mut file = fs::File::create(&path)
+        .map_err(|e| format!("Failed to create pinned directories file: {}", e))?;
+    
+    file.write_all(json.as_bytes())
+        .map_err(|e| format!("Failed to write pinned directories: {}", e))?;
+    
+    Ok(())
 }

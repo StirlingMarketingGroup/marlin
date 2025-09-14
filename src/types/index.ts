@@ -34,3 +34,9 @@ export interface SystemDrive {
   drive_type: string
   is_ejectable: boolean
 }
+
+export interface PinnedDirectory {
+  name: string
+  path: string
+  pinned_at: string // ISO 8601 string from Rust DateTime<Utc>
+}

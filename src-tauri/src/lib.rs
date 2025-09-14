@@ -60,6 +60,10 @@ pub fn run() {
       commands::stop_all_watchers,
       commands::is_watching_directory,
       commands::get_watched_directories,
+      commands::get_pinned_directories,
+      commands::add_pinned_directory,
+      commands::remove_pinned_directory,
+      commands::reorder_pinned_directories,
     ])
     .setup(|app| {
       if cfg!(debug_assertions) {

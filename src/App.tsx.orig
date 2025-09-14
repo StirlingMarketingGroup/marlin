@@ -6,8 +6,7 @@ import MainPanel from './components/MainPanel'
 import PathBar from './components/PathBar'
 import { useAppStore } from './store/useAppStore'
 import { message } from '@tauri-apps/plugin-dialog'
-import DragPreview from './components/DragPreview'
-import Toast from './components/Toast'
+import DragTest from './components/DragTest'
 
 function App() {
   const { currentPath, setCurrentPath, navigateTo, setLoading, setError, setFiles, loading, setHomeDir, toggleHiddenFiles, toggleFoldersFirst, directoryPreferences, globalPreferences, loadPinnedDirectories } = useAppStore()
@@ -975,18 +974,15 @@ function App() {
       <div className="h-screen p-2">
         <Sidebar />
       </div>
+      
+      {/* Temporary drag test component */}
+      <DragTest />
 
       {/* Content column with path bar + panel */}
       <div className="flex-1 flex flex-col overflow-hidden min-h-0">
         <PathBar />
         <MainPanel />
       </div>
-
-      {/* Global drag preview */}
-      <DragPreview />
-      
-      {/* Toast notifications */}
-      <Toast />
     </div>
   )
 }

@@ -27,6 +27,7 @@ describe('useAppStore', () => {
       historyIndex: 0,
       theme: 'system' as const,
       appIconCache: {},
+      pinnedDirectories: [],
       sidebarWidth: 200,
       showSidebar: true,
       showPreviewPanel: false,
@@ -288,6 +289,147 @@ describe('useAppStore', () => {
       
       const state = useAppStore.getState()
       expect(state.directoryPreferences).toEqual({})
+    })
+  })
+
+  describe('pinned directories', () => {
+    const mockPinnedDir = {
+      name: 'Test Directory',
+      path: '/test/directory',
+      pinned_at: '2024-01-01T00:00:00.000Z'
+    }
+
+    describe('loadPinnedDirectories', () => {
+      it('should load pinned directories from backend', async () => {
+        const mockPinnedDirs = [mockPinnedDir]
+        mockInvoke.mockResolvedValueOnce(mockPinnedDirs)
+
+        await useAppStore.getState().loadPinnedDirectories()
+
+        expect(mockInvoke).toHaveBeenCalledWith('get_pinned_directories')
+        expect(useAppStore.getState().pinnedDirectories).toEqual(mockPinnedDirs)
+      })
+
+      it('should handle loading errors gracefully', async () => {
+        mockInvoke.mockRejectedValueOnce(new Error('Backend error'))
+
+        await useAppStore.getState().loadPinnedDirectories()
+
+        expect(useAppStore.getState().pinnedDirectories).toEqual([])
+      })
+    })
+
+    describe('addPinnedDirectory', () => {
+      it('should add a new pinned directory', async () => {
+        mockInvoke.mockResolvedValueOnce(mockPinnedDir)
+
+        const result = await useAppStore.getState().addPinnedDirectory('/test/directory')
+
+        expect(mockInvoke).toHaveBeenCalledWith('add_pinned_directory', {
+          path: '/test/directory',
+          name: undefined
+        })
+        expect(result).toEqual(mockPinnedDir)
+        expect(useAppStore.getState().pinnedDirectories).toContain(mockPinnedDir)
+      })
+
+      it('should add a pinned directory with custom name', async () => {
+        const customPinnedDir = { ...mockPinnedDir, name: 'Custom Name' }
+        mockInvoke.mockResolvedValueOnce(customPinnedDir)
+
+        const result = await useAppStore.getState().addPinnedDirectory('/test/directory', 'Custom Name')
+
+        expect(mockInvoke).toHaveBeenCalledWith('add_pinned_directory', {
+          path: '/test/directory',
+          name: 'Custom Name'
+        })
+        expect(result).toEqual(customPinnedDir)
+      })
+
+      it('should throw error when backend fails', async () => {
+        mockInvoke.mockRejectedValueOnce(new Error('Directory already pinned'))
+
+        await expect(
+          useAppStore.getState().addPinnedDirectory('/test/directory')
+        ).rejects.toThrow('Directory already pinned')
+      })
+    })
+
+    describe('removePinnedDirectory', () => {
+      it('should remove a pinned directory', async () => {
+        useAppStore.setState({
+          pinnedDirectories: [mockPinnedDir]
+        })
+        mockInvoke.mockResolvedValueOnce(true)
+
+        const result = await useAppStore.getState().removePinnedDirectory('/test/directory')
+
+        expect(mockInvoke).toHaveBeenCalledWith('remove_pinned_directory', {
+          path: '/test/directory'
+        })
+        expect(result).toBe(true)
+        expect(useAppStore.getState().pinnedDirectories).not.toContain(mockPinnedDir)
+      })
+
+      it('should return false when directory was not pinned', async () => {
+        mockInvoke.mockResolvedValueOnce(false)
+
+        const result = await useAppStore.getState().removePinnedDirectory('/nonexistent')
+
+        expect(result).toBe(false)
+      })
+
+      it('should handle backend errors gracefully', async () => {
+        mockInvoke.mockRejectedValueOnce(new Error('Backend error'))
+
+        const result = await useAppStore.getState().removePinnedDirectory('/test/directory')
+
+        expect(result).toBe(false)
+      })
+    })
+
+    describe('reorderPinnedDirectories', () => {
+      const mockPinnedDir2 = {
+        name: 'Another Directory',
+        path: '/another/directory',
+        pinned_at: '2024-01-02T00:00:00.000Z'
+      }
+
+      it('should reorder pinned directories', async () => {
+        useAppStore.setState({
+          pinnedDirectories: [mockPinnedDir, mockPinnedDir2]
+        })
+        mockInvoke.mockResolvedValueOnce(undefined)
+
+        await useAppStore.getState().reorderPinnedDirectories([
+          '/another/directory',
+          '/test/directory'
+        ])
+
+        expect(mockInvoke).toHaveBeenCalledWith('reorder_pinned_directories', {
+          paths: ['/another/directory', '/test/directory']
+        })
+        expect(useAppStore.getState().pinnedDirectories).toEqual([mockPinnedDir2, mockPinnedDir])
+      })
+
+      it('should handle missing directories in reorder list', async () => {
+        useAppStore.setState({
+          pinnedDirectories: [mockPinnedDir, mockPinnedDir2]
+        })
+        mockInvoke.mockResolvedValueOnce(undefined)
+
+        await useAppStore.getState().reorderPinnedDirectories(['/another/directory'])
+
+        expect(useAppStore.getState().pinnedDirectories).toEqual([mockPinnedDir2, mockPinnedDir])
+      })
+
+      it('should throw error when backend fails', async () => {
+        mockInvoke.mockRejectedValueOnce(new Error('Reorder failed'))
+
+        await expect(
+          useAppStore.getState().reorderPinnedDirectories(['/test/path'])
+        ).rejects.toThrow('Reorder failed')
+      })
     })
   })
 })

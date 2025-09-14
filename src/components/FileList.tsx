@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Folder, File, ImageSquare, MusicNote, VideoCamera, FileText, CaretUp, CaretDown, AppWindow, Package, FilePdf, PaintBrush, Palette, Disc, Cube } from 'phosphor-react'
 import { FileItem, ViewPreferences } from '../types'
 import { useAppStore } from '../store/useAppStore'
+import { useDragStore } from '../store/useDragStore'
 import AppIcon from '@/components/AppIcon'
 import { FileTypeIcon, resolveVSCodeIcon } from '@/components/FileTypeIcon'
 import { open } from '@tauri-apps/plugin-shell'
@@ -96,11 +97,19 @@ function ListFilePreview({ file, isMac, fallbackIcon }: { file: FileItem; isMac:
 export default function FileList({ files, preferences }: FileListProps) {
   const { selectedFiles, setSelectedFiles, navigateTo, selectionAnchor, setSelectionAnchor, setSelectionLead } = useAppStore()
   const { renameTargetPath, setRenameTarget, renameFile } = useAppStore()
+  const { startDrag: startManualDrag, isDraggedDirectory, isDragging } = useDragStore()
   const [renameText, setRenameText] = useState<string>('')
   const renameInputRef = useRef<HTMLInputElement>(null)
   const { fetchAppIcon } = useAppStore()
   const [draggedFile, setDraggedFile] = useState<string | null>(null)
   const [hoveredFile, setHoveredFile] = useState<string | null>(null)
+  
+  // Clean up dragged state when drag ends
+  useEffect(() => {
+    if (!isDragging && draggedFile) {
+      setDraggedFile(null)
+    }
+  }, [isDragging, draggedFile])
 
   const sortBy = preferences.sortBy
   const sortOrder = preferences.sortOrder
@@ -283,6 +292,8 @@ export default function FileList({ files, preferences }: FileListProps) {
     })
   }
 
+
+
   // Handle mouse down for drag initiation and right-click selection
   const handleMouseDownForFile = (e: React.MouseEvent, file: FileItem) => {
     // If we're renaming this item and the event started in an input, ignore to allow text selection
@@ -299,90 +310,129 @@ export default function FileList({ files, preferences }: FileListProps) {
       return
     }
     
-    // Left-click: Add drag threshold to prevent accidental drags
-    if (e.button === 0) {
-      const startX = e.clientX
-      const startY = e.clientY
-      const dragThreshold = 5 // pixels
-      let dragStarted = false
+    // Left-click: Handle drag initiation
+    if (e.button === 0) {      
+      // For directories, use manual drag system
+      if (file.is_directory) {
+        console.log('🔵 FileList: Starting manual drag for directory')
+        
+        const startX = e.clientX
+        const startY = e.clientY
+        const dragThreshold = 5
+        let dragStarted = false
 
-      const startDrag = () => {
-        if (dragStarted) return
-        dragStarted = true
-        
-        // Clean up listeners
-        document.removeEventListener('mousemove', onMouseMove)
-        document.removeEventListener('mouseup', onMouseUp)
-        
-        // Update selection if dragging a non-selected file
-        let actualSelectedFiles = selectedFiles
-        if (!selectedFiles.includes(file.path)) {
-          actualSelectedFiles = [file.path]
-          setSelectedFiles([file.path])
-        }
-        
-        // Determine which files to drag using the actual selection
-        const selected = actualSelectedFiles.includes(file.path) && actualSelectedFiles.length > 0
-          ? files.filter(f => actualSelectedFiles.includes(f.path))
-          : [file]
-        
-        // Set dragging state for visual feedback
-        setDraggedFile(file.path)
-
-        // Perform native drag
-        void (async () => {
-          try {
-            // Create drag preview image with nice icons
-            let dragImageDataUrl: string | undefined
-            try {
-              // Try to use async version to render SVG icons properly
-              const dragVisual = await createDragImageForSelectionAsync(selected, document.body)
-              dragImageDataUrl = dragVisual.dataUrl
-            } catch (e) {
-              console.warn('Failed to create async drag image, falling back:', e)
-              // Fallback to synchronous version
-              try {
-                const dragVisual = createDragImageForSelection(selected, document.body)
-                dragImageDataUrl = dragVisual.dataUrl
-              } catch (e2) {
-                console.warn('Failed to create drag image:', e2)
-              }
-            }
+        const handleMouseMove = (moveEvent: MouseEvent) => {
+          const deltaX = moveEvent.clientX - startX
+          const deltaY = moveEvent.clientY - startY
+          const distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY)
+          
+          if (distance >= dragThreshold && !dragStarted) {
+            dragStarted = true
+            startManualDrag({ path: file.path, name: file.name })
+            setDraggedFile(file.path)
+            document.removeEventListener('mousemove', handleMouseMove)
+            document.removeEventListener('mouseup', handleMouseUp)
             
-            // Use new unified native drag API
-            await invoke('start_native_drag', { 
-              paths: selected.map(f => f.path),
-              previewImage: dragImageDataUrl,
-              dragOffsetY: 0
-            })
-          } catch (error) {
-            console.warn('Native drag failed:', error)
-          } finally {
-            // Clear dragging state and hover state
-            setDraggedFile(null)
-            setHoveredFile(null)
+            // Don't end drag here - let the drop target handle it
+            // The sidebar will call endDrag when appropriate
           }
-        })()
-      }
-
-      const onMouseMove = (moveEvent: MouseEvent) => {
-        const deltaX = moveEvent.clientX - startX
-        const deltaY = moveEvent.clientY - startY
-        const distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY)
-        
-        if (distance >= dragThreshold) {
-          startDrag()
         }
-      }
 
-      const onMouseUp = () => {
-        document.removeEventListener('mousemove', onMouseMove)
-        document.removeEventListener('mouseup', onMouseUp)
-      }
+        const handleMouseUp = () => {
+          document.removeEventListener('mousemove', handleMouseMove)
+          document.removeEventListener('mouseup', handleMouseUp)
+        }
 
-      // Add temporary listeners to detect movement
-      document.addEventListener('mousemove', onMouseMove)
-      document.addEventListener('mouseup', onMouseUp)
+        document.addEventListener('mousemove', handleMouseMove)
+        document.addEventListener('mouseup', handleMouseUp)
+        return
+      }
+      
+      if (!file.is_directory) {
+        // For files, use the existing native drag system
+        const startX = e.clientX
+        const startY = e.clientY
+        const dragThreshold = 5 // pixels
+        let dragStarted = false
+
+        const startDrag = () => {
+          if (dragStarted) return
+          dragStarted = true
+          
+          // Clean up listeners
+          document.removeEventListener('mousemove', onMouseMove)
+          document.removeEventListener('mouseup', onMouseUp)
+        
+          // Update selection if dragging a non-selected file
+          let actualSelectedFiles = selectedFiles
+          if (!selectedFiles.includes(file.path)) {
+            actualSelectedFiles = [file.path]
+            setSelectedFiles([file.path])
+          }
+          
+          // Determine which files to drag using the actual selection
+          const selected = actualSelectedFiles.includes(file.path) && actualSelectedFiles.length > 0
+            ? files.filter(f => actualSelectedFiles.includes(f.path))
+            : [file]
+          
+          // Set dragging state for visual feedback
+          setDraggedFile(file.path)
+
+          // Perform native drag
+          void (async () => {
+            try {
+              // Create drag preview image with nice icons
+              let dragImageDataUrl: string | undefined
+              try {
+                // Try to use async version to render SVG icons properly
+                const dragVisual = await createDragImageForSelectionAsync(selected, document.body)
+                dragImageDataUrl = dragVisual.dataUrl
+              } catch (e) {
+                console.warn('Failed to create async drag image, falling back:', e)
+                // Fallback to synchronous version
+                try {
+                  const dragVisual = createDragImageForSelection(selected, document.body)
+                  dragImageDataUrl = dragVisual.dataUrl
+                } catch (e2) {
+                  console.warn('Failed to create drag image:', e2)
+                }
+              }
+              
+              // Use new unified native drag API
+              await invoke('start_native_drag', { 
+                paths: selected.map(f => f.path),
+                previewImage: dragImageDataUrl,
+                dragOffsetY: 0
+              })
+            } catch (error) {
+              console.warn('Native drag failed:', error)
+            } finally {
+              // Clear dragging state and hover state
+              setDraggedFile(null)
+              setHoveredFile(null)
+            }
+          })()
+        }
+
+        const onMouseMove = (moveEvent: MouseEvent) => {
+          const deltaX = moveEvent.clientX - startX
+          const deltaY = moveEvent.clientY - startY
+          const distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY)
+          
+          if (distance >= dragThreshold) {
+            startDrag()
+          }
+        }
+
+        const onMouseUp = () => {
+          document.removeEventListener('mousemove', onMouseMove)
+          document.removeEventListener('mouseup', onMouseUp)
+        }
+
+        // Add temporary listeners to detect movement
+        document.addEventListener('mousemove', onMouseMove)
+        document.addEventListener('mouseup', onMouseUp)
+      }
     }
   }
 
@@ -519,7 +569,7 @@ export default function FileList({ files, preferences }: FileListProps) {
       <div className="space-y-[2px] px-3 py-1 mt-1">
         {filteredFiles.map((file) => {
           const isSelected = selectedFiles.includes(file.path)
-          const isDragged = draggedFile !== null && (draggedFile === file.path || selectedFiles.includes(file.path))
+          const isDragged = (draggedFile !== null && (draggedFile === file.path || selectedFiles.includes(file.path))) || isDraggedDirectory(file.path)
           
           return (
             <div

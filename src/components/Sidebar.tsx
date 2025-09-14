@@ -1,19 +1,105 @@
-import { House, Desktop, FileText, DownloadSimple, ImageSquare, SquaresFour, UsersThree, HardDrives, Eject, CircleNotch, Trash, Recycle } from 'phosphor-react'
+import { House, Desktop, FileText, DownloadSimple, ImageSquare, SquaresFour, UsersThree, HardDrives, Eject, CircleNotch, Trash, Recycle, Folder } from 'phosphor-react'
 import { useAppStore } from '../store/useAppStore'
-import { useEffect, useState, MouseEvent } from 'react'
+import { useEffect, useState, MouseEvent, useRef } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import { SystemDrive } from '../types'
+import { SystemDrive, PinnedDirectory } from '../types'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import { useDragStore } from '../store/useDragStore'
+import { useToastStore } from '../store/useToastStore'
 
 export default function Sidebar() {
-  const { currentPath, navigateTo, showSidebar, sidebarWidth, homeDir } = useAppStore()
+  const { 
+    currentPath, 
+    navigateTo, 
+    showSidebar, 
+    sidebarWidth, 
+    homeDir, 
+    pinnedDirectories, 
+    removePinnedDirectory,
+    addPinnedDirectory
+  } = useAppStore()
+  const { isDragging, draggedDirectory, endDrag } = useDragStore()
   const [systemDrives, setSystemDrives] = useState<SystemDrive[]>([])
   const [ejectingDrives, setEjectingDrives] = useState<Set<string>>(new Set())
+  const [isDragOver, setIsDragOver] = useState(false)
+  const sidebarRef = useRef<HTMLDivElement>(null)
   
   // Fetch system drives on component mount
   useEffect(() => {
     fetchSystemDrives()
   }, [])
+
+  // Handle manual drag over sidebar
+  useEffect(() => {
+    if (!isDragging || !draggedDirectory || !sidebarRef.current) {
+      if (isDragging) console.log('🔍 Sidebar: Drag active but missing:', { isDragging, draggedDirectory, hasSidebarRef: !!sidebarRef.current })
+      return
+    }
+    console.log('🎯 Sidebar: Manual drag detection active for', draggedDirectory)
+
+    const handleMouseMove = (e: globalThis.MouseEvent) => {
+      const rect = sidebarRef.current?.getBoundingClientRect()
+      if (!rect) return
+      
+      const isOver = e.clientX >= rect.left && e.clientX <= rect.right && 
+                     e.clientY >= rect.top && e.clientY <= rect.bottom
+      
+      if (isOver !== isDragOver) {
+        setIsDragOver(isOver)
+        if (isOver) {
+          console.log('🚪 Sidebar: Manual drag entered')
+        } else {
+          console.log('📤 Sidebar: Manual drag left')
+        }
+      }
+    }
+
+    const handleMouseUp = async (e: globalThis.MouseEvent) => {
+      const rect = sidebarRef.current?.getBoundingClientRect()
+      if (!rect) {
+        // Still end the drag even if sidebar ref is missing
+        console.log('⚠️ Sidebar: No sidebar ref, ending drag')
+        setIsDragOver(false)
+        endDrag()
+        return
+      }
+      
+      const isOver = e.clientX >= rect.left && e.clientX <= rect.right && 
+                     e.clientY >= rect.top && e.clientY <= rect.bottom
+      
+      if (isOver) {
+        console.log('🎯 Sidebar: Manual drop detected', draggedDirectory)
+        
+        // Check if directory is already pinned
+        const isAlreadyPinned = pinnedDirectories.some(pin => pin.path === draggedDirectory.path)
+        if (!isAlreadyPinned) {
+          console.log('📌 Sidebar: Pinning directory', draggedDirectory.path)
+          try {
+            await addPinnedDirectory(draggedDirectory.path)
+            console.log('✅ Sidebar: Successfully pinned directory')
+          } catch (error) {
+            console.error('❌ Sidebar: Failed to pin directory:', error)
+          }
+        } else {
+          console.log('⚠️ Sidebar: Directory already pinned')
+        }
+      } else {
+        console.log('📤 Sidebar: Drop outside sidebar, cancelling')
+      }
+      
+      // Always clean up
+      setIsDragOver(false)
+      endDrag()
+    }
+
+    document.addEventListener('mousemove', handleMouseMove)
+    document.addEventListener('mouseup', handleMouseUp)
+    
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove)
+      document.removeEventListener('mouseup', handleMouseUp)
+    }
+  }, [isDragging, draggedDirectory, isDragOver, pinnedDirectories, addPinnedDirectory, endDrag])
 
   const fetchSystemDrives = async () => {
     try {
@@ -44,6 +130,51 @@ export default function Sidebar() {
       })
     }
   }
+
+  const handleUnpinDirectory = async (pin: PinnedDirectory, event: React.MouseEvent) => {
+    event.stopPropagation()
+    const { addToast } = useToastStore.getState()
+    
+    try {
+      await removePinnedDirectory(pin.path)
+      
+      // Show success toast with undo action
+      addToast({
+        message: `Removed "${pin.name}" from pinned folders`,
+        type: 'success',
+        duration: 8000, // Give more time for undo
+        action: {
+          label: 'Undo',
+          onClick: async () => {
+            try {
+              await addPinnedDirectory(pin.path)
+              addToast({
+                message: `Restored "${pin.name}" to pinned folders`,
+                type: 'success',
+                duration: 3000
+              })
+            } catch (error) {
+              console.error('Failed to restore pinned directory:', error)
+              addToast({
+                message: 'Failed to restore pinned folder',
+                type: 'error',
+                duration: 5000
+              })
+            }
+          }
+        }
+      })
+    } catch (error) {
+      console.error('Failed to unpin directory:', error)
+      addToast({
+        message: 'Failed to remove pinned folder',
+        type: 'error',
+        duration: 5000
+      })
+    }
+  }
+
+
   
   if (!showSidebar) return null
   // Safe join that returns null until base (home) is known
@@ -86,8 +217,12 @@ export default function Sidebar() {
 
   return (
     <div 
-      className="flex flex-col h-full bg-app-gray rounded-xl overflow-hidden"
+      ref={sidebarRef}
+      className={`flex flex-col h-full bg-app-gray rounded-xl overflow-hidden transition-all duration-200 ${
+        isDragOver ? 'ring-2 ring-accent bg-accent/10 shadow-lg shadow-accent/20' : ''
+      }`}
       style={{ width: sidebarWidth }}
+      data-tauri-drag-region={false}
     >
       {/* Expanded draggable area around traffic lights - covers entire top area */}
       <div
@@ -128,6 +263,46 @@ export default function Sidebar() {
             </button>
           )
         })}
+        
+        {/* Pinned directories section */}
+        {pinnedDirectories.length > 0 && (
+          <>
+            <div className="px-1 pt-3 pb-1 text-xs text-app-muted select-none">Pinned</div>
+            {[...pinnedDirectories].sort((a, b) => a.name.localeCompare(b.name)).map(pin => {
+              const isActive = currentPath === pin.path
+              return (
+                <div
+                  key={pin.path}
+                  className={`w-full flex items-center gap-2 px-1.5 py-1 rounded-md text-left leading-5 text-[13px] group ${
+                    isActive ? 'bg-app-light' : 'hover:bg-app-light/70'
+                  }`}
+                >
+                  <button
+                    onClick={() => navigateTo(pin.path)}
+                    className="flex items-center gap-2 flex-1 min-w-0"
+                    title={pin.path}
+                    data-tauri-drag-region={false}
+                  >
+                    {createIcon(Folder, "fill", isActive)}
+                    <span className={`truncate ${isActive ? 'text-accent' : ''}`}>{pin.name}</span>
+                  </button>
+                  
+                  <button
+                    onClick={(e) => handleUnpinDirectory(pin, e)}
+                    className="ml-auto p-0.5 rounded hover:bg-app-light/50 text-app-muted hover:text-accent transition-colors"
+                    title="Remove from pinned"
+                    data-tauri-drag-region={false}
+                  >
+                    <Trash 
+                      className="w-3.5 h-3.5" 
+                      weight="regular" 
+                    />
+                  </button>
+                </div>
+              )
+            })}
+          </>
+        )}
         
         {/* Locations section */}
         <div className="px-1 pt-3 pb-1 text-xs text-app-muted select-none">System</div>

@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { FileItem, ViewPreferences, Theme } from '../types'
+import { FileItem, ViewPreferences, Theme, PinnedDirectory } from '../types'
 import { invoke } from '@tauri-apps/api/core'
 import { message } from '@tauri-apps/plugin-dialog'
 
@@ -56,6 +56,9 @@ interface AppState {
   // App icon cache for macOS Applications view
   appIconCache: Record<string, string>
   
+  // Pinned directories
+  pinnedDirectories: PinnedDirectory[]
+  
   // UI State
   sidebarWidth: number
   showSidebar: boolean
@@ -95,6 +98,11 @@ interface AppState {
   refreshCurrentDirectory: () => Promise<void>
   fetchAppIcon: (path: string, size?: number) => Promise<string | undefined>
   resetDirectoryPreferences: () => void
+  // Pinned directories
+  loadPinnedDirectories: () => Promise<void>
+  addPinnedDirectory: (path: string, name?: string) => Promise<PinnedDirectory>
+  removePinnedDirectory: (path: string) => Promise<boolean>
+  reorderPinnedDirectories: (paths: string[]) => Promise<void>
   // Rename UX
   renameTargetPath?: string
   setRenameTarget: (path?: string) => void
@@ -144,6 +152,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   lastPreferenceUpdate: 0,
   theme: 'system',
   appIconCache: {},
+  pinnedDirectories: [],
   
   sidebarWidth: 240,
   showSidebar: true,
@@ -389,6 +398,66 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   resetDirectoryPreferences: () => {
     set({ directoryPreferences: {} })
+  },
+
+  loadPinnedDirectories: async () => {
+    try {
+      const pinnedDirs = await invoke<PinnedDirectory[]>('get_pinned_directories')
+      set({ pinnedDirectories: pinnedDirs })
+    } catch (error) {
+      console.error('Failed to load pinned directories:', error)
+      set({ pinnedDirectories: [] })
+    }
+  },
+
+  addPinnedDirectory: async (path: string, name?: string) => {
+    try {
+      const newPin = await invoke<PinnedDirectory>('add_pinned_directory', { path, name })
+      set((state) => ({
+        pinnedDirectories: [...state.pinnedDirectories, newPin]
+      }))
+      return newPin
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error)
+      throw new Error(errorMessage)
+    }
+  },
+
+  removePinnedDirectory: async (path: string) => {
+    try {
+      const removed = await invoke<boolean>('remove_pinned_directory', { path })
+      if (removed) {
+        set((state) => ({
+          pinnedDirectories: state.pinnedDirectories.filter(p => p.path !== path)
+        }))
+      }
+      return removed
+    } catch (error) {
+      console.error('Failed to remove pinned directory:', error)
+      return false
+    }
+  },
+
+  reorderPinnedDirectories: async (paths: string[]) => {
+    try {
+      await invoke('reorder_pinned_directories', { paths })
+      // Reorder the local state to match
+      set((state) => {
+        const reordered = paths.map(path => 
+          state.pinnedDirectories.find(p => p.path === path)
+        ).filter(Boolean) as PinnedDirectory[]
+        
+        // Add any pins that weren't in the reorder list
+        const missing = state.pinnedDirectories.filter(p => 
+          !paths.includes(p.path)
+        )
+        
+        return { pinnedDirectories: [...reordered, ...missing] }
+      })
+    } catch (error) {
+      console.error('Failed to reorder pinned directories:', error)
+      throw error
+    }
   },
   
   // Rename state
