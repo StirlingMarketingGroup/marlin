@@ -3,6 +3,7 @@ import { Folder, File, ImageSquare, MusicNote, VideoCamera, FileText, CaretUp, C
 import { FileItem, ViewPreferences } from '../types'
 import { useAppStore } from '../store/useAppStore'
 import { useDragStore } from '../store/useDragStore'
+import { useToastStore } from '../store/useToastStore'
 import AppIcon from '@/components/AppIcon'
 import { FileTypeIcon, resolveVSCodeIcon } from '@/components/FileTypeIcon'
 import { open } from '@tauri-apps/plugin-shell'
@@ -97,7 +98,7 @@ function ListFilePreview({ file, isMac, fallbackIcon }: { file: FileItem; isMac:
 export default function FileList({ files, preferences }: FileListProps) {
   const { selectedFiles, setSelectedFiles, navigateTo, selectionAnchor, setSelectionAnchor, setSelectionLead } = useAppStore()
   const { renameTargetPath, setRenameTarget, renameFile } = useAppStore()
-  const { startDrag: startManualDrag, isDraggedDirectory, isDragging } = useDragStore()
+  const { startNativeDrag, endNativeDrag, isDraggedDirectory } = useDragStore()
   const [renameText, setRenameText] = useState<string>('')
   const renameInputRef = useRef<HTMLInputElement>(null)
   const { fetchAppIcon } = useAppStore()
@@ -105,11 +106,7 @@ export default function FileList({ files, preferences }: FileListProps) {
   const [hoveredFile, setHoveredFile] = useState<string | null>(null)
   
   // Clean up dragged state when drag ends
-  useEffect(() => {
-    if (!isDragging && draggedFile) {
-      setDraggedFile(null)
-    }
-  }, [isDragging, draggedFile])
+  // No longer needed - native drag handles cleanup
 
   const sortBy = preferences.sortBy
   const sortOrder = preferences.sortOrder
@@ -311,128 +308,138 @@ export default function FileList({ files, preferences }: FileListProps) {
     }
     
     // Left-click: Handle drag initiation
-    if (e.button === 0) {      
-      // For directories, use manual drag system
-      if (file.is_directory) {
-        console.log('🔵 FileList: Starting manual drag for directory')
+    if (e.button === 0) {
+      // Use native drag for both files AND directories
+      const startX = e.clientX
+      const startY = e.clientY
+      const dragThreshold = 5 // pixels
+      let dragStarted = false
+
+      const startDrag = () => {
+        if (dragStarted) return
+        dragStarted = true
         
-        const startX = e.clientX
-        const startY = e.clientY
-        const dragThreshold = 5
-        let dragStarted = false
-
-        const handleMouseMove = (moveEvent: MouseEvent) => {
-          const deltaX = moveEvent.clientX - startX
-          const deltaY = moveEvent.clientY - startY
-          const distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY)
-          
-          if (distance >= dragThreshold && !dragStarted) {
-            dragStarted = true
-            startManualDrag({ path: file.path, name: file.name })
-            setDraggedFile(file.path)
-            document.removeEventListener('mousemove', handleMouseMove)
-            document.removeEventListener('mouseup', handleMouseUp)
-            
-            // Don't end drag here - let the drop target handle it
-            // The sidebar will call endDrag when appropriate
-          }
+        console.log('🚀 FileList: Native drag started for', {
+          fileName: file.name,
+          isDirectory: file.is_directory,
+          selectedFiles: selectedFiles.length
+        })
+        
+        // If dragging a directory, track it for potential pinning
+        if (file.is_directory) {
+          startNativeDrag({ path: file.path, name: file.name })
         }
-
-        const handleMouseUp = () => {
-          document.removeEventListener('mousemove', handleMouseMove)
-          document.removeEventListener('mouseup', handleMouseUp)
-        }
-
-        document.addEventListener('mousemove', handleMouseMove)
-        document.addEventListener('mouseup', handleMouseUp)
-        return
-      }
+        
+        // Clean up listeners
+        document.removeEventListener('mousemove', onMouseMove)
+        document.removeEventListener('mouseup', onMouseUp)
       
-      if (!file.is_directory) {
-        // For files, use the existing native drag system
-        const startX = e.clientX
-        const startY = e.clientY
-        const dragThreshold = 5 // pixels
-        let dragStarted = false
-
-        const startDrag = () => {
-          if (dragStarted) return
-          dragStarted = true
-          
-          // Clean up listeners
-          document.removeEventListener('mousemove', onMouseMove)
-          document.removeEventListener('mouseup', onMouseUp)
+        // Update selection if dragging a non-selected file
+        let actualSelectedFiles = selectedFiles
+        if (!selectedFiles.includes(file.path)) {
+          actualSelectedFiles = [file.path]
+          setSelectedFiles([file.path])
+        }
         
-          // Update selection if dragging a non-selected file
-          let actualSelectedFiles = selectedFiles
-          if (!selectedFiles.includes(file.path)) {
-            actualSelectedFiles = [file.path]
-            setSelectedFiles([file.path])
-          }
-          
-          // Determine which files to drag using the actual selection
-          const selected = actualSelectedFiles.includes(file.path) && actualSelectedFiles.length > 0
-            ? files.filter(f => actualSelectedFiles.includes(f.path))
-            : [file]
-          
-          // Set dragging state for visual feedback
-          setDraggedFile(file.path)
+        // Determine which files to drag using the actual selection
+        const selected = actualSelectedFiles.includes(file.path) && actualSelectedFiles.length > 0
+          ? files.filter(f => actualSelectedFiles.includes(f.path))
+          : [file]
+        
+        // Set dragging state for visual feedback
+        setDraggedFile(file.path)
 
-          // Perform native drag
-          void (async () => {
+        // Perform native drag
+        void (async () => {
+          try {
+            // Create drag preview image with nice icons
+            let dragImageDataUrl: string | undefined
             try {
-              // Create drag preview image with nice icons
-              let dragImageDataUrl: string | undefined
+              // Try to use async version to render SVG icons properly
+              const dragVisual = await createDragImageForSelectionAsync(selected, document.body)
+              dragImageDataUrl = dragVisual.dataUrl
+            } catch (e) {
+              console.warn('Failed to create async drag image, falling back:', e)
+              // Fallback to synchronous version
               try {
-                // Try to use async version to render SVG icons properly
-                const dragVisual = await createDragImageForSelectionAsync(selected, document.body)
+                const dragVisual = createDragImageForSelection(selected, document.body)
                 dragImageDataUrl = dragVisual.dataUrl
-              } catch (e) {
-                console.warn('Failed to create async drag image, falling back:', e)
-                // Fallback to synchronous version
-                try {
-                  const dragVisual = createDragImageForSelection(selected, document.body)
-                  dragImageDataUrl = dragVisual.dataUrl
-                } catch (e2) {
-                  console.warn('Failed to create drag image:', e2)
+              } catch (e2) {
+                console.warn('Failed to create drag image:', e2)
+              }
+            }
+            
+            // Use new unified native drag API
+            const result = await invoke('start_native_drag', { 
+              paths: selected.map(f => f.path),
+              previewImage: dragImageDataUrl,
+              dragOffsetY: 0
+            })
+            
+            console.log('🏁 FileList: Native drag completed', result)
+            
+            // After native drag completes, check if we should pin to sidebar
+            if (file.is_directory) {
+              // Get current mouse position (stored globally during mousemove)
+              const mouseX = (window as any).lastMouseX || 0
+              const mouseY = (window as any).lastMouseY || 0
+              
+              // Check if mouse is over sidebar
+              const sidebar = document.querySelector('[data-sidebar="true"]')
+              if (sidebar) {
+                const rect = sidebar.getBoundingClientRect()
+                const isOverSidebar = mouseX >= rect.left && mouseX <= rect.right && 
+                                     mouseY >= rect.top && mouseY <= rect.bottom
+                
+                if (isOverSidebar) {
+                  console.log('📌 FileList: Dropping on sidebar, pinning directory')
+                  const { addPinnedDirectory } = useAppStore.getState()
+                  try {
+                    await addPinnedDirectory(file.path)
+                    console.log('✅ FileList: Successfully pinned directory')
+                    const { addToast } = useToastStore.getState()
+                    addToast({
+                      type: 'success',
+                      message: `Pinned ${file.name} to sidebar`
+                    })
+                  } catch (error) {
+                    console.error('❌ FileList: Failed to pin directory:', error)
+                  }
                 }
               }
-              
-              // Use new unified native drag API
-              await invoke('start_native_drag', { 
-                paths: selected.map(f => f.path),
-                previewImage: dragImageDataUrl,
-                dragOffsetY: 0
-              })
-            } catch (error) {
-              console.warn('Native drag failed:', error)
-            } finally {
-              // Clear dragging state and hover state
-              setDraggedFile(null)
-              setHoveredFile(null)
             }
-          })()
-        }
-
-        const onMouseMove = (moveEvent: MouseEvent) => {
-          const deltaX = moveEvent.clientX - startX
-          const deltaY = moveEvent.clientY - startY
-          const distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY)
-          
-          if (distance >= dragThreshold) {
-            startDrag()
+          } catch (error) {
+            console.warn('Native drag failed:', error)
+          } finally {
+            // Clear dragging state and hover state
+            setDraggedFile(null)
+            setHoveredFile(null)
+            // If we were tracking a directory drag, end it
+            if (file.is_directory) {
+              endNativeDrag()
+            }
           }
-        }
-
-        const onMouseUp = () => {
-          document.removeEventListener('mousemove', onMouseMove)
-          document.removeEventListener('mouseup', onMouseUp)
-        }
-
-        // Add temporary listeners to detect movement
-        document.addEventListener('mousemove', onMouseMove)
-        document.addEventListener('mouseup', onMouseUp)
+        })()
       }
+
+      const onMouseMove = (moveEvent: MouseEvent) => {
+        const deltaX = moveEvent.clientX - startX
+        const deltaY = moveEvent.clientY - startY
+        const distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY)
+        
+        if (distance >= dragThreshold) {
+          startDrag()
+        }
+      }
+
+      const onMouseUp = () => {
+        document.removeEventListener('mousemove', onMouseMove)
+        document.removeEventListener('mouseup', onMouseUp)
+      }
+
+      // Add temporary listeners to detect movement
+      document.addEventListener('mousemove', onMouseMove)
+      document.addEventListener('mouseup', onMouseUp)
     }
   }
 

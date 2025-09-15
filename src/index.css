@@ -46,6 +46,14 @@
     --accent-rgb: 53, 132, 228;  /* #3584e4 */
   }
 
+  /* Sidebar drag-over effect */
+  [data-sidebar="true"].drag-over {
+    @apply relative;
+    background-color: var(--accent-soft);
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
+
   /* Scrollbar styling */
   ::-webkit-scrollbar {
     @apply w-2 h-2;

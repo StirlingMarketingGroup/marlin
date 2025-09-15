@@ -6,7 +6,7 @@ import MainPanel from './components/MainPanel'
 import PathBar from './components/PathBar'
 import { useAppStore } from './store/useAppStore'
 import { message } from '@tauri-apps/plugin-dialog'
-import DragPreview from './components/DragPreview'
+
 import Toast from './components/Toast'
 
 function App() {
@@ -15,6 +15,17 @@ function App() {
   const [showLoadingOverlay, setShowLoadingOverlay] = useState(false)
   const prefsLoadedRef = useRef(false)
   const firstLoadRef = useRef(true)
+  
+  // Track global mouse position for drag/drop detection
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      (window as any).lastMouseX = e.clientX;
+      (window as any).lastMouseY = e.clientY
+    }
+    
+    document.addEventListener('mousemove', handleMouseMove)
+    return () => document.removeEventListener('mousemove', handleMouseMove)
+  }, [])
 
   // Apply smart default view and sort preferences based on folder name or contents
   const applySmartViewDefaults = async (path: string, files?: any[]) => {
@@ -982,9 +993,7 @@ function App() {
         <MainPanel />
       </div>
 
-      {/* Global drag preview */}
-      <DragPreview />
-      
+
       {/* Toast notifications */}
       <Toast />
     </div>

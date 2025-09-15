@@ -4,6 +4,7 @@ mod fs_watcher;
 mod menu;
 mod state;
 mod thumbnails;
+mod plugins;
 #[cfg(target_os = "macos")]
 mod macos_icons;
 #[cfg(target_os = "macos")]
@@ -23,6 +24,7 @@ pub fn run() {
     .plugin(tauri_plugin_dialog::init())
     .plugin(tauri_plugin_decorum::init())
     .plugin(tauri_plugin_drag::init())
+    .plugin(plugins::drag_detector::init())
       .invoke_handler(tauri::generate_handler![
       commands::get_home_directory,
       commands::read_directory,

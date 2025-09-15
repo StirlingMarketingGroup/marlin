@@ -6,47 +6,36 @@ interface DraggedDirectory {
 }
 
 interface DragStore {
-  isDragging: boolean
-  draggedDirectory: DraggedDirectory | null
-  dragPreviewPosition: { x: number; y: number } | null
+  // Native drag tracking (for directories being dragged to external apps or sidebar)
+  nativeDragDirectory: DraggedDirectory | null
   
-  startDrag: (directory: DraggedDirectory) => void
-  updateDragPosition: (x: number, y: number) => void
-  endDrag: () => void
+  // Start tracking a native drag of a directory
+  startNativeDrag: (directory: DraggedDirectory) => void
+  // End tracking of native drag
+  endNativeDrag: () => void
+  // Check if a specific path is being dragged
   isDraggedDirectory: (path: string) => boolean
 }
 
 export const useDragStore = create<DragStore>((set, get) => ({
-  isDragging: false,
-  draggedDirectory: null,
-  dragPreviewPosition: null,
+  nativeDragDirectory: null,
 
-  startDrag: (directory: DraggedDirectory) => {
-    console.log('🚀 Manual drag started:', directory)
-    // Alert for debugging
-    // alert(`Manual drag started for: ${directory.name}`)
+  startNativeDrag: (directory: DraggedDirectory) => {
+    console.log('🚀 Native drag started for directory:', directory)
     set({
-      isDragging: true,
-      draggedDirectory: directory,
-      dragPreviewPosition: { x: 100, y: 100 } // Start with a visible position
+      nativeDragDirectory: directory
     })
   },
 
-  updateDragPosition: (x: number, y: number) => {
-    set({ dragPreviewPosition: { x, y } })
-  },
-
-  endDrag: () => {
-    console.log('🏁 Manual drag ended')
+  endNativeDrag: () => {
+    console.log('🏁 Native drag ended')
     set({
-      isDragging: false,
-      draggedDirectory: null,
-      dragPreviewPosition: null
+      nativeDragDirectory: null
     })
   },
 
   isDraggedDirectory: (path: string) => {
     const state = get()
-    return state.isDragging && state.draggedDirectory?.path === path
+    return state.nativeDragDirectory?.path === path
   }
 }))

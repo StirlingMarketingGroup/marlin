@@ -4,8 +4,8 @@ import { useEffect, useState, MouseEvent, useRef } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { SystemDrive, PinnedDirectory } from '../types'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { useDragStore } from '../store/useDragStore'
 import { useToastStore } from '../store/useToastStore'
+import { useSidebarDropZone } from '../hooks/useDragDetector'
 
 export default function Sidebar() {
   const { 
@@ -18,88 +18,39 @@ export default function Sidebar() {
     removePinnedDirectory,
     addPinnedDirectory
   } = useAppStore()
-  const { isDragging, draggedDirectory, endDrag } = useDragStore()
+
   const [systemDrives, setSystemDrives] = useState<SystemDrive[]>([])
   const [ejectingDrives, setEjectingDrives] = useState<Set<string>>(new Set())
   const [isDragOver, setIsDragOver] = useState(false)
   const sidebarRef = useRef<HTMLDivElement>(null)
   
+  // Use the new drag detector hook for native drop detection
+  useSidebarDropZone(async (paths) => {
+    // Handle dropped directories
+    for (const path of paths) {
+      try {
+        await addPinnedDirectory(path)
+        const { addToast } = useToastStore.getState()
+        addToast({
+          type: 'success',
+          message: `Pinned ${path.split('/').pop() || 'directory'} to sidebar`
+        })
+      } catch (error) {
+        console.error('Failed to pin directory:', error)
+        const { addToast } = useToastStore.getState()
+        addToast({
+          type: 'error',
+          message: 'Failed to pin directory'
+        })
+      }
+    }
+    setIsDragOver(false)
+  })
+  
   // Fetch system drives on component mount
   useEffect(() => {
     fetchSystemDrives()
   }, [])
-
-  // Handle manual drag over sidebar
-  useEffect(() => {
-    if (!isDragging || !draggedDirectory || !sidebarRef.current) {
-      if (isDragging) console.log('🔍 Sidebar: Drag active but missing:', { isDragging, draggedDirectory, hasSidebarRef: !!sidebarRef.current })
-      return
-    }
-    console.log('🎯 Sidebar: Manual drag detection active for', draggedDirectory)
-
-    const handleMouseMove = (e: globalThis.MouseEvent) => {
-      const rect = sidebarRef.current?.getBoundingClientRect()
-      if (!rect) return
-      
-      const isOver = e.clientX >= rect.left && e.clientX <= rect.right && 
-                     e.clientY >= rect.top && e.clientY <= rect.bottom
-      
-      if (isOver !== isDragOver) {
-        setIsDragOver(isOver)
-        if (isOver) {
-          console.log('🚪 Sidebar: Manual drag entered')
-        } else {
-          console.log('📤 Sidebar: Manual drag left')
-        }
-      }
-    }
-
-    const handleMouseUp = async (e: globalThis.MouseEvent) => {
-      const rect = sidebarRef.current?.getBoundingClientRect()
-      if (!rect) {
-        // Still end the drag even if sidebar ref is missing
-        console.log('⚠️ Sidebar: No sidebar ref, ending drag')
-        setIsDragOver(false)
-        endDrag()
-        return
-      }
-      
-      const isOver = e.clientX >= rect.left && e.clientX <= rect.right && 
-                     e.clientY >= rect.top && e.clientY <= rect.bottom
-      
-      if (isOver) {
-        console.log('🎯 Sidebar: Manual drop detected', draggedDirectory)
-        
-        // Check if directory is already pinned
-        const isAlreadyPinned = pinnedDirectories.some(pin => pin.path === draggedDirectory.path)
-        if (!isAlreadyPinned) {
-          console.log('📌 Sidebar: Pinning directory', draggedDirectory.path)
-          try {
-            await addPinnedDirectory(draggedDirectory.path)
-            console.log('✅ Sidebar: Successfully pinned directory')
-          } catch (error) {
-            console.error('❌ Sidebar: Failed to pin directory:', error)
-          }
-        } else {
-          console.log('⚠️ Sidebar: Directory already pinned')
-        }
-      } else {
-        console.log('📤 Sidebar: Drop outside sidebar, cancelling')
-      }
-      
-      // Always clean up
-      setIsDragOver(false)
-      endDrag()
-    }
-
-    document.addEventListener('mousemove', handleMouseMove)
-    document.addEventListener('mouseup', handleMouseUp)
-    
-    return () => {
-      document.removeEventListener('mousemove', handleMouseMove)
-      document.removeEventListener('mouseup', handleMouseUp)
-    }
-  }, [isDragging, draggedDirectory, isDragOver, pinnedDirectories, addPinnedDirectory, endDrag])
 
   const fetchSystemDrives = async () => {
     try {
@@ -223,6 +174,7 @@ export default function Sidebar() {
       }`}
       style={{ width: sidebarWidth }}
       data-tauri-drag-region={false}
+      data-sidebar="true"
     >
       {/* Expanded draggable area around traffic lights - covers entire top area */}
       <div

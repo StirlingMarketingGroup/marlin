@@ -2,24 +2,46 @@
 
 ## 🎯 Feature Requirements
 
-**Goal**: Allow users to drag directories from the file browser to the sidebar to pin them for quick access.
+**Goal**: Allow users to drag directories from the file browser to the sidebar to pin them for quick access, while maintaining the ability to drag directories to external applications.
 
 **Expected Behavior**:
 1. User drags a directory from FileGrid or FileList
-2. Sidebar shows visual feedback (highlight/ring effect) when dragged over
-3. User drops directory on sidebar
-4. Directory is added to "Pinned" section in sidebar
-5. Directory persists across app restarts
+2. Directory can be dragged to external applications (like Finder, Terminal, etc.)
+3. Sidebar shows visual feedback (highlight/ring effect) when dragged over
+4. User drops directory on sidebar to pin it
+5. Directory is added to "Pinned" section in sidebar
+6. Directory persists across app restarts
 
-## 📊 Current Status: **✅ WORKING**
+## 📊 Current Status: **❌ NOT WORKING**
 
-The drag and drop functionality is fully operational using a custom manual drag implementation.
+Despite multiple implementation attempts, the drag and drop functionality for pinning directories to the sidebar is still not functioning properly.
 
-## 🛠️ Implementation Progress
+## 🔍 Research Findings
+
+### Tauri Drag & Drop Limitations Discovered
+
+1. **HTML5 Drag Events in Tauri WebView**:
+   - `dragstart` events fire properly
+   - `dragenter`, `dragover`, and `drop` events **do NOT fire reliably between elements**
+   - This is a known limitation of Tauri's WebView implementation
+   - Setting `dragDropEnabled: false` in window config can help on Windows but breaks native drag
+
+2. **Native Drag (`start_native_drag`)**:
+   - Successfully allows dragging files/directories to external applications
+   - **Takes over mouse control completely** - browser doesn't receive mouse events during drag
+   - Returns only after drag completes (blocking operation)
+   - Cannot easily detect drops within the same application
+
+3. **Platform-Specific Issues**:
+   - Linux/WebKit has known issues with drag and drop (GitHub issue #6695)
+   - Windows requires disabling native drag/drop to use HTML5 drag/drop
+   - macOS native drag preview animations have issues (see `DRAG_DROP_IMPLEMENTATION.md` in git history)
+
+## 🛠️ Implementation History
 
 ### ✅ Backend Implementation (COMPLETE)
 
-**Files Modified**: `src-tauri/src/commands.rs`, `src-tauri/src/lib.rs`
+**Files**: `src-tauri/src/commands.rs`, `src-tauri/src/lib.rs`
 
 **Features Implemented**:
 - `get_pinned_directories()` - Load pinned directories from JSON file
@@ -27,271 +49,237 @@ The drag and drop functionality is fully operational using a custom manual drag 
 - `remove_pinned_directory(path)` - Remove pinned directory
 - `reorder_pinned_directories(paths)` - Reorder pinned directories
 - Persistent storage in `~/.config/Marlin/pinned_directories.json`
-- Limit of 20 pinned directories
-- Automatic directory name extraction from path
 
-**Backend Status**: ✅ **Working** - All Tauri commands compile and are registered
+**Status**: ✅ Working - Backend commands function correctly
 
 ### ✅ Store Integration (COMPLETE)
 
-**Files Modified**: `src/store/useAppStore.ts`, `src/types/index.ts`
+**Files**: `src/store/useAppStore.ts`, `src/types/index.ts`
 
 **Features Implemented**:
 - `pinnedDirectories` state array
 - `loadPinnedDirectories()` - Load from backend on app start
 - `addPinnedDirectory()` - Add and update local state
-- `removePinnedDirectory()` - Remove and update local state  
-- `reorderPinnedDirectories()` - Reorder local state
-- Error handling for all operations
+- `removePinnedDirectory()` - Remove and update local state
 - TypeScript types for `PinnedDirectory`
 
-**Store Status**: ✅ **Working** - App loads pinned directories on startup
+**Status**: ✅ Working - Store methods function correctly
 
-### ✅ Sidebar UI (COMPLETE)
+### ✅ Sidebar UI (PARTIALLY WORKING)
 
-**Files Modified**: `src/components/Sidebar.tsx`
+**File**: `src/components/Sidebar.tsx`
 
 **Features Implemented**:
-- Display pinned directories in "Pinned" section
-- Unpin functionality with trash button on hover
-- Navigation to pinned directories on click
-- Visual feedback during drag operations
-- Drop zone with enhanced styling and transitions
+- Display pinned directories in "Pinned" section ✅
+- Unpin functionality with trash button ✅
+- Navigation to pinned directories ✅
+- Visual feedback during drag ❌ (not showing)
+- Drop zone detection ❌ (not working)
 
-**Sidebar Status**: ✅ **Working** - UI displays properly, unpin works
+**Status**: ⚠️ Display works, but drop detection fails
 
-### ❌ Drag & Drop System (NOT WORKING)
+## 📝 Attempted Solutions
 
-**Files Modified**: `src/components/FileGrid.tsx`, `src/components/FileList.tsx`, `src/components/Sidebar.tsx`
+### Attempt 1: Manual Drag Implementation (Initial Commit)
+**Approach**: Created a complete manual drag system using mouse events
+- Tracked drag state in `useDragStore`
+- Created `DragPreview` component for visual feedback
+- Used mouse position tracking for drop detection
 
-#### HTML5 Drag Implementation (Source)
+**Result**: 
+- ✅ Pinning to sidebar worked
+- ❌ **Broke dragging to external applications**
+- ❌ Complex implementation with many edge cases
 
-**FileGrid.tsx & FileList.tsx**:
+### Attempt 2: Restore Native Drag (Current Attempt #1)
+**Approach**: Use native drag for everything, track directories for pinning
+- Restored native drag for directories
+- Added lightweight tracking in `useDragStore`
+- Tried to detect drops via mouse position during native drag
+
+**Result**:
+- ✅ External application dragging works
+- ❌ **No drop detection** - mouse events blocked during native drag
+- ❌ **No visual feedback** - sidebar doesn't highlight
+
+### Attempt 3: Global Mouse Tracking (Current Attempt #2)
+**Approach**: Track mouse position globally, check after native drag completes
+- Added global mouse position tracking in App.tsx
+- Check sidebar bounds after `start_native_drag` returns
+- Poll mouse position for visual feedback
+
+**Implementation**:
 ```typescript
-// Directory items have draggable={file.is_directory}
-// onDragStart handler sets drag data for directories only
-const handleDragStart = (e: React.DragEvent, file: FileItem) => {
-  if (file.is_directory) {
-    const dragData = {
-      type: 'file',
-      path: file.path,
-      isDirectory: true,
-      name: file.name
-    }
-    e.dataTransfer.setData('application/json', JSON.stringify(dragData))
-    e.dataTransfer.effectAllowed = 'copy'
-  } else {
-    e.preventDefault()
+// In App.tsx - track mouse globally
+useEffect(() => {
+  const handleMouseMove = (e: MouseEvent) => {
+    (window as any).lastMouseX = e.clientX;
+    (window as any).lastMouseY = e.clientY;
   }
+  document.addEventListener('mousemove', handleMouseMove)
+}, [])
+
+// In FileGrid/FileList - check after drag
+await invoke('start_native_drag', {...})
+// Check if mouse is over sidebar
+const sidebar = document.querySelector('[data-sidebar="true"]')
+if (sidebar && mouseOverSidebar) {
+  await addPinnedDirectory(file.path)
 }
 ```
 
-**Current Issues**:
-- `handleDragStart` is never being called
-- No drag events are being initiated at all
-- Console logs show no drag activity
-
-#### Drop Zone Implementation (Target)
-
-**Sidebar.tsx**:
-```typescript
-<div 
-  className={`... ${isDragOver ? 'ring-2 ring-accent bg-accent/10' : ''}`}
-  data-tauri-drag-region={false}
-  onDragEnter={handleDragEnter}
-  onDragOver={handleDragOver}
-  onDragLeave={handleDragLeave}
-  onDrop={handleDrop}
->
-```
-
-**Current Issues**:
-- Drop zone event handlers are never called
-- No visual feedback occurs
-- `isDragOver` state is never set to `true`
+**Result**:
+- ✅ External application dragging still works
+- ❌ **Drop detection still doesn't work** - mouse position not reliable after native drag
+- ❌ **No visual feedback** - polling during native drag doesn't work
 
 ## 🐛 Root Cause Analysis
 
-### Issue 1: HTML5 Drag Not Initiating
+### Why Current Implementation Fails
 
-**Problem**: The `onDragStart` event is never fired for directories.
+1. **Native Drag Blocks Everything**:
+   - When `start_native_drag` is called, it takes complete control
+   - No browser events fire until drag completes
+   - Mouse position tracking is unreliable during native drag
+   - The final mouse position after drag may not reflect drop location
 
-**Investigation**:
-- Directories have `draggable={file.is_directory}` set correctly
-- `onDragStart` handler is attached properly
-- Mouse down events work (selection still functions)
-- But drag doesn't initiate at all
+2. **HTML5 Drag is Broken in Tauri**:
+   - Even with `draggable={true}`, drop events don't fire between elements
+   - This appears to be a fundamental Tauri WebView limitation
+   - Cannot use HTML5 drag for internal drops
 
-**Potential Causes**:
-1. **CSS Prevention**: Some CSS or parent element preventing drag
-2. **Event Interference**: Other event handlers interfering with drag initiation
-3. **Browser Restrictions**: Tauri/WebView restrictions on drag operations
-4. **Mouse Handler Conflicts**: `onMouseDown` handler might still be interfering
+3. **No Hybrid Solution Works**:
+   - Can't use HTML5 for internal + native for external (events conflict)
+   - Can't detect drops during native drag (no events)
+   - Can't reliably detect drops after native drag (position unreliable)
 
-### Issue 2: Native Drag System Conflict
+## 🚧 Current Blockers
 
-**Background**: The app has a complex native drag system for files that uses:
-- `onMouseDown` with threshold detection
-- `invoke('start_native_drag')` for external file operations
-- Custom drag image generation
+1. **Fundamental Limitation**: Tauri doesn't support detecting drops within the app during native drag
+2. **No Mouse Events**: Can't track mouse or detect hover during native drag
+3. **No HTML5 Alternative**: HTML5 drag events broken in Tauri WebView
+4. **Position Unreliable**: Final mouse position after native drag doesn't indicate drop location
 
-**Recent Changes**: Modified `onMouseDown` to skip native drag for directories:
-```typescript
-// Before: early return prevented HTML5 drag
-if (file.is_directory) {
-  return // ❌ This broke HTML5 drag
-}
+## 💡 Potential Solutions to Explore
 
-// After: wrapped native drag code
-if (!file.is_directory) {
-  // Native drag code only for files
-}
-```
+### Option 1: Two-Phase Drag
+- On mouse down, show a "mode selector" 
+- User chooses "Pin to Sidebar" or "Drag to App"
+- Different drag behavior based on selection
+- **Pros**: Would work reliably
+- **Cons**: Poor UX, extra step for users
 
-**Status**: Fixed the early return issue, but drag still doesn't work.
+### Option 2: Modifier Keys
+- Hold Cmd/Ctrl while dragging to pin to sidebar (uses manual drag)
+- Normal drag for external apps (uses native drag)
+- **Pros**: Power user friendly
+- **Cons**: Not discoverable, requires documentation
 
-### Issue 3: Tauri WebView Restrictions
+### Option 3: Right-Click Menu
+- Add "Pin to Sidebar" to context menu
+- Keep drag only for external apps
+- **Pros**: Simple, reliable
+- **Cons**: Not as intuitive as drag and drop
 
-**Concern**: Tauri's WebView might have restrictions on HTML5 drag operations, especially:
-- Cross-component drag and drop
-- `dataTransfer` API usage
-- Custom drag data
+### Option 4: Custom Tauri Plugin
+- Write a Rust plugin to detect drops at the OS level
+- Bridge native drop detection back to JavaScript
+- **Pros**: Could provide full functionality
+- **Cons**: Complex, platform-specific, maintenance burden
 
-## 🔍 Debugging Performed
+### Option 5: Drag Handle/Zone
+- Add a specific drag handle/icon that uses manual drag (for pinning)
+- Rest of the item uses native drag (for external)
+- **Pros**: Both features available
+- **Cons**: UI complexity, user confusion
 
-### ✅ Completed Debugging Steps
+## 📊 Comparison with Native File Managers
 
-1. **Backend Testing**: ✅ All Tauri commands work via manual invocation
-2. **Store Testing**: ✅ All store methods work correctly
-3. **UI Testing**: ✅ Sidebar displays pinned directories correctly  
-4. **Build Testing**: ✅ Frontend and backend compile without errors
-5. **Event Handler Setup**: ✅ All drag/drop handlers are attached correctly
-6. **Console Logging**: ✅ Extensive logging added but no drag events fire
-7. **Mouse Down Fix**: ✅ Removed early return that was blocking HTML5 drag
+| Feature | Finder (macOS) | Explorer (Windows) | Our App |
+|---------|---------------|-------------------|---------|
+| Drag to external apps | ✅ | ✅ | ✅ |
+| Drag to sidebar | ✅ | ✅ | ❌ |
+| Visual feedback | ✅ | ✅ | ❌ |
+| Drop zones | ✅ | ✅ | ❌ |
 
-### ❌ Outstanding Issues
+## 🎯 Recommendation
 
-1. **No Drag Initiation**: `onDragStart` never fires for directories
-2. **No Visual Feedback**: Sidebar drop zone never activates
-3. **Silent Failure**: No errors in console, drag just doesn't start
+Given the technical limitations discovered, I recommend:
 
-## 🚨 Current Blockers
+### Primary Solution: Custom Tauri Plugin (In Progress)
+Implement **Option 4** - Build a native drag detection plugin
 
-### Primary Blocker: HTML5 Drag Not Starting
+**Status**: Plugin foundation created and compiling. Needs platform-specific implementation completion.
 
-The fundamental issue is that HTML5 drag operations are not initiating at all. This suggests:
+### Alternative Solutions (Not Preferred)
+- **Context Menu**: Would work but we want to keep the context menu clean and minimal
+- **Modifier Keys**: Not discoverable enough for users
+- **Two-Phase Drag**: Poor UX with extra steps
 
-1. **Draggable Attribute Issue**: `draggable={file.is_directory}` might not be working
-2. **Event Prevention**: Some parent element or CSS is preventing drag
-3. **Tauri Limitation**: WebView might not support HTML5 drag fully
-4. **Conflicting Handlers**: Other event handlers still interfering
+### Current Focus: Complete the Custom Plugin
+Investigate **Option 4** - Build a native drag detection plugin
 
-### Secondary Issues
+**Technical Approach**:
+1. **Create Rust Plugin** that hooks into OS-level drag events:
+   - macOS: Use `NSDraggingDestination` protocol to detect drops
+   - Windows: Use `IDropTarget` COM interface
+   - Linux: Use GTK drag-and-drop signals
 
-1. **No Error Messages**: Complete silent failure makes debugging difficult
-2. **Complex Event Flow**: Native drag + HTML5 drag systems are complex
-3. **Cross-System Interference**: File selection, context menus, rename modes all using same elements
+2. **Bridge to JavaScript**:
+   ```rust
+   // Rust side - detect drop and emit event
+   fn handle_native_drop(window: Window, paths: Vec<String>, drop_location: DropLocation) {
+     window.emit("native-drop", DropPayload {
+       paths,
+       target: drop_location, // e.g., "sidebar", "file-list", etc.
+     });
+   }
+   ```
 
-## 🎉 Solution: Manual Drag Implementation
+3. **Handle in Frontend**:
+   ```typescript
+   // JavaScript side - listen for native drops
+   listen('native-drop', (event) => {
+     if (event.payload.target === 'sidebar') {
+       addPinnedDirectory(event.payload.paths[0]);
+     }
+   });
+   ```
 
-### The Problem
-HTML5 drag and drop API was fundamentally broken in Tauri's WebView:
-- `draggable={true}` would create a drag ghost image
-- `onDragStart` events would fire
-- But `onDragEnter`, `onDragOver`, and `onDrop` events on drop targets would **never fire**
-- This appears to be a Tauri WebView limitation where drag events don't propagate between elements
+**Benefits**:
+- Full native drag and drop support
+- Works with external apps AND internal drops
+- Proper visual feedback and drop zones
+- Native performance and reliability
 
-### The Solution
-We implemented a **complete manual drag system** using mouse events:
+**Considerations**:
+- Requires platform-specific implementations
+- Adds maintenance complexity
+- Could be contributed back to Tauri core
+- Would benefit entire Tauri community
 
-1. **Global Drag State** (`src/store/useDragStore.ts`):
-   - Zustand store to track drag state globally
-   - Stores dragged directory info and cursor position
-   - Provides `startDrag()`, `endDrag()`, and `updateDragPosition()` methods
+**Resources**:
+- [Tauri Plugin Development Guide](https://tauri.app/v1/guides/features/plugin)
+- [macOS NSDraggingDestination](https://developer.apple.com/documentation/appkit/nsdraggingdestination)
+- [Windows IDropTarget](https://docs.microsoft.com/en-us/windows/win32/api/oleidl/nn-oleidl-idroptarget)
+- [GTK Drag and Drop](https://docs.gtk.org/gtk3/drag-and-drop.html)
 
-2. **Manual Drag Initiation** (FileGrid/FileList):
-   - On `mouseDown` for directories, track initial position
-   - On `mouseMove`, check if moved > 5px (drag threshold)
-   - If threshold met, call `startManualDrag()` from store
-   - Completely bypass HTML5 drag API
+## 📝 Lessons Learned
 
-3. **Visual Drag Preview** (`src/components/DragPreview.tsx`):
-   - Global component that renders when `isDragging` is true
-   - Follows cursor position using mousemove events
-   - Shows folder icon and name in floating panel
+1. **Tauri Limitations**: Not all web APIs work as expected in Tauri
+2. **Native vs Web**: Can't easily mix native and web drag behaviors
+3. **Research First**: Should have investigated Tauri limitations before implementing
+4. **Test Early**: Simple prototypes would have revealed issues sooner
+5. **Document Everything**: This document is valuable for future reference
 
-4. **Drop Detection** (Sidebar):
-   - Monitors global mouse position during drag
-   - Checks if cursor is within sidebar bounds
-   - On `mouseUp`, if within bounds, pins the directory
-   - Single source of truth for ending drag (avoids conflicts)
+## 🔗 Related Documentation
 
-### Key Implementation Details
+- `DRAG_DROP_IMPLEMENTATION.md` (in git history) - Detailed native drag implementation attempts
+- [Tauri GitHub Issue #6695](https://github.com/tauri-apps/tauri/issues/6695) - Linux drag/drop issues
+- [Tauri Window Config](https://tauri.app/v1/api/config/#windowconfig) - `dragDropEnabled` setting
 
-#### Why Manual Drag Was Necessary
-```javascript
-// This DOESN'T work in Tauri:
-<div 
-  draggable={true}
-  onDragStart={(e) => console.log('starts')}  // ✅ Fires
-  onDrop={(e) => console.log('drops')}         // ❌ Never fires
-/>
+---
 
-// This DOES work (our solution):
-<div
-  onMouseDown={handleManualDragStart}
-  // Global mouseMove and mouseUp handlers track drag
-/>
-```
-
-#### Coordination Between Components
-- **FileGrid/FileList**: Only starts drag, doesn't end it
-- **Sidebar**: Handles both drop detection AND ending drag
-- **DragPreview**: Pure visual component, no logic
-- This prevents race conditions where drag ends before drop is processed
-
-## 💻 Code Status
-
-### Files with Complete Implementation
-- ✅ `src-tauri/src/commands.rs` - Backend pinned directory management
-- ✅ `src-tauri/src/lib.rs` - Tauri command registration  
-- ✅ `src/store/useAppStore.ts` - Frontend state management for pinned directories
-- ✅ `src/store/useDragStore.ts` - Manual drag state management
-- ✅ `src/types/index.ts` - TypeScript definitions
-- ✅ `src/components/Sidebar.tsx` - Drop detection and pinning logic
-- ✅ `src/components/FileGrid.tsx` - Manual drag initiation for directories
-- ✅ `src/components/FileList.tsx` - Manual drag initiation for directories
-- ✅ `src/components/DragPreview.tsx` - Visual drag feedback component
-- ✅ `src/App.tsx` - Initialization and component composition
-
-### Test Coverage
-- ✅ `src/__tests__/unit/store/useAppStore.test.ts` - Store methods tested
-- ⚠️ Manual drag system not yet unit tested
-
-## 📝 Summary
-
-The drag and drop system is now **fully functional** using a custom manual implementation:
-
-### What Works
-- ✅ **Drag Initiation**: Click and drag folders from FileGrid or FileList
-- ✅ **Visual Feedback**: Floating preview follows cursor during drag
-- ✅ **Drop Zone Highlighting**: Sidebar shows blue outline when hovering
-- ✅ **Directory Pinning**: Drop on sidebar successfully pins directories
-- ✅ **Persistence**: Pinned directories persist across app restarts
-- ✅ **Duplicate Prevention**: Already pinned directories won't be added twice
-- ✅ **Clean State Management**: Drag state properly cleans up after drop
-
-### Technical Achievement
-We successfully worked around a fundamental Tauri WebView limitation by:
-1. Completely bypassing the broken HTML5 drag and drop API
-2. Implementing a robust manual drag system using mouse events
-3. Creating a global state management solution for drag operations
-4. Ensuring proper coordination between multiple components
-
-### Lessons Learned
-- **Tauri WebView Limitation**: HTML5 drag events don't propagate properly between elements
-- **Manual Implementation**: Sometimes native APIs don't work and you need custom solutions
-- **Global State**: Complex interactions benefit from centralized state management
-- **Event Coordination**: Careful handling of who "owns" cleanup prevents race conditions
-
-The implementation is clean, maintainable, and provides a smooth user experience despite the underlying platform limitations.
+**Last Updated**: 2024-12-19
+**Status**: Blocked by Tauri limitations
+**Next Steps**: Implement context menu workaround or investigate custom plugin

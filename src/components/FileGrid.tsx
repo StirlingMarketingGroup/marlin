@@ -3,6 +3,7 @@ import { Folder, File, ImageSquare, MusicNote, VideoCamera, FileText, AppWindow,
 import { FileItem, ViewPreferences } from '../types'
 import { useAppStore } from '../store/useAppStore'
 import { useDragStore } from '../store/useDragStore'
+import { useToastStore } from '../store/useToastStore'
 import AppIcon from '@/components/AppIcon'
 import { FileTypeIcon, resolveVSCodeIcon } from '@/components/FileTypeIcon'
 import { open } from '@tauri-apps/plugin-shell'
@@ -113,18 +114,14 @@ function GridFilePreview({ file, isMac, fallbackIcon, tile }: { file: FileItem; 
 export default function FileGrid({ files, preferences }: FileGridProps) {
   const { selectedFiles, setSelectedFiles, navigateTo, selectionAnchor, setSelectionAnchor, setSelectionLead } = useAppStore()
   const { renameTargetPath, setRenameTarget, renameFile } = useAppStore()
-  const { startDrag: startManualDrag, isDraggedDirectory, isDragging } = useDragStore()
+  const { startNativeDrag, endNativeDrag, isDraggedDirectory } = useDragStore()
   const [renameText, setRenameText] = useState<string>('')
   const [draggedFile, setDraggedFile] = useState<string | null>(null)
   const [hoveredFile, setHoveredFile] = useState<string | null>(null)
   const renameInputRef = useRef<HTMLInputElement>(null)
   
   // Clean up dragged state when drag ends
-  useEffect(() => {
-    if (!isDragging && draggedFile) {
-      setDraggedFile(null)
-    }
-  }, [isDragging, draggedFile])
+  // No longer needed - native drag handles cleanup
   
   const [renameInputOffset, setRenameInputOffset] = useState<number>(0)
   const [renameInputWidth, setRenameInputWidth] = useState<number | undefined>(undefined)
@@ -274,46 +271,9 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     }
     
     // Left-click: Handle drag initiation
-    if (e.button === 0) {      
-      // For directories, use manual drag system
-      if (file.is_directory) {
-        console.log('🔵 FileGrid: Starting manual drag for directory')
-        
-        const startX = e.clientX
-        const startY = e.clientY
-        const dragThreshold = 5
-        let dragStarted = false
-
-        const handleMouseMove = (moveEvent: MouseEvent) => {
-          const deltaX = moveEvent.clientX - startX
-          const deltaY = moveEvent.clientY - startY
-          const distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY)
-          
-          if (distance >= dragThreshold && !dragStarted) {
-            dragStarted = true
-            console.log('📍 FileGrid: Drag threshold reached, starting manual drag', { path: file.path, name: file.name })
-            startManualDrag({ path: file.path, name: file.name })
-            setDraggedFile(file.path)
-            document.removeEventListener('mousemove', handleMouseMove)
-            document.removeEventListener('mouseup', handleMouseUp)
-            
-            // Don't end drag here - let the drop target handle it
-            // The sidebar will call endDrag when appropriate
-          }
-        }
-
-        const handleMouseUp = () => {
-          document.removeEventListener('mousemove', handleMouseMove)
-          document.removeEventListener('mouseup', handleMouseUp)
-        }
-
-        document.addEventListener('mousemove', handleMouseMove)
-        document.addEventListener('mouseup', handleMouseUp)
-        return
-      }
-      
-      if (!file.is_directory) {
-        // For files, use the existing native drag system
+    if (e.button === 0) {
+      // Use native drag for both files AND directories
+      // Track directories for potential pinning to sidebar
         const startX = e.clientX
         const startY = e.clientY
         const dragThreshold = 5 // pixels
@@ -328,6 +288,11 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
             isDirectory: file.is_directory,
             selectedFiles: selectedFiles.length
           })
+          
+          // If dragging a directory, track it for potential pinning
+          if (file.is_directory) {
+            startNativeDrag({ path: file.path, name: file.name })
+          }
           
           // Clean up listeners
           document.removeEventListener('mousemove', onMouseMove)
@@ -368,18 +333,53 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
                 }
               }
               
-              // Use new unified native drag API
-                await invoke('start_native_drag', {
-                paths: selected.map(f => f.path),
-                previewImage: dragImageDataUrl,
-                dragOffsetY: 0
-              })
+            // Use new unified native drag API
+            const result = await invoke('start_native_drag', {
+              paths: selected.map(f => f.path),
+              previewImage: dragImageDataUrl,
+              dragOffsetY: 0
+            })
+            
+            console.log('🏁 FileGrid: Native drag completed', result)
+            
+            // After native drag completes, check if we should pin to sidebar
+            if (file.is_directory) {
+              // Get current mouse position
+              const mouseX = (window as any).lastMouseX || 0
+              const mouseY = (window as any).lastMouseY || 0
+              
+              // Check if mouse is over sidebar
+              const sidebar = document.querySelector('[data-sidebar="true"]')
+              if (sidebar) {
+                const rect = sidebar.getBoundingClientRect()
+                if (mouseX >= rect.left && mouseX <= rect.right && 
+                    mouseY >= rect.top && mouseY <= rect.bottom) {
+                  // Mouse is over sidebar, pin the directory
+                  console.log('📌 Pinning directory to sidebar:', file.path)
+                  try {
+                    const { addPinnedDirectory } = useAppStore.getState()
+                    await addPinnedDirectory(file.path)
+                    const { addToast } = useToastStore.getState()
+                    addToast({
+                      type: 'success',
+                      message: `Pinned ${file.name} to sidebar`
+                    })
+                  } catch (error) {
+                    console.error('Failed to pin directory:', error)
+                  }
+                }
+              }
+            }
             } catch (error) {
               console.warn('Native drag failed:', error)
             } finally {
               // Clear dragging state and hover state
               setDraggedFile(null)
               setHoveredFile(null)
+              // If we were tracking a directory drag, end it
+              if (file.is_directory) {
+                endNativeDrag()
+              }
             }
           })()
         }
@@ -402,7 +402,6 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
         // Add temporary listeners to detect movement
         document.addEventListener('mousemove', onMouseMove)
         document.addEventListener('mouseup', onMouseUp)
-      }
     }
   }
 
