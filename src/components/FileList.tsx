@@ -3,7 +3,6 @@ import { Folder, File, ImageSquare, MusicNote, VideoCamera, FileText, CaretUp, C
 import { FileItem, ViewPreferences } from '../types'
 import { useAppStore } from '../store/useAppStore'
 import { useDragStore } from '../store/useDragStore'
-import { useToastStore } from '../store/useToastStore'
 import AppIcon from '@/components/AppIcon'
 import { FileTypeIcon, resolveVSCodeIcon } from '@/components/FileTypeIcon'
 import { open } from '@tauri-apps/plugin-shell'
@@ -395,37 +394,6 @@ export default function FileList({ files, preferences }: FileListProps) {
             })
             
             console.log('🏁 FileList: Native drag completed', result)
-            
-            // After native drag completes, check if we should pin to sidebar
-            if (file.is_directory) {
-              // Get current mouse position (stored globally during mousemove)
-              const mouseX = (window as any).lastMouseX || 0
-              const mouseY = (window as any).lastMouseY || 0
-              
-              // Check if mouse is over sidebar
-              const sidebar = document.querySelector('[data-sidebar="true"]')
-              if (sidebar) {
-                const rect = sidebar.getBoundingClientRect()
-                const isOverSidebar = mouseX >= rect.left && mouseX <= rect.right && 
-                                     mouseY >= rect.top && mouseY <= rect.bottom
-                
-                if (isOverSidebar) {
-                  console.log('📌 FileList: Dropping on sidebar, pinning directory')
-                  const { addPinnedDirectory } = useAppStore.getState()
-                  try {
-                    await addPinnedDirectory(file.path)
-                    console.log('✅ FileList: Successfully pinned directory')
-                    const { addToast } = useToastStore.getState()
-                    addToast({
-                      type: 'success',
-                      message: `Pinned ${file.name} to sidebar`
-                    })
-                  } catch (error) {
-                    console.error('❌ FileList: Failed to pin directory:', error)
-                  }
-                }
-              }
-            }
           } catch (error) {
             console.warn('Native drag failed:', error)
           } finally {

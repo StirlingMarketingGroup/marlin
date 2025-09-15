@@ -24,7 +24,6 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_decorum::init())
         .plugin(tauri_plugin_drag::init())
-        .plugin(plugins::drag_detector::init())
         .invoke_handler(tauri::generate_handler![
             commands::get_home_directory,
             commands::read_directory,
@@ -66,6 +65,9 @@ pub fn run() {
             commands::add_pinned_directory,
             commands::remove_pinned_directory,
             commands::reorder_pinned_directories,
+            plugins::drag_detector::enable_drag_detection,
+            plugins::drag_detector::set_drop_zone,
+            plugins::drag_detector::simulate_drop,
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {

@@ -1,4 +1,4 @@
-import { useEffect, useCallback } from 'react'
+import { useEffect, useCallback, useMemo } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, UnlistenFn } from '@tauri-apps/api/event'
 
@@ -26,7 +26,7 @@ export interface DragDropHandlers {
 export function useDragDetector(handlers: DragDropHandlers) {
   const enableDragDetection = useCallback(async () => {
     try {
-      await invoke('plugin:drag-detector|enable_drag_detection')
+      await invoke('enable_drag_detection')
     } catch (error) {
       console.error('Failed to enable drag detection:', error)
     }
@@ -34,8 +34,8 @@ export function useDragDetector(handlers: DragDropHandlers) {
 
   const setDropZone = useCallback(async (zoneId: string, enabled: boolean) => {
     try {
-      await invoke('plugin:drag-detector|set_drop_zone', { 
-        zoneId, 
+      await invoke('set_drop_zone', { 
+        zone_id: zoneId, 
         enabled 
       })
     } catch (error) {
@@ -89,34 +89,39 @@ export function useDragDetector(handlers: DragDropHandlers) {
 /**
  * Hook specifically for sidebar drop zone
  */
-export function useSidebarDropZone(onDrop: (paths: string[]) => void) {
+interface SidebarDropZoneHandlers {
+  onDragEnter?: () => void
+  onDragOver?: () => void
+  onDragLeave?: () => void
+}
+
+export function useSidebarDropZone(onDrop: (paths: string[]) => void, handlers?: SidebarDropZoneHandlers) {
   const handleDrop = useCallback((event: DragDropEvent) => {
     if (event.location.targetId === 'sidebar' && event.paths.length > 0) {
       onDrop(event.paths)
     }
   }, [onDrop])
 
-  const { setDropZone } = useDragDetector({
+  const detectorHandlers = useMemo<DragDropHandlers>(() => ({
     onDrop: handleDrop,
     onDragEnter: (event) => {
       if (event.location.targetId === 'sidebar') {
-        // Add visual feedback
-        const sidebar = document.querySelector('[data-sidebar="true"]')
-        if (sidebar) {
-          sidebar.classList.add('drag-over')
-        }
+        handlers?.onDragEnter?.()
+      }
+    },
+    onDragOver: (event) => {
+      if (event.location.targetId === 'sidebar') {
+        handlers?.onDragOver?.()
       }
     },
     onDragLeave: (event) => {
       if (event.location.targetId === 'sidebar') {
-        // Remove visual feedback
-        const sidebar = document.querySelector('[data-sidebar="true"]')
-        if (sidebar) {
-          sidebar.classList.remove('drag-over')
-        }
+        handlers?.onDragLeave?.()
       }
     }
-  })
+  }), [handleDrop, handlers?.onDragEnter, handlers?.onDragOver, handlers?.onDragLeave])
+
+  const { setDropZone } = useDragDetector(detectorHandlers)
 
   useEffect(() => {
     // Enable sidebar as a drop zone

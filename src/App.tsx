@@ -5,6 +5,7 @@ import Sidebar from './components/Sidebar'
 import MainPanel from './components/MainPanel'
 import PathBar from './components/PathBar'
 import { useAppStore } from './store/useAppStore'
+import { useToastStore } from './store/useToastStore'
 import { message } from '@tauri-apps/plugin-dialog'
 
 import Toast from './components/Toast'
@@ -15,18 +16,6 @@ function App() {
   const [showLoadingOverlay, setShowLoadingOverlay] = useState(false)
   const prefsLoadedRef = useRef(false)
   const firstLoadRef = useRef(true)
-  
-  // Track global mouse position for drag/drop detection
-  useEffect(() => {
-    const handleMouseMove = (e: MouseEvent) => {
-      (window as any).lastMouseX = e.clientX;
-      (window as any).lastMouseY = e.clientY
-    }
-    
-    document.addEventListener('mousemove', handleMouseMove)
-    return () => document.removeEventListener('mousemove', handleMouseMove)
-  }, [])
-
   // Apply smart default view and sort preferences based on folder name or contents
   const applySmartViewDefaults = async (path: string, files?: any[]) => {
     try {
@@ -561,6 +550,61 @@ function App() {
       await register('menu:copy_full_name', () => { void copyNames(true) })
       await register('menu:rename', () => {
         useAppStore.getState().beginRenameSelected()
+      })
+      await register('ctx:pin_sidebar', async () => {
+        const { files, selectedFiles, addPinnedDirectory } = useAppStore.getState()
+        const toastStore = useToastStore.getState()
+
+        if (!selectedFiles || selectedFiles.length === 0) {
+          toastStore.addToast({
+            type: 'info',
+            message: 'Select a folder to pin',
+            duration: 4000
+          })
+          return
+        }
+
+        const selectedSet = new Set(selectedFiles)
+        const directories = files.filter((file) => file.is_directory && selectedSet.has(file.path))
+
+        if (directories.length === 0) {
+          toastStore.addToast({
+            type: 'info',
+            message: 'Only folders can be pinned',
+            duration: 4000
+          })
+          return
+        }
+
+        const pinnedNames: string[] = []
+        for (const dir of directories) {
+          try {
+            await addPinnedDirectory(dir.path)
+            pinnedNames.push(dir.name)
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error)
+            if (message.includes('already pinned')) {
+              toastStore.addToast({
+                type: 'info',
+                message: `"${dir.name}" is already pinned`,
+                duration: 4000
+              })
+            } else {
+              console.error('Failed to pin directory from context menu:', error)
+              toastStore.addToast({
+                type: 'error',
+                message: `Failed to pin ${dir.name}`
+              })
+            }
+          }
+        }
+
+        if (pinnedNames.length > 0) {
+          const message = pinnedNames.length === 1
+            ? `Pinned "${pinnedNames[0]}" to sidebar`
+            : `Pinned ${pinnedNames.length} folders to sidebar`
+          toastStore.addToast({ type: 'success', message })
+        }
       })
       
       await register('menu:new_window', () => {

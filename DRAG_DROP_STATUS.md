@@ -216,53 +216,19 @@ Implement **Option 4** - Build a native drag detection plugin
 - **Modifier Keys**: Not discoverable enough for users
 - **Two-Phase Drag**: Poor UX with extra steps
 
-### Current Focus: Complete the Custom Plugin
-Investigate **Option 4** - Build a native drag detection plugin
+### Current Focus: Mac Drop Detection (In Progress)
 
-**Technical Approach**:
-1. **Create Rust Plugin** that hooks into OS-level drag events:
-   - macOS: Use `NSDraggingDestination` protocol to detect drops
-   - Windows: Use `IDropTarget` COM interface
-   - Linux: Use GTK drag-and-drop signals
+- ✅ **Context-menu fallback shipped**: users can pin via right-click even while drag-drop work continues (see `ALTERNATIVE_DRAG_SOLUTION.md`).
+- ✅ **Frontend wired for native events**: sidebar/highlight logic now listens for `drag-drop-event` payloads instead of the mouse-position hack.
+- ⚠️ **Mac delegate hooked but unstable**: registering an always-on overlay and invoking `start_native_drag` works, but the `draggingEntered` callback still panics because we emit while the system drag is active. This causes the app to abort during native drags.
 
-2. **Bridge to JavaScript**:
-   ```rust
-   // Rust side - detect drop and emit event
-   fn handle_native_drop(window: Window, paths: Vec<String>, drop_location: DropLocation) {
-     window.emit("native-drop", DropPayload {
-       paths,
-       target: drop_location, // e.g., "sidebar", "file-list", etc.
-     });
-   }
-   ```
-
-3. **Handle in Frontend**:
-   ```typescript
-   // JavaScript side - listen for native drops
-   listen('native-drop', (event) => {
-     if (event.payload.target === 'sidebar') {
-       addPinnedDirectory(event.payload.paths[0]);
-     }
-   });
-   ```
-
-**Benefits**:
-- Full native drag and drop support
-- Works with external apps AND internal drops
-- Proper visual feedback and drop zones
-- Native performance and reliability
-
-**Considerations**:
-- Requires platform-specific implementations
-- Adds maintenance complexity
-- Could be contributed back to Tauri core
-- Would benefit entire Tauri community
-
-**Resources**:
-- [Tauri Plugin Development Guide](https://tauri.app/v1/guides/features/plugin)
-- [macOS NSDraggingDestination](https://developer.apple.com/documentation/appkit/nsdraggingdestination)
-- [Windows IDropTarget](https://docs.microsoft.com/en-us/windows/win32/api/oleidl/nn-oleidl-idroptarget)
-- [GTK Drag and Drop](https://docs.gtk.org/gtk3/drag-and-drop.html)
+**Next concrete steps**
+1. **Stabilize the macOS delegate**
+   - Move the event emission entirely off the Cocoa call stack (e.g., queue to the main runloop or spawn from the `Dragged` store) so no Rust panic crosses the FFI boundary.
+   - Add guardrails around `draggingEntered/Updated/Exited/Drop` to log and swallow failures rather than aborting.
+2. **Re-enable visual feedback** once the delegate is reliable (sidebar highlight is waiting on events).
+3. **Regression pass** for native external drags to ensure the overlay doesn’t break dragging to Finder/Terminal.
+4. **Cross-platform follow-up** – after macOS is stable, port the delegate to Windows (`IDropTarget`) and Linux (GTK) and consider upstreaming into a reusable plugin.
 
 ## 📝 Lessons Learned
 
@@ -280,6 +246,6 @@ Investigate **Option 4** - Build a native drag detection plugin
 
 ---
 
-**Last Updated**: 2024-12-19
-**Status**: Blocked by Tauri limitations
-**Next Steps**: Implement context menu workaround or investigate custom plugin
+**Last Updated**: 2025-01-05
+**Status**: macOS delegate crashing during native drag
+**Next Steps**: Stabilize delegate (no panics), then verify sidebar feedback/pinning

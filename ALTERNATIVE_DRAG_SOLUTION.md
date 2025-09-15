@@ -52,4 +52,4 @@ The drag detector plugin structure is in place and compiles. To fully implement 
    - Handle X11/Wayland differences
 
 ## Recommendation
-Use the context menu approach NOW while the plugin is refined in the background. This gives users the functionality immediately while avoiding the complexity of native drag detection.
+Use the context menu approach NOW while the plugin is refined in the background. Ship it alongside the experimental plugin path so we can toggle the native drop handling on/off without removing the guaranteed pin affordance.

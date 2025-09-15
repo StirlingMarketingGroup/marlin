@@ -1,36 +1,46 @@
+use cocoa::appkit::{NSViewHeightSizable, NSViewWidthSizable, NSWindowOrderingMode};
 use cocoa::base::{id, nil, NO, YES};
-use cocoa::foundation::{NSArray, NSAutoreleasePool, NSPoint, NSString};
+#[allow(unused_imports)]
+use cocoa::foundation::NSArray;
+use cocoa::foundation::{NSAutoreleasePool, NSPoint, NSRect, NSString};
 use objc::class;
 use objc::declare::ClassDecl;
 use objc::runtime::{Class, Object, Sel, BOOL};
 use objc::{msg_send, sel, sel_impl};
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
-use std::ffi::CStr;
+use std::ffi::{c_void, CStr};
 use std::os::raw::c_char;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex};
-use tauri::{Runtime, Window};
+use tauri::{Emitter, Runtime, Window};
 
 use super::{DragDropEvent, DragEventType, DropLocation};
 
-static DROP_ZONES: Lazy<Arc<Mutex<HashMap<String, bool>>>> =
-    Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
+type DragHandler = dyn Fn(DragDropEvent) + 'static;
 
-static DRAG_DELEGATE_CLASS: Lazy<&'static Class> = Lazy::new(|| {
-    let superclass = class!(NSObject);
-    let mut decl = ClassDecl::new("MarlinDragDelegate", superclass).unwrap();
+type NSDragOperation = u64;
+const NS_DRAG_OPERATION_NONE: NSDragOperation = 0;
+const NS_DRAG_OPERATION_COPY: NSDragOperation = 1;
+
+static DROP_ZONES: Lazy<Mutex<HashMap<String, bool>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+static INITIALIZED_WINDOWS: Lazy<Mutex<HashMap<String, bool>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+
+static DRAG_OVERLAY_CLASS: Lazy<&'static Class> = Lazy::new(|| {
+    let superclass = class!(NSView);
+    let mut decl = ClassDecl::new("MarlinDragOverlayView", superclass).expect("create overlay class");
 
     unsafe {
-        decl.add_ivar::<*mut c_char>("window_ptr");
+        decl.add_ivar::<*mut c_void>("event_handler_ptr");
 
         decl.add_method(
             sel!(draggingEntered:),
-            dragging_entered as extern "C" fn(&Object, Sel, id) -> BOOL,
+            dragging_entered as extern "C" fn(&Object, Sel, id) -> NSDragOperation,
         );
 
         decl.add_method(
             sel!(draggingUpdated:),
-            dragging_updated as extern "C" fn(&Object, Sel, id) -> BOOL,
+            dragging_updated as extern "C" fn(&Object, Sel, id) -> NSDragOperation,
         );
 
         decl.add_method(
@@ -47,81 +57,59 @@ static DRAG_DELEGATE_CLASS: Lazy<&'static Class> = Lazy::new(|| {
             sel!(prepareForDragOperation:),
             prepare_for_drag_operation as extern "C" fn(&Object, Sel, id) -> BOOL,
         );
+
+        // Ensure normal pointer events pass through to the webview
+        decl.add_method(
+            sel!(hitTest:),
+            hit_test as extern "C" fn(&Object, Sel, NSPoint) -> id,
+        );
+
+        decl.add_method(
+            sel!(wantsPeriodicDraggingUpdates),
+            wants_periodic_dragging_updates as extern "C" fn(&Object, Sel) -> BOOL,
+        );
     }
 
     decl.register()
 });
 
-extern "C" fn dragging_entered(this: &Object, _sel: Sel, sender: id) -> BOOL {
-    unsafe {
+extern "C" fn dragging_entered(this: &Object, _sel: Sel, sender: id) -> NSDragOperation {
+    match catch_unwind(AssertUnwindSafe(|| unsafe {
         let _pool = NSAutoreleasePool::new(nil);
-
-        let point = get_drag_location(sender);
-        let paths = get_dragged_paths(sender);
-
-        if let Some(window) = get_window_from_delegate(this) {
-            let event = DragDropEvent {
-                paths,
-                location: DropLocation {
-                    x: point.x,
-                    y: point.y,
-                    target_id: get_target_at_point(point),
-                },
-                event_type: DragEventType::DragEnter,
-            };
-
-            emit_to_window(window, event);
+        let (event, target_id) = compose_event(sender, DragEventType::DragEnter);
+        emit_event(this, event);
+        drag_operation_for_target(&target_id)
+    })) {
+        Ok(op) => op,
+        Err(_) => {
+            log::error!("dragging_entered panicked");
+            NS_DRAG_OPERATION_NONE
         }
-
-        YES
     }
 }
 
-extern "C" fn dragging_updated(this: &Object, _sel: Sel, sender: id) -> BOOL {
-    unsafe {
+extern "C" fn dragging_updated(this: &Object, _sel: Sel, sender: id) -> NSDragOperation {
+    match catch_unwind(AssertUnwindSafe(|| unsafe {
         let _pool = NSAutoreleasePool::new(nil);
-
-        let point = get_drag_location(sender);
-        let paths = get_dragged_paths(sender);
-
-        if let Some(window) = get_window_from_delegate(this) {
-            let event = DragDropEvent {
-                paths,
-                location: DropLocation {
-                    x: point.x,
-                    y: point.y,
-                    target_id: get_target_at_point(point),
-                },
-                event_type: DragEventType::DragOver,
-            };
-
-            emit_to_window(window, event);
+        let (event, target_id) = compose_event(sender, DragEventType::DragOver);
+        emit_event(this, event);
+        drag_operation_for_target(&target_id)
+    })) {
+        Ok(op) => op,
+        Err(_) => {
+            log::error!("dragging_updated panicked");
+            NS_DRAG_OPERATION_NONE
         }
-
-        YES
     }
 }
 
 extern "C" fn dragging_exited(this: &Object, _sel: Sel, sender: id) {
-    unsafe {
+    if let Err(_) = catch_unwind(AssertUnwindSafe(|| unsafe {
         let _pool = NSAutoreleasePool::new(nil);
-
-        let point = get_drag_location(sender);
-        let paths = get_dragged_paths(sender);
-
-        if let Some(window) = get_window_from_delegate(this) {
-            let event = DragDropEvent {
-                paths,
-                location: DropLocation {
-                    x: point.x,
-                    y: point.y,
-                    target_id: None,
-                },
-                event_type: DragEventType::DragLeave,
-            };
-
-            emit_to_window(window, event);
-        }
+        let (event, _) = compose_event(sender, DragEventType::DragLeave);
+        emit_event(this, event);
+    })) {
+        log::error!("dragging_exited panicked");
     }
 }
 
@@ -130,62 +118,55 @@ extern "C" fn prepare_for_drag_operation(_this: &Object, _sel: Sel, _sender: id)
 }
 
 extern "C" fn perform_drag_operation(this: &Object, _sel: Sel, sender: id) -> BOOL {
-    unsafe {
+    match catch_unwind(AssertUnwindSafe(|| unsafe {
         let _pool = NSAutoreleasePool::new(nil);
+        let (event, target_id) = compose_event(sender, DragEventType::Drop);
 
-        let point = get_drag_location(sender);
-        let paths = get_dragged_paths(sender);
+        if !is_target_enabled(&target_id) {
+            return NO;
+        }
 
-        if let Some(window) = get_window_from_delegate(this) {
-            let target_id = get_target_at_point(point);
-
-            if let Some(ref target) = target_id {
-                let zones = DROP_ZONES.lock().unwrap();
-                if !zones.get(target).unwrap_or(&false) {
-                    return NO;
-                }
-            }
-
-            let event = DragDropEvent {
-                paths,
-                location: DropLocation {
-                    x: point.x,
-                    y: point.y,
-                    target_id,
-                },
-                event_type: DragEventType::Drop,
-            };
-
-            emit_to_window(window, event);
-            YES
-        } else {
+        emit_event(this, event);
+        YES
+    })) {
+        Ok(result) => result,
+        Err(_) => {
+            log::error!("perform_drag_operation panicked");
             NO
         }
     }
 }
 
+extern "C" fn hit_test(_this: &Object, _sel: Sel, _point: NSPoint) -> id {
+    // Allow underlying views to handle normal events while still receiving drag callbacks
+    nil
+}
+
+extern "C" fn wants_periodic_dragging_updates(_this: &Object, _sel: Sel) -> BOOL {
+    YES
+}
+
 unsafe fn get_drag_location(sender: id) -> NSPoint {
     let window: id = msg_send![sender, draggingDestinationWindow];
     let screen_point: NSPoint = msg_send![sender, draggingLocation];
-    let window_point: NSPoint = msg_send![window, convertPointFromScreen:screen_point];
+    let window_point: NSPoint = msg_send![window, convertPointFromScreen: screen_point];
 
     let content_view: id = msg_send![window, contentView];
-    let view_point: NSPoint = msg_send![content_view, convertPoint:window_point fromView:nil];
-
-    view_point
+    msg_send![content_view, convertPoint: window_point fromView: nil]
 }
 
 unsafe fn get_dragged_paths(sender: id) -> Vec<String> {
     let pasteboard: id = msg_send![sender, draggingPasteboard];
-    let types: id = msg_send![class!(NSArray), arrayWithObject:NSString::alloc(nil).init_str("public.file-url")];
-    let urls: id = msg_send![pasteboard, readObjectsForClasses:types options:nil];
+    let ns_array: &Class = class!(NSArray);
+    let types: id = msg_send![ns_array, arrayWithObject: NSString::alloc(nil).init_str("public.file-url")];
+    let urls: id = msg_send![pasteboard, readObjectsForClasses: types options: nil];
 
     let mut paths = Vec::new();
 
     if urls != nil {
         let count: usize = msg_send![urls, count];
         for i in 0..count {
-            let url: id = msg_send![urls, objectAtIndex:i];
+            let url: id = msg_send![urls, objectAtIndex: i];
             let path: id = msg_send![url, path];
             let c_str: *const c_char = msg_send![path, UTF8String];
             if !c_str.is_null() {
@@ -199,31 +180,141 @@ unsafe fn get_dragged_paths(sender: id) -> Vec<String> {
     paths
 }
 
-fn get_target_at_point(point: NSPoint) -> Option<String> {
-    if point.x < 250.0 {
+fn resolve_target(point: NSPoint) -> Option<String> {
+    let zones = DROP_ZONES.lock().unwrap();
+
+    if zones.get("sidebar").copied().unwrap_or(false) && point.x <= 280.0 {
         Some("sidebar".to_string())
-    } else {
+    } else if zones.get("file-grid").copied().unwrap_or(false) {
         Some("file-grid".to_string())
-    }
-}
-
-unsafe fn get_window_from_delegate(delegate: &Object) -> Option<id> {
-    let window_ptr: *mut c_char = *delegate.get_ivar("window_ptr");
-    if window_ptr.is_null() {
-        None
     } else {
-        Some(window_ptr as id)
+        None
     }
 }
 
-fn emit_to_window(window: id, event: DragDropEvent) {
-    println!("Emitting drag event: {:?}", event);
+fn drag_operation_for_target(target: &Option<String>) -> NSDragOperation {
+    if is_target_enabled(target) {
+        NS_DRAG_OPERATION_COPY
+    } else {
+        NS_DRAG_OPERATION_NONE
+    }
+}
+
+fn is_target_enabled(target: &Option<String>) -> bool {
+    match target {
+        Some(id) => DROP_ZONES.lock().unwrap().get(id).copied().unwrap_or(false),
+        None => false,
+    }
+}
+
+fn emit_event(this: &Object, event: DragDropEvent) {
+    unsafe {
+        let handler_ptr = *this.get_ivar::<*mut c_void>("event_handler_ptr");
+        if handler_ptr.is_null() {
+            return;
+        }
+
+        let handler_arc_ptr = handler_ptr as *mut Arc<DragHandler>;
+        let handler = &*handler_arc_ptr;
+        handler(event);
+    }
+}
+
+unsafe fn compose_event(sender: id, event_type: DragEventType) -> (DragDropEvent, Option<String>) {
+    let point = get_drag_location(sender);
+    let paths = get_dragged_paths(sender);
+    let target_id = match event_type {
+        DragEventType::DragLeave => None,
+        _ => resolve_target(point),
+    };
+
+    (
+        DragDropEvent {
+            paths,
+            location: DropLocation {
+                x: point.x,
+                y: point.y,
+                target_id: target_id.clone(),
+            },
+            event_type,
+        },
+        target_id,
+    )
+}
+
+fn install_overlay<R: Runtime>(window: Window<R>) -> Result<(), String> {
+    unsafe {
+        let ns_window_ptr = window
+            .ns_window()
+            .map_err(|e| e.to_string())?;
+        let ns_window: id = ns_window_ptr as id;
+        let content_view: id = msg_send![ns_window, contentView];
+        if content_view == nil {
+            return Err("No content view available".into());
+        }
+
+        let bounds: NSRect = msg_send![content_view, bounds];
+
+        let overlay: id = msg_send![*DRAG_OVERLAY_CLASS, alloc];
+        let overlay: id = msg_send![overlay, initWithFrame: bounds];
+        let _: () = msg_send![overlay, setAlphaValue: 0.0];
+        let _: () = msg_send![overlay, setHidden: NO];
+        let _: () = msg_send![overlay, setAutoresizingMask: NSViewWidthSizable | NSViewHeightSizable];
+
+        let handler_arc: Arc<DragHandler> = Arc::new({
+            let window_clone = window.clone();
+            move |event: DragDropEvent| {
+                let emit_window = window_clone.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(err) = emit_window.emit("drag-drop-event", event) {
+                        log::warn!("Failed to emit drag-drop-event: {err}");
+                    }
+                });
+            }
+        });
+
+        let handler_box = Box::new(handler_arc);
+        let handler_ptr = Box::into_raw(handler_box) as *mut c_void;
+        let overlay_obj = overlay as *mut Object;
+        (*overlay_obj).set_ivar("event_handler_ptr", handler_ptr);
+
+        let ns_array: &Class = class!(NSArray);
+        let types: id = msg_send![ns_array, arrayWithObject: NSString::alloc(nil).init_str("public.file-url")];
+        let _: () = msg_send![overlay, registerForDraggedTypes: types];
+
+        let _: () = msg_send![content_view, addSubview: overlay positioned: NSWindowOrderingMode::NSWindowAbove relativeTo: nil];
+    }
+
+    Ok(())
 }
 
 pub fn setup_drag_handlers<R: Runtime>(window: &Window<R>) -> Result<(), String> {
-    // For now, just return Ok - full implementation would require
-    // more complex window handle management
-    Ok(())
+    let label = window.label().to_string();
+    {
+        let mut initialized = INITIALIZED_WINDOWS.lock().unwrap();
+        if initialized.get(&label).copied().unwrap_or(false) {
+            return Ok(());
+        }
+        initialized.insert(label, true);
+    }
+
+    let result: Arc<Mutex<Result<(), String>>> = Arc::new(Mutex::new(Ok(())));
+    let result_clone = Arc::clone(&result);
+    let window_clone = window.clone();
+
+    window
+        .run_on_main_thread(move || {
+            let install_result = install_overlay(window_clone);
+            if let Ok(mut guard) = result_clone.lock() {
+                *guard = install_result;
+            }
+        })
+        .map_err(|e| e.to_string())?;
+
+    result
+        .lock()
+        .map(|guard| guard.clone())
+        .map_err(|_| "Failed to acquire drag detector result".to_string())?
 }
 
 pub fn set_drop_zone(zone_id: &str, enabled: bool) {

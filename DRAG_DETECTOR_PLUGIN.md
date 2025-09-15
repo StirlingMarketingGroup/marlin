@@ -85,27 +85,23 @@ useSidebarDropZone(async (paths) => {
 
 ## Current Status
 
-✅ **Implemented**:
-- Plugin architecture and API (compiles successfully)
-- Plugin foundation for future platform-specific implementations
-- JavaScript hooks ready for integration
-- **Working Solution**: Detect sidebar drop after native drag completes
-- Toast notifications for successful pins
+⚠️ **In Progress**:
+- Plugin scaffolding exists but macOS delegate callbacks still need to emit `drag-drop-event`
+- `useDragDetector` hook is ready, yet no events fire because the delegate isn’t registered to the window
+- Frontend still falls back to the unreliable mouse-position heuristic for pinning
 
-### Working Implementation
-Instead of complex native event interception, we use a simpler approach:
-1. Native drag starts and tracks dragged directory
-2. After drag completes, check mouse position
-3. If mouse is over sidebar, pin the directory
-4. Show success toast to user
+✅ **Already done**:
+- Rust/TypeScript data models and command wiring compile
+- Sidebar hook/API shape validated with mocked events
+- Styling for `drag-over` state prepared in `index.css`
 
-This works TODAY on all platforms without requiring deep OS integration.
+🚧 **Active work items**:
+1. During plugin setup, grab the `main` window, register it as an `NSDraggingDestination`, and forward delegate events via `window.emit("drag-drop-event", payload)`
+2. Include window-space coordinates plus the resolved drop-zone id in the payload so the frontend can call `document.elementFromPoint`
+3. Update `Sidebar.tsx`/`FileGrid.tsx`/`FileList.tsx` to consume those events instead of the `lastMouseX/Y` polling hack
+4. Keep the context-menu pin action (see `ALTERNATIVE_DRAG_SOLUTION.md`) as a fallback until native drops are solid
 
-⚠️ **Future Enhancements**:
-- Full macOS implementation using NSDraggingDestination
-- Windows implementation using IDropTarget COM interface
-- Linux implementation using GTK drag-and-drop
-- Real-time visual feedback during drag (not just after)
+Once macOS behaves, replicate the delegate on Windows (`IDropTarget`) and Linux (GTK) to complete the plugin story.
 
 ## Testing
 

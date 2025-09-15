@@ -1,6 +1,6 @@
 import { House, Desktop, FileText, DownloadSimple, ImageSquare, SquaresFour, UsersThree, HardDrives, Eject, CircleNotch, Trash, Recycle, Folder } from 'phosphor-react'
 import { useAppStore } from '../store/useAppStore'
-import { useEffect, useState, MouseEvent, useRef } from 'react'
+import { useCallback, useEffect, useState, MouseEvent, useRef } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { SystemDrive, PinnedDirectory } from '../types'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -25,6 +25,9 @@ export default function Sidebar() {
   const sidebarRef = useRef<HTMLDivElement>(null)
   
   // Use the new drag detector hook for native drop detection
+  const handleDragEnter = useCallback(() => setIsDragOver(true), [])
+  const handleDragLeave = useCallback(() => setIsDragOver(false), [])
+
   useSidebarDropZone(async (paths) => {
     // Handle dropped directories
     for (const path of paths) {
@@ -45,6 +48,10 @@ export default function Sidebar() {
       }
     }
     setIsDragOver(false)
+  }, {
+    onDragEnter: handleDragEnter,
+    onDragOver: handleDragEnter,
+    onDragLeave: handleDragLeave
   })
   
   // Fetch system drives on component mount
@@ -170,7 +177,7 @@ export default function Sidebar() {
     <div 
       ref={sidebarRef}
       className={`flex flex-col h-full bg-app-gray rounded-xl overflow-hidden transition-all duration-200 ${
-        isDragOver ? 'ring-2 ring-accent bg-accent/10 shadow-lg shadow-accent/20' : ''
+        isDragOver ? 'drag-over ring-2 ring-accent bg-accent/10 shadow-lg shadow-accent/20' : ''
       }`}
       style={{ width: sidebarWidth }}
       data-tauri-drag-region={false}
