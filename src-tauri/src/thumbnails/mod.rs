@@ -1,12 +1,12 @@
+use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
-use sha2::{Sha256, Digest};
 use uuid::Uuid;
 
 pub mod cache;
-pub mod worker;
 pub mod generators;
+pub mod worker;
 
 use cache::ThumbnailCache;
 use worker::ThumbnailWorker;
@@ -28,10 +28,12 @@ pub enum ThumbnailQuality {
     High,   // Best quality, slower
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum ThumbnailPriority {
     Low = 0,    // Background generation
-    Medium = 1, // Near visible viewport  
+    Medium = 1, // Near visible viewport
     High = 2,   // Visible items
 }
 
@@ -60,16 +62,18 @@ impl ThumbnailService {
     pub async fn new() -> Result<Self, String> {
         let cache = Arc::new(ThumbnailCache::new().await?);
         let worker = Arc::new(ThumbnailWorker::new(cache.clone()).await?);
-        
-        Ok(ThumbnailService {
-            cache,
-            worker,
-        })
+
+        Ok(ThumbnailService { cache, worker })
     }
 
-    pub async fn request_thumbnail(&self, request: ThumbnailRequest) -> Result<ThumbnailResponse, String> {
+    pub async fn request_thumbnail(
+        &self,
+        request: ThumbnailRequest,
+    ) -> Result<ThumbnailResponse, String> {
         // Try cache first (L1 memory, then L2 disk)
-        if let Some((cached_data, has_transparency)) = self.cache.get(&request.path, request.size).await {
+        if let Some((cached_data, has_transparency)) =
+            self.cache.get(&request.path, request.size).await
+        {
             return Ok(ThumbnailResponse {
                 id: request.id,
                 data_url: cached_data,
@@ -113,7 +117,12 @@ pub fn get_file_mtime(path: &Path) -> u64 {
 }
 
 pub fn get_thumbnail_format_from_path(path: &Path) -> ThumbnailFormat {
-    match path.extension().and_then(|s| s.to_str()).map(|s| s.to_lowercase()).as_deref() {
+    match path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_lowercase())
+        .as_deref()
+    {
         Some("jpg") | Some("jpeg") => ThumbnailFormat::JPEG,
         Some("png") | Some("gif") | Some("svg") => ThumbnailFormat::PNG,
         _ => ThumbnailFormat::WebP, // Default to WebP for best compression

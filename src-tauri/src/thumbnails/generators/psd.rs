@@ -1,12 +1,12 @@
-use std::path::Path;
 use super::super::ThumbnailRequest;
+use std::path::Path;
 
 pub struct PsdGenerator;
 
 impl PsdGenerator {
     pub fn generate(request: &ThumbnailRequest) -> Result<(String, bool), String> {
         let path = Path::new(&request.path);
-        
+
         if !path.exists() {
             return Err("PSD file does not exist".to_string());
         }

@@ -1,22 +1,21 @@
-use std::path::Path;
-use tauri::{command, AppHandle, Manager};
-use dirs;
-use std::process::Command as OsCommand;
-use tokio::process::Command as TokioCommand;
-use std::sync::Arc;
-use tokio::sync::OnceCell;
-use std::fs;
-use std::io::{Read, Write};
-use std::path::{PathBuf};
-use serde_json::{json, Value};
 use base64::Engine as _;
 use chrono::{DateTime, Utc};
-use serde::{Serialize, Deserialize};
+use dirs;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::fs;
+use std::io::{Read, Write};
+use std::path::Path;
+use std::path::PathBuf;
+use std::process::Command as OsCommand;
+use std::sync::Arc;
+use tauri::{command, AppHandle, Manager};
+use tokio::process::Command as TokioCommand;
+use tokio::sync::OnceCell;
 
 use crate::fs_utils::{
-    self, FileItem, read_directory_contents, get_file_info,
-    delete_file_or_directory,
-    rename_file_or_directory, copy_file_or_directory, expand_path
+    self, copy_file_or_directory, delete_file_or_directory, expand_path, get_file_info,
+    read_directory_contents, rename_file_or_directory, FileItem,
 };
 use crate::fs_watcher;
 
@@ -103,7 +102,9 @@ pub fn rename_file(from_path: String, to_path: String) -> Result<(), String> {
 
     if is_case_only {
         // Two-step rename to update case where FS is case-insensitive
-        let parent = from.parent().ok_or_else(|| "Invalid source path".to_string())?;
+        let parent = from
+            .parent()
+            .ok_or_else(|| "Invalid source path".to_string())?;
         // Generate a temporary name that shouldn't collide
         let mut counter: u32 = 0;
         let mut temp_path;
@@ -114,15 +115,17 @@ pub fn rename_file(from_path: String, to_path: String) -> Result<(), String> {
                 .as_millis();
             let temp_name = format!(".__rename_tmp_{}_{}", ts, counter);
             temp_path = parent.join(&temp_name);
-            if !temp_path.exists() { break; }
+            if !temp_path.exists() {
+                break;
+            }
             counter += 1;
-            if counter > 1000 { return Err("Failed to allocate temporary name for rename".to_string()); }
+            if counter > 1000 {
+                return Err("Failed to allocate temporary name for rename".to_string());
+            }
         }
 
-        fs::rename(from, &temp_path)
-            .map_err(|e| format!("Failed to rename (stage 1): {}", e))?;
-        fs::rename(&temp_path, to)
-            .map_err(|e| format!("Failed to rename (stage 2): {}", e))?;
+        fs::rename(from, &temp_path).map_err(|e| format!("Failed to rename (stage 1): {}", e))?;
+        fs::rename(&temp_path, to).map_err(|e| format!("Failed to rename (stage 2): {}", e))?;
         return Ok(());
     }
 
@@ -166,7 +169,12 @@ pub fn get_system_accent_color() -> Result<String, String> {
     #[cfg(target_os = "macos")]
     {
         // Try AppleHighlightColor first — includes a color name token we can map
-        if let Ok(output) = OsCommand::new("defaults").arg("read").arg("-g").arg("AppleHighlightColor").output() {
+        if let Ok(output) = OsCommand::new("defaults")
+            .arg("read")
+            .arg("-g")
+            .arg("AppleHighlightColor")
+            .output()
+        {
             if output.status.success() {
                 let s = String::from_utf8_lossy(&output.stdout);
                 let tokens: Vec<&str> = s.split_whitespace().collect();
@@ -287,11 +295,14 @@ pub fn update_hidden_files_menu(
     _app: tauri::AppHandle,
     menu_state: tauri::State<crate::state::MenuState<tauri::Wry>>,
     checked: bool,
-    source: Option<String>
+    source: Option<String>,
 ) -> Result<(), String> {
     let _source_str = source.unwrap_or_else(|| "UNKNOWN".to_string());
 
-    let item_guard = menu_state.show_hidden_item.lock().map_err(|e| format!("Failed to acquire lock: {}", e))?;
+    let item_guard = menu_state
+        .show_hidden_item
+        .lock()
+        .map_err(|e| format!("Failed to acquire lock: {}", e))?;
 
     if let Some(ref item) = *item_guard {
         item.set_checked(checked).map_err(|e| e.to_string())?;
@@ -311,7 +322,7 @@ pub fn update_folders_first_menu(
     _app: tauri::AppHandle,
     menu_state: tauri::State<crate::state::MenuState<tauri::Wry>>,
     checked: bool,
-    _source: Option<String>
+    _source: Option<String>,
 ) -> Result<(), String> {
     // Update the menu item checked state if available
     if let Ok(item_guard) = menu_state.folders_first_item.lock() {
@@ -342,14 +353,22 @@ pub fn update_sort_menu_state(
         *asc = ascending;
     }
     // Update system menu checkboxes if available
-    let set_checked = |item_mutex: &std::sync::Mutex<Option<tauri::menu::CheckMenuItem<tauri::Wry>>>, value: bool| {
-        if let Ok(item_guard) = item_mutex.lock() {
-            if let Some(ref item) = *item_guard {
-                let _ = item.set_checked(value);
+    let set_checked =
+        |item_mutex: &std::sync::Mutex<Option<tauri::menu::CheckMenuItem<tauri::Wry>>>,
+         value: bool| {
+            if let Ok(item_guard) = item_mutex.lock() {
+                if let Some(ref item) = *item_guard {
+                    let _ = item.set_checked(value);
+                }
             }
-        }
-    };
-    match menu_state.current_sort_by.lock().map(|s| s.clone()).unwrap_or_else(|_| "name".to_string()).as_str() {
+        };
+    match menu_state
+        .current_sort_by
+        .lock()
+        .map(|s| s.clone())
+        .unwrap_or_else(|_| "name".to_string())
+        .as_str()
+    {
         "name" => {
             set_checked(&menu_state.sort_name_item, true);
             set_checked(&menu_state.sort_size_item, false);
@@ -455,7 +474,8 @@ pub fn get_system_drives() -> Result<Vec<SystemDrive>, String> {
                     if let Ok(metadata) = entry.metadata() {
                         if metadata.is_dir() {
                             let name = entry.file_name().to_string_lossy().to_string();
-                            if name != "Macintosh HD" { // Skip default system volume
+                            if name != "Macintosh HD" {
+                                // Skip default system volume
                                 drives.push(SystemDrive {
                                     name: name.clone(),
                                     path: format!("/Volumes/{}", name),
@@ -524,7 +544,8 @@ pub async fn eject_drive(path: String) -> Result<(), String> {
 }
 
 // Global thumbnail service instance
-static THUMBNAIL_SERVICE: OnceCell<Result<Arc<crate::thumbnails::ThumbnailService>, String>> = OnceCell::const_new();
+static THUMBNAIL_SERVICE: OnceCell<Result<Arc<crate::thumbnails::ThumbnailService>, String>> =
+    OnceCell::const_new();
 
 async fn get_thumbnail_service() -> Result<Arc<crate::thumbnails::ThumbnailService>, String> {
     THUMBNAIL_SERVICE
@@ -606,7 +627,11 @@ pub fn open_path(path: String) -> Result<(), String> {
             .arg(&path_str)
             .status()
             .map_err(|e| format!("Failed to spawn 'open': {}", e))?;
-        if status.success() { Ok(()) } else { Err(format!("'open' exited with status: {}", status)) }
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!("'open' exited with status: {}", status))
+        }
     }
 
     #[cfg(target_os = "windows")]
@@ -617,7 +642,11 @@ pub fn open_path(path: String) -> Result<(), String> {
             .args(["/C", "start", "", &path_str])
             .status()
             .map_err(|e| format!("Failed to spawn 'start': {}", e))?;
-        if status.success() { Ok(()) } else { Err(format!("'start' exited with status: {}", status)) }
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!("'start' exited with status: {}", status))
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -631,7 +660,11 @@ pub fn open_path(path: String) -> Result<(), String> {
                     .args(["open", &path_str])
                     .status()
                     .map_err(|e| format!("Failed to spawn 'gio open': {}", e))?;
-                if status.success() { Ok(()) } else { Err(format!("'gio open' exited with status: {}", status)) }
+                if status.success() {
+                    Ok(())
+                } else {
+                    Err(format!("'gio open' exited with status: {}", status))
+                }
             }
         }
     }
@@ -644,7 +677,10 @@ pub fn open_path(path: String) -> Result<(), String> {
 
 #[command]
 pub fn new_window(app: AppHandle, path: Option<String>) -> Result<(), String> {
-    let window_label = format!("window-{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0));
+    let window_label = format!(
+        "window-{}",
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+    );
 
     let mut url = tauri::WebviewUrl::App("index.html".into());
 
@@ -654,18 +690,14 @@ pub fn new_window(app: AppHandle, path: Option<String>) -> Result<(), String> {
         url = tauri::WebviewUrl::App(format!("index.html?path={}", encoded_path).into());
     }
 
-    let window = tauri::WebviewWindowBuilder::new(
-        &app,
-        &window_label,
-        url
-    )
-    .title("")
-    .inner_size(1200.0, 800.0)
-    .resizable(true)
-    .fullscreen(false)
-    .title_bar_style(tauri::TitleBarStyle::Overlay)
-    .build()
-    .map_err(|e| format!("Failed to create window: {}", e))?;
+    let window = tauri::WebviewWindowBuilder::new(&app, &window_label, url)
+        .title("")
+        .inner_size(1200.0, 800.0)
+        .resizable(true)
+        .fullscreen(false)
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .build()
+        .map_err(|e| format!("Failed to create window: {}", e))?;
 
     #[cfg(target_os = "macos")]
     {
@@ -690,9 +722,11 @@ pub fn show_native_context_menu(
 ) -> Result<(), String> {
     // Resolve window
     let webview = if let Some(label) = window_label {
-        app.get_webview_window(&label).ok_or_else(|| "Window not found".to_string())?
+        app.get_webview_window(&label)
+            .ok_or_else(|| "Window not found".to_string())?
     } else {
-        app.get_webview_window("main").ok_or_else(|| "Main window not found".to_string())?
+        app.get_webview_window("main")
+            .ok_or_else(|| "Main window not found".to_string())?
     };
 
     // Build a native menu mirroring our React context menu
@@ -770,11 +804,16 @@ pub fn show_native_context_menu(
     } else if let Some(p) = path.clone() {
         if let Ok(v) = read_prefs_value() {
             let norm = normalize_path(p);
-            let so = v.get("directoryPreferences")
+            let so = v
+                .get("directoryPreferences")
                 .and_then(|d| d.get(&norm))
                 .and_then(|dp| dp.get("sortOrder"))
                 .and_then(|x| x.as_str())
-                .or_else(|| v.get("globalPreferences").and_then(|g| g.get("sortOrder")).and_then(|x| x.as_str()));
+                .or_else(|| {
+                    v.get("globalPreferences")
+                        .and_then(|g| g.get("sortOrder"))
+                        .and_then(|x| x.as_str())
+                });
             match so {
                 Some("asc") => true,
                 Some("desc") => false,
@@ -841,7 +880,9 @@ pub fn show_native_context_menu(
         let copy_full_name_item = MenuItemBuilder::with_id("ctx:copy_full_name", "Copy Full Path")
             .build(&app)
             .map_err(|e| e.to_string())?;
-        builder = builder.items(&[&rename_item, &copy_name_item, &copy_full_name_item]).separator();
+        builder = builder
+            .items(&[&rename_item, &copy_name_item, &copy_full_name_item])
+            .separator();
     }
 
     let ctx_menu = builder
@@ -860,7 +901,8 @@ pub fn show_native_context_menu(
 }
 
 fn preferences_path() -> Result<PathBuf, String> {
-    let base = dirs::config_dir().ok_or_else(|| "Could not resolve config directory".to_string())?;
+    let base =
+        dirs::config_dir().ok_or_else(|| "Could not resolve config directory".to_string())?;
     let app_dir = base.join("Marlin");
     if !app_dir.exists() {
         fs::create_dir_all(&app_dir).map_err(|e| format!("Failed to create config dir: {}", e))?;
@@ -874,27 +916,41 @@ pub fn read_preferences() -> Result<String, String> {
     if !path.exists() {
         return Ok("{}".to_string());
     }
-    let mut file = fs::File::open(&path).map_err(|e| format!("Failed to open preferences: {}", e))?;
+    let mut file =
+        fs::File::open(&path).map_err(|e| format!("Failed to open preferences: {}", e))?;
     let mut contents = String::new();
-    file.read_to_string(&mut contents).map_err(|e| format!("Failed to read preferences: {}", e))?;
+    file.read_to_string(&mut contents)
+        .map_err(|e| format!("Failed to read preferences: {}", e))?;
     Ok(contents)
 }
 
 #[tauri::command]
 pub fn write_preferences(json: String) -> Result<(), String> {
     let path = preferences_path()?;
-    let mut file = fs::File::create(&path).map_err(|e| format!("Failed to create preferences: {}", e))?;
-    file.write_all(json.as_bytes()).map_err(|e| format!("Failed to write preferences: {}", e))?;
+    let mut file =
+        fs::File::create(&path).map_err(|e| format!("Failed to create preferences: {}", e))?;
+    file.write_all(json.as_bytes())
+        .map_err(|e| format!("Failed to write preferences: {}", e))?;
     Ok(())
 }
 
 fn normalize_path(mut s: String) -> String {
-    if s.is_empty() { return "/".to_string(); }
+    if s.is_empty() {
+        return "/".to_string();
+    }
     s = s.replace('\\', "/");
-    while s.contains("//") { s = s.replace("//", "/"); }
-    if s.len() > 1 && s.ends_with('/') { s.pop(); }
-    if s.len() == 2 && s.chars().nth(1) == Some(':') { s.push('/'); }
-    if s.is_empty() { s = "/".into(); }
+    while s.contains("//") {
+        s = s.replace("//", "/");
+    }
+    if s.len() > 1 && s.ends_with('/') {
+        s.pop();
+    }
+    if s.len() == 2 && s.chars().nth(1) == Some(':') {
+        s.push('/');
+    }
+    if s.is_empty() {
+        s = "/".into();
+    }
     s
 }
 
@@ -903,18 +959,22 @@ fn read_prefs_value() -> Result<Value, String> {
     if !path.exists() {
         return Ok(json!({}));
     }
-    let mut file = fs::File::open(&path).map_err(|e| format!("Failed to open preferences: {}", e))?;
+    let mut file =
+        fs::File::open(&path).map_err(|e| format!("Failed to open preferences: {}", e))?;
     let mut contents = String::new();
-    file.read_to_string(&mut contents).map_err(|e| format!("Failed to read preferences: {}", e))?;
+    file.read_to_string(&mut contents)
+        .map_err(|e| format!("Failed to read preferences: {}", e))?;
     let v: Value = serde_json::from_str(&contents).unwrap_or_else(|_| json!({}));
     Ok(v)
 }
 
 fn write_prefs_value(v: &Value) -> Result<(), String> {
     let path = preferences_path()?;
-    let mut file = fs::File::create(&path).map_err(|e| format!("Failed to create preferences: {}", e))?;
+    let mut file =
+        fs::File::create(&path).map_err(|e| format!("Failed to create preferences: {}", e))?;
     let s = serde_json::to_string_pretty(v).map_err(|e| e.to_string())?;
-    file.write_all(s.as_bytes()).map_err(|e| format!("Failed to write preferences: {}", e))?;
+    file.write_all(s.as_bytes())
+        .map_err(|e| format!("Failed to write preferences: {}", e))?;
     Ok(())
 }
 
@@ -922,7 +982,11 @@ fn write_prefs_value(v: &Value) -> Result<(), String> {
 pub fn get_dir_prefs(path: String) -> Result<String, String> {
     let norm = normalize_path(path);
     let v = read_prefs_value()?;
-    let dirs = v.get("directoryPreferences").and_then(|d| d.as_object()).cloned().unwrap_or_default();
+    let dirs = v
+        .get("directoryPreferences")
+        .and_then(|d| d.as_object())
+        .cloned()
+        .unwrap_or_default();
     let out = dirs.get(&norm).cloned().unwrap_or(json!({}));
     Ok(out.to_string())
 }
@@ -931,11 +995,18 @@ pub fn get_dir_prefs(path: String) -> Result<String, String> {
 pub fn set_dir_prefs(path: String, prefs: String) -> Result<(), String> {
     let norm = normalize_path(path);
     let mut v = read_prefs_value()?;
-    let dirs = v.get("directoryPreferences").and_then(|d| d.as_object()).cloned().unwrap_or_default();
-    let incoming: Value = serde_json::from_str(&prefs).map_err(|e| format!("Invalid prefs JSON: {}", e))?;
+    let dirs = v
+        .get("directoryPreferences")
+        .and_then(|d| d.as_object())
+        .cloned()
+        .unwrap_or_default();
+    let incoming: Value =
+        serde_json::from_str(&prefs).map_err(|e| format!("Invalid prefs JSON: {}", e))?;
     let mut merged = dirs.get(&norm).cloned().unwrap_or(json!({}));
     if let (Some(obj_in), Some(obj_existing)) = (incoming.as_object(), merged.as_object_mut()) {
-        for (k, val) in obj_in.iter() { obj_existing.insert(k.clone(), val.clone()); }
+        for (k, val) in obj_in.iter() {
+            obj_existing.insert(k.clone(), val.clone());
+        }
     } else {
         merged = incoming;
     }
@@ -1034,7 +1105,8 @@ pub struct PinnedDirectory {
 }
 
 fn pinned_directories_path() -> Result<PathBuf, String> {
-    let base = dirs::config_dir().ok_or_else(|| "Could not resolve config directory".to_string())?;
+    let base =
+        dirs::config_dir().ok_or_else(|| "Could not resolve config directory".to_string())?;
     let app_dir = base.join("Marlin");
     if !app_dir.exists() {
         fs::create_dir_all(&app_dir).map_err(|e| format!("Failed to create config dir: {}", e))?;
@@ -1048,14 +1120,16 @@ pub fn get_pinned_directories() -> Result<Vec<PinnedDirectory>, String> {
     if !path.exists() {
         return Ok(vec![]);
     }
-    
-    let mut file = fs::File::open(&path).map_err(|e| format!("Failed to open pinned directories: {}", e))?;
+
+    let mut file =
+        fs::File::open(&path).map_err(|e| format!("Failed to open pinned directories: {}", e))?;
     let mut contents = String::new();
-    file.read_to_string(&mut contents).map_err(|e| format!("Failed to read pinned directories: {}", e))?;
-    
+    file.read_to_string(&mut contents)
+        .map_err(|e| format!("Failed to read pinned directories: {}", e))?;
+
     let pinned_dirs: Vec<PinnedDirectory> = serde_json::from_str(&contents)
         .map_err(|e| format!("Failed to parse pinned directories: {}", e))?;
-    
+
     Ok(pinned_dirs)
 }
 
@@ -1063,44 +1137,45 @@ pub fn get_pinned_directories() -> Result<Vec<PinnedDirectory>, String> {
 pub fn add_pinned_directory(path: String, name: Option<String>) -> Result<PinnedDirectory, String> {
     let expanded_path = expand_path(&path)?;
     let path_obj = &expanded_path;
-    
+
     if !path_obj.exists() {
         return Err("Path does not exist".to_string());
     }
-    
+
     if !path_obj.is_dir() {
         return Err("Path is not a directory".to_string());
     }
-    
+
     let expanded_path_str = expanded_path.to_string_lossy().to_string();
     let mut pinned_dirs = get_pinned_directories()?;
-    
+
     // Check if already pinned
     if pinned_dirs.iter().any(|p| p.path == expanded_path_str) {
         return Err("Directory is already pinned".to_string());
     }
-    
+
     // Limit to 20 pinned directories
     if pinned_dirs.len() >= 20 {
         return Err("Maximum number of pinned directories reached (20)".to_string());
     }
-    
+
     let dir_name = name.unwrap_or_else(|| {
-        path_obj.file_name()
+        path_obj
+            .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("Unknown")
             .to_string()
     });
-    
+
     let new_pin = PinnedDirectory {
         name: dir_name,
         path: expanded_path_str,
         pinned_at: Utc::now(),
     };
-    
+
     pinned_dirs.push(new_pin.clone());
     save_pinned_directories(&pinned_dirs)?;
-    
+
     Ok(new_pin)
 }
 
@@ -1109,10 +1184,10 @@ pub fn remove_pinned_directory(path: String) -> Result<bool, String> {
     let expanded_path = expand_path(&path)?;
     let expanded_path_str = expanded_path.to_string_lossy().to_string();
     let mut pinned_dirs = get_pinned_directories()?;
-    
+
     let initial_len = pinned_dirs.len();
     pinned_dirs.retain(|p| p.path != expanded_path_str);
-    
+
     if pinned_dirs.len() < initial_len {
         save_pinned_directories(&pinned_dirs)?;
         Ok(true)
@@ -1125,21 +1200,21 @@ pub fn remove_pinned_directory(path: String) -> Result<bool, String> {
 pub fn reorder_pinned_directories(paths: Vec<String>) -> Result<(), String> {
     let current_pins = get_pinned_directories()?;
     let mut reordered = Vec::new();
-    
+
     // Reorder based on the provided paths list
     for path in paths {
         if let Some(pin) = current_pins.iter().find(|p| p.path == path) {
             reordered.push(pin.clone());
         }
     }
-    
+
     // Add any missing pins that weren't in the reorder list
     for pin in &current_pins {
         if !reordered.iter().any(|p| p.path == pin.path) {
             reordered.push(pin.clone());
         }
     }
-    
+
     save_pinned_directories(&reordered)
 }
 
@@ -1147,12 +1222,12 @@ fn save_pinned_directories(pinned_dirs: &[PinnedDirectory]) -> Result<(), String
     let path = pinned_directories_path()?;
     let json = serde_json::to_string_pretty(pinned_dirs)
         .map_err(|e| format!("Failed to serialize pinned directories: {}", e))?;
-    
+
     let mut file = fs::File::create(&path)
         .map_err(|e| format!("Failed to create pinned directories file: {}", e))?;
-    
+
     file.write_all(json.as_bytes())
         .map_err(|e| format!("Failed to write pinned directories: {}", e))?;
-    
+
     Ok(())
 }

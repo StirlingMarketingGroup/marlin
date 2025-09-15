@@ -14,6 +14,7 @@ import { createDragImageForSelection, createDragImageForSelectionAsync } from '@
 import { useThumbnail } from '@/hooks/useThumbnail'
 import { useVisibility } from '@/hooks/useVisibility'
 import FileNameDisplay from './FileNameDisplay'
+import SymlinkBadge from '@/components/SymlinkBadge'
 
 interface FileGridProps {
   files: FileItem[]
@@ -21,7 +22,7 @@ interface FileGridProps {
 }
 
 // Stable, top-level preview component to avoid remount flicker
-function GridFilePreview({ file, isMac, fallbackIcon, tile }: { file: FileItem; isMac: boolean; fallbackIcon: ReactNode; tile: number }) {
+function GridFilePreview({ file, isMac, fallbackIcon, tile, isSymlink }: { file: FileItem; isMac: boolean; fallbackIcon: ReactNode; tile: number; isSymlink: boolean }) {
   const { ref, stage } = useVisibility({ nearMargin: '900px', visibleMargin: '0px' })
   const ext = file.extension?.toLowerCase()
   const isImage = !!ext && ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'tiff', 'tga', 'ico', 'svg'].includes(ext || '')
@@ -31,6 +32,9 @@ function GridFilePreview({ file, isMac, fallbackIcon, tile }: { file: FileItem; 
 
   const isStl = ext === 'stl'
   const isAppBundle = isMac && file.is_directory && file.name.toLowerCase().endsWith('.app')
+
+  const badgeSize: 'sm' | 'md' | 'lg' = tile >= 200 ? 'lg' : tile >= 120 ? 'md' : 'sm'
+  const badgeOffset = tile >= 200 ? 'bottom-3 left-3' : tile >= 140 ? 'bottom-2 left-2' : 'bottom-1 left-1'
 
   // (Rendering handled below with a fixed preview box for alignment)
 
@@ -61,7 +65,12 @@ function GridFilePreview({ file, isMac, fallbackIcon, tile }: { file: FileItem; 
     const { dataUrl, loading, hasTransparency } = useThumbnail(shouldLoad ? file.path : undefined, { size: requestSize, quality: 'medium', priority })
     if (dataUrl) {
       return (
-        <div ref={ref as any} className={`rounded-md border border-app-border ${hasTransparency ? 'bg-checker' : ''} overflow-hidden`} style={{ width: box, height: box, padding: pad, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <div
+          ref={ref as any}
+          className={`relative rounded-md border border-app-border ${hasTransparency ? 'bg-checker' : ''} overflow-hidden`}
+          style={{ width: box, height: box, padding: pad, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+        >
+          {isSymlink && <SymlinkBadge className={badgeOffset} size={badgeSize} />}
           <img
             src={dataUrl}
             alt={file.name}
@@ -73,19 +82,44 @@ function GridFilePreview({ file, isMac, fallbackIcon, tile }: { file: FileItem; 
       )
     }
     if (loading) {
-      return <div ref={ref as any} className="rounded-md border border-app-border animate-pulse" style={{ width: box, height: box, padding: pad }} />
+      return (
+        <div
+          ref={ref as any}
+          className="relative rounded-md border border-app-border animate-pulse"
+          style={{ width: box, height: box, padding: pad }}
+        >
+          {isSymlink && <SymlinkBadge className={badgeOffset} size={badgeSize} />}
+        </div>
+      )
     }
-    return <div ref={ref as any} className="rounded-md border border-app-border" style={{ width: box, height: box, padding: pad }} />
+    return (
+      <div
+        ref={ref as any}
+        className="relative rounded-md border border-app-border"
+        style={{ width: box, height: box, padding: pad }}
+      >
+        {isSymlink && <SymlinkBadge className={badgeOffset} size={badgeSize} />}
+      </div>
+    )
   }
 
   // macOS .app Application icons (native icons)
   if (isAppBundle) {
     const requestSize = pickBucket(Math.round((box - pad * 2) * dpr))
     if (stage === 'far') {
-      return <div ref={ref as any} className="overflow-hidden rounded-md border border-app-border bg-checker" style={{ width: box, height: box, padding: pad }} />
+      return (
+        <div
+          ref={ref as any}
+          className="relative overflow-hidden rounded-md border border-app-border bg-checker"
+          style={{ width: box, height: box, padding: pad }}
+        >
+          {isSymlink && <SymlinkBadge className={badgeOffset} size={badgeSize} />}
+        </div>
+      )
     }
     return (
-      <div ref={ref as any} className="overflow-hidden" style={{ width: box, height: box, padding: pad }}>
+      <div ref={ref as any} className="relative overflow-hidden" style={{ width: box, height: box, padding: pad }}>
+        {isSymlink && <SymlinkBadge className={badgeOffset} size={badgeSize} />}
         <AppIcon
           path={file.path}
           size={requestSize}
@@ -102,11 +136,28 @@ function GridFilePreview({ file, isMac, fallbackIcon, tile }: { file: FileItem; 
   // Base icons ~48px; target ~50% of thumb at default
   const target = Math.max(32, Math.min(thumb * 0.5, 140))
   const scale = Math.max(0.75, Math.min(2.0, target / 48))
+  const iconPixels = 48 * scale
+  const gap = Math.max(0, (thumb - iconPixels) / 2)
+  const overlayInset = Math.max(0, Math.min(thumb - 4, gap + Math.min(iconPixels * 0.12, 8)))
+  const adjust = Math.max(6, iconPixels * 0.12)
+  const verticalInset = Math.max(0, overlayInset - adjust)
+  const badgeInsetAdjust = badgeSize === 'lg' ? 3 : badgeSize === 'md' ? 2 : 1
+  const horizontalInset = Math.max(0, verticalInset - badgeInsetAdjust)
   return (
-    <div ref={ref as any} className="rounded-md" style={{ width: thumb, height: thumb, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+    <div
+      ref={ref as any}
+      className="relative rounded-md flex items-center justify-center"
+      style={{ width: thumb, height: thumb }}
+    >
       <div style={{ transform: `scale(${scale})`, transformOrigin: 'center' }}>
         {fallbackIcon}
       </div>
+      {isSymlink && (
+        <SymlinkBadge
+          size={badgeSize}
+          style={{ bottom: verticalInset, right: horizontalInset }}
+        />
+      )}
     </div>
   )
 }
@@ -226,7 +277,10 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
   // (moved FilePreview to top-level GridFilePreview to avoid remounting)
 
   const handleDoubleClick = async (file: FileItem) => {
-    if (file.is_directory && !file.name.toLowerCase().endsWith('.app')) {
+    const isAppBundle = file.is_directory && file.name.toLowerCase().endsWith('.app')
+    const shouldNavigate = file.is_directory && (!isAppBundle || file.is_symlink)
+
+    if (shouldNavigate) {
       navigateTo(file.path)
     } else {
       // Open file or app with system default
@@ -671,7 +725,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
 
             >
               <div className="mb-2 flex-shrink-0" style={{ width: tile, display: 'flex', justifyContent: 'center', height: Math.max(48, Math.min(tile - Math.max(3, Math.min(8, Math.round(tile * 0.03))) * 2, 320)) }}>
-                <GridFilePreview file={file} isMac={isMac} fallbackIcon={getFileIcon(file)} tile={tile} />
+                <GridFilePreview file={file} isMac={isMac} fallbackIcon={getFileIcon(file)} tile={tile} isSymlink={file.is_symlink} />
               </div>
               
               {isRenaming ? (

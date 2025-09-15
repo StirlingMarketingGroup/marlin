@@ -14,6 +14,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { useThumbnail } from '@/hooks/useThumbnail'
 import { useVisibility } from '@/hooks/useVisibility'
 import FileNameDisplay from './FileNameDisplay'
+import SymlinkBadge from '@/components/SymlinkBadge'
 
 interface FileListProps {
   files: FileItem[]
@@ -215,10 +216,27 @@ export default function FileList({ files, preferences }: FileListProps) {
     return <File className="w-5 h-5 text-app-muted" />
   }
 
+  const getTypeLabel = (file: FileItem) => {
+    const name = file.name.toLowerCase()
+    let base = 'File'
+    if (file.is_directory && name.endsWith('.app')) {
+      base = 'Application'
+    } else if (file.is_directory) {
+      base = 'Folder'
+    } else if (file.extension) {
+      base = file.extension.toUpperCase()
+    }
+
+    return file.is_symlink ? `${base} (symlink)` : base
+  }
+
   // (moved FilePreview to top-level ListFilePreview to avoid remounting)
 
   const handleDoubleClick = async (file: FileItem) => {
-    if (file.is_directory && !file.name.toLowerCase().endsWith('.app')) {
+    const isAppBundle = file.is_directory && file.name.toLowerCase().endsWith('.app')
+    const shouldNavigate = file.is_directory && (!isAppBundle || file.is_symlink)
+
+    if (shouldNavigate) {
       navigateTo(file.path)
     } else {
       // Open file or app with system default
@@ -598,8 +616,16 @@ export default function FileList({ files, preferences }: FileListProps) {
             >
               {/* Name column */}
               <div className="col-span-5 flex items-center gap-2 min-w-0 pl-2 pr-2">
-                <span className="flex-shrink-0">
-                  <ListFilePreview file={file} isMac={isMac} fallbackIcon={getFileIcon(file)} />
+                <span className="relative flex-shrink-0 w-5 h-5">
+                  <div className="w-full h-full flex items-center justify-center">
+                    <ListFilePreview file={file} isMac={isMac} fallbackIcon={getFileIcon(file)} />
+                  </div>
+                  {file.is_symlink && (
+                    <SymlinkBadge
+                      size="sm"
+                      style={{ bottom: -2, right: -2 }}
+                    />
+                  )}
                 </span>
                 {renameTargetPath === file.path ? (
                   <input
@@ -640,11 +666,7 @@ export default function FileList({ files, preferences }: FileListProps) {
 
               {/* Type column */}
               <div className={`col-span-2 flex items-center ${isSelected ? 'text-white' : 'text-app-muted'}`}>
-                {file.is_directory && file.name.toLowerCase().endsWith('.app') 
-                  ? 'Application' 
-                  : file.is_directory 
-                    ? 'Folder' 
-                    : (file.extension?.toUpperCase() || 'File')}
+                {getTypeLabel(file)}
               </div>
 
               {/* Modified column */}

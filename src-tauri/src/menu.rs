@@ -1,19 +1,24 @@
 use tauri::{
-    menu::{MenuBuilder, SubmenuBuilder, CheckMenuItemBuilder, MenuItemBuilder, AboutMetadata},
+    menu::{AboutMetadata, CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder, SubmenuBuilder},
     AppHandle, Emitter, Manager, Runtime,
 };
 
-pub fn create_menu<R: Runtime>(app: &AppHandle<R>) -> Result<(
-    tauri::menu::Menu<R>,
-    tauri::menu::CheckMenuItem<R>, // show_hidden
-    tauri::menu::CheckMenuItem<R>, // folders_first
-    tauri::menu::CheckMenuItem<R>, // sort_name
-    tauri::menu::CheckMenuItem<R>, // sort_size
-    tauri::menu::CheckMenuItem<R>, // sort_type
-    tauri::menu::CheckMenuItem<R>, // sort_modified
-    tauri::menu::CheckMenuItem<R>, // sort_order_asc
-    tauri::menu::CheckMenuItem<R>, // sort_order_desc
-), tauri::Error> {
+pub fn create_menu<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<
+    (
+        tauri::menu::Menu<R>,
+        tauri::menu::CheckMenuItem<R>, // show_hidden
+        tauri::menu::CheckMenuItem<R>, // folders_first
+        tauri::menu::CheckMenuItem<R>, // sort_name
+        tauri::menu::CheckMenuItem<R>, // sort_size
+        tauri::menu::CheckMenuItem<R>, // sort_type
+        tauri::menu::CheckMenuItem<R>, // sort_modified
+        tauri::menu::CheckMenuItem<R>, // sort_order_asc
+        tauri::menu::CheckMenuItem<R>, // sort_order_desc
+    ),
+    tauri::Error,
+> {
     // Create App submenu (appears under app name on macOS)
     let app_submenu = SubmenuBuilder::new(app, "Marlin")
         .about(Some(AboutMetadata {
@@ -61,9 +66,9 @@ pub fn create_menu<R: Runtime>(app: &AppHandle<R>) -> Result<(
 
     // Create the Show Hidden Files checkbox with explicit unchecked state
     let show_hidden_item = CheckMenuItemBuilder::with_id("menu:toggle_hidden", "Show Hidden Files")
-        .checked(false)  // Explicitly set to unchecked to match store default
+        .checked(false) // Explicitly set to unchecked to match store default
         .build(app)?;
-    
+
     // Clone for returning (we need to return a copy for storing in state)
     let show_hidden_clone = show_hidden_item.clone();
 
@@ -153,7 +158,10 @@ pub fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, event: &tauri::menu::Me
             // Read and toggle the stored checked state, update the menu item, then emit the new value
             let state: tauri::State<crate::state::MenuState<R>> = app.state();
             let new_checked = {
-                let mut checked_guard = state.show_hidden_checked.lock().expect("lock menu checked state");
+                let mut checked_guard = state
+                    .show_hidden_checked
+                    .lock()
+                    .expect("lock menu checked state");
                 *checked_guard = !*checked_guard;
                 *checked_guard
             };
@@ -164,59 +172,153 @@ pub fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, event: &tauri::menu::Me
             }
             let _ = app.emit("menu:toggle_hidden", new_checked);
         }
-        "menu:view_list" => { let _ = app.emit("menu:view_list", ()); }
+        "menu:view_list" => {
+            let _ = app.emit("menu:view_list", ());
+        }
         "menu:view_grid" => {
             let _ = app.emit("menu:view_grid", ());
         }
         "menu:sort_name" => {
             // Update check states and emit
             let state: tauri::State<crate::state::MenuState<R>> = app.state();
-            if let Ok(mut sb) = state.current_sort_by.lock() { *sb = "name".to_string(); }
-            if let Ok(item) = state.sort_name_item.lock() { if let Some(i) = &*item { let _ = i.set_checked(true); } }
-            if let Ok(item) = state.sort_size_item.lock() { if let Some(i) = &*item { let _ = i.set_checked(false); } }
-            if let Ok(item) = state.sort_type_item.lock() { if let Some(i) = &*item { let _ = i.set_checked(false); } }
-            if let Ok(item) = state.sort_modified_item.lock() { if let Some(i) = &*item { let _ = i.set_checked(false); } }
+            if let Ok(mut sb) = state.current_sort_by.lock() {
+                *sb = "name".to_string();
+            }
+            if let Ok(item) = state.sort_name_item.lock() {
+                if let Some(i) = &*item {
+                    let _ = i.set_checked(true);
+                }
+            }
+            if let Ok(item) = state.sort_size_item.lock() {
+                if let Some(i) = &*item {
+                    let _ = i.set_checked(false);
+                }
+            }
+            if let Ok(item) = state.sort_type_item.lock() {
+                if let Some(i) = &*item {
+                    let _ = i.set_checked(false);
+                }
+            }
+            if let Ok(item) = state.sort_modified_item.lock() {
+                if let Some(i) = &*item {
+                    let _ = i.set_checked(false);
+                }
+            }
             let _ = app.emit("menu:sort_name", ());
         }
         "menu:sort_size" => {
             let state: tauri::State<crate::state::MenuState<R>> = app.state();
-            if let Ok(mut sb) = state.current_sort_by.lock() { *sb = "size".to_string(); }
-            if let Ok(item) = state.sort_name_item.lock() { if let Some(i) = &*item { let _ = i.set_checked(false); } }
-            if let Ok(item) = state.sort_size_item.lock() { if let Some(i) = &*item { let _ = i.set_checked(true); } }
-            if let Ok(item) = state.sort_type_item.lock() { if let Some(i) = &*item { let _ = i.set_checked(false); } }
-            if let Ok(item) = state.sort_modified_item.lock() { if let Some(i) = &*item { let _ = i.set_checked(false); } }
+            if let Ok(mut sb) = state.current_sort_by.lock() {
+                *sb = "size".to_string();
+            }
+            if let Ok(item) = state.sort_name_item.lock() {
+                if let Some(i) = &*item {
+                    let _ = i.set_checked(false);
+                }
+            }
+            if let Ok(item) = state.sort_size_item.lock() {
+                if let Some(i) = &*item {
+                    let _ = i.set_checked(true);
+                }
+            }
+            if let Ok(item) = state.sort_type_item.lock() {
+                if let Some(i) = &*item {
+                    let _ = i.set_checked(false);
+                }
+            }
+            if let Ok(item) = state.sort_modified_item.lock() {
+                if let Some(i) = &*item {
+                    let _ = i.set_checked(false);
+                }
+            }
             let _ = app.emit("menu:sort_size", ());
         }
         "menu:sort_type" => {
             let state: tauri::State<crate::state::MenuState<R>> = app.state();
-            if let Ok(mut sb) = state.current_sort_by.lock() { *sb = "type".to_string(); }
-            if let Ok(item) = state.sort_name_item.lock() { if let Some(i) = &*item { let _ = i.set_checked(false); } }
-            if let Ok(item) = state.sort_size_item.lock() { if let Some(i) = &*item { let _ = i.set_checked(false); } }
-            if let Ok(item) = state.sort_type_item.lock() { if let Some(i) = &*item { let _ = i.set_checked(true); } }
-            if let Ok(item) = state.sort_modified_item.lock() { if let Some(i) = &*item { let _ = i.set_checked(false); } }
+            if let Ok(mut sb) = state.current_sort_by.lock() {
+                *sb = "type".to_string();
+            }
+            if let Ok(item) = state.sort_name_item.lock() {
+                if let Some(i) = &*item {
+                    let _ = i.set_checked(false);
+                }
+            }
+            if let Ok(item) = state.sort_size_item.lock() {
+                if let Some(i) = &*item {
+                    let _ = i.set_checked(false);
+                }
+            }
+            if let Ok(item) = state.sort_type_item.lock() {
+                if let Some(i) = &*item {
+                    let _ = i.set_checked(true);
+                }
+            }
+            if let Ok(item) = state.sort_modified_item.lock() {
+                if let Some(i) = &*item {
+                    let _ = i.set_checked(false);
+                }
+            }
             let _ = app.emit("menu:sort_type", ());
         }
         "menu:sort_modified" => {
             let state: tauri::State<crate::state::MenuState<R>> = app.state();
-            if let Ok(mut sb) = state.current_sort_by.lock() { *sb = "modified".to_string(); }
-            if let Ok(item) = state.sort_name_item.lock() { if let Some(i) = &*item { let _ = i.set_checked(false); } }
-            if let Ok(item) = state.sort_size_item.lock() { if let Some(i) = &*item { let _ = i.set_checked(false); } }
-            if let Ok(item) = state.sort_type_item.lock() { if let Some(i) = &*item { let _ = i.set_checked(false); } }
-            if let Ok(item) = state.sort_modified_item.lock() { if let Some(i) = &*item { let _ = i.set_checked(true); } }
+            if let Ok(mut sb) = state.current_sort_by.lock() {
+                *sb = "modified".to_string();
+            }
+            if let Ok(item) = state.sort_name_item.lock() {
+                if let Some(i) = &*item {
+                    let _ = i.set_checked(false);
+                }
+            }
+            if let Ok(item) = state.sort_size_item.lock() {
+                if let Some(i) = &*item {
+                    let _ = i.set_checked(false);
+                }
+            }
+            if let Ok(item) = state.sort_type_item.lock() {
+                if let Some(i) = &*item {
+                    let _ = i.set_checked(false);
+                }
+            }
+            if let Ok(item) = state.sort_modified_item.lock() {
+                if let Some(i) = &*item {
+                    let _ = i.set_checked(true);
+                }
+            }
             let _ = app.emit("menu:sort_modified", ());
         }
         "menu:sort_order_asc" => {
             let state: tauri::State<crate::state::MenuState<R>> = app.state();
-            if let Ok(mut asc) = state.sort_order_asc_checked.lock() { *asc = true; }
-            if let Ok(item) = state.sort_asc_item.lock() { if let Some(i) = &*item { let _ = i.set_checked(true); } }
-            if let Ok(item) = state.sort_desc_item.lock() { if let Some(i) = &*item { let _ = i.set_checked(false); } }
+            if let Ok(mut asc) = state.sort_order_asc_checked.lock() {
+                *asc = true;
+            }
+            if let Ok(item) = state.sort_asc_item.lock() {
+                if let Some(i) = &*item {
+                    let _ = i.set_checked(true);
+                }
+            }
+            if let Ok(item) = state.sort_desc_item.lock() {
+                if let Some(i) = &*item {
+                    let _ = i.set_checked(false);
+                }
+            }
             let _ = app.emit("menu:sort_order_asc", ());
         }
         "menu:sort_order_desc" => {
             let state: tauri::State<crate::state::MenuState<R>> = app.state();
-            if let Ok(mut asc) = state.sort_order_asc_checked.lock() { *asc = false; }
-            if let Ok(item) = state.sort_asc_item.lock() { if let Some(i) = &*item { let _ = i.set_checked(false); } }
-            if let Ok(item) = state.sort_desc_item.lock() { if let Some(i) = &*item { let _ = i.set_checked(true); } }
+            if let Ok(mut asc) = state.sort_order_asc_checked.lock() {
+                *asc = false;
+            }
+            if let Ok(item) = state.sort_asc_item.lock() {
+                if let Some(i) = &*item {
+                    let _ = i.set_checked(false);
+                }
+            }
+            if let Ok(item) = state.sort_desc_item.lock() {
+                if let Some(i) = &*item {
+                    let _ = i.set_checked(true);
+                }
+            }
             let _ = app.emit("menu:sort_order_desc", ());
         }
         "menu:refresh" => {
@@ -231,7 +333,10 @@ pub fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, event: &tauri::menu::Me
         "ctx:toggle_hidden" => {
             let state: tauri::State<crate::state::MenuState<R>> = app.state();
             let new_checked = {
-                let mut checked_guard = state.show_hidden_checked.lock().expect("lock menu checked state");
+                let mut checked_guard = state
+                    .show_hidden_checked
+                    .lock()
+                    .expect("lock menu checked state");
                 *checked_guard = !*checked_guard;
                 *checked_guard
             };
@@ -247,7 +352,10 @@ pub fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, event: &tauri::menu::Me
         "ctx:folders_first" => {
             let state: tauri::State<crate::state::MenuState<R>> = app.state();
             let new_checked = {
-                let mut checked_guard = state.folders_first_checked.lock().expect("lock menu checked state");
+                let mut checked_guard = state
+                    .folders_first_checked
+                    .lock()
+                    .expect("lock menu checked state");
                 *checked_guard = !*checked_guard;
                 *checked_guard
             };
@@ -259,18 +367,30 @@ pub fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, event: &tauri::menu::Me
             let _ = app.emit("menu:folders_first", new_checked);
             let _ = app.emit("ctx:folders_first", new_checked);
         }
-        "ctx:sort_name" => { let _ = app.emit("menu:sort_name", ()); }
-        "ctx:sort_size" => { let _ = app.emit("menu:sort_size", ()); }
-        "ctx:sort_type" => { let _ = app.emit("menu:sort_type", ()); }
-        "ctx:sort_modified" => { let _ = app.emit("menu:sort_modified", ()); }
+        "ctx:sort_name" => {
+            let _ = app.emit("menu:sort_name", ());
+        }
+        "ctx:sort_size" => {
+            let _ = app.emit("menu:sort_size", ());
+        }
+        "ctx:sort_type" => {
+            let _ = app.emit("menu:sort_type", ());
+        }
+        "ctx:sort_modified" => {
+            let _ = app.emit("menu:sort_modified", ());
+        }
         "ctx:sort_order_asc" => {
             let state: tauri::State<crate::state::MenuState<R>> = app.state();
-            if let Ok(mut asc) = state.sort_order_asc_checked.lock() { *asc = true; }
+            if let Ok(mut asc) = state.sort_order_asc_checked.lock() {
+                *asc = true;
+            }
             let _ = app.emit("menu:sort_order_asc", ());
         }
         "ctx:sort_order_desc" => {
             let state: tauri::State<crate::state::MenuState<R>> = app.state();
-            if let Ok(mut asc) = state.sort_order_asc_checked.lock() { *asc = false; }
+            if let Ok(mut asc) = state.sort_order_asc_checked.lock() {
+                *asc = false;
+            }
             let _ = app.emit("menu:sort_order_desc", ());
         }
         "ctx:copy_name" => {
@@ -286,7 +406,10 @@ pub fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, event: &tauri::menu::Me
             // Toggle and emit new value
             let state: tauri::State<crate::state::MenuState<R>> = app.state();
             let new_checked = {
-                let mut checked_guard = state.folders_first_checked.lock().expect("lock menu checked state");
+                let mut checked_guard = state
+                    .folders_first_checked
+                    .lock()
+                    .expect("lock menu checked state");
                 *checked_guard = !*checked_guard;
                 *checked_guard
             };

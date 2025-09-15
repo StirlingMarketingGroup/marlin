@@ -1,8 +1,8 @@
+use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::collections::HashMap;
 use std::time::{Duration, Instant};
-use notify::{Watcher, RecommendedWatcher, Config, RecursiveMode, Event, EventKind};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc;
 
@@ -24,17 +24,17 @@ impl FsWatcher {
 
     pub fn start_watching(&self, path: &str) -> Result<(), String> {
         let path_buf = PathBuf::from(path);
-        
+
         if !path_buf.exists() {
             return Err("Path does not exist".to_string());
         }
-        
+
         if !path_buf.is_dir() {
             return Err("Path is not a directory".to_string());
         }
 
         let normalized_path = path_buf.to_string_lossy().to_string();
-        
+
         // Check if already watching this path
         {
             let watchers = self.watchers.lock().unwrap();
@@ -60,7 +60,8 @@ impl FsWatcher {
                 }
             },
             config,
-        ).map_err(|e| format!("Failed to create watcher: {}", e))?;
+        )
+        .map_err(|e| format!("Failed to create watcher: {}", e))?;
 
         // Start watching the directory (non-recursive for performance)
         watcher
@@ -76,7 +77,7 @@ impl FsWatcher {
         // Use a thread to handle events since we're not in a Tokio context yet
         std::thread::spawn(move || {
             const DEBOUNCE_DURATION: Duration = Duration::from_millis(300);
-            
+
             // Create a simple receiver loop
             while let Some(event) = rx.blocking_recv() {
                 let should_emit = match event.kind {
@@ -108,16 +109,17 @@ impl FsWatcher {
                 if should_process {
                     // Small additional delay to catch rapid consecutive changes
                     std::thread::sleep(Duration::from_millis(100));
-                    
+
                     // Get change details
                     let change_type = match event.kind {
                         EventKind::Create(_) => "created",
-                        EventKind::Modify(_) => "modified", 
+                        EventKind::Modify(_) => "modified",
                         EventKind::Remove(_) => "removed",
                         _ => "changed",
                     };
 
-                    let affected_files: Vec<String> = event.paths
+                    let affected_files: Vec<String> = event
+                        .paths
                         .iter()
                         .filter_map(|p| p.file_name())
                         .filter_map(|name| name.to_str())
@@ -143,7 +145,7 @@ impl FsWatcher {
 
     pub fn stop_watching(&self, path: &str) -> Result<(), String> {
         let normalized_path = PathBuf::from(path).to_string_lossy().to_string();
-        
+
         let mut watchers = self.watchers.lock().unwrap();
         if watchers.remove(&normalized_path).is_some() {
             // Also clean up debounce entry
@@ -158,7 +160,7 @@ impl FsWatcher {
     pub fn stop_all_watchers(&self) {
         let mut watchers = self.watchers.lock().unwrap();
         watchers.clear();
-        
+
         let mut debounce = self.debounce_map.lock().unwrap();
         debounce.clear();
     }
@@ -179,7 +181,8 @@ impl FsWatcher {
 static GLOBAL_WATCHER: OnceLock<Arc<FsWatcher>> = OnceLock::new();
 
 pub fn init_watcher(app_handle: AppHandle) {
-    GLOBAL_WATCHER.set(Arc::new(FsWatcher::new(app_handle)))
+    GLOBAL_WATCHER
+        .set(Arc::new(FsWatcher::new(app_handle)))
         .expect("Watcher already initialized");
 }
 

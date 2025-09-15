@@ -5,6 +5,7 @@ export interface FileItem {
   modified: string // ISO 8601 string from Rust DateTime<Utc>
   is_directory: boolean // Match Rust snake_case
   is_hidden: boolean // Match Rust snake_case
+  is_symlink: boolean // Match Rust snake_case
   extension?: string
 }
 

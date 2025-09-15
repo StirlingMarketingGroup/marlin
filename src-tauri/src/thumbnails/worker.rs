@@ -1,13 +1,13 @@
+use rayon::ThreadPool;
+use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::sync::Arc;
-use std::cmp::Ordering;
 use std::time::Instant;
 use tokio::sync::{mpsc, oneshot, Semaphore};
 use tokio::task::JoinHandle;
-use rayon::ThreadPool;
 
-use super::{ThumbnailRequest, ThumbnailResponse, cache::ThumbnailCache};
 use super::generators::ThumbnailGenerator;
+use super::{cache::ThumbnailCache, ThumbnailRequest, ThumbnailResponse};
 
 #[derive(Debug)]
 struct PriorityRequest {
@@ -40,7 +40,6 @@ impl PartialOrd for PriorityRequest {
     }
 }
 
-
 enum WorkerMessage {
     Request(PriorityRequest),
     Cancel(String),
@@ -54,13 +53,15 @@ pub struct ThumbnailWorker {
 impl ThumbnailWorker {
     pub async fn new(cache: Arc<ThumbnailCache>) -> Result<Self, String> {
         let (sender, receiver) = mpsc::unbounded_channel();
-        
+
         // Create thread pool for CPU-intensive work
-        let thread_pool = Arc::new(rayon::ThreadPoolBuilder::new()
-            .num_threads(num_cpus::get().max(4))
-            .thread_name(|i| format!("thumbnail-{}", i))
-            .build()
-            .map_err(|e| format!("Failed to create thread pool: {}", e))?);
+        let thread_pool = Arc::new(
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(num_cpus::get().max(4))
+                .thread_name(|i| format!("thumbnail-{}", i))
+                .build()
+                .map_err(|e| format!("Failed to create thread pool: {}", e))?,
+        );
 
         // Allow multiple in-flight requests (bounded)
         // Allow up to the number of logical CPUs in flight
@@ -73,7 +74,9 @@ impl ThumbnailWorker {
         };
 
         // Start single worker task that handles all requests
-        let handle = worker.spawn_worker_task(0, receiver, cache.clone(), thread_pool, semaphore).await;
+        let handle = worker
+            .spawn_worker_task(0, receiver, cache.clone(), thread_pool, semaphore)
+            .await;
         worker.worker_handles.push(handle);
 
         Ok(worker)
@@ -87,12 +90,11 @@ impl ThumbnailWorker {
         thread_pool: Arc<ThreadPool>,
         semaphore: Arc<Semaphore>,
     ) -> JoinHandle<()> {
-        
         tokio::spawn(async move {
             let mut request_queue = BinaryHeap::new();
-            
+
             log::info!("Thumbnail worker {} started", worker_id);
-            
+
             loop {
                 // Process incoming messages
                 while let Ok(message) = receiver.try_recv() {
@@ -138,16 +140,25 @@ impl ThumbnailWorker {
                         // Generate thumbnail using thread pool
                         let req_for_pool = request.clone();
                         let result = tokio::task::spawn_blocking(move || {
-                            thread_pool_clone.install(|| {
-                                ThumbnailGenerator::generate(&req_for_pool)
-                            })
-                        }).await;
+                            thread_pool_clone
+                                .install(|| ThumbnailGenerator::generate(&req_for_pool))
+                        })
+                        .await;
 
                         let response = match result {
                             Ok(Ok((data_url, has_transparency))) => {
                                 let generation_time_ms = start_time.elapsed().as_millis() as u64;
                                 // Store in cache
-                                if let Err(e) = cache_clone.put(&request.path, request.size, data_url.clone(), generation_time_ms, has_transparency).await {
+                                if let Err(e) = cache_clone
+                                    .put(
+                                        &request.path,
+                                        request.size,
+                                        data_url.clone(),
+                                        generation_time_ms,
+                                        has_transparency,
+                                    )
+                                    .await
+                                {
                                     log::warn!("Failed to cache thumbnail: {}", e);
                                 }
                                 Ok(ThumbnailResponse {
@@ -175,9 +186,12 @@ impl ThumbnailWorker {
         })
     }
 
-    pub async fn submit_request(&self, request: ThumbnailRequest) -> Result<ThumbnailResponse, String> {
+    pub async fn submit_request(
+        &self,
+        request: ThumbnailRequest,
+    ) -> Result<ThumbnailResponse, String> {
         let (response_sender, response_receiver) = oneshot::channel();
-        
+
         let priority_request = PriorityRequest {
             request,
             response_sender,
@@ -185,17 +199,20 @@ impl ThumbnailWorker {
         };
 
         // Send to worker
-        self.sender.send(WorkerMessage::Request(priority_request))
+        self.sender
+            .send(WorkerMessage::Request(priority_request))
             .map_err(|e| format!("Failed to send request to worker: {}", e))?;
 
         // Wait for response
-        response_receiver.await
+        response_receiver
+            .await
             .map_err(|e| format!("Failed to receive response: {}", e))?
     }
 
     pub async fn cancel_request(&self, request_id: &str) -> bool {
         // Send cancellation message to workers
-        self.sender.send(WorkerMessage::Cancel(request_id.to_string())).is_ok()
+        self.sender
+            .send(WorkerMessage::Cancel(request_id.to_string()))
+            .is_ok()
     }
-
 }

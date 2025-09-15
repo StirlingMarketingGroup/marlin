@@ -82,10 +82,7 @@ async fn set_drop_zone(
 }
 
 #[tauri::command]
-async fn simulate_drop(
-    paths: Vec<String>,
-    target_id: String,
-) -> Result<(), String> {
+async fn simulate_drop(paths: Vec<String>, target_id: String) -> Result<(), String> {
     // Simplified for now - would emit events in full implementation
     Ok(())
 }

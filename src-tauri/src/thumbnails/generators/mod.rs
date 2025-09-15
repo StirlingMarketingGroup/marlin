@@ -1,23 +1,23 @@
-use std::path::Path;
-use image::{DynamicImage, ImageFormat, GenericImageView};
-use std::io::Cursor;
 use base64::Engine as _;
+use image::{DynamicImage, GenericImageView, ImageFormat};
+use std::io::Cursor;
+use std::path::Path;
 
-use super::{ThumbnailRequest, ThumbnailFormat, ThumbnailQuality};
+use super::{ThumbnailFormat, ThumbnailQuality, ThumbnailRequest};
 
-pub mod images;
 pub mod apps;
+pub mod images;
 pub mod pdf;
 pub mod psd;
-pub mod svg;
 pub mod stl;
+pub mod svg;
 
 pub struct ThumbnailGenerator;
 
 impl ThumbnailGenerator {
     pub fn generate(request: &ThumbnailRequest) -> Result<(String, bool), String> {
         let path = Path::new(&request.path);
-        
+
         if !path.exists() {
             return Err("File does not exist".to_string());
         }
@@ -32,13 +32,13 @@ impl ThumbnailGenerator {
                     return apps::MacAppGenerator::generate(request);
                 }
             }
-            
+
             // Also check .app directories (bundles)
             if path.is_dir() && path.extension().and_then(|s| s.to_str()) == Some("app") {
                 return apps::MacAppGenerator::generate(request);
             }
         }
-        
+
         #[cfg(not(target_os = "macos"))]
         {
             if path.is_dir() && path.extension().and_then(|s| s.to_str()) == Some("app") {
@@ -50,7 +50,7 @@ impl ThumbnailGenerator {
         if Self::is_psd_file(path) {
             return psd::PsdGenerator::generate(request);
         }
-        
+
         // Check if it's an image file
         if Self::is_image_file(path) {
             return images::ImageGenerator::generate(request);
@@ -77,17 +77,19 @@ impl ThumbnailGenerator {
 
     fn is_image_file(path: &Path) -> bool {
         if let Some(extension) = path.extension().and_then(|s| s.to_str()) {
-            matches!(extension.to_lowercase().as_str(), 
+            matches!(
+                extension.to_lowercase().as_str(),
                 "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "tiff" | "tga" | "ico"
             )
         } else {
             false
         }
     }
-    
+
     fn is_psd_file(path: &Path) -> bool {
         if let Some(extension) = path.extension().and_then(|s| s.to_str()) {
-            matches!(extension.to_lowercase().as_str(), 
+            matches!(
+                extension.to_lowercase().as_str(),
                 "psd" | "psb" // Photoshop files
             )
         } else {
@@ -97,7 +99,8 @@ impl ThumbnailGenerator {
 
     fn is_pdf_file(path: &Path) -> bool {
         if let Some(extension) = path.extension().and_then(|s| s.to_str()) {
-            matches!(extension.to_lowercase().as_str(),
+            matches!(
+                extension.to_lowercase().as_str(),
                 "pdf" | "ai" | "eps" // PDF and Adobe Illustrator/EPS files
             )
         } else {
@@ -120,12 +123,12 @@ impl ThumbnailGenerator {
     }
 
     pub fn resize_image(
-        image: DynamicImage, 
-        target_size: u32, 
-        quality: ThumbnailQuality
+        image: DynamicImage,
+        target_size: u32,
+        quality: ThumbnailQuality,
     ) -> Result<DynamicImage, String> {
         let (width, height) = image.dimensions();
-        
+
         if width == 0 || height == 0 {
             return Err("Invalid image dimensions".to_string());
         }
@@ -159,19 +162,22 @@ impl ThumbnailGenerator {
     }
 
     pub fn encode_to_data_url(
-        image: &DynamicImage, 
+        image: &DynamicImage,
         format: ThumbnailFormat,
-        quality: ThumbnailQuality
+        quality: ThumbnailQuality,
     ) -> Result<String, String> {
         let mut buffer = Vec::new();
         let mut cursor = Cursor::new(&mut buffer);
 
         match format {
             ThumbnailFormat::PNG => {
-                image.write_to(&mut cursor, ImageFormat::Png)
+                image
+                    .write_to(&mut cursor, ImageFormat::Png)
                     .map_err(|e| format!("Failed to encode PNG: {}", e))?;
-                Ok(format!("data:image/png;base64,{}", 
-                   base64::engine::general_purpose::STANDARD.encode(&buffer)))
+                Ok(format!(
+                    "data:image/png;base64,{}",
+                    base64::engine::general_purpose::STANDARD.encode(&buffer)
+                ))
             }
             ThumbnailFormat::JPEG => {
                 let quality_value = match quality {
@@ -179,21 +185,27 @@ impl ThumbnailGenerator {
                     ThumbnailQuality::Medium => 80,
                     ThumbnailQuality::High => 95,
                 };
-                
+
                 // Convert to RGB if it has alpha channel
                 let rgb_image = if image.color().has_alpha() {
                     DynamicImage::ImageRgb8(image.to_rgb8())
                 } else {
                     image.clone()
                 };
-                
+
                 let mut jpeg_cursor = Cursor::new(&mut buffer);
-                let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg_cursor, quality_value);
-                rgb_image.write_with_encoder(encoder)
+                let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
+                    &mut jpeg_cursor,
+                    quality_value,
+                );
+                rgb_image
+                    .write_with_encoder(encoder)
                     .map_err(|e| format!("Failed to encode JPEG: {}", e))?;
-                
-                Ok(format!("data:image/jpeg;base64,{}", 
-                   base64::engine::general_purpose::STANDARD.encode(&buffer)))
+
+                Ok(format!(
+                    "data:image/jpeg;base64,{}",
+                    base64::engine::general_purpose::STANDARD.encode(&buffer)
+                ))
             }
             ThumbnailFormat::WebP => {
                 #[cfg(feature = "webp")]

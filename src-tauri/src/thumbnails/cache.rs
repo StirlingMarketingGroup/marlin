@@ -1,12 +1,12 @@
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::path::{Path, PathBuf};
-use tokio::sync::RwLock;
-use tokio::fs;
-use lru::LruCache;
-use std::num::NonZeroUsize;
 use chrono::{DateTime, Utc};
-use serde::{Serialize, Deserialize};
+use lru::LruCache;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::num::NonZeroUsize;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tokio::fs;
+use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CacheEntry {
@@ -32,14 +32,14 @@ pub struct CacheStats {
 pub struct ThumbnailCache {
     // L1: In-memory LRU cache for hot thumbnails
     memory_cache: Arc<RwLock<LruCache<String, CacheEntry>>>,
-    
+
     // L2: Disk cache directory
     disk_cache_dir: PathBuf,
     disk_cache_index: Arc<RwLock<HashMap<String, CacheEntry>>>,
-    
+
     // Stats tracking
     stats: Arc<RwLock<CacheStats>>,
-    
+
     // Configuration
     max_memory_entries: usize,
     max_memory_size_bytes: usize,
@@ -51,13 +51,14 @@ impl ThumbnailCache {
         let cache_dir = dirs::cache_dir()
             .ok_or("Could not determine cache directory")?
             .join("marlin_thumbnails");
-        
+
         // Create cache directory if it doesn't exist
-        fs::create_dir_all(&cache_dir).await
+        fs::create_dir_all(&cache_dir)
+            .await
             .map_err(|e| format!("Failed to create cache directory: {}", e))?;
 
         let memory_cache = LruCache::new(
-            NonZeroUsize::new(1000).unwrap() // Max 1000 entries in memory
+            NonZeroUsize::new(1000).unwrap(), // Max 1000 entries in memory
         );
 
         let mut cache = ThumbnailCache {
@@ -75,18 +76,18 @@ impl ThumbnailCache {
             })),
             max_memory_entries: 1000,
             max_memory_size_bytes: 100 * 1024 * 1024, // 100MB
-            max_disk_size_bytes: 500 * 1024 * 1024, // 500MB
+            max_disk_size_bytes: 500 * 1024 * 1024,   // 500MB
         };
 
         // Load disk cache index
         cache.load_disk_cache_index().await?;
-        
+
         Ok(cache)
     }
 
     pub async fn get(&self, path: &str, size: u32) -> Option<(String, bool)> {
         let cache_key = self.generate_cache_key(path, size).await?;
-        
+
         // Try L1 memory cache first
         {
             let mut memory_cache = self.memory_cache.write().await;
@@ -100,7 +101,8 @@ impl ThumbnailCache {
         // Try L2 disk cache
         if let Some((data_url, has_transparency)) = self.get_from_disk(&cache_key).await {
             // Promote to memory cache
-            self.put_memory(&cache_key, &data_url, 0, has_transparency).await;
+            self.put_memory(&cache_key, &data_url, 0, has_transparency)
+                .await;
             self.record_hit().await;
             return Some((data_url, has_transparency));
         }
@@ -109,21 +111,38 @@ impl ThumbnailCache {
         None
     }
 
-    pub async fn put(&self, path: &str, size: u32, data_url: String, generation_time_ms: u64, has_transparency: bool) -> Result<(), String> {
-        let cache_key = self.generate_cache_key(path, size).await
+    pub async fn put(
+        &self,
+        path: &str,
+        size: u32,
+        data_url: String,
+        generation_time_ms: u64,
+        has_transparency: bool,
+    ) -> Result<(), String> {
+        let cache_key = self
+            .generate_cache_key(path, size)
+            .await
             .ok_or("Failed to generate cache key")?;
-        
+
         // Store in both memory and disk cache
-        self.put_memory(&cache_key, &data_url, generation_time_ms, has_transparency).await;
-        self.put_disk(&cache_key, &data_url, generation_time_ms, has_transparency).await?;
-        
+        self.put_memory(&cache_key, &data_url, generation_time_ms, has_transparency)
+            .await;
+        self.put_disk(&cache_key, &data_url, generation_time_ms, has_transparency)
+            .await?;
+
         // Cleanup if necessary
         self.cleanup_if_needed().await?;
-        
+
         Ok(())
     }
 
-    async fn put_memory(&self, key: &str, data_url: &str, generation_time_ms: u64, has_transparency: bool) {
+    async fn put_memory(
+        &self,
+        key: &str,
+        data_url: &str,
+        generation_time_ms: u64,
+        has_transparency: bool,
+    ) {
         let entry = CacheEntry {
             data_url: data_url.to_string(),
             created_at: Utc::now(),
@@ -134,7 +153,7 @@ impl ThumbnailCache {
         };
 
         let mut memory_cache = self.memory_cache.write().await;
-        
+
         // Check memory limits and evict if necessary
         while memory_cache.len() >= self.max_memory_entries {
             // LRU will automatically evict the least recently used item
@@ -142,13 +161,13 @@ impl ThumbnailCache {
                 break; // Cache is empty, shouldn't happen but be safe
             }
         }
-        
-        // Check memory size limit 
+
+        // Check memory size limit
         let mut total_size = entry.size_bytes;
         for (_, existing_entry) in memory_cache.iter() {
             total_size += existing_entry.size_bytes;
         }
-        
+
         while total_size > self.max_memory_size_bytes {
             if let Some((_, evicted_entry)) = memory_cache.pop_lru() {
                 total_size -= evicted_entry.size_bytes;
@@ -156,11 +175,17 @@ impl ThumbnailCache {
                 break; // Cache is empty
             }
         }
-        
+
         memory_cache.put(key.to_string(), entry);
     }
 
-    async fn put_disk(&self, key: &str, data_url: &str, generation_time_ms: u64, has_transparency: bool) -> Result<(), String> {
+    async fn put_disk(
+        &self,
+        key: &str,
+        data_url: &str,
+        generation_time_ms: u64,
+        has_transparency: bool,
+    ) -> Result<(), String> {
         let entry = CacheEntry {
             data_url: data_url.to_string(),
             created_at: Utc::now(),
@@ -174,8 +199,9 @@ impl ThumbnailCache {
         let file_path = self.disk_cache_dir.join(format!("{}.json", key));
         let json = serde_json::to_string(&entry)
             .map_err(|e| format!("Failed to serialize cache entry: {}", e))?;
-        
-        fs::write(&file_path, json).await
+
+        fs::write(&file_path, json)
+            .await
             .map_err(|e| format!("Failed to write cache file: {}", e))?;
 
         // Update index
@@ -198,7 +224,7 @@ impl ThumbnailCache {
         let file_path = self.disk_cache_dir.join(format!("{}.json", key));
         let json = fs::read_to_string(&file_path).await.ok()?;
         let entry: CacheEntry = serde_json::from_str(&json).ok()?;
-        
+
         // Update last accessed time
         {
             let mut index = self.disk_cache_index.write().await;
@@ -220,12 +246,15 @@ impl ThumbnailCache {
         let mut index = HashMap::new();
         let mut total_size = 0u64;
 
-        let mut entries = fs::read_dir(&self.disk_cache_dir).await
+        let mut entries = fs::read_dir(&self.disk_cache_dir)
+            .await
             .map_err(|e| format!("Failed to read cache directory: {}", e))?;
 
-        while let Some(entry) = entries.next_entry().await
-            .map_err(|e| format!("Failed to read directory entry: {}", e))? {
-            
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|e| format!("Failed to read directory entry: {}", e))?
+        {
             if let Some(extension) = entry.path().extension() {
                 if extension == "json" {
                     if let Some(stem) = entry.path().file_stem().and_then(|s| s.to_str()) {
@@ -246,7 +275,7 @@ impl ThumbnailCache {
 
         let index_len = index.len();
         *self.disk_cache_index.write().await = index;
-        
+
         // Update stats
         let mut stats = self.stats.write().await;
         stats.disk_entries = index_len;
@@ -268,18 +297,19 @@ impl ThumbnailCache {
 
     async fn cleanup_disk_cache(&self) -> Result<(), String> {
         let mut entries_to_remove = Vec::new();
-        
+
         {
             let index = self.disk_cache_index.read().await;
             let mut entries: Vec<_> = index.iter().collect();
-            
+
             // Sort by last accessed time (oldest first)
             entries.sort_by_key(|(_, entry)| entry.last_accessed);
-            
+
             let mut current_size = 0;
             for (key, entry) in entries.iter().rev() {
                 current_size += entry.size_bytes;
-                if current_size > self.max_disk_size_bytes * 3 / 4 { // Keep 75% of max size
+                if current_size > self.max_disk_size_bytes * 3 / 4 {
+                    // Keep 75% of max size
                     entries_to_remove.push(key.to_string());
                 }
             }
@@ -296,10 +326,10 @@ impl ThumbnailCache {
     async fn remove_from_disk(&self, key: &str) -> Result<(), String> {
         let file_path = self.disk_cache_dir.join(format!("{}.json", key));
         let _ = fs::remove_file(&file_path).await; // Ignore errors for missing files
-        
+
         let mut index = self.disk_cache_index.write().await;
         index.remove(key);
-        
+
         Ok(())
     }
 
@@ -317,14 +347,12 @@ impl ThumbnailCache {
 
     pub async fn get_stats(&self) -> CacheStats {
         let mut stats = self.stats.write().await;
-        
+
         // Update memory stats
         let memory_cache = self.memory_cache.read().await;
         stats.memory_entries = memory_cache.len();
-        stats.memory_size_bytes = memory_cache.iter()
-            .map(|(_, entry)| entry.size_bytes)
-            .sum();
-        
+        stats.memory_size_bytes = memory_cache.iter().map(|(_, entry)| entry.size_bytes).sum();
+
         stats.clone()
     }
 
@@ -336,11 +364,15 @@ impl ThumbnailCache {
         }
 
         // Clear disk cache
-        let mut entries = fs::read_dir(&self.disk_cache_dir).await
+        let mut entries = fs::read_dir(&self.disk_cache_dir)
+            .await
             .map_err(|e| format!("Failed to read cache directory: {}", e))?;
 
-        while let Some(entry) = entries.next_entry().await
-            .map_err(|e| format!("Failed to read directory entry: {}", e))? {
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|e| format!("Failed to read directory entry: {}", e))?
+        {
             let _ = fs::remove_file(entry.path()).await;
         }
 

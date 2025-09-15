@@ -1,5 +1,5 @@
 use super::super::ThumbnailRequest;
-use image::{DynamicImage};
+use image::DynamicImage;
 use std::fs;
 
 pub struct SvgGenerator;
@@ -61,12 +61,9 @@ impl SvgGenerator {
         // Check for transparency by looking for any alpha values < 255
         let has_transparency = rgba.chunks_exact(4).any(|pixel| pixel[3] < 255);
 
-        let data_url = super::ThumbnailGenerator::encode_to_data_url(
-            &di,
-            request.format,
-            request.quality,
-        )?;
-        
+        let data_url =
+            super::ThumbnailGenerator::encode_to_data_url(&di, request.format, request.quality)?;
+
         Ok((data_url, has_transparency))
     }
 }
