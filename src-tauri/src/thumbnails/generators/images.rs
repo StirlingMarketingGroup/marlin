@@ -1,6 +1,6 @@
 use super::super::{get_thumbnail_format_from_path, ThumbnailRequest};
 use super::ThumbnailGenerator;
-use image::{io::Reader as ImageReader, DynamicImage};
+use image::{DynamicImage, ImageReader};
 use std::path::Path;
 
 pub struct ImageGenerator;

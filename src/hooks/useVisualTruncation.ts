@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { RefObject } from 'react';
 import { truncateMiddle } from '../utils/truncate';
 
 interface TruncationResult {
@@ -12,7 +13,7 @@ const truncationCache = new Map<string, TruncationResult>();
 
 export function useVisualTruncation(
   text: string,
-  containerRef: React.RefObject<HTMLElement>,
+  containerRef: RefObject<HTMLElement>,
   maxWidth?: number,
   enabled: boolean = true
 ): TruncationResult {
