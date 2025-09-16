@@ -1,0 +1,60 @@
+name: Sync Version
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  bump:
+    if: startsWith(github.event.release.tag_name, 'v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+      TARGET_BRANCH: ${{ github.event.release.target_commitish }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ env.TARGET_BRANCH }}
+
+      - name: Set release version
+        run: echo "RELEASE_VERSION=${RELEASE_TAG#v}" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 20
+
+      - name: Update npm metadata
+        run: npm version "$RELEASE_VERSION" --no-git-tag-version
+
+      - name: Update Tauri config
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const version = process.env.RELEASE_VERSION;
+          const file = 'src-tauri/tauri.conf.json';
+          const content = fs.readFileSync(file, 'utf8');
+          const json = JSON.parse(content);
+          json.version = version;
+          fs.writeFileSync(file, JSON.stringify(json, null, 2) + '\n');
+          NODE
+
+      - name: Detect changes
+        id: diff
+        run: |
+          if git diff --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit version bump
+        if: steps.diff.outputs.changed == 'true'
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: 'chore: sync version to ${RELEASE_TAG}'
+          branch: ${{ env.TARGET_BRANCH }}
+          commit_user_name: marlin-release-bot
+          commit_user_email: releases@marlin.app

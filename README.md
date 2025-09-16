@@ -194,14 +194,14 @@ npm run tauri build
 
 ## 🚀 Release process
 
-1. Update the version in both `package.json` and `src-tauri/tauri.conf.json` (keep
-   them in sync).
-2. Commit the changes and ensure `npm run check` passes locally.
-3. Create an annotated tag that follows the `v*` convention, for example:
+1. Make sure `npm run check` passes on the commit you plan to tag.
+2. Create an annotated tag that follows the `v*` convention, for example:
    `git tag -a v0.1.0 -m "Marlin 0.1.0"`.
-4. Push the tag: `git push origin v0.1.0`.
-5. Watch the **Release** workflow on GitHub; when it finishes the DMG, MSI, AppImage,
-   and Debian installers will be attached to the tag's release page.
+3. Push the tag: `git push origin v0.1.0`.
+4. Watch the **Release** workflow; when it finishes the DMG, MSI, AppImage, and Debian
+   installers will be attached to the tag's release page.
+5. The **Sync Version** workflow runs right after publishing and bumps
+   `package.json`, `package-lock.json`, and `src-tauri/tauri.conf.json` to match the tag.
 6. (Optional) Run `marlin-install` or the YOLO script on each platform/architecture
    (x64 + ARM) to spot-check the uploaded binaries.
 
