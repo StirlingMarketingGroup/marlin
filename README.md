@@ -74,26 +74,94 @@ Marlin uses **Tauri** instead of Electron for superior performance:
 
 ## 📦 Installation
 
-### Download Release
+### Desktop installers
 
-1. Go to [Releases](https://github.com/StirlingMarketingGroup/marlin/releases)
-2. Download for your platform:
-   - **Windows**: `Marlin_x.x.x_x64_en-US.msi`
-   - **macOS**: `Marlin_x.x.x_universal.dmg`
-   - **Linux**: `marlin_x.x.x_amd64.deb` or `marlin_x.x.x_amd64.AppImage`
+Publishing a Git tag that starts with `v` (for example `v0.1.0`) triggers our release
+workflow. Once the build finishes you will find platform installers on the
+[Releases](https://github.com/StirlingMarketingGroup/marlin/releases) page:
 
-### Package Managers
+- **macOS**: `Marlin_<version>_universal.dmg`
+- **Windows**: `Marlin_<version>_x64_en-US.msi` (Intel/AMD) and `Marlin_<version>_arm64_en-US.msi`
+- **Linux**: `Marlin_<version>_amd64.AppImage`/`.deb` and `Marlin_<version>_aarch64.AppImage`/`_arm64.deb`
+
+### Command line installs
+
+Use the latest published release by querying the GitHub API in each snippet below.
+
+**YOLO (macOS & Linux x86_64/arm64)**
 
 ```bash
-# macOS (Homebrew)
-brew install --cask marlin
-
-# Windows (Chocolatey)
-choco install marlin
-
-# Linux (Snap)
-snap install marlin
+curl -fsSL https://raw.githubusercontent.com/StirlingMarketingGroup/marlin/main/scripts/install.sh | bash
 ```
+
+> Installs to `/Applications` on macOS and `/usr/local/bin/marlin` on Linux using
+> the latest release. Review the script before piping to `bash` if you prefer.
+
+**npm global CLI (macOS, Windows, Linux)**
+
+```bash
+npm install -g github:StirlingMarketingGroup/marlin
+marlin-install
+```
+
+> Installs a cross-platform Node.js helper (requires Node.js 18+) that fetches and
+> runs the latest Marlin desktop installer for your OS. Re-run `marlin-install`
+> whenever you want to pick up a newer release. On macOS you may need to prefix
+> the command with `sudo` so it can write to `/Applications`.
+
+**macOS (Terminal)**
+
+```bash
+TAG=$(curl -fsSL https://api.github.com/repos/StirlingMarketingGroup/marlin/releases/latest \
+  | python3 -c "import sys, json; print(json.load(sys.stdin)['tag_name'])")
+VERSION=${TAG#v}
+curl -L -o Marlin.dmg \
+  "https://github.com/StirlingMarketingGroup/marlin/releases/download/$TAG/Marlin_${VERSION}_universal.dmg"
+hdiutil attach Marlin.dmg
+sudo cp -R /Volumes/Marlin/Marlin.app /Applications # may prompt for your password
+hdiutil detach /Volumes/Marlin
+```
+
+**Windows (PowerShell)**
+
+```powershell
+$tag = (Invoke-RestMethod https://api.github.com/repos/StirlingMarketingGroup/marlin/releases/latest).tag_name
+$version = $tag.TrimStart('v')
+$arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }
+$asset = "Marlin_${version}_${arch}_en-US.msi"
+Invoke-WebRequest "https://github.com/StirlingMarketingGroup/marlin/releases/download/$tag/$asset" `
+  -OutFile "$env:TEMP\$asset"
+Start-Process msiexec.exe -Wait -ArgumentList "/i `"$env:TEMP\$asset`""
+```
+
+**Linux (AppImage)**
+
+```bash
+TAG=$(curl -fsSL https://api.github.com/repos/StirlingMarketingGroup/marlin/releases/latest \
+  | python3 -c "import sys, json; print(json.load(sys.stdin)['tag_name'])")
+ARCH=$(uname -m)
+case "$ARCH" in
+  x86_64|amd64)
+    SUFFIX="amd64"
+    ;;
+  aarch64|arm64)
+    SUFFIX="aarch64"
+    ;;
+  *)
+    echo "Unsupported architecture: $ARCH" >&2
+    exit 1
+    ;;
+esac
+ASSET="Marlin_${TAG#v}_${SUFFIX}.AppImage"
+curl -L -o "$ASSET" \
+  "https://github.com/StirlingMarketingGroup/marlin/releases/download/$TAG/$ASSET"
+chmod +x "$ASSET"
+sudo mv "$ASSET" /usr/local/bin/marlin # or move it anywhere on your PATH
+marlin
+```
+
+Prefer to build locally or script your own pipeline? See the
+[Development](#development) section for source-based setup instructions.
 
 ## 🛠️ Development
 
@@ -123,6 +191,28 @@ npm run tauri dev
 # Build for production
 npm run tauri build
 ```
+
+## 🚀 Release process
+
+1. Update the version in both `package.json` and `src-tauri/tauri.conf.json` (keep
+   them in sync).
+2. Commit the changes and ensure `npm run check` passes locally.
+3. Create an annotated tag that follows the `v*` convention, for example:
+   `git tag -a v0.1.0 -m "Marlin 0.1.0"`.
+4. Push the tag: `git push origin v0.1.0`.
+5. Watch the **Release** workflow on GitHub; when it finishes the DMG, MSI, AppImage,
+   and Debian installers will be attached to the tag's release page.
+6. (Optional) Run `marlin-install` or the YOLO script on each platform/architecture
+   (x64 + ARM) to spot-check the uploaded binaries.
+
+After pushing `v0.1.0` you'll have the first pre-1.0 release ready to share.
+
+The installation snippets above always fetch the latest release tag, so no README
+updates are needed after tagging.
+
+The YOLO installer script and the npm helper consume the same release assets; if you
+change asset names adjust `scripts/install.sh` and `scripts/install.mjs` accordingly
+before tagging.
 
 ### Project Structure
 

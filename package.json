@@ -14,9 +14,12 @@
     "cross-platform",
     "rust"
   ],
+  "bin": {
+    "marlin-install": "./scripts/install.mjs"
+  },
   "repository": {
     "type": "git",
-    "url": "https://github.com/user/marlin"
+    "url": "https://github.com/StirlingMarketingGroup/marlin"
   },
   "scripts": {
     "dev": "vite",
@@ -57,7 +60,7 @@
     "@playwright/test": "^1.55.0",
     "@tailwindcss/postcss": "^4.1.13",
     "@tailwindcss/vite": "^4.1.13",
-    "@tauri-apps/cli": "^2.0.0",
+    "@tauri-apps/cli": "^2.8.4",
     "@testing-library/jest-dom": "^6.8.0",
     "@testing-library/react": "^16.3.0",
     "@testing-library/user-event": "^14.6.1",

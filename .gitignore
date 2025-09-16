@@ -49,6 +49,7 @@ coverage/
 # Temporary folders
 tmp/
 temp/
+tauri-private-key*
 
 # Tauri specific
 src-tauri/target/

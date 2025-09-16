@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "A modern, sleek file browser with native performance"
 authors = ["Marlin Team"]
 license = "MIT"
-repository = "https://github.com/user/marlin"
+repository = "https://github.com/StirlingMarketingGroup/marlin"
 edition = "2021"
 rust-version = "1.77.2"
 
