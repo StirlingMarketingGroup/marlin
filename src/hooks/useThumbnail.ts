@@ -49,6 +49,21 @@ export function useThumbnail(
   const currentPathRef = useRef<string | null>(null);
   const requestIdRef = useRef<string | null>(null);
 
+  const cancelCurrentRequest = useCallback(() => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    if (requestIdRef.current) {
+      const requestId = requestIdRef.current;
+      requestIdRef.current = null;
+      invoke('cancel_thumbnail', { requestId }).catch(() => {
+        // Ignore cancellation errors
+      });
+    }
+    currentPathRef.current = null;
+  }, []);
+
   const fetchThumbnail = useCallback(
     async (thumbnailPath: string, requestOptions: Omit<ThumbnailRequest, 'path'>) => {
       // Create cache key
@@ -85,33 +100,13 @@ export function useThumbnail(
   useEffect(() => {
     if (!path) {
       // If path becomes undefined, cancel any in-flight request but keep current dataUrl
-      if (abortControllerRef.current) {
-        abortControllerRef.current.abort();
-        abortControllerRef.current = null;
-      }
-      if (requestIdRef.current) {
-        const requestId = requestIdRef.current;
-        requestIdRef.current = null;
-        invoke('cancel_thumbnail', { requestId }).catch(() => {});
-      }
-      currentPathRef.current = null;
+      cancelCurrentRequest();
       setLoading(false);
       return;
     }
 
     // Cancel any existing request
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-      abortControllerRef.current = null;
-    }
-
-    if (requestIdRef.current) {
-      const requestId = requestIdRef.current;
-      requestIdRef.current = null;
-      invoke('cancel_thumbnail', { requestId }).catch(() => {
-        // Ignore cancellation errors
-      });
-    }
+    cancelCurrentRequest();
 
     // Create new abort controller
     abortControllerRef.current = new AbortController();
@@ -141,20 +136,9 @@ export function useThumbnail(
       });
 
     return () => {
-      if (abortControllerRef.current) {
-        abortControllerRef.current.abort();
-        abortControllerRef.current = null;
-      }
-      if (requestIdRef.current) {
-        const requestId = requestIdRef.current;
-        requestIdRef.current = null;
-        invoke('cancel_thumbnail', { requestId }).catch(() => {
-          // Ignore cancellation errors
-        });
-      }
-      currentPathRef.current = null;
+      cancelCurrentRequest();
     };
-  }, [path, size, quality, priority, format, fetchThumbnail]);
+  }, [path, size, quality, priority, format, fetchThumbnail, cancelCurrentRequest]);
 
   const retry = useCallback(() => {
     if (path) {
