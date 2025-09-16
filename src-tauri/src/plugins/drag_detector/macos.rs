@@ -29,11 +29,13 @@ struct DropZoneState {
 
 static DROP_ZONES: Lazy<Mutex<HashMap<String, DropZoneState>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
-static INITIALIZED_WINDOWS: Lazy<Mutex<HashMap<String, bool>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+static INITIALIZED_WINDOWS: Lazy<Mutex<HashMap<String, bool>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 
 static DRAG_OVERLAY_CLASS: Lazy<&'static Class> = Lazy::new(|| {
     let superclass = class!(NSView);
-    let mut decl = ClassDecl::new("MarlinDragOverlayView", superclass).expect("create overlay class");
+    let mut decl =
+        ClassDecl::new("MarlinDragOverlayView", superclass).expect("create overlay class");
 
     unsafe {
         decl.add_ivar::<*mut c_void>("event_handler_ptr");
@@ -268,9 +270,7 @@ unsafe fn compose_event(sender: id, event_type: DragEventType) -> (DragDropEvent
 
 fn install_overlay<R: Runtime>(window: Window<R>) -> Result<(), String> {
     unsafe {
-        let ns_window_ptr = window
-            .ns_window()
-            .map_err(|e| e.to_string())?;
+        let ns_window_ptr = window.ns_window().map_err(|e| e.to_string())?;
         let ns_window: id = ns_window_ptr as id;
         let content_view: id = msg_send![ns_window, contentView];
         if content_view == nil {
@@ -283,7 +283,8 @@ fn install_overlay<R: Runtime>(window: Window<R>) -> Result<(), String> {
         let overlay: id = msg_send![overlay, initWithFrame: bounds];
         let _: () = msg_send![overlay, setAlphaValue: 0.0];
         let _: () = msg_send![overlay, setHidden: NO];
-        let _: () = msg_send![overlay, setAutoresizingMask: NSViewWidthSizable | NSViewHeightSizable];
+        let _: () =
+            msg_send![overlay, setAutoresizingMask: NSViewWidthSizable | NSViewHeightSizable];
 
         let handler_arc: Arc<DragHandler> = Arc::new({
             let window_clone = window.clone();
@@ -312,7 +313,8 @@ fn install_overlay<R: Runtime>(window: Window<R>) -> Result<(), String> {
         (*overlay_obj).set_ivar("event_handler_ptr", handler_ptr);
 
         let ns_array: &Class = class!(NSArray);
-        let types: id = msg_send![ns_array, arrayWithObject: NSString::alloc(nil).init_str("public.file-url")];
+        let types: id =
+            msg_send![ns_array, arrayWithObject: NSString::alloc(nil).init_str("public.file-url")];
         let _: () = msg_send![overlay, registerForDraggedTypes: types];
 
         let _: () = msg_send![content_view, addSubview: overlay positioned: NSWindowOrderingMode::NSWindowAbove relativeTo: nil];

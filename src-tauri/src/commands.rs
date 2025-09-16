@@ -223,6 +223,8 @@ pub fn get_application_icon(path: String, size: Option<u32>) -> Result<String, S
     }
     #[cfg(not(target_os = "macos"))]
     {
+        let _ = path;
+        let _ = size;
         Err("get_application_icon is only supported on macOS".to_string())
     }
 }
@@ -690,12 +692,16 @@ pub fn new_window(app: AppHandle, path: Option<String>) -> Result<(), String> {
         url = tauri::WebviewUrl::App(format!("index.html?path={}", encoded_path).into());
     }
 
-    let window = tauri::WebviewWindowBuilder::new(&app, &window_label, url)
+    let builder = tauri::WebviewWindowBuilder::new(&app, &window_label, url)
         .title("")
         .inner_size(1200.0, 800.0)
         .resizable(true)
-        .fullscreen(false)
-        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .fullscreen(false);
+
+    #[cfg(target_os = "macos")]
+    let builder = builder.title_bar_style(tauri::TitleBarStyle::Overlay);
+
+    let window = builder
         .build()
         .map_err(|e| format!("Failed to create window: {}", e))?;
 

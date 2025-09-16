@@ -13,8 +13,6 @@ mod thumbnails;
 use state::MenuState;
 use std::sync::Mutex;
 use tauri::Manager;
-use tauri_plugin_decorum::WebviewWindowExt;
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -84,6 +82,7 @@ pub fn run() {
             // Position traffic lights similar to Finder's sidebar style
             #[cfg(target_os = "macos")]
             {
+                use tauri_plugin_decorum::WebviewWindowExt;
                 if let Some(main_window) = app.get_webview_window("main") {
                     // Position traffic lights inside the sidebar area (16px right, 24px down)
                     let _ = main_window.set_traffic_lights_inset(16.0, 24.0);
@@ -145,6 +144,12 @@ pub fn run() {
                     }
                     _ => {}
                 }
+            }
+
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = window;
+                let _ = event;
             }
         })
         .run(tauri::generate_context!())

@@ -32,7 +32,7 @@
     "lint:fix": "npm run lint -- --fix",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.node.json",
     "check": "npm run lint && npm run format && npm run typecheck && npm run check:rust",
-    "prepare": "husky install",
+    "prepare": "husky",
     "check:rust": "cd src-tauri && RUSTFLAGS=\"-D warnings\" cargo check",
     "format": "prettier --check .",
     "format:fix": "prettier --write ."
