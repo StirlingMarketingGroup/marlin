@@ -1,7 +1,7 @@
+import { X, CheckCircle, XCircle, Info } from 'phosphor-react';
+import type { ReactElement } from 'react';
 import { useToastStore } from '../store/useToastStore';
 import type { Toast as ToastData } from '../store/useToastStore';
-import type { ReactElement } from 'react';
-import { X, CheckCircle, XCircle, Info } from 'phosphor-react';
 
 export default function Toast() {
   const { toasts, removeToast } = useToastStore();

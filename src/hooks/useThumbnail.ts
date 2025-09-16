@@ -48,7 +48,6 @@ export function useThumbnail(
   const abortControllerRef = useRef<AbortController | null>(null);
   const currentPathRef = useRef<string | null>(null);
   const requestIdRef = useRef<string | null>(null);
-
   const cancelCurrentRequest = useCallback(() => {
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
