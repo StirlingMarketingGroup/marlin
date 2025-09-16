@@ -29,13 +29,13 @@ impl ThumbnailGenerator {
             if let Some(extension) = path.extension().and_then(|s| s.to_str()) {
                 let ext = extension.to_lowercase();
                 if matches!(ext.as_str(), "app" | "dmg" | "pkg") {
-                    return apps::MacAppGenerator::generate(request);
+                    return apps::generate(request);
                 }
             }
 
             // Also check .app directories (bundles)
             if path.is_dir() && path.extension().and_then(|s| s.to_str()) == Some("app") {
-                return apps::MacAppGenerator::generate(request);
+                return apps::generate(request);
             }
         }
 
