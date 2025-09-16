@@ -54,7 +54,7 @@ mupdf = { version = "0.5", default-features = false, features = [] }
 resvg = { version = "0.43", default-features = true }
 usvg = { version = "0.43", default-features = true, features = ["text"] }
 # File system watching
-notify = { version = "6.1", default-features = false, features = ["macos_fsevent"] }
+notify = { version = "8.2", default-features = false, features = ["macos_fsevent"] }
 
 
 [target.'cfg(target_os = "macos")'.dependencies]
