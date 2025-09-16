@@ -1,4 +1,4 @@
-import { useEffect, useCallback, useMemo } from 'react';
+import { useEffect, useCallback, useMemo, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 
@@ -166,16 +166,29 @@ export function useSidebarDropZone(
   onDrop: (paths: string[]) => void,
   options?: SidebarDropZoneOptions
 ) {
+  const { onDragEnter, onDragOver, onDragLeave, width } = options ?? {};
+
+  const lastDropRef = useRef<{ key: string; timestamp: number } | null>(null);
+  const DROP_DEDUPE_WINDOW_MS = 400;
+
   const handleDrop = useCallback(
     (event: DragDropEvent) => {
-      if (event.location.targetId === 'sidebar' && event.paths.length > 0) {
-        onDrop(event.paths);
+      if (event.location.targetId !== 'sidebar' || event.paths.length === 0) {
+        return;
       }
-    },
-    [onDrop]
-  );
+      const sortedKey = event.paths.slice().sort().join('|');
+      const now = Date.now();
+      const lastDrop = lastDropRef.current;
+      if (lastDrop && lastDrop.key === sortedKey && now - lastDrop.timestamp < DROP_DEDUPE_WINDOW_MS) {
+        onDragLeave?.();
+        return;
+      }
 
-  const { onDragEnter, onDragOver, onDragLeave, width } = options ?? {};
+      lastDropRef.current = { key: sortedKey, timestamp: now };
+      onDrop(event.paths);
+    },
+    [onDrop, onDragLeave]
+  );
 
   const detectorHandlers = useMemo<DragDropHandlers>(
     () => ({

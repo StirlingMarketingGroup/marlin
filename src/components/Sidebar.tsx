@@ -38,37 +38,94 @@ export default function Sidebar() {
   const [ejectingDrives, setEjectingDrives] = useState<Set<string>>(new Set());
   const [isDragOver, setIsDragOver] = useState(false);
   const sidebarRef = useRef<HTMLDivElement>(null);
+  const isProcessingDropRef = useRef(false);
 
   // Use the new drag detector hook for native drop detection
-  const handleDragEnter = useCallback(() => setIsDragOver(true), []);
+  const handleDragEnter = useCallback(() => {
+    setIsDragOver(true);
+  }, []);
   const handleDragLeave = useCallback(() => setIsDragOver(false), []);
 
   useSidebarDropZone(
     async (paths) => {
-      const uniquePaths = Array.from(new Set(paths));
-      // Handle dropped directories
-      for (const path of uniquePaths) {
-        try {
-          await addPinnedDirectory(path);
-          const { addToast } = useToastStore.getState();
+      if (isProcessingDropRef.current) {
+        return;
+      }
+
+      isProcessingDropRef.current = true;
+
+      try {
+        const uniquePaths = Array.from(new Set(paths));
+
+        if (uniquePaths.length === 0) {
+          return;
+        }
+
+        const pinnedNames: string[] = [];
+        const skippedFiles: string[] = [];
+        const otherErrors: { name: string; message: string }[] = [];
+
+        const getName = (path: string) => {
+          const parts = path.split(/[/\\\\]+/).filter(Boolean);
+          return parts[parts.length - 1] || path;
+        };
+
+        for (const path of uniquePaths) {
+          try {
+            const pin = await addPinnedDirectory(path);
+            pinnedNames.push(pin.name || getName(path));
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            const normalizedMessage = message.toLowerCase();
+            if (normalizedMessage.includes('already pinned')) {
+              continue;
+            }
+            if (
+              normalizedMessage.includes('not a directory') ||
+              normalizedMessage.includes('is not a directory')
+            ) {
+              skippedFiles.push(getName(path));
+              continue;
+            }
+
+            console.error('Failed to pin directory:', error);
+            otherErrors.push({ name: getName(path), message });
+          }
+        }
+
+        const { addToast } = useToastStore.getState();
+
+        if (pinnedNames.length > 0) {
+          const list = pinnedNames.length === 1 ? pinnedNames[0] : `${pinnedNames.length} folders`;
           addToast({
             type: 'success',
-            message: `Pinned ${path.split('/').pop() || 'directory'} to sidebar`,
-          });
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          if (message.includes('already pinned')) {
-            continue;
-          }
-          console.error('Failed to pin directory:', error);
-          const { addToast } = useToastStore.getState();
-          addToast({
-            type: 'error',
-            message: 'Failed to pin directory',
+            message: `Pinned ${list} to sidebar`,
           });
         }
+
+        if (skippedFiles.length > 0) {
+          const detail =
+            skippedFiles.length === 1
+              ? `“${skippedFiles[0]}” is a file.`
+              : `${skippedFiles.length} files were skipped.`;
+          addToast({
+            type: 'error',
+            message: `Only folders can be pinned to the sidebar. ${detail}`,
+          });
+        }
+
+        if (otherErrors.length > 0) {
+          const first = otherErrors[0];
+          const suffix = otherErrors.length > 1 ? ' (others skipped)' : '';
+          addToast({
+            type: 'error',
+            message: `Failed to pin ${first.name}: ${first.message}${suffix}`,
+          });
+        }
+      } finally {
+        isProcessingDropRef.current = false;
+        setIsDragOver(false);
       }
-      setIsDragOver(false);
     },
     {
       onDragEnter: handleDragEnter,

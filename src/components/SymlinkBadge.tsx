@@ -13,7 +13,7 @@ export default function SymlinkBadge({ className = '', size = 'md', style }: Sym
 
   return (
     <span
-      className={`pointer-events-none absolute rounded-full border border-app-border bg-app-dark/95 ${paddingClass} ${className}`}
+      className={`pointer-events-none absolute inline-flex items-center justify-center rounded-full border border-app-border bg-app-dark/95 ${paddingClass} ${className}`}
       style={style}
     >
       <ArrowSquareOut className={`${iconClass} text-accent`} weight="fill" />

@@ -13,7 +13,7 @@ export default function GitRepoBadge({ className = '', size = 'md', style }: Git
 
   return (
     <span
-      className={`pointer-events-none absolute rounded-full border border-app-border bg-app-dark/95 ${paddingClass} ${className}`}
+      className={`pointer-events-none absolute inline-flex items-center justify-center rounded-full border border-app-border bg-app-dark/95 ${paddingClass} ${className}`}
       style={style}
     >
       <GitBranch className={`${iconClass} text-orange-400`} weight="fill" />

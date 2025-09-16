@@ -44,7 +44,7 @@ updates:
       interval: 'weekly'
     open-pull-requests-limit: 10
     rebase-strategy: 'auto'
-    versioning-strategy: 'increase-if-necessary'
+    versioning-strategy: 'auto'
     commit-message:
       prefix: 'chore(deps)'
       include: 'scope'
