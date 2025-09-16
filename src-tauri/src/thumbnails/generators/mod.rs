@@ -5,6 +5,7 @@ use std::path::Path;
 
 use super::{ThumbnailFormat, ThumbnailQuality, ThumbnailRequest};
 
+#[cfg(target_os = "macos")]
 pub mod apps;
 pub mod images;
 pub mod pdf;

@@ -42,6 +42,11 @@ pub async fn enable_drag_detection<R: Runtime>(window: Window<R>) -> Result<(), 
         macos::setup_drag_handlers(&window)?;
     }
 
+    #[cfg(target_os = "linux")]
+    {
+        linux::setup_drag_handlers(&window)?;
+    }
+
     let _ = window; // suppress unused warning on other platforms
     Ok(())
 }
@@ -63,10 +68,16 @@ pub async fn set_drop_zone(
         macos::set_drop_zone(&zone_id, enabled, config);
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::set_drop_zone(&zone_id, enabled, config);
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = zone_id;
         let _ = enabled;
+        let _ = config;
     }
 
     Ok(())

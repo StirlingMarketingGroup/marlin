@@ -711,6 +711,11 @@ pub fn new_window(app: AppHandle, path: Option<String>) -> Result<(), String> {
         let _ = window.set_traffic_lights_inset(16.0, 24.0);
     }
 
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = window;
+    }
+
     Ok(())
 }
 
