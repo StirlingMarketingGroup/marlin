@@ -36,23 +36,23 @@ tauri-plugin-drag = "2.1.0"
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6.0"
 tokio = { version = "1.0", features = ["full"] }
-cocoa = { version = "0.25", optional = true }
+cocoa = { version = "0.26", optional = true }
 objc = { version = "0.2", optional = true }
 base64 = "0.22"
 # Thumbnail system dependencies
-image = { version = "0.24", features = ["png", "jpeg", "webp", "gif"] }
-lru = "0.12"
+image = { version = "0.25", features = ["png", "jpeg", "webp", "gif"] }
+lru = "0.16"
 dashmap = "6.1"
 rayon = "1.10"
 uuid = { version = "1.0", features = ["v4"] }
 sha2 = "0.10"
 urlencoding = "2.1"
-webp = { version = "0.2", optional = true }
+webp = { version = "0.3", optional = true }
 once_cell = "1.19"
 num_cpus = "1.16"
 mupdf = { version = "0.5", default-features = false, features = [] }
-resvg = { version = "0.43", default-features = true }
-usvg = { version = "0.43", default-features = true, features = ["text"] }
+resvg = { version = "0.45", default-features = true }
+usvg = { version = "0.45", default-features = true, features = ["text"] }
 # File system watching
 notify = { version = "8.2", default-features = false, features = ["macos_fsevent"] }
 
@@ -63,4 +63,4 @@ objc = { version = "0.2" }
 block = "0.1"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.48", features = ["Win32_Storage_FileSystem"] }
+windows = { version = "0.62", features = ["Win32_Storage_FileSystem"] }
