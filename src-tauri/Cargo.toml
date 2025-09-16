@@ -42,7 +42,7 @@ base64 = "0.22"
 # Thumbnail system dependencies
 image = { version = "0.24", features = ["png", "jpeg", "webp", "gif"] }
 lru = "0.12"
-dashmap = "5.5"
+dashmap = "6.1"
 rayon = "1.10"
 uuid = { version = "1.0", features = ["v4"] }
 sha2 = "0.10"
