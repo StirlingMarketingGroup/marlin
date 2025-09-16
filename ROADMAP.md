@@ -46,6 +46,7 @@ Create the most intuitive, performant, and beautiful file browser that feels lik
 **Goal**: Build world-class performance for large directories and SMB/NAS networks
 
 ### 🎯 Performance Targets
+
 - **Open 50k-file folder**: First paint ≤ 120ms (names only), interactive ≤ 200ms
 - **Scroll 50k items**: ≥ 60fps, no long tasks > 16ms in renderer
 - **SMB 20k over 10ms RTT**: First 1k names ≤ 400ms, progressive fill thereafter
@@ -53,27 +54,31 @@ Create the most intuitive, performant, and beautiful file browser that feels lik
 - **Thumbnail budget**: ≤ 4 concurrent per spindle/host, never block UI
 
 ### 📁 Directory Read Pipeline
+
 - [ ] **Names-first rendering**: Render immediately on `readdir`, metadata later
-- [ ] **Native bulk APIs**: 
+- [ ] **Native bulk APIs**:
   - macOS `getattrlistbulk`
-  - Windows `FindFirstFileExW(FIND_FIRST_EX_LARGE_FETCH)`  
+  - Windows `FindFirstFileExW(FIND_FIRST_EX_LARGE_FETCH)`
   - Linux `getdents64` + `statx` as needed
 - [ ] **Adaptive batching**: 512–2048 entries per chunk, backpressure-aware
 - [ ] **Virtualized views**: Windowed list/grid, O(visible) DOM, no layout thrash
 
 ### 🌐 SMB/NAS Optimization
+
 - [ ] **Network awareness**: Treat `smb://`, mounted shares, UNC paths as high-latency
 - [ ] **Timeouts & retries**: Jittered backoff, "degraded mode" (no thumbs, names-only)
 - [ ] **I/O budgets**: Coalesce `stat` calls, avoid `realpath` per item, cache dir inodes
 - [ ] **Per-host rate limits**: Prevent SMB server overload
 
 ### ⚡ Async & Caching
+
 - [ ] **Thread pool**: Per-device concurrency caps, cancel off-screen jobs
 - [ ] **Persistent cache**: Dir-entry cache (names + minimal attrs) by dir inode + mtime
 - [ ] **Heuristic invalidation**: Watcher events or parent mtime change
 - [ ] **Memory control**: Evict metadata/thumbnail LRU aggressively
 
 ### 📊 File Watching & Benchmarks
+
 - [ ] **Platform watchers**: macOS FSEvents, Windows ReadDirectoryChangesW, Linux inotify
 - [ ] **Event collapsing**: Collapse burst events, debounce updates
 - [ ] **Bench harness**: Synthetic dir generator (1k→100k files), repeatable perf tests
@@ -140,7 +145,7 @@ Create the most intuitive, performant, and beautiful file browser that feels lik
 
 ---
 
-## 🤖 AI Operations Framework  
+## 🤖 AI Operations Framework
 
 **Goal**: Safe AI-powered file operations with strict JSON schema
 
@@ -160,6 +165,7 @@ Create the most intuitive, performant, and beautiful file browser that feels lik
   - [ ] Quotas per apply; paging for huge plans
 
 ### 🎨 Built-in Presets
+
 - [ ] SEO rename from image content
 - [ ] Resize ≤2000px (preserve aspect)
 - [ ] Trim whitespace margins
@@ -194,7 +200,7 @@ Create the most intuitive, performant, and beautiful file browser that feels lik
   - [ ] Tabs with session restore
   - [ ] New window opens last directory or user default
 
-- [ ] **Enhanced Navigation**  
+- [ ] **Enhanced Navigation**
   - [ ] In-folder quick filter (non-indexed, real-time)
   - [ ] Favorites/bookmarks system
   - [ ] Copy path (Unix, Windows, file:// formats)
@@ -212,7 +218,7 @@ Create the most intuitive, performant, and beautiful file browser that feels lik
 
 - [ ] **System Integration**
   - [ ] Default application associations
-  - [ ] "Open with" menu  
+  - [ ] "Open with" menu
   - [ ] System trash integration
   - [ ] Network drive support with timeout handling
 
@@ -272,7 +278,7 @@ Create the most intuitive, performant, and beautiful file browser that feels lik
 
 - [ ] **Cross-Platform Compatibility**
   - [ ] Windows long paths support (>260 chars)
-  - [ ] macOS Unicode NFC normalization  
+  - [ ] macOS Unicode NFC normalization
   - [ ] Linux extended attributes and permissions
 
 - [ ] **Network & Performance**
@@ -366,22 +372,25 @@ Create the most intuitive, performant, and beautiful file browser that feels lik
 ## 🎯 Success Metrics
 
 ### Performance Targets
+
 - **Large Directories**: Open 50k files ≤ 120ms first paint, ≤ 200ms interactive
-- **SMB/NAS Performance**: 20k files over 10ms RTT, first 1k names ≤ 400ms  
+- **SMB/NAS Performance**: 20k files over 10ms RTT, first 1k names ≤ 400ms
 - **Scroll Performance**: ≥ 60fps with 50k items, no long tasks > 16ms
 - **Memory Budget**: < 150MB with 50k entries, aggressive LRU eviction
 - **Bundle Size**: < 20MB installed (vs 200MB+ Electron apps)
 - **Startup Time**: < 1 second cold start
 
 ### User Experience Goals
+
 - **Accessibility**: WCAG 2.1 AA compliance
 - **Internationalization**: Support for 10+ languages
 - **User Satisfaction**: 4.5+ stars on app stores
 - **Community**: 1000+ GitHub stars, 50+ contributors
 
 ### Technical Excellence
+
 - **Test Coverage**: > 85% for critical paths
-- **Performance**: Passes Core Web Vitals metrics  
+- **Performance**: Passes Core Web Vitals metrics
 - **Security**: Regular security audits
 - **Cross-Platform**: Consistent experience across OS
 
@@ -399,7 +408,7 @@ Create the most intuitive, performant, and beautiful file browser that feels lik
 - [ ] **Core Functionality**
   - [ ] Path paste → Enter navigates or shows clear error
   - [ ] Batch rename dry-run results exactly match apply results
-  - [ ] AI operations produce valid JSON; collisions resolved as `-1`, `-2` 
+  - [ ] AI operations produce valid JSON; collisions resolved as `-1`, `-2`
   - [ ] Cancel mid-apply leaves filesystem in consistent state
 
 - [ ] **Distribution**
@@ -425,22 +434,26 @@ Create the most intuitive, performant, and beautiful file browser that feels lik
 We welcome contributions to any phase of the roadmap! Here's how you can help:
 
 ### 🎯 High Priority Areas
+
 - **File Operations**: Copy/paste, drag & drop
 - **Performance**: Large directory handling
 - **Accessibility**: Screen reader support
 - **Testing**: Automated test coverage
 
 ### 📋 Feature Requests
+
 - Create GitHub issues with the `feature-request` label
 - Include detailed use cases and mockups
 - Consider implementation complexity and user benefit
 
 ### 🐛 Bug Reports
+
 - Use the bug report template
 - Include reproduction steps and system info
 - Test on multiple operating systems when possible
 
 ### 📝 Documentation
+
 - Improve README and developer guides
 - Create video tutorials
 - Write blog posts about features
@@ -455,6 +468,6 @@ We welcome contributions to any phase of the roadmap! Here's how you can help:
 
 ---
 
-*This roadmap is a living document and may be adjusted based on community feedback, technical constraints, and emerging opportunities.*
+_This roadmap is a living document and may be adjusted based on community feedback, technical constraints, and emerging opportunities._
 
 **Last Updated**: September 2025

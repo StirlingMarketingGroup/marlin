@@ -9,7 +9,7 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.6-blue.svg)](https://www.typescriptlang.org/)
 [![Stars](https://img.shields.io/github/stars/StirlingMarketingGroup/marlin?style=social)](https://github.com/StirlingMarketingGroup/marlin/stargazers)
 
-*A modern, sleek file browser with native performance and beautiful UI*
+_A modern, sleek file browser with native performance and beautiful UI_
 
 [🚀 Features](#features) • [📦 Installation](#installation) • [🛠️ Development](#development) • [🎨 Screenshots](#screenshots) • [🤝 Contributing](#contributing)
 
@@ -18,18 +18,21 @@
 ## ✨ Features
 
 ### 🎨 **Modern Design**
+
 - **Dark-first UI** with system theme detection
 - **Smooth animations** and clean modern interface
 - **Customizable sidebar** with collapsible file tree
 - **Native system colors** integration
 
-### 🚀 **Lightning Fast Performance** 
+### 🚀 **Lightning Fast Performance**
+
 - **10x smaller** than Electron alternatives (~10-20MB vs 200MB+)
 - **Native performance** with Rust backend
 - **Memory efficient** - uses system WebView instead of Chromium
 - **Instant file operations** with async processing
 
 ### 📁 **Powerful File Management**
+
 - **Editable path bar** with autocomplete (always-on editing)
 - **Multiple view modes**: Grid, List, and Details
 - **Smart sorting** by name, size, date, or type
@@ -38,6 +41,7 @@
 - **Advanced file operations**: Copy, Cut, Paste, Rename, Delete
 
 ### 🔧 **Developer Experience**
+
 - **Cross-platform**: Windows, macOS, and Linux
 - **Modern tech stack**: Tauri 2.0 + React 18 + TypeScript
 - **Extensible architecture** with plugin support
@@ -60,17 +64,18 @@ Marlin uses **Tauri** instead of Electron for superior performance:
 
 ### Why Tauri over Electron?
 
-| Feature | Marlin (Tauri) | Electron Apps |
-|---------|----------------|---------------|
-| **Bundle Size** | ~10-20 MB | ~200+ MB |
-| **Memory Usage** | ~50-80 MB | ~200-400 MB |
-| **Startup Time** | <1 second | 2-5 seconds |
-| **Security** | Sandboxed + Rust | Node.js runtime |
-| **Native Feel** | System WebView | Chromium |
+| Feature          | Marlin (Tauri)   | Electron Apps   |
+| ---------------- | ---------------- | --------------- |
+| **Bundle Size**  | ~10-20 MB        | ~200+ MB        |
+| **Memory Usage** | ~50-80 MB        | ~200-400 MB     |
+| **Startup Time** | <1 second        | 2-5 seconds     |
+| **Security**     | Sandboxed + Rust | Node.js runtime |
+| **Native Feel**  | System WebView   | Chromium        |
 
 ## 📦 Installation
 
 ### Download Release
+
 1. Go to [Releases](https://github.com/StirlingMarketingGroup/marlin/releases)
 2. Download for your platform:
    - **Windows**: `Marlin_x.x.x_x64_en-US.msi`
@@ -93,11 +98,13 @@ snap install marlin
 ## 🛠️ Development
 
 ### Prerequisites
+
 - [Node.js](https://nodejs.org/) 18+
 - [Rust](https://rustup.rs/) 1.77+
 - [Tauri CLI](https://tauri.app/v1/guides/getting-started/prerequisites)
 
 ### Setup
+
 ```bash
 # Clone the repository
 git clone https://github.com/StirlingMarketingGroup/marlin.git
@@ -111,12 +118,14 @@ npm run tauri dev
 ```
 
 ### Build
+
 ```bash
 # Build for production
 npm run tauri build
 ```
 
 ### Project Structure
+
 ```
 marlin/
 ├── src/                # React frontend
@@ -134,12 +143,15 @@ marlin/
 ## 🎨 Screenshots
 
 ### Main Interface
+
 ![Main Interface](docs/screenshots/main-interface.png)
 
 ### Grid View
+
 ![Grid View](docs/screenshots/grid-view.png)
 
 ### Dark Theme
+
 ![Dark Theme](docs/screenshots/dark-theme.png)
 
 ## 🗺️ Roadmap
@@ -147,18 +159,21 @@ marlin/
 See our [detailed roadmap](ROADMAP.md) for planned features and development timeline.
 
 ### Phase 1: Foundation ✅
+
 - [x] Basic Tauri + React setup
 - [x] Modern UI design
 - [x] File system operations
 - [x] Editable path bar
 
 ### Phase 2: Core Features 🚧
+
 - [ ] File operations (copy, cut, paste)
 - [ ] Search functionality
 - [ ] Context menus
 - [ ] Keyboard shortcuts
 
 ### Phase 3: Advanced Features 📋
+
 - [ ] File preview panel
 - [ ] Plugin system
 - [ ] Themes and customization
@@ -169,6 +184,7 @@ See our [detailed roadmap](ROADMAP.md) for planned features and development time
 We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details.
 
 ### Quick Start
+
 1. Fork the repository
 2. Create a feature branch: `git checkout -b feature/amazing-feature`
 3. Commit your changes: `git commit -m 'Add amazing feature'`
@@ -176,6 +192,7 @@ We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) f
 5. Open a Pull Request
 
 ### Development Guidelines
+
 - Follow [Rust](https://doc.rust-lang.org/1.0.0/style/style/naming/README.html) and [TypeScript](https://typescript-eslint.io/) style guides
 - Add tests for new features
 - Update documentation as needed

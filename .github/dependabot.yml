@@ -6,78 +6,78 @@
 version: 2
 updates:
   # NPM (frontend + Tauri CLI/plugins)
-  - package-ecosystem: "npm"
-    directory: "/"
+  - package-ecosystem: 'npm'
+    directory: '/'
     schedule:
-      interval: "weekly"
+      interval: 'weekly'
     open-pull-requests-limit: 10
-    rebase-strategy: "auto"
-    versioning-strategy: "increase-if-necessary"
+    rebase-strategy: 'auto'
+    versioning-strategy: 'increase-if-necessary'
     commit-message:
-      prefix: "chore(deps)"
-      prefix-development: "chore(deps-dev)"
-      include: "scope"
+      prefix: 'chore(deps)'
+      prefix-development: 'chore(deps-dev)'
+      include: 'scope'
     labels:
-      - "dependencies"
-      - "npm"
+      - 'dependencies'
+      - 'npm'
     groups:
       # Group routine updates to reduce PR noise
       dev-dependencies:
-        applies-to: "version-updates"
-        dependency-type: "development"
+        applies-to: 'version-updates'
+        dependency-type: 'development'
         patterns:
-          - "*"
+          - '*'
       minor-and-patch:
-        applies-to: "version-updates"
+        applies-to: 'version-updates'
         update-types:
-          - "minor"
-          - "patch"
+          - 'minor'
+          - 'patch'
         patterns:
-          - "*"
+          - '*'
 
   # Security updates are handled by GitHub's alerts (no separate block needed)
 
   # Cargo (Rust, Tauri backend)
-  - package-ecosystem: "cargo"
-    directory: "/src-tauri"
+  - package-ecosystem: 'cargo'
+    directory: '/src-tauri'
     schedule:
-      interval: "weekly"
+      interval: 'weekly'
     open-pull-requests-limit: 10
-    rebase-strategy: "auto"
-    versioning-strategy: "increase-if-necessary"
+    rebase-strategy: 'auto'
+    versioning-strategy: 'increase-if-necessary'
     commit-message:
-      prefix: "chore(deps)"
-      include: "scope"
+      prefix: 'chore(deps)'
+      include: 'scope'
     labels:
-      - "dependencies"
-      - "cargo"
+      - 'dependencies'
+      - 'cargo'
     groups:
       minor-and-patch:
-        applies-to: "version-updates"
+        applies-to: 'version-updates'
         update-types:
-          - "minor"
-          - "patch"
+          - 'minor'
+          - 'patch'
         patterns:
-          - "*"
+          - '*'
 
   # GitHub Actions
-  - package-ecosystem: "github-actions"
-    directory: "/"
+  - package-ecosystem: 'github-actions'
+    directory: '/'
     schedule:
-      interval: "weekly"
+      interval: 'weekly'
     open-pull-requests-limit: 10
-    rebase-strategy: "auto"
+    rebase-strategy: 'auto'
     commit-message:
-      prefix: "chore(ci)"
-      include: "scope"
+      prefix: 'chore(ci)'
+      include: 'scope'
     labels:
-      - "dependencies"
-      - "ci"
+      - 'dependencies'
+      - 'ci'
     groups:
       minor-and-patch:
-        applies-to: "version-updates"
+        applies-to: 'version-updates'
         update-types:
-          - "minor"
-          - "patch"
+          - 'minor'
+          - 'patch'
         patterns:
-          - "*"
+          - '*'

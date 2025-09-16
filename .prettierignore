@@ -1,0 +1,8 @@
+node_modules
+.dist
+dist
+coverage
+playwright-report
+src-tauri/target
+src-tauri/gen
+

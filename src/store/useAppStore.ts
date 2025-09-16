@@ -1,132 +1,136 @@
-import { create } from 'zustand'
-import { FileItem, ViewPreferences, Theme, PinnedDirectory } from '../types'
-import { invoke } from '@tauri-apps/api/core'
-import { message } from '@tauri-apps/plugin-dialog'
+import { create } from 'zustand';
+import {
+  FileItem,
+  ViewPreferences,
+  Theme,
+  PinnedDirectory,
+  DirectoryPreferencesMap,
+} from '../types';
+import { invoke } from '@tauri-apps/api/core';
+import { message } from '@tauri-apps/plugin-dialog';
 
 // Concurrency limiter for app icon generation requests (macOS)
-let __iconQueue: Array<() => void> = []
-let __iconActive = 0
-const __ICON_MAX = 4
+const __iconQueue: Array<() => void> = [];
+let __iconActive = 0;
+const __ICON_MAX = 4;
 const __pumpIconQueue = () => {
   while (__iconActive < __ICON_MAX && __iconQueue.length) {
-    const fn = __iconQueue.shift()
-    if (fn) fn()
+    const fn = __iconQueue.shift();
+    if (fn) fn();
   }
-}
-const __scheduleIconTask = <T,>(task: () => Promise<T>): Promise<T> =>
+};
+const __scheduleIconTask = <T>(task: () => Promise<T>): Promise<T> =>
   new Promise((resolve, reject) => {
     const run = async () => {
-      __iconActive++
+      __iconActive++;
       try {
-        const result = await task()
-        resolve(result)
+        const result = await task();
+        resolve(result);
       } catch (e) {
-        reject(e)
+        reject(e);
       } finally {
-        __iconActive--
-        __pumpIconQueue()
+        __iconActive--;
+        __pumpIconQueue();
       }
-    }
-    __iconQueue.push(run)
-    __pumpIconQueue()
-  })
+    };
+    __iconQueue.push(run);
+    __pumpIconQueue();
+  });
+
+const normalizePath = (input: string): string => {
+  let path = input || '/';
+  path = path.replace(/\\/g, '/');
+  path = path.replace(/\/+/, '/');
+  path = path.replace(/\/+/, '/');
+  if (/^[A-Za-z]:$/.test(path)) {
+    path = `${path}/`;
+  }
+  if (path.length > 1 && path.endsWith('/')) {
+    path = path.slice(0, -1);
+  }
+  return path || '/';
+};
 
 interface AppState {
   // Navigation
-  currentPath: string
-  pathHistory: string[]
-  historyIndex: number
-  homeDir?: string
-  
+  currentPath: string;
+  pathHistory: string[];
+  historyIndex: number;
+  homeDir?: string;
+
   // Files
-  files: FileItem[]
-  selectedFiles: string[]
-  selectionAnchor?: string
-  selectionLead?: string
-  shiftBaseSelection?: string[] | null
-  loading: boolean
-  error?: string
-  
+  files: FileItem[];
+  selectedFiles: string[];
+  selectionAnchor?: string;
+  selectionLead?: string;
+  shiftBaseSelection?: string[] | null;
+  loading: boolean;
+  error?: string;
+
   // Preferences
-  globalPreferences: ViewPreferences
-  directoryPreferences: Record<string, Partial<ViewPreferences>>
-  lastPreferenceUpdate: number // Timestamp to prevent race conditions
-  theme: Theme
-  
+  globalPreferences: ViewPreferences;
+  directoryPreferences: DirectoryPreferencesMap;
+  lastPreferenceUpdate: number; // Timestamp to prevent race conditions
+  theme: Theme;
+
   // App icon cache for macOS Applications view
-  appIconCache: Record<string, string>
-  
+  appIconCache: Record<string, string>;
+
   // Pinned directories
-  pinnedDirectories: PinnedDirectory[]
-  
+  pinnedDirectories: PinnedDirectory[];
+
   // UI State
-  sidebarWidth: number
-  showSidebar: boolean
-  showPreviewPanel: boolean
+  sidebarWidth: number;
+  showSidebar: boolean;
+  showPreviewPanel: boolean;
   // UI ephemeral
-  showZoomSlider: boolean
-  _zoomSliderHideTimer?: number
-  
+  showZoomSlider: boolean;
+  _zoomSliderHideTimer?: number;
+
   // Actions
-  setCurrentPath: (path: string) => void
-  setHomeDir: (path: string) => void
-  setFiles: (files: FileItem[]) => void
-  setLoading: (loading: boolean) => void
-  setError: (error?: string) => void
-  setSelectedFiles: (files: string[]) => void
-  setSelectionAnchor: (path?: string) => void
-  setSelectionLead: (path?: string) => void
-  setShiftBaseSelection: (paths: string[] | null) => void
-  updateGlobalPreferences: (preferences: Partial<ViewPreferences>) => void
-  updateDirectoryPreferences: (path: string, preferences: Partial<ViewPreferences>) => void
-  setTheme: (theme: Theme) => void
-  setSidebarWidth: (width: number) => void
-  toggleSidebar: () => void
-  togglePreviewPanel: () => void
-  showZoomSliderNow: () => void
-  hideZoomSliderNow: () => void
-  scheduleHideZoomSlider: (delayMs?: number) => void
-  navigateTo: (path: string) => void
-  goBack: () => void
-  goForward: () => void
-  canGoBack: () => boolean
-  canGoForward: () => boolean
-  goUp: () => void
-  canGoUp: () => boolean
-  toggleHiddenFiles: (forceValue?: boolean) => Promise<void>
-  toggleFoldersFirst: () => Promise<void>
-  refreshCurrentDirectory: () => Promise<void>
-  fetchAppIcon: (path: string, size?: number) => Promise<string | undefined>
-  resetDirectoryPreferences: () => void
+  setCurrentPath: (path: string) => void;
+  setHomeDir: (path: string) => void;
+  setFiles: (files: FileItem[]) => void;
+  setLoading: (loading: boolean) => void;
+  setError: (error?: string) => void;
+  setSelectedFiles: (files: string[]) => void;
+  setSelectionAnchor: (path?: string) => void;
+  setSelectionLead: (path?: string) => void;
+  setShiftBaseSelection: (paths: string[] | null) => void;
+  updateGlobalPreferences: (preferences: Partial<ViewPreferences>) => void;
+  updateDirectoryPreferences: (path: string, preferences: Partial<ViewPreferences>) => void;
+  setTheme: (theme: Theme) => void;
+  setSidebarWidth: (width: number) => void;
+  toggleSidebar: () => void;
+  togglePreviewPanel: () => void;
+  showZoomSliderNow: () => void;
+  hideZoomSliderNow: () => void;
+  scheduleHideZoomSlider: (delayMs?: number) => void;
+  navigateTo: (path: string) => void;
+  goBack: () => void;
+  goForward: () => void;
+  canGoBack: () => boolean;
+  canGoForward: () => boolean;
+  goUp: () => void;
+  canGoUp: () => boolean;
+  toggleHiddenFiles: (forceValue?: boolean) => Promise<void>;
+  toggleFoldersFirst: () => Promise<void>;
+  refreshCurrentDirectory: () => Promise<void>;
+  fetchAppIcon: (path: string, size?: number) => Promise<string | undefined>;
+  resetDirectoryPreferences: () => void;
   // Pinned directories
-  loadPinnedDirectories: () => Promise<void>
-  addPinnedDirectory: (path: string, name?: string) => Promise<PinnedDirectory>
-  removePinnedDirectory: (path: string) => Promise<boolean>
-  reorderPinnedDirectories: (paths: string[]) => Promise<void>
+  loadPinnedDirectories: () => Promise<void>;
+  addPinnedDirectory: (path: string, name?: string) => Promise<PinnedDirectory>;
+  removePinnedDirectory: (path: string) => Promise<boolean>;
+  reorderPinnedDirectories: (paths: string[]) => Promise<void>;
   // Rename UX
-  renameTargetPath?: string
-  setRenameTarget: (path?: string) => void
-  beginRenameSelected: () => void
-  renameFile: (newName: string) => Promise<void>
+  renameTargetPath?: string;
+  setRenameTarget: (path?: string) => void;
+  beginRenameSelected: () => void;
+  renameFile: (newName: string) => Promise<void>;
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
-  // Helpers
-  // Normalize paths for consistent per-directory keys
-  // - converts backslashes to slashes
-  // - collapses duplicate slashes
-  // - trims trailing slash except root
-  // - ensures Windows drive roots like C: become C:/
-  _normalizePath: (p: string): string => {
-    let s = p || '/'
-    s = s.replace(/\\/g, '/')
-    s = s.replace(/\/+/, '/')
-    s = s.replace(/\/+/, '/')
-    if (/^[A-Za-z]:$/.test(s)) s = s + '/'
-    if (s.length > 1 && s.endsWith('/')) s = s.slice(0, -1)
-    if (!s) s = '/'
-    return s
-  },
   // Initial state
   currentPath: '/', // Will be replaced at init
   pathHistory: ['/'],
@@ -139,7 +143,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   shiftBaseSelection: null,
   loading: false,
   error: undefined,
-  
+
   globalPreferences: {
     viewMode: 'list',
     sortBy: 'name',
@@ -153,352 +157,380 @@ export const useAppStore = create<AppState>((set, get) => ({
   theme: 'system',
   appIconCache: {},
   pinnedDirectories: [],
-  
+
   sidebarWidth: 240,
   showSidebar: true,
   showPreviewPanel: false,
   showZoomSlider: false,
   _zoomSliderHideTimer: undefined,
-  
+
   // Actions
-  setCurrentPath: (path) => set({ currentPath: (get() as any)._normalizePath(path) }),
+  setCurrentPath: (path) => set({ currentPath: normalizePath(path) }),
   setHomeDir: (path) => set({ homeDir: path }),
   setFiles: (files) => set({ files }),
   setLoading: (loading) => set({ loading }),
   setError: (error) => set({ error }),
   setSelectedFiles: (files) => {
-    set({ selectedFiles: files })
+    set({ selectedFiles: files });
     // Update native menu selection state (ignore errors in dev)
-    ;(async () => {
+    (async () => {
       try {
-        await invoke('update_selection_menu_state', { hasSelection: Array.isArray(files) && files.length > 0 })
-      } catch { /* ignore */ }
-    })()
+        await invoke('update_selection_menu_state', {
+          hasSelection: Array.isArray(files) && files.length > 0,
+        });
+      } catch {
+        /* ignore */
+      }
+    })();
   },
   setSelectionAnchor: (path?: string) => set({ selectionAnchor: path }),
   setSelectionLead: (path?: string) => set({ selectionLead: path }),
   setShiftBaseSelection: (paths: string[] | null) => set({ shiftBaseSelection: paths }),
-  
+
   updateGlobalPreferences: (preferences) =>
     set((state) => ({
       globalPreferences: { ...state.globalPreferences, ...preferences },
     })),
-    
+
   updateDirectoryPreferences: (path, preferences) =>
     set((state) => {
-      const norm = (get() as any)._normalizePath(path)
-      console.log('📝 updateDirectoryPreferences:', { path: norm, preferences, timestamp: Date.now() })
+      const norm = normalizePath(path);
+      console.log('📝 updateDirectoryPreferences:', {
+        path: norm,
+        preferences,
+        timestamp: Date.now(),
+      });
       return {
         directoryPreferences: {
           ...state.directoryPreferences,
           [norm]: { ...state.directoryPreferences[norm], ...preferences },
         },
         lastPreferenceUpdate: Date.now(),
-      }
+      };
     }),
-    
+
   setTheme: (theme) => set({ theme }),
   setSidebarWidth: (width) => set({ sidebarWidth: Math.max(200, Math.min(400, width)) }),
   toggleSidebar: () => set((state) => ({ showSidebar: !state.showSidebar })),
   togglePreviewPanel: () => set((state) => ({ showPreviewPanel: !state.showPreviewPanel })),
-  showZoomSliderNow: () => set((state) => {
-    if (state._zoomSliderHideTimer) {
-      window.clearTimeout(state._zoomSliderHideTimer)
-    }
-    return { showZoomSlider: true, _zoomSliderHideTimer: undefined }
-  }),
-  hideZoomSliderNow: () => set((state) => {
-    if (state._zoomSliderHideTimer) {
-      window.clearTimeout(state._zoomSliderHideTimer)
-    }
-    return { showZoomSlider: false, _zoomSliderHideTimer: undefined }
-  }),
-  scheduleHideZoomSlider: (delayMs = 300) => set((state) => {
-    if (state._zoomSliderHideTimer) {
-      window.clearTimeout(state._zoomSliderHideTimer)
-    }
-    const id = window.setTimeout(() => {
-      useAppStore.getState().hideZoomSliderNow()
-    }, delayMs)
-    return { _zoomSliderHideTimer: id }
-  }),
-  
+  showZoomSliderNow: () =>
+    set((state) => {
+      if (state._zoomSliderHideTimer) {
+        window.clearTimeout(state._zoomSliderHideTimer);
+      }
+      return { showZoomSlider: true, _zoomSliderHideTimer: undefined };
+    }),
+  hideZoomSliderNow: () =>
+    set((state) => {
+      if (state._zoomSliderHideTimer) {
+        window.clearTimeout(state._zoomSliderHideTimer);
+      }
+      return { showZoomSlider: false, _zoomSliderHideTimer: undefined };
+    }),
+  scheduleHideZoomSlider: (delayMs = 300) =>
+    set((state) => {
+      if (state._zoomSliderHideTimer) {
+        window.clearTimeout(state._zoomSliderHideTimer);
+      }
+      const id = window.setTimeout(() => {
+        useAppStore.getState().hideZoomSliderNow();
+      }, delayMs);
+      return { _zoomSliderHideTimer: id };
+    }),
+
   navigateTo: (path) => {
-    const { pathHistory, historyIndex } = get()
-    const norm = (get() as any)._normalizePath(path)
-    const newHistory = [...pathHistory.slice(0, historyIndex + 1), norm]
+    const { pathHistory, historyIndex } = get();
+    const norm = normalizePath(path);
+    const newHistory = [...pathHistory.slice(0, historyIndex + 1), norm];
     set({
       currentPath: norm,
       pathHistory: newHistory,
       historyIndex: newHistory.length - 1,
-    })
+    });
   },
-  
+
   goBack: () => {
-    const { pathHistory, historyIndex } = get()
+    const { pathHistory, historyIndex } = get();
     if (historyIndex > 0) {
-      const newIndex = historyIndex - 1
+      const newIndex = historyIndex - 1;
       set({
         currentPath: pathHistory[newIndex],
         historyIndex: newIndex,
-      })
+      });
     }
   },
-  
+
   goForward: () => {
-    const { pathHistory, historyIndex } = get()
+    const { pathHistory, historyIndex } = get();
     if (historyIndex < pathHistory.length - 1) {
-      const newIndex = historyIndex + 1
+      const newIndex = historyIndex + 1;
       set({
         currentPath: pathHistory[newIndex],
         historyIndex: newIndex,
-      })
+      });
     }
   },
-  
+
   canGoBack: () => {
-    const { historyIndex } = get()
-    return historyIndex > 0
+    const { historyIndex } = get();
+    return historyIndex > 0;
   },
-  
+
   canGoForward: () => {
-    const { pathHistory, historyIndex } = get()
-    return historyIndex < pathHistory.length - 1
+    const { pathHistory, historyIndex } = get();
+    return historyIndex < pathHistory.length - 1;
   },
-  
+
   goUp: () => {
-    const { currentPath, navigateTo } = get()
+    const { currentPath, navigateTo } = get();
     // Handle POSIX and basic Windows paths
-    if (!currentPath || currentPath === '/') return
+    if (!currentPath || currentPath === '/') return;
     // Normalize backslashes to slashes for finding parent
-    const normalized = currentPath.replace(/\\/g, '/').replace(/\/+$/g, '') || '/'
+    const normalized = currentPath.replace(/\\/g, '/').replace(/\/+$/g, '') || '/';
     // If after trimming it's root, nothing to do
-    if (normalized === '/') return
+    if (normalized === '/') return;
     // Windows drive root like C:/
-    const driveRootMatch = normalized.match(/^([A-Za-z]:)(\/$)?$/)
-    if (driveRootMatch) return
-    const lastSlash = normalized.lastIndexOf('/')
-    const parent = lastSlash <= 0 ? '/' : normalized.slice(0, lastSlash) || '/'
-    navigateTo(parent)
+    const driveRootMatch = normalized.match(/^([A-Za-z]:)(\/$)?$/);
+    if (driveRootMatch) return;
+    const lastSlash = normalized.lastIndexOf('/');
+    const parent = lastSlash <= 0 ? '/' : normalized.slice(0, lastSlash) || '/';
+    navigateTo(parent);
   },
-  
+
   canGoUp: () => {
-    const { currentPath } = get()
-    if (!currentPath || currentPath === '/') return false
-    const normalized = currentPath.replace(/\\/g, '/').replace(/\/+$/g, '') || '/'
-    if (normalized === '/') return false
-    const driveRootMatch = normalized.match(/^([A-Za-z]:)(\/$)?$/)
-    if (driveRootMatch) return false
-    return true
+    const { currentPath } = get();
+    if (!currentPath || currentPath === '/') return false;
+    const normalized = currentPath.replace(/\\/g, '/').replace(/\/+$/g, '') || '/';
+    if (normalized === '/') return false;
+    const driveRootMatch = normalized.match(/^([A-Za-z]:)(\/$)?$/);
+    if (driveRootMatch) return false;
+    return true;
   },
 
   toggleHiddenFiles: async (forceValue?: boolean) => {
-    const { currentPath } = get()
-    console.log('🔄 toggleHiddenFiles called for path:', currentPath)
-    
+    const { currentPath } = get();
+    console.log('🔄 toggleHiddenFiles called for path:', currentPath);
+
     // Get current state fresh each time to avoid stale closure values
     const getCurrentState = () => {
-      const state = get()
+      const state = get();
+      const directoryPrefs = state.directoryPreferences[currentPath] ?? {};
       return {
-        directoryPrefs: state.directoryPreferences[currentPath] || {},
+        directoryPrefs,
         globalPrefs: state.globalPreferences,
-        currentShowHidden: state.directoryPreferences[currentPath]?.showHidden ?? state.globalPreferences.showHidden
-      }
-    }
-    
-    const { currentShowHidden } = getCurrentState()
-    const newShowHidden = typeof forceValue === 'boolean' ? forceValue : !currentShowHidden
-    console.log('🔄 Toggle hidden files:', { 
+        currentShowHidden: directoryPrefs.showHidden ?? state.globalPreferences.showHidden,
+      };
+    };
+
+    const { currentShowHidden } = getCurrentState();
+    const newShowHidden = typeof forceValue === 'boolean' ? forceValue : !currentShowHidden;
+    console.log('🔄 Toggle hidden files:', {
       path: currentPath,
-      currentShowHidden, 
+      currentShowHidden,
       newShowHidden,
-      timestamp: Date.now()
-    })
-    
+      timestamp: Date.now(),
+    });
+
     // Update directory preference first
-    console.log('📝 About to update directory preferences...')
-    get().updateDirectoryPreferences(currentPath, { showHidden: newShowHidden })
-    console.log('✅ Directory preferences updated')
-    
+    console.log('📝 About to update directory preferences...');
+    get().updateDirectoryPreferences(currentPath, { showHidden: newShowHidden });
+    console.log('✅ Directory preferences updated');
+
     // Also update global preference as default for new directories
-    get().updateGlobalPreferences({ showHidden: newShowHidden })
-    
+    get().updateGlobalPreferences({ showHidden: newShowHidden });
+
     // Get fresh state after updates for saving
-    const { directoryPrefs, globalPrefs } = getCurrentState()
-    const updatedDirPrefs = { ...directoryPrefs, showHidden: newShowHidden }
-    const updatedGlobalPrefs = { ...globalPrefs, showHidden: newShowHidden }
-    
+    const { directoryPrefs } = getCurrentState();
+    const updatedDirPrefs: Partial<ViewPreferences> = {
+      ...directoryPrefs,
+      showHidden: newShowHidden,
+    };
+
     // Save to backend with updated values
     try {
-      await invoke('set_dir_prefs', { path: currentPath, prefs: JSON.stringify(updatedDirPrefs) })
-      console.log('✅ Successfully saved directory preferences to disk for:', currentPath)
+      await invoke('set_dir_prefs', { path: currentPath, prefs: JSON.stringify(updatedDirPrefs) });
+      console.log('✅ Successfully saved directory preferences to disk for:', currentPath);
     } catch (error) {
-      console.warn('Failed to save directory preferences:', error)
+      console.warn('Failed to save directory preferences:', error);
     }
 
     // Sync native menu state
     try {
-      await invoke('update_hidden_files_menu', { checked: newShowHidden, source: 'frontend' })
+      await invoke('update_hidden_files_menu', { checked: newShowHidden, source: 'frontend' });
     } catch (error) {
-      console.warn('Failed to sync menu:', error)
+      console.warn('Failed to sync menu:', error);
     }
 
     // Refresh directory to apply new filter
-    console.log('🔄 Calling refreshCurrentDirectory to apply hidden files filter')
-    await get().refreshCurrentDirectory()
-    console.log('✅ Refresh completed, new state should show hidden files:', newShowHidden)
+    console.log('🔄 Calling refreshCurrentDirectory to apply hidden files filter');
+    await get().refreshCurrentDirectory();
+    console.log('✅ Refresh completed, new state should show hidden files:', newShowHidden);
   },
 
   toggleFoldersFirst: async () => {
-    const { globalPreferences, updateGlobalPreferences } = get()
-    const newValue = !globalPreferences.foldersFirst
+    const { globalPreferences, updateGlobalPreferences } = get();
+    const newValue = !globalPreferences.foldersFirst;
 
     // Update preference
-    updateGlobalPreferences({ foldersFirst: newValue })
+    updateGlobalPreferences({ foldersFirst: newValue });
 
     // Sync the native menu checkbox state
     try {
-      await invoke('update_folders_first_menu', { checked: newValue, source: 'frontend' })
-    } catch (_) {}
+      await invoke('update_folders_first_menu', { checked: newValue, source: 'frontend' });
+    } catch (error) {
+      console.warn('Failed to sync folders-first menu state:', error);
+    }
   },
 
   refreshCurrentDirectory: async () => {
-    const { currentPath, setFiles, setLoading, setError } = get()
-    console.log('🔄 refreshCurrentDirectory called for:', currentPath)
+    const { currentPath, setFiles, setLoading, setError } = get();
+    console.log('🔄 refreshCurrentDirectory called for:', currentPath);
     try {
-      setLoading(true)
-      setError(undefined)
-      const files = await invoke<any[]>('read_directory', { path: currentPath })
-      console.log('📁 Loaded files:', files.length, 'total files')
-      console.log('👻 Hidden files in loaded set:', files.filter(f => f.is_hidden).length)
-      setFiles(files)
+      setLoading(true);
+      setError(undefined);
+      const files = await invoke<FileItem[]>('read_directory', { path: currentPath });
+      console.log('📁 Loaded files:', files.length, 'total files');
+      console.log('👻 Hidden files in loaded set:', files.filter((f) => f.is_hidden).length);
+      setFiles(files);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      console.error('❌ refreshCurrentDirectory failed:', msg)
-      setError(`Failed to refresh: ${msg}`)
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('❌ refreshCurrentDirectory failed:', msg);
+      setError(`Failed to refresh: ${msg}`);
     } finally {
-      setLoading(false)
+      setLoading(false);
     }
   },
 
   fetchAppIcon: async (path: string, size = 128) => {
-    const { appIconCache } = get()
-    if (appIconCache[path]) return appIconCache[path]
+    const { appIconCache } = get();
+    if (appIconCache[path]) return appIconCache[path];
     return __scheduleIconTask(async () => {
       try {
-        const dataUrl = await invoke<string>('get_application_icon', { path, size })
+        const dataUrl = await invoke<string>('get_application_icon', { path, size });
         // dataUrl is already a data:image/png;base64,... string on macOS
-        set((state) => ({ appIconCache: { ...state.appIconCache, [path]: dataUrl } }))
-        return dataUrl
-      } catch (_) {
-        return undefined
+        set((state) => ({ appIconCache: { ...state.appIconCache, [path]: dataUrl } }));
+        return dataUrl;
+      } catch (error) {
+        console.warn('Failed to fetch application icon:', error);
+        return undefined;
       }
-    })
+    });
   },
 
   resetDirectoryPreferences: () => {
-    set({ directoryPreferences: {} })
+    set({ directoryPreferences: {} });
   },
 
   loadPinnedDirectories: async () => {
     try {
-      const pinnedDirs = await invoke<PinnedDirectory[]>('get_pinned_directories')
-      set({ pinnedDirectories: pinnedDirs })
+      const pinnedDirs = await invoke<PinnedDirectory[]>('get_pinned_directories');
+      set({ pinnedDirectories: pinnedDirs });
     } catch (error) {
-      console.error('Failed to load pinned directories:', error)
-      set({ pinnedDirectories: [] })
+      console.error('Failed to load pinned directories:', error);
+      set({ pinnedDirectories: [] });
     }
   },
 
   addPinnedDirectory: async (path: string, name?: string) => {
     try {
-      const newPin = await invoke<PinnedDirectory>('add_pinned_directory', { path, name })
+      const newPin = await invoke<PinnedDirectory>('add_pinned_directory', { path, name });
       set((state) => ({
-        pinnedDirectories: [...state.pinnedDirectories, newPin]
-      }))
-      return newPin
+        pinnedDirectories: [...state.pinnedDirectories, newPin],
+      }));
+      return newPin;
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error)
-      throw new Error(errorMessage)
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      throw new Error(errorMessage);
     }
   },
 
   removePinnedDirectory: async (path: string) => {
     try {
-      const removed = await invoke<boolean>('remove_pinned_directory', { path })
+      const removed = await invoke<boolean>('remove_pinned_directory', { path });
       if (removed) {
         set((state) => ({
-          pinnedDirectories: state.pinnedDirectories.filter(p => p.path !== path)
-        }))
+          pinnedDirectories: state.pinnedDirectories.filter((p) => p.path !== path),
+        }));
       }
-      return removed
+      return removed;
     } catch (error) {
-      console.error('Failed to remove pinned directory:', error)
-      return false
+      console.error('Failed to remove pinned directory:', error);
+      return false;
     }
   },
 
   reorderPinnedDirectories: async (paths: string[]) => {
     try {
-      await invoke('reorder_pinned_directories', { paths })
+      await invoke('reorder_pinned_directories', { paths });
       // Reorder the local state to match
       set((state) => {
-        const reordered = paths.map(path => 
-          state.pinnedDirectories.find(p => p.path === path)
-        ).filter(Boolean) as PinnedDirectory[]
-        
+        const reordered = paths
+          .map((path) => state.pinnedDirectories.find((p) => p.path === path))
+          .filter(Boolean) as PinnedDirectory[];
+
         // Add any pins that weren't in the reorder list
-        const missing = state.pinnedDirectories.filter(p => 
-          !paths.includes(p.path)
-        )
-        
-        return { pinnedDirectories: [...reordered, ...missing] }
-      })
+        const missing = state.pinnedDirectories.filter((p) => !paths.includes(p.path));
+
+        return { pinnedDirectories: [...reordered, ...missing] };
+      });
     } catch (error) {
-      console.error('Failed to reorder pinned directories:', error)
-      throw error
+      console.error('Failed to reorder pinned directories:', error);
+      throw error;
     }
   },
-  
+
   // Rename state
   renameTargetPath: undefined,
   setRenameTarget: (path?: string) => set({ renameTargetPath: path }),
   beginRenameSelected: () => {
-    const { selectedFiles } = get()
-    if (!selectedFiles || selectedFiles.length === 0) return
-    set({ renameTargetPath: selectedFiles[0] })
+    const { selectedFiles } = get();
+    if (!selectedFiles || selectedFiles.length === 0) return;
+    set({ renameTargetPath: selectedFiles[0] });
   },
   renameFile: async (newName: string) => {
-    const state = get()
-    const target = state.renameTargetPath
-    if (!target) return
-    const trimmed = (newName || '').trim()
-    if (!trimmed) { set({ renameTargetPath: undefined }); return }
+    const state = get();
+    const target = state.renameTargetPath;
+    if (!target) return;
+    const trimmed = (newName || '').trim();
+    if (!trimmed) {
+      set({ renameTargetPath: undefined });
+      return;
+    }
     if (/[\\/]/.test(trimmed)) {
       // Invalid characters for a single path segment
       try {
-        await message('Name cannot contain slashes.', { title: 'Invalid Name', kind: 'warning', okLabel: 'OK' })
-      } catch (_) {}
-      return
+        await message('Name cannot contain slashes.', {
+          title: 'Invalid Name',
+          kind: 'warning',
+          okLabel: 'OK',
+        });
+      } catch (error) {
+        console.warn('Failed to show invalid-name warning:', error);
+      }
+      return;
     }
 
-    const sep = target.includes('\\') ? '\\' : '/'
-    const lastSep = Math.max(target.lastIndexOf('/'), target.lastIndexOf('\\'))
-    const parent = lastSep >= 0 ? target.slice(0, lastSep) : state.currentPath
-    const toPath = parent ? `${parent}${sep}${trimmed}` : trimmed
+    const sep = target.includes('\\') ? '\\' : '/';
+    const lastSep = Math.max(target.lastIndexOf('/'), target.lastIndexOf('\\'));
+    const parent = lastSep >= 0 ? target.slice(0, lastSep) : state.currentPath;
+    const toPath = parent ? `${parent}${sep}${trimmed}` : trimmed;
     try {
       // Tauri command args expect camelCase keys
-      await invoke('rename_file', { fromPath: target, toPath })
-      set({ renameTargetPath: undefined })
-      state.setSelectedFiles([toPath])
-      await state.refreshCurrentDirectory()
+      await invoke('rename_file', { fromPath: target, toPath });
+      set({ renameTargetPath: undefined });
+      state.setSelectedFiles([toPath]);
+      await state.refreshCurrentDirectory();
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
+      const msg = err instanceof Error ? err.message : String(err);
       try {
-        await message(`Failed to rename:\n${msg}`, { title: 'Rename Error', kind: 'error', okLabel: 'OK' })
-      } catch (_) {
-        // ignore
+        await message(`Failed to rename:\n${msg}`, {
+          title: 'Rename Error',
+          kind: 'error',
+          okLabel: 'OK',
+        });
+      } catch (dialogError) {
+        console.error('Failed to show rename error dialog:', dialogError);
       }
     }
   },
-}))
+}));

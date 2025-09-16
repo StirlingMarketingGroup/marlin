@@ -6,7 +6,7 @@
   * {
     @apply border-app-border;
   }
-  
+
   body {
     @apply bg-app-dark text-app-text font-sans;
     margin: 0;
@@ -31,7 +31,7 @@
     user-select: none;
     -webkit-user-select: none;
   }
-  [data-tauri-drag-region="false"] {
+  [data-tauri-drag-region='false'] {
     -webkit-app-region: no-drag;
   }
 
@@ -40,14 +40,14 @@
     --accent: #3584e4;
     --accent-soft: rgba(53, 132, 228, 0.15);
     --accent-selected: rgba(53, 132, 228, 0.28);
-    
+
     /* RGB values for background colors (for rgba usage) */
-    --bg-rgb: 30, 30, 30;  /* #1e1e1e */
-    --accent-rgb: 53, 132, 228;  /* #3584e4 */
+    --bg-rgb: 30, 30, 30; /* #1e1e1e */
+    --accent-rgb: 53, 132, 228; /* #3584e4 */
   }
 
   /* Sidebar drag-over effect */
-  [data-sidebar="true"].drag-over {
+  [data-sidebar='true'].drag-over {
     @apply relative;
     background-color: var(--accent-soft);
     outline: 2px solid var(--accent);
@@ -104,11 +104,21 @@
 }
 
 @layer utilities {
-  .text-accent { color: var(--accent); }
-  .bg-accent { background-color: var(--accent); }
-  .bg-accent-soft { background-color: var(--accent-soft); }
-  .bg-accent-selected { background-color: var(--accent-selected); }
-  .outline-accent { outline-color: var(--accent); }
+  .text-accent {
+    color: var(--accent);
+  }
+  .bg-accent {
+    background-color: var(--accent);
+  }
+  .bg-accent-soft {
+    background-color: var(--accent-soft);
+  }
+  .bg-accent-selected {
+    background-color: var(--accent-selected);
+  }
+  .outline-accent {
+    outline-color: var(--accent);
+  }
   .line-clamp-2 {
     display: -webkit-box;
     -webkit-line-clamp: 2;
@@ -124,19 +134,23 @@
   .bg-checker {
     background-color: #1f1f1f; /* base for dark theme */
     background-image:
-      linear-gradient(45deg, rgba(255,255,255,0.08) 25%, transparent 25%),
-      linear-gradient(-45deg, rgba(255,255,255,0.08) 25%, transparent 25%),
-      linear-gradient(45deg, transparent 75%, rgba(255,255,255,0.08) 75%),
-      linear-gradient(-45deg, transparent 75%, rgba(255,255,255,0.08) 75%);
+      linear-gradient(45deg, rgba(255, 255, 255, 0.08) 25%, transparent 25%),
+      linear-gradient(-45deg, rgba(255, 255, 255, 0.08) 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, rgba(255, 255, 255, 0.08) 75%),
+      linear-gradient(-45deg, transparent 75%, rgba(255, 255, 255, 0.08) 75%);
     background-size: 16px 16px;
-    background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+    background-position:
+      0 0,
+      0 8px,
+      8px -8px,
+      -8px 0;
   }
-  
+
   /* Dragging state for file items */
   .draggable-item.dragging {
     opacity: 0.5 !important;
   }
-  
+
   /* Custom drag preview animation */
   @keyframes dragPreviewFadeIn {
     from {
@@ -148,7 +162,7 @@
       transform: scale(1);
     }
   }
-  
+
   .drag-preview {
     animation: dragPreviewFadeIn 0.15s ease-out;
   }
@@ -158,7 +172,7 @@
     /* Ensure consistent text rendering */
     text-rendering: optimizeLegibility;
   }
-  
+
   /* Support for webkit line clamping in grid view */
   .webkit-line-clamp-2 {
     display: -webkit-box;
@@ -171,7 +185,7 @@
   .truncated-text {
     position: relative;
   }
-  
+
   /* Toast slide-in animation */
   @keyframes slide-in {
     from {
@@ -183,7 +197,7 @@
       opacity: 1;
     }
   }
-  
+
   .animate-slide-in {
     animation: slide-in 0.3s ease-out;
   }

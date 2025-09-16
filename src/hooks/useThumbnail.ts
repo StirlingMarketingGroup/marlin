@@ -37,46 +37,50 @@ export function useThumbnail(
   path: string | undefined,
   options: Omit<ThumbnailRequest, 'path'> = {}
 ) {
+  const { size, quality, priority, format } = options;
   const [dataUrl, setDataUrl] = useState<string | undefined>(undefined);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | undefined>(undefined);
   const [cached, setCached] = useState(false);
   const [generationTimeMs, setGenerationTimeMs] = useState<number>(0);
   const [hasTransparency, setHasTransparency] = useState<boolean>(false);
-  
+
   const abortControllerRef = useRef<AbortController>();
   const currentPathRef = useRef<string>();
   const requestIdRef = useRef<string>();
 
-  const fetchThumbnail = useCallback(async (thumbnailPath: string, requestOptions: Omit<ThumbnailRequest, 'path'>) => {
-    // Create cache key
-    const cacheKey = `${thumbnailPath}:${requestOptions.size || 128}:${requestOptions.quality || 'medium'}:${requestOptions.format || 'webp'}`;
-    
-    // Check if we already have a promise for this request
-    if (thumbnailPromises.has(cacheKey)) {
-      return thumbnailPromises.get(cacheKey)!;
-    }
+  const fetchThumbnail = useCallback(
+    async (thumbnailPath: string, requestOptions: Omit<ThumbnailRequest, 'path'>) => {
+      // Create cache key
+      const cacheKey = `${thumbnailPath}:${requestOptions.size || 128}:${requestOptions.quality || 'medium'}:${requestOptions.format || 'webp'}`;
 
-    // Create new request promise
-    const requestPromise = invoke<ThumbnailResponse>('request_thumbnail', {
-      path: thumbnailPath,
-      size: requestOptions.size,
-      quality: requestOptions.quality,
-      priority: requestOptions.priority,
-      format: requestOptions.format,
-    });
+      // Check if we already have a promise for this request
+      if (thumbnailPromises.has(cacheKey)) {
+        return thumbnailPromises.get(cacheKey)!;
+      }
 
-    // Store promise in cache
-    thumbnailPromises.set(cacheKey, requestPromise);
+      // Create new request promise
+      const requestPromise = invoke<ThumbnailResponse>('request_thumbnail', {
+        path: thumbnailPath,
+        size: requestOptions.size,
+        quality: requestOptions.quality,
+        priority: requestOptions.priority,
+        format: requestOptions.format,
+      });
 
-    // Do not expire successful promises eagerly; they serve as an L1 in-memory cache
-    // Remove failed requests immediately so they can be retried
-    requestPromise.catch(() => {
-      thumbnailPromises.delete(cacheKey);
-    });
+      // Store promise in cache
+      thumbnailPromises.set(cacheKey, requestPromise);
 
-    return requestPromise;
-  }, []);
+      // Do not expire successful promises eagerly; they serve as an L1 in-memory cache
+      // Remove failed requests immediately so they can be retried
+      requestPromise.catch(() => {
+        thumbnailPromises.delete(cacheKey);
+      });
+
+      return requestPromise;
+    },
+    []
+  );
 
   useEffect(() => {
     if (!path) {
@@ -85,10 +89,10 @@ export function useThumbnail(
         abortControllerRef.current.abort();
       }
       if (requestIdRef.current) {
-        invoke('cancel_thumbnail', { requestId: requestIdRef.current }).catch(() => {})
+        invoke('cancel_thumbnail', { requestId: requestIdRef.current }).catch(() => {});
       }
-      setLoading(false)
-      return
+      setLoading(false);
+      return;
     }
 
     // Cancel any existing request
@@ -109,7 +113,7 @@ export function useThumbnail(
     setLoading(true);
     setError(undefined);
 
-    fetchThumbnail(path, options)
+    fetchThumbnail(path, { size, quality, priority, format })
       .then((response) => {
         // Check if this is still the current request
         if (currentPathRef.current === path && !abortControllerRef.current?.signal.aborted) {
@@ -139,18 +143,18 @@ export function useThumbnail(
         });
       }
     };
-  }, [path, options.size, options.quality, options.priority, options.format, fetchThumbnail]);
+  }, [path, size, quality, priority, format, fetchThumbnail]);
 
   const retry = useCallback(() => {
     if (path) {
       setError(undefined);
       // Force a new request by clearing the cache for this item
-      const cacheKey = `${path}:${options.size || 128}:${options.quality || 'medium'}:${options.format || 'webp'}`;
+      const cacheKey = `${path}:${size || 128}:${quality || 'medium'}:${format || 'webp'}`;
       thumbnailPromises.delete(cacheKey);
-      
+
       // Trigger re-fetch
       setLoading(true);
-      fetchThumbnail(path, options)
+      fetchThumbnail(path, { size, quality, priority, format })
         .then((response) => {
           if (currentPathRef.current === path) {
             setDataUrl(response.data_url);
@@ -168,7 +172,7 @@ export function useThumbnail(
           }
         });
     }
-  }, [path, options, fetchThumbnail]);
+  }, [path, size, quality, priority, format, fetchThumbnail]);
 
   return {
     dataUrl,

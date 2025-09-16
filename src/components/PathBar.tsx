@@ -1,103 +1,99 @@
-import { useEffect, useState, KeyboardEvent, MouseEvent } from 'react'
-import { CaretLeft, CaretRight, SquaresFour, List, ArrowUp, ArrowClockwise } from 'phosphor-react'
-import { useAppStore } from '../store/useAppStore'
-import { getCurrentWindow } from '@tauri-apps/api/window'
-import ZoomSlider from './ZoomSlider'
+import { useEffect, useState, KeyboardEvent, MouseEvent } from 'react';
+import { CaretLeft, CaretRight, SquaresFour, List, ArrowUp, ArrowClockwise } from 'phosphor-react';
+import { useAppStore } from '../store/useAppStore';
+import { getCurrentWindow } from '@tauri-apps/api/window';
+import ZoomSlider from './ZoomSlider';
 
 export default function PathBar() {
-  const {
-    currentPath,
-    homeDir,
-    navigateTo,
-    showZoomSliderNow,
-    scheduleHideZoomSlider,
-    showZoomSlider,
-  } = useAppStore()
+  const { currentPath, navigateTo, showZoomSliderNow, scheduleHideZoomSlider, showZoomSlider } =
+    useAppStore();
 
-  const [editPath, setEditPath] = useState(currentPath)
+  const [editPath, setEditPath] = useState(currentPath);
 
   const handleKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') {
-      navigateTo(editPath)
+      navigateTo(editPath);
     } else if (e.key === 'Escape') {
-      setEditPath(currentPath)
+      setEditPath(currentPath);
     }
-  }
+  };
 
   // Keep the input in sync if navigation occurs elsewhere
   useEffect(() => {
-    setEditPath(currentPath)
-  }, [currentPath])
+    setEditPath(currentPath);
+  }, [currentPath]);
 
   // Manual dragging fallback function
   const handleManualDrag = async (e: MouseEvent<HTMLDivElement>) => {
     // Only start drag on primary button (left click)
-    if (e.button !== 0) return
-    
+    if (e.button !== 0) return;
+
     // Check if clicked element is interactive (has data-tauri-drag-region=false)
-    const target = e.target as HTMLElement
-    if (target.closest('[data-tauri-drag-region="false"], button, input, select, textarea')) return
-    
+    const target = e.target as HTMLElement;
+    if (target.closest('[data-tauri-drag-region="false"], button, input, select, textarea')) return;
+
     try {
-      const window = getCurrentWindow()
-      await window.startDragging()
+      const window = getCurrentWindow();
+      await window.startDragging();
     } catch (error) {
-      console.error('Failed to start window dragging:', error)
+      console.error('Failed to start window dragging:', error);
     }
-  }
+  };
 
   return (
-    <div 
-      className="toolbar gap-3 select-none relative" 
+    <div
+      className="toolbar gap-3 select-none relative"
       data-tauri-drag-region
       onMouseDown={handleManualDrag}
     >
       {/* Back/Forward */}
       <div className="flex items-center">
-        {(() => { const isMac = navigator.platform.toUpperCase().includes('MAC');
-          const backTitle = isMac ? 'Back (⌘[)' : 'Back (Alt+←)'
-          const fwdTitle = isMac ? 'Forward (⌘])' : 'Forward (Alt+→)'
-          const upTitle = isMac ? 'Up (⌘↑)' : 'Up (Alt+↑)'
-          const refreshTitle = isMac ? 'Refresh (⌘R)' : 'Refresh (F5/Ctrl+R)'
+        {(() => {
+          const isMac = navigator.platform.toUpperCase().includes('MAC');
+          const backTitle = isMac ? 'Back (⌘[)' : 'Back (Alt+←)';
+          const fwdTitle = isMac ? 'Forward (⌘])' : 'Forward (Alt+→)';
+          const upTitle = isMac ? 'Up (⌘↑)' : 'Up (Alt+↑)';
+          const refreshTitle = isMac ? 'Refresh (⌘R)' : 'Refresh (F5/Ctrl+R)';
           return (
             <>
-        <button
-          onClick={() => useAppStore.getState().goBack()}
-          disabled={!useAppStore.getState().canGoBack()}
-          className="btn-icon rounded-full"
-          title={backTitle}
-          data-tauri-drag-region={false}
-        >
-          <CaretLeft className="w-4 h-4" />
-        </button>
-        <button
-          onClick={() => useAppStore.getState().goForward()}
-          disabled={!useAppStore.getState().canGoForward()}
-          className="btn-icon rounded-full"
-          title={fwdTitle}
-          data-tauri-drag-region={false}
-        >
-          <CaretRight className="w-4 h-4" />
-        </button>
-        <button
-          onClick={() => useAppStore.getState().goUp()}
-          disabled={!useAppStore.getState().canGoUp()}
-          className="btn-icon rounded-full"
-          title={upTitle}
-          data-tauri-drag-region={false}
-        >
-          <ArrowUp className="w-4 h-4" />
-        </button>
-        <button
-          onClick={() => useAppStore.getState().refreshCurrentDirectory()}
-          className="btn-icon rounded-full"
-          title={refreshTitle}
-          data-tauri-drag-region={false}
-        >
-          <ArrowClockwise className="w-4 h-4" />
-        </button>
+              <button
+                onClick={() => useAppStore.getState().goBack()}
+                disabled={!useAppStore.getState().canGoBack()}
+                className="btn-icon rounded-full"
+                title={backTitle}
+                data-tauri-drag-region={false}
+              >
+                <CaretLeft className="w-4 h-4" />
+              </button>
+              <button
+                onClick={() => useAppStore.getState().goForward()}
+                disabled={!useAppStore.getState().canGoForward()}
+                className="btn-icon rounded-full"
+                title={fwdTitle}
+                data-tauri-drag-region={false}
+              >
+                <CaretRight className="w-4 h-4" />
+              </button>
+              <button
+                onClick={() => useAppStore.getState().goUp()}
+                disabled={!useAppStore.getState().canGoUp()}
+                className="btn-icon rounded-full"
+                title={upTitle}
+                data-tauri-drag-region={false}
+              >
+                <ArrowUp className="w-4 h-4" />
+              </button>
+              <button
+                onClick={() => useAppStore.getState().refreshCurrentDirectory()}
+                className="btn-icon rounded-full"
+                title={refreshTitle}
+                data-tauri-drag-region={false}
+              >
+                <ArrowClockwise className="w-4 h-4" />
+              </button>
             </>
-          )})()}
+          );
+        })()}
       </div>
 
       {/* Path input */}
@@ -153,13 +149,12 @@ export default function PathBar() {
 
       {/* Sticky Zoom slider at top right */}
       {(() => {
-        const viewMode = (useAppStore.getState().directoryPreferences[currentPath]?.viewMode ||
-          useAppStore.getState().globalPreferences.viewMode)
-        const isGrid = viewMode === 'grid'
-        return (
-          <ZoomSlider visible={isGrid && showZoomSlider} />
-        )
+        const viewMode =
+          useAppStore.getState().directoryPreferences[currentPath]?.viewMode ||
+          useAppStore.getState().globalPreferences.viewMode;
+        const isGrid = viewMode === 'grid';
+        return <ZoomSlider visible={isGrid && showZoomSlider} />;
       })()}
     </div>
-  )
+  );
 }

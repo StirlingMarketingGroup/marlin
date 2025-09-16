@@ -5,6 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Development Commands
 
 ### Primary Development Workflow
+
 - `npm run tauri dev` - Start the full Tauri app with hot reload (frontend + backend)
 - `npm run tauri build` - Build production desktop app for current platform
 - `npm run dev` - Start Vite dev server for frontend-only development
@@ -13,6 +14,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `cd src-tauri && cargo check` - Fast compile check for Rust code
 
 ### Platform-Specific Notes
+
 - macOS: Requires Xcode command line tools for native drag functionality
 - All platforms: Requires Rust 1.77+ and Node.js 18+
 
@@ -31,6 +33,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **ALWAYS run test builds to catch ALL errors and warnings before completing work:**
 
 ### Required Build Verification Steps
+
 1. **Frontend Build**: `npm run build`
    - Fix all TypeScript errors and warnings
    - Ensure Vite build succeeds without issues
@@ -45,6 +48,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
    - Only run for major changes to avoid long build times
 
 ### Why This Matters
+
 - TypeScript warnings often reveal type safety issues
 - Rust warnings can indicate memory safety or logic problems
 - Production builds may catch issues not visible in dev mode
@@ -53,12 +57,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Architecture Overview
 
 ### Technology Stack
+
 - **Frontend**: React 18 + TypeScript + Tailwind CSS + Vite
 - **Backend**: Rust + Tauri 2.0 + Tokio for async operations
 - **State Management**: Zustand (`src/store/useAppStore.ts`)
 - **Icons**: Phosphor React + VSCode Icons + native system icons on macOS
 
 ### Key Backend Modules
+
 - `commands.rs` - Main Tauri commands API (file operations, navigation, thumbnails)
 - `thumbnails/` - Advanced thumbnail generation system with caching and queuing
 - `native_drag.rs` - Platform-specific drag-and-drop implementation
@@ -66,6 +72,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `macos_icons.rs` - macOS-specific app icon extraction
 
 ### Key Frontend Architecture
+
 - `App.tsx` - Main layout with sidebar, path bar, and file display
 - `store/useAppStore.ts` - Global state with navigation history, file lists, preferences
 - `components/FileGrid.tsx` & `FileList.tsx` - Main file display components with drag support
@@ -74,6 +81,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Important Implementation Details
 
 ### Thumbnail System
+
 - Located in `src-tauri/src/thumbnails/`
 - Uses content-hash + mtime for cache keys
 - Supports PNG, JPEG, WebP, GIF, PDF, SVG
@@ -81,18 +89,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - LRU cache eviction with memory management
 
 ### Drag & Drop
+
 - macOS native implementation in `native_drag.rs` using Cocoa/Objective-C
 - Custom drag images and visual feedback
 - Supports dragging files to external applications
 - Integration points in FileGrid.tsx and FileList.tsx
 
 ### File Operations & Navigation
+
 - Navigation state managed in Zustand store with history
 - Path validation and resolution in backend
 - Per-directory view preferences (grid/list, sort, hidden files)
 - Async file loading with cancellation support
 
 ### State Management Patterns
+
 - Zustand store (`useAppStore`) for global app state
 - File selection state with multi-select support
 - View preferences persisted per directory
@@ -101,6 +112,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Testing & Code Quality
 
 ### Test Infrastructure
+
 - **Unit Tests**: Vitest + @testing-library/react for React components and store logic
 - **E2E Tests**: Playwright for full application workflows
 - **Backend Tests**: Use `cargo test` with `*_test.rs` files
@@ -112,8 +124,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   - `npm run test:e2e-ui` - Open Playwright UI
 
 ### Critical Test Areas
+
 - **State Management**: useAppStore actions like `toggleHiddenFiles`, navigation, preferences
-- **Regression Prevention**: 
+- **Regression Prevention**:
   - Directory-specific hidden file preferences
   - Last-opened directory persistence
   - View mode and sort preferences across navigation
@@ -122,6 +135,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Thumbnail Generation**: Cache behavior and performance
 
 ### Running Tests
+
 - Unit tests run automatically with file changes during development
 - E2E tests require the dev server to be running (`npm run tauri dev`)
 - Focus tests on user-facing regressions and critical state management
@@ -129,12 +143,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Performance Considerations
 
 ### Large Directory Handling
+
 - Virtual scrolling planned for 50k+ files
 - Thumbnail generation uses worker queues
 - Memory management with LRU eviction
 - Progressive loading for network shares (SMB/NAS)
 
 ### Platform-Specific Optimizations
+
 - macOS: Uses `getattrlistbulk` for bulk metadata (planned)
 - Windows: `FindFirstFileExW` with large fetch (planned)
 - Linux: `getdents64` + selective `statx` (planned)
@@ -142,18 +158,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Common Development Tasks
 
 ### Adding New File Operations
+
 1. Add Rust command in `src-tauri/src/commands.rs`
 2. Add TypeScript types in `src/types/index.ts`
 3. Update store actions in `src/store/useAppStore.ts`
 4. Add UI integration in relevant components
 
 ### Adding New View Components
+
 - Follow existing patterns in `src/components/`
 - Use Tailwind utility classes for styling
 - Integrate with Zustand store for state
 - Consider responsive design and dark theme support
 
 ### Platform-Specific Features
+
 - Add conditional compilation in Rust (`#[cfg(target_os = "...")]`)
 - Use optional dependencies in `Cargo.toml`
 - Test across all supported platforms
@@ -161,6 +180,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## File Structure Notes
 
 ### Frontend (`src/`)
+
 - `components/` - UI components (PascalCase .tsx files)
 - `hooks/` - Custom React hooks
 - `store/` - Zustand state management
@@ -168,6 +188,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `utils/` - Utility functions
 
 ### Backend (`src-tauri/src/`)
+
 - `main.rs` - App entry point
 - `lib.rs` - Library configuration and module declarations
 - `commands.rs` - Main API commands (file ops, thumbnails, etc.)
@@ -176,6 +197,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Platform-specific modules for native functionality
 
 ### Configuration Files
+
 - `src-tauri/tauri.conf.json` - Tauri app configuration
 - `package.json` - Frontend dependencies and scripts
 - `src-tauri/Cargo.toml` - Rust dependencies
@@ -184,6 +206,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Coding Conventions
 
 ### TypeScript/React
+
 - Strict TypeScript mode enabled
 - 2-space indentation
 - PascalCase for components, camelCase for functions/variables
@@ -191,12 +214,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Use `@/` path alias for imports when available
 
 ### Rust
+
 - Follow Rust naming conventions (snake_case)
 - Use `#[tauri::command]` for exposed functions
 - Handle errors with proper Result types
 - Use async/await for I/O operations
 
 ### Commit Messages
+
 - Use prefixes: `feat:`, `fix:`, `refactor:`, `docs:`, `chore:`
 - Keep first line under 50 characters
 - Reference issues when applicable

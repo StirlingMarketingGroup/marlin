@@ -1,10 +1,10 @@
-import { useEffect, useRef, useState, MouseEvent } from 'react'
-import { useAppStore } from '../store/useAppStore'
-import FileGrid from './FileGrid'
-import FileList from './FileList'
-import ContextMenu from './ContextMenu'
-import { getCurrentWindow } from '@tauri-apps/api/window'
-import { invoke } from '@tauri-apps/api/core'
+import { useEffect, useRef, useState } from 'react';
+import { useAppStore } from '../store/useAppStore';
+import FileGrid from './FileGrid';
+import FileList from './FileList';
+import ContextMenu from './ContextMenu';
+import { getCurrentWindow } from '@tauri-apps/api/window';
+import { invoke } from '@tauri-apps/api/core';
 
 export default function MainPanel() {
   const {
@@ -14,65 +14,70 @@ export default function MainPanel() {
     currentPath,
     directoryPreferences,
     setSelectedFiles,
-    selectedFiles,
     loading,
-  } = useAppStore()
+  } = useAppStore();
 
   // We rely solely on the native OS context menu now
-  const scrollRef = useRef<HTMLDivElement>(null)
-  const fileCtxCaptureRef = useRef<boolean>(false)
-  const fileCtxPathRef = useRef<string | null>(null)
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const fileCtxCaptureRef = useRef<boolean>(false);
+  const fileCtxPathRef = useRef<string | null>(null);
   const [fallbackCtx, setFallbackCtx] = useState<{
     x: number;
     y: number;
     isFileCtx: boolean;
-  } | null>(null)
+  } | null>(null);
 
   const currentPrefs = {
     ...globalPreferences,
     ...directoryPreferences[currentPath],
-  }
+  };
 
   const handleContextMenuCapture = (e: React.MouseEvent) => {
-    const target = e.target as Element | null
-    const fileEl = target && 'closest' in target ? (target as Element).closest('[data-file-item="true"]') as HTMLElement | null : null
-    fileCtxCaptureRef.current = !!fileEl
-    fileCtxPathRef.current = fileEl ? (fileEl.getAttribute('data-file-path') || null) : null
-  }
+    const target = e.target as Element | null;
+    const fileEl =
+      target && 'closest' in target
+        ? ((target as Element).closest('[data-file-item="true"]') as HTMLElement | null)
+        : null;
+    fileCtxCaptureRef.current = !!fileEl;
+    fileCtxPathRef.current = fileEl ? fileEl.getAttribute('data-file-path') || null : null;
+  };
 
   const handleContextMenu = async (e: React.MouseEvent) => {
-    e.preventDefault()
+    e.preventDefault();
     try {
-      const win = getCurrentWindow()
-      const state = useAppStore.getState()
-      const path = state.currentPath
-      const prefs = { ...state.globalPreferences, ...state.directoryPreferences[path] }
-      const sortBy = (prefs.sortBy ?? state.globalPreferences.sortBy) || 'name'
-      const sortOrder = (prefs.sortOrder ?? state.globalPreferences.sortOrder) || 'asc'
+      const win = getCurrentWindow();
+      const state = useAppStore.getState();
+      const path = state.currentPath;
+      const prefs = { ...state.globalPreferences, ...state.directoryPreferences[path] };
+      const sortBy = (prefs.sortBy ?? state.globalPreferences.sortBy) || 'name';
+      const sortOrder = (prefs.sortOrder ?? state.globalPreferences.sortOrder) || 'asc';
 
       // Derive file context directly from event target for reliability
-      const tgt = e.target as Element | null
-      const fileEl = tgt && 'closest' in tgt ? (tgt as Element).closest('[data-file-item="true"]') as HTMLElement | null : null
-      const ctxPathFromTarget = fileEl ? (fileEl.getAttribute('data-file-path') || null) : null
+      const tgt = e.target as Element | null;
+      const fileEl =
+        tgt && 'closest' in tgt
+          ? ((tgt as Element).closest('[data-file-item="true"]') as HTMLElement | null)
+          : null;
+      const ctxPathFromTarget = fileEl ? fileEl.getAttribute('data-file-path') || null : null;
 
       // Prefer target-derived context; fall back to capture ref
-      const isFileCtx = !!ctxPathFromTarget || fileCtxCaptureRef.current
-      const ctxPath = ctxPathFromTarget || fileCtxPathRef.current
+      const isFileCtx = !!ctxPathFromTarget || fileCtxCaptureRef.current;
+      const ctxPath = ctxPathFromTarget || fileCtxPathRef.current;
       // If right-clicked a file, ensure it is selected and pass it explicitly
-      let filePaths: string[] | undefined
+      let filePaths: string[] | undefined;
       if (isFileCtx && ctxPath) {
         if (!state.selectedFiles.includes(ctxPath)) {
-          setSelectedFiles([ctxPath])
-          filePaths = [ctxPath]
+          setSelectedFiles([ctxPath]);
+          filePaths = [ctxPath];
         } else {
           // Right-clicked within existing selection: use full selection
-          filePaths = state.selectedFiles
+          filePaths = state.selectedFiles;
         }
       } else {
-        filePaths = undefined
+        filePaths = undefined;
       }
-      fileCtxCaptureRef.current = false
-      fileCtxPathRef.current = null
+      fileCtxCaptureRef.current = false;
+      fileCtxPathRef.current = null;
 
       await invoke('show_native_context_menu', {
         windowLabel: win.label,
@@ -85,58 +90,43 @@ export default function MainPanel() {
         hasFileContext: !!isFileCtx,
         // Only send file paths when clicking on a file
         filePaths: isFileCtx ? filePaths : undefined,
-      })
-      return
-    } catch (_) {
+      });
+      return;
+    } catch (error) {
+      console.warn('Falling back to React context menu due to error:', error);
       // If native menu fails (e.g., web preview), show React fallback
-      const tgt = e.target as HTMLElement
-      const isFile = !!(tgt && tgt.closest && tgt.closest('[data-file-item="true"]'))
-      setFallbackCtx({ x: e.clientX, y: e.clientY, isFileCtx: isFile })
+      const tgt = e.target as HTMLElement;
+      const isFile = !!(tgt && tgt.closest && tgt.closest('[data-file-item="true"]'));
+      setFallbackCtx({ x: e.clientX, y: e.clientY, isFileCtx: isFile });
     }
-  }
+  };
 
   // No custom context menu fallback
 
   // Reset scroll when navigating to a new path
   useEffect(() => {
-    const el = scrollRef.current
-    if (el) el.scrollTo({ top: 0, left: 0, behavior: 'auto' })
-  }, [currentPath])
+    const el = scrollRef.current;
+    if (el) el.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+  }, [currentPath]);
 
   // Clear selection when clicking anywhere that's not an interactive control
   const handleContainerBackgroundClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    const target = e.target as HTMLElement
+    const target = e.target as HTMLElement;
     // Ignore clicks on obvious controls
-    if (target.closest('button, a, input, select, textarea, [role="button"], [data-prevent-deselect]')) return
-    setSelectedFiles([])
-  }
-
-  // Manual dragging fallback function for MainPanel
-  const handleManualDrag = async (e: MouseEvent<HTMLDivElement>) => {
-    // Only start drag on primary button (left click)
-    if (e.button !== 0) return
-    
-    // Check if clicked element is interactive or a file item
-    const target = e.target as HTMLElement
-    if (target.closest('[data-tauri-drag-region="false"], button, input, select, textarea, [role="button"]')) return
-    
-    try {
-      const window = getCurrentWindow()
-      await window.startDragging()
-    } catch (error) {
-      console.error('Failed to start window dragging from MainPanel:', error)
-    }
-  }
+    if (
+      target.closest('button, a, input, select, textarea, [role="button"], [data-prevent-deselect]')
+    )
+      return;
+    setSelectedFiles([]);
+  };
 
   if (error) {
     return (
       <div className="flex-1 flex items-center justify-center">
         <div className="text-app-red">Error: {error}</div>
       </div>
-    )
+    );
   }
-
-  
 
   return (
     <div className="flex-1 flex flex-col select-none min-h-0">
@@ -165,7 +155,7 @@ export default function MainPanel() {
           </div>
         )}
       </div>
-      
+
       {/* React context menu fallback (web preview or native failure) */}
       {fallbackCtx && (
         <ContextMenu
@@ -176,5 +166,5 @@ export default function MainPanel() {
         />
       )}
     </div>
-  )
+  );
 }

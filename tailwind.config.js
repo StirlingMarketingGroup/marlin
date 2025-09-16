@@ -1,9 +1,6 @@
 /** @type {import('tailwindcss').Config} */
 export default {
-  content: [
-    "./index.html",
-    "./src/**/*.{js,ts,jsx,tsx}",
-  ],
+  content: ['./index.html', './src/**/*.{js,ts,jsx,tsx}'],
   theme: {
     extend: {
       colors: {
@@ -19,8 +16,8 @@ export default {
           yellow: '#f6c84c',
           text: '#e6e6e7',
           muted: '#a1a1aa',
-          border: '#3a3a3a'
-        }
+          border: '#3a3a3a',
+        },
       },
       fontFamily: {
         // Prefer macOS system font to match Finder appearance
@@ -38,10 +35,10 @@ export default {
           'Liberation Sans',
           'sans-serif',
         ],
-        mono: ['JetBrains Mono', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace']
-      }
+        mono: ['JetBrains Mono', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
+      },
     },
   },
   plugins: [],
-  darkMode: 'class'
-}
+  darkMode: 'class',
+};

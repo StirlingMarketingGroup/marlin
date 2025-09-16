@@ -1,10 +1,11 @@
-import { useToastStore } from '../store/useToastStore'
-import { X, CheckCircle, XCircle, Info } from 'phosphor-react'
+import { useToastStore } from '../store/useToastStore';
+import type { Toast as ToastData } from '../store/useToastStore';
+import { X, CheckCircle, XCircle, Info } from 'phosphor-react';
 
 export default function Toast() {
-  const { toasts, removeToast } = useToastStore()
+  const { toasts, removeToast } = useToastStore();
 
-  if (toasts.length === 0) return null
+  if (toasts.length === 0) return null;
 
   return (
     <div className="fixed bottom-4 right-4 z-50 flex flex-col gap-2">
@@ -12,31 +13,35 @@ export default function Toast() {
         <ToastItem key={toast.id} toast={toast} onClose={() => removeToast(toast.id)} />
       ))}
     </div>
-  )
+  );
 }
 
-function ToastItem({ toast, onClose }: { toast: any; onClose: () => void }) {
-  const getIcon = () => {
+function ToastItem({ toast, onClose }: { toast: ToastData; onClose: () => void }) {
+  const getIcon = (): JSX.Element | null => {
     switch (toast.type) {
       case 'success':
-        return <CheckCircle className="w-5 h-5 text-green-500" weight="fill" />
+        return <CheckCircle className="w-5 h-5 text-green-500" weight="fill" />;
       case 'error':
-        return <XCircle className="w-5 h-5 text-red-500" weight="fill" />
+        return <XCircle className="w-5 h-5 text-red-500" weight="fill" />;
       case 'info':
-        return <Info className="w-5 h-5 text-blue-500" weight="fill" />
+        return <Info className="w-5 h-5 text-blue-500" weight="fill" />;
+      default:
+        return null;
     }
-  }
+  };
 
   const getBgColor = () => {
     switch (toast.type) {
       case 'success':
-        return 'bg-green-500/10 border-green-500/20'
+        return 'bg-green-500/10 border-green-500/20';
       case 'error':
-        return 'bg-red-500/10 border-red-500/20'
+        return 'bg-red-500/10 border-red-500/20';
       case 'info':
-        return 'bg-blue-500/10 border-blue-500/20'
+        return 'bg-blue-500/10 border-blue-500/20';
+      default:
+        return 'bg-app-panel border-app-border';
     }
-  }
+  };
 
   return (
     <div
@@ -61,5 +66,5 @@ function ToastItem({ toast, onClose }: { toast: any; onClose: () => void }) {
         <X className="w-4 h-4" weight="bold" />
       </button>
     </div>
-  )
+  );
 }
