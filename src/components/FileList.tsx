@@ -149,6 +149,8 @@ export default function FileList({ files, preferences }: FileListProps) {
     selectionAnchor,
     setSelectionAnchor,
     setSelectionLead,
+    pendingRevealTarget,
+    setPendingRevealTarget,
   } = useAppStore();
   const { renameTargetPath, setRenameTarget, renameFile } = useAppStore();
   const { startNativeDrag, endNativeDrag, isDraggedDirectory } = useDragStore();
@@ -157,6 +159,9 @@ export default function FileList({ files, preferences }: FileListProps) {
   const { fetchAppIcon } = useAppStore();
   const [draggedFile, setDraggedFile] = useState<string | null>(null);
   const [hoveredFile, setHoveredFile] = useState<string | null>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const [flashPath, setFlashPath] = useState<string | null>(null);
+  const flashTimeoutRef = useRef<number | undefined>(undefined);
 
   // Clean up dragged state when drag ends
   // No longer needed - native drag handles cleanup
@@ -555,6 +560,50 @@ export default function FileList({ files, preferences }: FileListProps) {
     ? sortedFiles
     : sortedFiles.filter((file) => !file.is_hidden);
 
+  useEffect(() => {
+    return () => {
+      if (flashTimeoutRef.current) {
+        window.clearTimeout(flashTimeoutRef.current);
+        flashTimeoutRef.current = undefined;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!pendingRevealTarget) return;
+    const targetPath = pendingRevealTarget;
+    if (!filteredFiles.some((file) => file.path === targetPath)) return;
+
+    setSelectedFiles([targetPath]);
+    setSelectionAnchor(targetPath);
+    setSelectionLead(targetPath);
+
+    requestAnimationFrame(() => {
+      const container = listRef.current;
+      if (!container) return;
+      const nodes = container.querySelectorAll<HTMLElement>('[data-file-item="true"]');
+      for (const el of nodes) {
+        if (el.getAttribute('data-file-path') === targetPath) {
+          try {
+            el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+          } catch (error) {
+            console.warn('Failed to scroll list reveal target:', error);
+          }
+          break;
+        }
+      }
+    });
+
+    setFlashPath(targetPath);
+    if (flashTimeoutRef.current) window.clearTimeout(flashTimeoutRef.current);
+    flashTimeoutRef.current = window.setTimeout(() => {
+      setFlashPath((prev) => (prev === targetPath ? null : prev));
+      flashTimeoutRef.current = undefined;
+    }, 1600);
+
+    setPendingRevealTarget(undefined);
+  }, [pendingRevealTarget, filteredFiles, setPendingRevealTarget, setSelectedFiles, setSelectionAnchor, setSelectionLead]);
+
   if (filteredFiles.length === 0) {
     return (
       <div className="flex-1 flex items-center justify-center text-app-muted">
@@ -635,7 +684,7 @@ export default function FileList({ files, preferences }: FileListProps) {
 
   return (
     <>
-      <div className="h-full" onClick={handleBackgroundClick}>
+      <div className="h-full" onClick={handleBackgroundClick} ref={listRef}>
         {/* Header */}
         <div className="grid grid-cols-12 gap-3 px-3 py-2 border-b border-app-border border-t-0 text-[12px] font-medium text-app-muted bg-transparent select-none mb-1">
           <button
@@ -722,6 +771,11 @@ export default function FileList({ files, preferences }: FileListProps) {
                 data-file-item="true"
                 data-file-path={file.path}
                 data-tauri-drag-region={false}
+                style={
+                  flashPath === file.path
+                    ? { outline: '2px solid var(--color-accent)', outlineOffset: '2px' }
+                    : undefined
+                }
                 onClick={(e) => {
                   e.stopPropagation();
                   handleFileClick(e, file);

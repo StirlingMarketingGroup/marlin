@@ -21,6 +21,7 @@ import { SystemDrive, PinnedDirectory } from '../types';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useToastStore } from '../store/useToastStore';
 import { useSidebarDropZone } from '../hooks/useDragDetector';
+import QuickTooltip from './QuickTooltip';
 
 export default function Sidebar() {
   const {
@@ -352,33 +353,40 @@ export default function Sidebar() {
               .map((pin) => {
                 const isActive = currentPath === pin.path;
                 return (
-                  <div
-                    key={pin.path}
-                    className={`w-full flex items-center gap-2 px-1.5 py-1 rounded-md text-left leading-5 text-[13px] group ${
-                      isActive ? 'bg-app-light' : 'hover:bg-app-light/70'
-                    }`}
-                  >
-                    <button
-                      onClick={() => navigateTo(pin.path)}
-                      className="flex items-center gap-2 flex-1 min-w-0"
-                      title={pin.path}
-                      data-tauri-drag-region={false}
-                    >
-                      {createIcon(Folder, 'fill', isActive)}
-                      <span className={`truncate ${isActive ? 'text-accent' : ''}`}>
-                        {pin.name}
-                      </span>
-                    </button>
+                  <QuickTooltip key={pin.path} text={pin.path}>
+                    {({ onBlur, onFocus, onMouseEnter, onMouseLeave, ref }) => (
+                      <div
+                        ref={ref}
+                        onMouseEnter={onMouseEnter}
+                        onMouseLeave={onMouseLeave}
+                        onFocus={onFocus}
+                        onBlur={onBlur}
+                        className={`w-full flex items-center gap-2 px-1.5 py-1 rounded-md text-left leading-5 text-[13px] group ${
+                          isActive ? 'bg-app-light' : 'hover:bg-app-light/70'
+                        }`}
+                      >
+                        <button
+                          onClick={() => navigateTo(pin.path)}
+                          className="flex items-center gap-2 flex-1 min-w-0"
+                          data-tauri-drag-region={false}
+                        >
+                          {createIcon(Folder, 'fill', isActive)}
+                          <span className={`truncate ${isActive ? 'text-accent' : ''}`}>
+                            {pin.name}
+                          </span>
+                        </button>
 
-                    <button
-                      onClick={(e) => handleUnpinDirectory(pin, e)}
-                      className="ml-auto p-0.5 rounded hover:bg-app-light/50 text-app-muted hover:text-accent transition-colors"
-                      title="Remove from pinned"
-                      data-tauri-drag-region={false}
-                    >
-                      <Trash className="w-3.5 h-3.5" weight="regular" />
-                    </button>
-                  </div>
+                        <button
+                          onClick={(e) => handleUnpinDirectory(pin, e)}
+                          className="ml-auto p-0.5 rounded hover:bg-app-light/50 text-app-muted hover:text-accent transition-colors cursor-pointer"
+                          title="Remove from pinned"
+                          data-tauri-drag-region={false}
+                        >
+                          <Trash className="w-3.5 h-3.5" weight="regular" />
+                        </button>
+                      </div>
+                    )}
+                  </QuickTooltip>
                 );
               })}
           </>

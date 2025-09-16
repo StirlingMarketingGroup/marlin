@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useAppStore } from '@/store/useAppStore';
+import { invoke } from '@tauri-apps/api/core';
+import { useToastStore } from '@/store/useToastStore';
 
 type SortBy = 'name' | 'size' | 'type' | 'modified';
 type SortOrder = 'asc' | 'desc';
@@ -19,6 +21,7 @@ export default function ContextMenu({ x, y, isFileContext, onRequestClose }: Con
   const state = useAppStore();
   const {
     selectedFiles,
+    files,
     globalPreferences,
     currentPath,
     directoryPreferences,
@@ -26,6 +29,8 @@ export default function ContextMenu({ x, y, isFileContext, onRequestClose }: Con
     toggleHiddenFiles,
     toggleFoldersFirst,
     beginRenameSelected,
+    navigateTo,
+    setPendingRevealTarget,
   } = state;
 
   const prefs = useMemo(
@@ -80,6 +85,19 @@ export default function ContextMenu({ x, y, isFileContext, onRequestClose }: Con
 
   const fileSpecific = isFileContext && selectedFiles.length > 0;
 
+  const selectedFileItems = useMemo(() => {
+    if (!fileSpecific) return [] as typeof files;
+    const map = new Map(files.map((file) => [file.path, file]));
+    return selectedFiles
+      .map((path) => map.get(path))
+      .filter((file): file is (typeof files)[number] => Boolean(file));
+  }, [fileSpecific, files, selectedFiles]);
+
+  const singleSymlink =
+    selectedFileItems.length === 1 && selectedFileItems[0]?.is_symlink
+      ? selectedFileItems[0]
+      : undefined;
+
   const menu = (
     <div
       ref={menuRef}
@@ -120,6 +138,32 @@ export default function ContextMenu({ x, y, isFileContext, onRequestClose }: Con
             >
               Copy Full Path
             </button>
+            {singleSymlink && (
+              <button
+                className="w-full text-left px-3 py-2 hover:bg-app-light"
+                onClick={async () => {
+                  onRequestClose();
+                  try {
+                    const result = await invoke<{ parent: string; target: string }>(
+                      'resolve_symlink_parent_command',
+                      {
+                        path: singleSymlink.path,
+                      }
+                    );
+                    setPendingRevealTarget(result.target);
+                    navigateTo(result.parent);
+                  } catch (error) {
+                    console.warn('Failed to resolve symlink parent:', error);
+                    useToastStore.getState().addToast({
+                      type: 'error',
+                      message: 'Unable to locate the original item for this link.',
+                    });
+                  }
+                }}
+              >
+                Reveal Original Location
+              </button>
+            )}
             <div className="my-1 h-px bg-app-border" />
           </>
         )}

@@ -26,6 +26,7 @@ pub fn run() {
             commands::get_home_directory,
             commands::read_directory,
             commands::get_file_metadata,
+            commands::resolve_symlink_parent_command,
             commands::create_directory_command,
             commands::delete_file,
             commands::rename_file,

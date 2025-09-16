@@ -16,6 +16,34 @@ pub struct FileItem {
     pub extension: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SymlinkResolution {
+    pub parent: String,
+    pub target: String,
+}
+
+pub fn resolve_symlink_parent(path: &Path) -> Result<SymlinkResolution, String> {
+    let metadata =
+        fs::symlink_metadata(path).map_err(|e| format!("Failed to get metadata: {}", e))?;
+
+    if !metadata.file_type().is_symlink() {
+        return Err("Path is not a symlink".to_string());
+    }
+
+    let target =
+        fs::canonicalize(path).map_err(|e| format!("Failed to resolve symlink target: {}", e))?;
+
+    let parent = target
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| target.clone());
+
+    Ok(SymlinkResolution {
+        parent: parent.to_string_lossy().to_string(),
+        target: target.to_string_lossy().to_string(),
+    })
+}
+
 fn build_file_item(path: &Path) -> Result<FileItem, String> {
     let symlink_metadata =
         fs::symlink_metadata(path).map_err(|e| format!("Failed to get metadata: {}", e))?;

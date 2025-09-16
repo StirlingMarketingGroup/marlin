@@ -128,6 +128,8 @@ interface AppState {
   setRenameTarget: (path?: string) => void;
   beginRenameSelected: () => void;
   renameFile: (newName: string) => Promise<void>;
+  pendingRevealTarget?: string;
+  setPendingRevealTarget: (path?: string) => void;
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -481,6 +483,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   // Rename state
   renameTargetPath: undefined,
+  pendingRevealTarget: undefined,
   setRenameTarget: (path?: string) => set({ renameTargetPath: path }),
   beginRenameSelected: () => {
     const { selectedFiles } = get();
@@ -533,4 +536,5 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
     }
   },
+  setPendingRevealTarget: (path?: string) => set({ pendingRevealTarget: path }),
 }));

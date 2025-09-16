@@ -232,6 +232,8 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     selectionAnchor,
     setSelectionAnchor,
     setSelectionLead,
+    pendingRevealTarget,
+    setPendingRevealTarget,
   } = useAppStore();
   const { renameTargetPath, setRenameTarget, renameFile } = useAppStore();
   const { startNativeDrag, endNativeDrag, isDraggedDirectory } = useDragStore();
@@ -239,6 +241,9 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
   const [draggedFile, setDraggedFile] = useState<string | null>(null);
   const [hoveredFile, setHoveredFile] = useState<string | null>(null);
   const renameInputRef = useRef<HTMLInputElement>(null);
+  const gridRef = useRef<HTMLDivElement>(null);
+  const [flashPath, setFlashPath] = useState<string | null>(null);
+  const flashTimeoutRef = useRef<number | undefined>(undefined);
 
   // Clean up dragged state when drag ends
   // No longer needed - native drag handles cleanup
@@ -687,6 +692,50 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     ? sortedFiles
     : sortedFiles.filter((file) => !file.is_hidden);
 
+  useEffect(() => {
+    return () => {
+      if (flashTimeoutRef.current) {
+        window.clearTimeout(flashTimeoutRef.current);
+        flashTimeoutRef.current = undefined;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!pendingRevealTarget) return;
+    const targetPath = pendingRevealTarget;
+    if (!files.some((file) => file.path === targetPath)) return;
+
+    setSelectedFiles([targetPath]);
+    setSelectionAnchor(targetPath);
+    setSelectionLead(targetPath);
+
+    requestAnimationFrame(() => {
+      const container = gridRef.current;
+      if (!container) return;
+      const candidates = container.querySelectorAll<HTMLElement>('[data-file-item="true"]');
+      for (const el of candidates) {
+        if (el.getAttribute('data-file-path') === targetPath) {
+          try {
+            el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+          } catch (error) {
+            console.warn('Failed to scroll reveal target into view:', error);
+          }
+          break;
+        }
+      }
+    });
+
+    setFlashPath(targetPath);
+    if (flashTimeoutRef.current) window.clearTimeout(flashTimeoutRef.current);
+    flashTimeoutRef.current = window.setTimeout(() => {
+      setFlashPath((prev) => (prev === targetPath ? null : prev));
+      flashTimeoutRef.current = undefined;
+    }, 1600);
+
+    setPendingRevealTarget(undefined);
+  }, [pendingRevealTarget, files, setPendingRevealTarget, setSelectedFiles, setSelectionAnchor, setSelectionLead]);
+
   if (filteredFiles.length === 0) {
     return (
       <div className="flex-1 flex items-center justify-center text-app-muted">
@@ -765,7 +814,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
   }
 
   return (
-    <div className="p-2" onClick={handleBackgroundClick}>
+    <div className="p-2" onClick={handleBackgroundClick} ref={gridRef}>
       <div
         className="grid gap-2 file-grid"
         style={{
@@ -793,6 +842,11 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
               data-file-item="true"
               data-file-path={file.path}
               data-tauri-drag-region={false}
+              style={
+                flashPath === file.path
+                  ? { outline: '2px solid var(--color-accent)', outlineOffset: '2px' }
+                  : undefined
+              }
               onClick={(e) => {
                 e.stopPropagation();
                 handleFileClick(e, file);

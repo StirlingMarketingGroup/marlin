@@ -6,6 +6,7 @@ import Sidebar from './components/Sidebar';
 import MainPanel from './components/MainPanel';
 import PathBar from './components/PathBar';
 import { useAppStore } from './store/useAppStore';
+import { useToastStore } from './store/useToastStore';
 import { message } from '@tauri-apps/plugin-dialog';
 
 import Toast from './components/Toast';
@@ -644,6 +645,28 @@ function App() {
       });
       await register('menu:rename', () => {
         useAppStore.getState().beginRenameSelected();
+      });
+      await register('menu:reveal_symlink', async () => {
+        const state = useAppStore.getState();
+        const selection = state.selectedFiles;
+        if (!selection || selection.length === 0) return;
+        const target = selection[0];
+        try {
+          const result = await invoke<{ parent: string; target: string }>(
+            'resolve_symlink_parent_command',
+            {
+              path: target,
+            }
+          );
+          state.setPendingRevealTarget(result.target);
+          state.navigateTo(result.parent);
+        } catch (error) {
+          console.warn('Failed to resolve symlink parent from menu:', error);
+          useToastStore.getState().addToast({
+            type: 'error',
+            message: 'Unable to locate the original item for this link.',
+          });
+        }
       });
       await register('menu:new_window', () => {
         // Create new window in current directory

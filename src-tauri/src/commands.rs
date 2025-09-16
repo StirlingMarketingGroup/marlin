@@ -15,7 +15,8 @@ use tokio::sync::OnceCell;
 
 use crate::fs_utils::{
     self, copy_file_or_directory, delete_file_or_directory, expand_path, get_file_info,
-    read_directory_contents, rename_file_or_directory, FileItem,
+    read_directory_contents, rename_file_or_directory, resolve_symlink_parent, FileItem,
+    SymlinkResolution,
 };
 use crate::fs_watcher;
 
@@ -52,6 +53,14 @@ pub fn get_file_metadata(path: String) -> Result<FileItem, String> {
     }
 
     get_file_info(path)
+}
+
+#[command]
+pub fn resolve_symlink_parent_command(path: String) -> Result<SymlinkResolution, String> {
+    let expanded_path = expand_path(&path)?;
+    let path = Path::new(&expanded_path);
+
+    resolve_symlink_parent(path)
 }
 
 #[command]
@@ -730,6 +739,7 @@ pub fn show_native_context_menu(
     path: Option<String>,
     has_file_context: Option<bool>,
     file_paths: Option<Vec<String>>,
+    selected_is_symlink: Option<bool>,
 ) -> Result<(), String> {
     // Resolve window
     let webview = if let Some(label) = window_label {
@@ -891,9 +901,24 @@ pub fn show_native_context_menu(
         let copy_full_name_item = MenuItemBuilder::with_id("ctx:copy_full_name", "Copy Full Path")
             .build(&app)
             .map_err(|e| e.to_string())?;
+
+        let reveal_item = if selected_is_symlink.unwrap_or(false) {
+            Some(
+                MenuItemBuilder::with_id("ctx:reveal_symlink", "Reveal Original Location")
+                    .build(&app)
+                    .map_err(|e| e.to_string())?,
+            )
+        } else {
+            None
+        };
         builder = builder
-            .items(&[&rename_item, &copy_name_item, &copy_full_name_item])
-            .separator();
+            .item(&rename_item)
+            .item(&copy_name_item)
+            .item(&copy_full_name_item);
+        if let Some(ref item) = reveal_item {
+            builder = builder.item(item);
+        }
+        builder = builder.separator();
     }
 
     let ctx_menu = builder

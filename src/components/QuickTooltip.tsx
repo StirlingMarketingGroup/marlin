@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
 interface QuickTooltipProps {
@@ -16,8 +16,10 @@ interface QuickTooltipProps {
 export default function QuickTooltip({ text, delay = 120, children }: QuickTooltipProps) {
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
+  const [offset, setOffset] = useState(0);
   const ref = useRef<HTMLElement | null>(null);
   const timer = useRef<number | undefined>(undefined);
+  const tooltipRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(
     () => () => {
@@ -35,6 +37,7 @@ export default function QuickTooltip({ text, delay = 120, children }: QuickToolt
     const centerX = r.left + r.width / 2;
     const x = Math.max(padding, Math.min(centerX, window.innerWidth - padding));
     setPos({ x, y });
+    setOffset(0);
     setOpen(true);
   };
 
@@ -64,6 +67,46 @@ export default function QuickTooltip({ text, delay = 120, children }: QuickToolt
     },
   };
 
+  const adjustWithinViewport = useCallback(() => {
+    if (!open || !pos || !tooltipRef.current) return;
+    const { width } = tooltipRef.current.getBoundingClientRect();
+    const padding = 8;
+    const half = width / 2;
+    const available = Math.max(0, window.innerWidth - padding * 2);
+
+    let nextOffset = 0;
+    if (width > available) {
+      // Align tooltip to the viewport padding when we cannot fit entirely.
+      nextOffset = padding + half - pos.x;
+    } else {
+      const minCenter = padding + half;
+      const maxCenter = window.innerWidth - padding - half;
+      if (pos.x < minCenter) {
+        nextOffset = minCenter - pos.x;
+      } else if (pos.x > maxCenter) {
+        nextOffset = maxCenter - pos.x;
+      }
+    }
+
+    setOffset((prev) => {
+      if (Math.abs(nextOffset - prev) <= 0.5) {
+        return nextOffset === 0 ? 0 : prev;
+      }
+      return nextOffset;
+    });
+  }, [open, pos]);
+
+  useLayoutEffect(() => {
+    adjustWithinViewport();
+  }, [adjustWithinViewport, text]);
+
+  useEffect(() => {
+    if (!open) return;
+    const handle = () => adjustWithinViewport();
+    window.addEventListener('resize', handle);
+    return () => window.removeEventListener('resize', handle);
+  }, [open, adjustWithinViewport]);
+
   return (
     <>
       {children(handlers)}
@@ -72,8 +115,13 @@ export default function QuickTooltip({ text, delay = 120, children }: QuickToolt
         createPortal(
           <div
             role="tooltip"
-            className="fixed z-[1000] pointer-events-none select-none px-2 py-1 text-[12px] rounded bg-black/85 text-white shadow-lg text-center"
-            style={{ left: pos.x, top: pos.y, transform: 'translateX(-50%)' }}
+            ref={tooltipRef}
+            className="fixed z-[1000] pointer-events-none select-none px-2 py-1 text-[12px] rounded bg-black/85 text-white shadow-lg text-center whitespace-nowrap"
+            style={{
+              left: pos.x,
+              top: pos.y,
+              transform: `translateX(-50%) translateX(${offset}px)`
+            }}
           >
             {text}
           </div>,

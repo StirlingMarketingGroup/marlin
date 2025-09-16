@@ -1,6 +1,23 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+
+@theme {
+  --color-app-dark: #1e1e1e;
+  --color-app-darker: #121212;
+  --color-app-gray: #262626;
+  --color-app-light: #2e2e2e;
+  --color-app-accent: #3584e4;
+  --color-app-green: #23a55a;
+  --color-app-red: #e01b24;
+  --color-app-yellow: #f6c84c;
+  --color-app-text: #e6e6e7;
+  --color-app-muted: #a1a1aa;
+  --color-app-border: #3a3a3a;
+  --color-accent: var(--accent);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-selected: var(--accent-selected);
+  --font-sans: "ui-sans-serif", "-apple-system", "BlinkMacSystemFont", "SF Pro Text", "SF Pro Display", "Segoe UI", "Helvetica Neue", "Helvetica", "Arial", "Noto Sans", "Liberation Sans", "sans-serif";
+  --font-mono: "JetBrains Mono", "ui-monospace", "SFMono-Regular", "Menlo", "monospace";
+}
 
 @layer base {
   * {
@@ -105,19 +122,19 @@
 
 @layer utilities {
   .text-accent {
-    color: var(--accent);
+    color: var(--color-accent);
   }
   .bg-accent {
-    background-color: var(--accent);
+    background-color: var(--color-accent);
   }
   .bg-accent-soft {
-    background-color: var(--accent-soft);
+    background-color: var(--color-accent-soft);
   }
   .bg-accent-selected {
-    background-color: var(--accent-selected);
+    background-color: var(--color-accent-selected);
   }
   .outline-accent {
-    outline-color: var(--accent);
+    outline-color: var(--color-accent);
   }
   .line-clamp-2 {
     display: -webkit-box;
