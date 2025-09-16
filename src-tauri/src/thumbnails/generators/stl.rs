@@ -244,7 +244,7 @@ impl StlGenerator {
         let mut out = Vec::new();
         let mut cursor = std::io::Cursor::new(&mut out);
         image::DynamicImage::ImageRgba8(img)
-            .write_to(&mut cursor, image::ImageOutputFormat::Png)
+            .write_to(&mut cursor, image::ImageFormat::Png)
             .map_err(|e| format!("Failed to encode PNG: {}", e))?;
 
         let data_url = format!(

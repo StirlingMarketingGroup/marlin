@@ -291,7 +291,7 @@ pub fn render_svg_to_png(svg: String, size: Option<u32>) -> Result<String, Strin
     let mut out = Vec::new();
     let mut cursor = std::io::Cursor::new(&mut out);
     image::DynamicImage::ImageRgba8(img)
-        .write_to(&mut cursor, image::ImageOutputFormat::Png)
+        .write_to(&mut cursor, image::ImageFormat::Png)
         .map_err(|e| format!("PNG encode error: {}", e))?;
 
     let data_url = format!(
