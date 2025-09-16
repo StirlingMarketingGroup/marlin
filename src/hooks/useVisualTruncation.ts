@@ -23,7 +23,7 @@ export function useVisualTruncation(
   });
 
   const measureRef = useRef<HTMLDivElement | null>(null);
-  const debounceRef = useRef<number>();
+  const debounceRef = useRef<number | null>(null);
 
   // Create cache key
   const cacheKey = useMemo(() => {
@@ -122,7 +122,7 @@ export function useVisualTruncation(
 
   // Debounced measure function
   const debouncedMeasure = useCallback(() => {
-    if (debounceRef.current) {
+    if (debounceRef.current !== null) {
       clearTimeout(debounceRef.current);
     }
     debounceRef.current = window.setTimeout(measureTruncation, 16); // ~1 frame delay
@@ -144,8 +144,9 @@ export function useVisualTruncation(
         document.body.removeChild(measureRef.current);
         measureRef.current = null;
       }
-      if (debounceRef.current) {
+      if (debounceRef.current !== null) {
         clearTimeout(debounceRef.current);
+        debounceRef.current = null;
       }
     };
   }, []);

@@ -45,9 +45,9 @@ export function useThumbnail(
   const [generationTimeMs, setGenerationTimeMs] = useState<number>(0);
   const [hasTransparency, setHasTransparency] = useState<boolean>(false);
 
-  const abortControllerRef = useRef<AbortController>();
-  const currentPathRef = useRef<string>();
-  const requestIdRef = useRef<string>();
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const currentPathRef = useRef<string | null>(null);
+  const requestIdRef = useRef<string | null>(null);
 
   const fetchThumbnail = useCallback(
     async (thumbnailPath: string, requestOptions: Omit<ThumbnailRequest, 'path'>) => {
@@ -87,10 +87,14 @@ export function useThumbnail(
       // If path becomes undefined, cancel any in-flight request but keep current dataUrl
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
+        abortControllerRef.current = null;
       }
       if (requestIdRef.current) {
-        invoke('cancel_thumbnail', { requestId: requestIdRef.current }).catch(() => {});
+        const requestId = requestIdRef.current;
+        requestIdRef.current = null;
+        invoke('cancel_thumbnail', { requestId }).catch(() => {});
       }
+      currentPathRef.current = null;
       setLoading(false);
       return;
     }
@@ -98,10 +102,13 @@ export function useThumbnail(
     // Cancel any existing request
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
+      abortControllerRef.current = null;
     }
 
     if (requestIdRef.current) {
-      invoke('cancel_thumbnail', { requestId: requestIdRef.current }).catch(() => {
+      const requestId = requestIdRef.current;
+      requestIdRef.current = null;
+      invoke('cancel_thumbnail', { requestId }).catch(() => {
         // Ignore cancellation errors
       });
     }
@@ -136,12 +143,16 @@ export function useThumbnail(
     return () => {
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
+        abortControllerRef.current = null;
       }
       if (requestIdRef.current) {
-        invoke('cancel_thumbnail', { requestId: requestIdRef.current }).catch(() => {
+        const requestId = requestIdRef.current;
+        requestIdRef.current = null;
+        invoke('cancel_thumbnail', { requestId }).catch(() => {
           // Ignore cancellation errors
         });
       }
+      currentPathRef.current = null;
     };
   }, [path, size, quality, priority, format, fetchThumbnail]);
 
