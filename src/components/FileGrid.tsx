@@ -28,6 +28,7 @@ import { useThumbnail } from '@/hooks/useThumbnail';
 import { useVisibility } from '@/hooks/useVisibility';
 import FileNameDisplay from './FileNameDisplay';
 import SymlinkBadge from '@/components/SymlinkBadge';
+import GitRepoBadge from '@/components/GitRepoBadge';
 
 interface FileGridProps {
   files: FileItem[];
@@ -41,12 +42,14 @@ function GridFilePreview({
   fallbackIcon,
   tile,
   isSymlink,
+  isGitRepo,
 }: {
   file: FileItem;
   isMac: boolean;
   fallbackIcon: ReactNode;
   tile: number;
   isSymlink: boolean;
+  isGitRepo: boolean;
 }) {
   const { ref: previewRef, stage } = useVisibility<HTMLDivElement>({
     nearMargin: '900px',
@@ -66,6 +69,8 @@ function GridFilePreview({
   const badgeSize: 'sm' | 'md' | 'lg' = tile >= 200 ? 'lg' : tile >= 120 ? 'md' : 'sm';
   const badgeOffset =
     tile >= 200 ? 'bottom-3 left-3' : tile >= 140 ? 'bottom-2 left-2' : 'bottom-1 left-1';
+  const gitBadgeOffset =
+    tile >= 200 ? 'bottom-3 right-3' : tile >= 140 ? 'bottom-2 right-2' : 'bottom-1 right-1';
 
   // (Rendering handled below with a fixed preview box for alignment)
 
@@ -120,6 +125,7 @@ function GridFilePreview({
             justifyContent: 'center',
           }}
         >
+          {isGitRepo && <GitRepoBadge className={gitBadgeOffset} size={badgeSize} />}
           {isSymlink && <SymlinkBadge className={badgeOffset} size={badgeSize} />}
           <img
             src={dataUrl}
@@ -138,6 +144,7 @@ function GridFilePreview({
           className="relative rounded-md border border-app-border animate-pulse"
           style={{ width: box, height: box, padding: pad }}
         >
+          {isGitRepo && <GitRepoBadge className={gitBadgeOffset} size={badgeSize} />}
           {isSymlink && <SymlinkBadge className={badgeOffset} size={badgeSize} />}
         </div>
       );
@@ -148,6 +155,7 @@ function GridFilePreview({
         className="relative rounded-md border border-app-border"
         style={{ width: box, height: box, padding: pad }}
       >
+        {isGitRepo && <GitRepoBadge className={gitBadgeOffset} size={badgeSize} />}
         {isSymlink && <SymlinkBadge className={badgeOffset} size={badgeSize} />}
       </div>
     );
@@ -163,6 +171,7 @@ function GridFilePreview({
           className="relative overflow-hidden rounded-md border border-app-border bg-checker"
           style={{ width: box, height: box, padding: pad }}
         >
+          {isGitRepo && <GitRepoBadge className={gitBadgeOffset} size={badgeSize} />}
           {isSymlink && <SymlinkBadge className={badgeOffset} size={badgeSize} />}
         </div>
       );
@@ -173,6 +182,7 @@ function GridFilePreview({
         className="relative overflow-hidden"
         style={{ width: box, height: box, padding: pad }}
       >
+        {isGitRepo && <GitRepoBadge className={gitBadgeOffset} size={badgeSize} />}
         {isSymlink && <SymlinkBadge className={badgeOffset} size={badgeSize} />}
         <AppIcon
           path={file.path}
@@ -204,6 +214,12 @@ function GridFilePreview({
       style={{ width: thumb, height: thumb }}
     >
       <div style={{ transform: `scale(${scale})`, transformOrigin: 'center' }}>{fallbackIcon}</div>
+      {isGitRepo && (
+        <GitRepoBadge
+          size={badgeSize}
+          style={{ bottom: verticalInset, left: horizontalInset }}
+        />
+      )}
       {isSymlink && (
         <SymlinkBadge size={badgeSize} style={{ bottom: verticalInset, right: horizontalInset }} />
       )}
@@ -811,6 +827,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
                   fallbackIcon={getFileIcon(file)}
                   tile={tile}
                   isSymlink={file.is_symlink}
+                  isGitRepo={file.is_git_repo}
                 />
               </div>
 

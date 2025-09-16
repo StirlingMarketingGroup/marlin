@@ -30,6 +30,7 @@ import { useThumbnail } from '@/hooks/useThumbnail';
 import { useVisibility } from '@/hooks/useVisibility';
 import FileNameDisplay from './FileNameDisplay';
 import SymlinkBadge from '@/components/SymlinkBadge';
+import GitRepoBadge from '@/components/GitRepoBadge';
 
 interface FileListProps {
   files: FileItem[];
@@ -740,6 +741,9 @@ export default function FileList({ files, preferences }: FileListProps) {
                     <div className="w-full h-full flex items-center justify-center">
                       <ListFilePreview file={file} isMac={isMac} fallbackIcon={getFileIcon(file)} />
                     </div>
+                    {file.is_git_repo && (
+                      <GitRepoBadge size="sm" style={{ bottom: -2, left: -2 }} />
+                    )}
                     {file.is_symlink && (
                       <SymlinkBadge size="sm" style={{ bottom: -2, right: -2 }} />
                     )}

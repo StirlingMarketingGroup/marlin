@@ -6,6 +6,7 @@ export interface FileItem {
   is_directory: boolean; // Match Rust snake_case
   is_hidden: boolean; // Match Rust snake_case
   is_symlink: boolean; // Match Rust snake_case
+  is_git_repo: boolean; // Match Rust snake_case
   extension?: string;
 }
 

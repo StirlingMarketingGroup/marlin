@@ -12,6 +12,7 @@ pub struct FileItem {
     pub is_directory: bool,
     pub is_hidden: bool,
     pub is_symlink: bool,
+    pub is_git_repo: bool,
     pub extension: Option<String>,
 }
 
@@ -55,6 +56,13 @@ fn build_file_item(path: &Path) -> Result<FileItem, String> {
         None
     };
 
+    let is_git_repo = if is_directory {
+        let git_path = path.join(".git");
+        git_path.is_dir() || git_path.is_file()
+    } else {
+        false
+    };
+
     let modified = metadata
         .modified()
         .map(|time| DateTime::from(time))
@@ -68,6 +76,7 @@ fn build_file_item(path: &Path) -> Result<FileItem, String> {
         is_directory,
         is_hidden,
         is_symlink,
+        is_git_repo,
         extension,
     })
 }
