@@ -602,7 +602,14 @@ export default function FileList({ files, preferences }: FileListProps) {
     }, 1600);
 
     setPendingRevealTarget(undefined);
-  }, [pendingRevealTarget, filteredFiles, setPendingRevealTarget, setSelectedFiles, setSelectionAnchor, setSelectionLead]);
+  }, [
+    pendingRevealTarget,
+    filteredFiles,
+    setPendingRevealTarget,
+    setSelectedFiles,
+    setSelectionAnchor,
+    setSelectionLead,
+  ]);
 
   if (filteredFiles.length === 0) {
     return (

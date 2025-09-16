@@ -1,4 +1,4 @@
-@import "tailwindcss";
+@import 'tailwindcss';
 
 @theme {
   --color-app-dark: #1e1e1e;
@@ -15,8 +15,10 @@
   --color-accent: var(--accent);
   --color-accent-soft: var(--accent-soft);
   --color-accent-selected: var(--accent-selected);
-  --font-sans: "ui-sans-serif", "-apple-system", "BlinkMacSystemFont", "SF Pro Text", "SF Pro Display", "Segoe UI", "Helvetica Neue", "Helvetica", "Arial", "Noto Sans", "Liberation Sans", "sans-serif";
-  --font-mono: "JetBrains Mono", "ui-monospace", "SFMono-Regular", "Menlo", "monospace";
+  --font-sans:
+    'ui-sans-serif', '-apple-system', 'BlinkMacSystemFont', 'SF Pro Text', 'SF Pro Display',
+    'Segoe UI', 'Helvetica Neue', 'Helvetica', 'Arial', 'Noto Sans', 'Liberation Sans', 'sans-serif';
+  --font-mono: 'JetBrains Mono', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace';
 }
 
 @layer base {

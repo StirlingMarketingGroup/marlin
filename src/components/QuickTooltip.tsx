@@ -120,7 +120,7 @@ export default function QuickTooltip({ text, delay = 120, children }: QuickToolt
             style={{
               left: pos.x,
               top: pos.y,
-              transform: `translateX(-50%) translateX(${offset}px)`
+              transform: `translateX(-50%) translateX(${offset}px)`,
             }}
           >
             {text}

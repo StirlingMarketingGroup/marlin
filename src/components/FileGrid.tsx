@@ -734,7 +734,14 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     }, 1600);
 
     setPendingRevealTarget(undefined);
-  }, [pendingRevealTarget, files, setPendingRevealTarget, setSelectedFiles, setSelectionAnchor, setSelectionLead]);
+  }, [
+    pendingRevealTarget,
+    files,
+    setPendingRevealTarget,
+    setSelectedFiles,
+    setSelectionAnchor,
+    setSelectionLead,
+  ]);
 
   if (filteredFiles.length === 0) {
     return (
