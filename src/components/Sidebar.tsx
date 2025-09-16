@@ -29,8 +29,9 @@ export default function Sidebar() {
   const handleDragLeave = useCallback(() => setIsDragOver(false), [])
 
   useSidebarDropZone(async (paths) => {
+    const uniquePaths = Array.from(new Set(paths))
     // Handle dropped directories
-    for (const path of paths) {
+    for (const path of uniquePaths) {
       try {
         await addPinnedDirectory(path)
         const { addToast } = useToastStore.getState()
@@ -39,6 +40,10 @@ export default function Sidebar() {
           message: `Pinned ${path.split('/').pop() || 'directory'} to sidebar`
         })
       } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        if (message.includes('already pinned')) {
+          continue
+        }
         console.error('Failed to pin directory:', error)
         const { addToast } = useToastStore.getState()
         addToast({
@@ -51,7 +56,8 @@ export default function Sidebar() {
   }, {
     onDragEnter: handleDragEnter,
     onDragOver: handleDragEnter,
-    onDragLeave: handleDragLeave
+    onDragLeave: handleDragLeave,
+    width: sidebarWidth
   })
   
   // Fetch system drives on component mount
@@ -182,6 +188,7 @@ export default function Sidebar() {
       style={{ width: sidebarWidth }}
       data-tauri-drag-region={false}
       data-sidebar="true"
+      data-drop-zone-id="sidebar"
     >
       {/* Expanded draggable area around traffic lights - covers entire top area */}
       <div

@@ -40,7 +40,7 @@ function ToastItem({ toast, onClose }: { toast: any; onClose: () => void }) {
 
   return (
     <div
-      className={`flex items-center gap-3 px-4 py-3 rounded-lg border ${getBgColor()} bg-app-dark/95 backdrop-blur-sm shadow-lg min-w-[300px] max-w-[500px] animate-slide-in`}
+      className={`flex items-center gap-3 px-4 py-3 rounded-lg border ${getBgColor()} bg-app-dark/95 backdrop-blur-sm shadow-lg min-w-[300px] max-w-[500px] ${toast.closing ? 'animate-fade-out' : 'animate-slide-in'}`}
     >
       {getIcon()}
       <div className="flex-1">

@@ -32,11 +32,12 @@ export function useDragDetector(handlers: DragDropHandlers) {
     }
   }, [])
 
-  const setDropZone = useCallback(async (zoneId: string, enabled: boolean) => {
+  const setDropZone = useCallback(async (zoneId: string, enabled: boolean, config?: { width?: number }) => {
     try {
-      await invoke('set_drop_zone', { 
-        zone_id: zoneId, 
-        enabled 
+      await invoke('set_drop_zone', {
+        zoneId,
+        enabled,
+        config: config ?? null
       })
     } catch (error) {
       console.error('Failed to set drop zone:', error)
@@ -45,6 +46,8 @@ export function useDragDetector(handlers: DragDropHandlers) {
 
   useEffect(() => {
     let unlisten: UnlistenFn | null = null
+    let lastTargetId: string | null = null
+    let lastLogTime = 0
 
     const setupListener = async () => {
       // Enable drag detection when component mounts
@@ -52,20 +55,71 @@ export function useDragDetector(handlers: DragDropHandlers) {
 
       // Listen for drag-drop events from the plugin
       unlisten = await listen<DragDropEvent>('drag-drop-event', (event) => {
-        const { eventType } = event.payload
+        const viewportHeight = window.innerHeight
+        const deviceScale = window.devicePixelRatio || 1
 
-        switch (eventType) {
+        let zoneId: string | null = event.payload.location.targetId ?? null
+        const domPoint = {
+          x: event.payload.location.x,
+          y: viewportHeight - event.payload.location.y
+        }
+
+        if (!zoneId) {
+          if (Number.isFinite(domPoint.x) && Number.isFinite(domPoint.y)) {
+            if (domPoint.x >= 0 && domPoint.x <= window.innerWidth && domPoint.y >= 0 && domPoint.y <= viewportHeight) {
+              const element = document.elementFromPoint(domPoint.x, domPoint.y)
+              const zoneEl = element?.closest<HTMLElement>('[data-drop-zone-id]')
+              if (zoneEl) {
+                zoneId = zoneEl.dataset.dropZoneId ?? null
+              }
+            }
+          }
+        }
+
+        const normalizedEvent: DragDropEvent = {
+          ...event.payload,
+          location: {
+            ...event.payload.location,
+            x: domPoint.x,
+            y: domPoint.y,
+            targetId: zoneId
+          }
+        }
+
+        const now = performance.now()
+        if (
+          import.meta.env.DEV &&
+          normalizedEvent.eventType !== 'dragOver' &&
+          (normalizedEvent.location.targetId !== lastTargetId || now - lastLogTime > 250)
+        ) {
+          lastTargetId = normalizedEvent.location.targetId ?? null
+          lastLogTime = now
+          console.debug('[drag-detector]', normalizedEvent)
+        }
+
+        switch (normalizedEvent.eventType) {
           case 'dragEnter':
-            handlers.onDragEnter?.(event.payload)
+            handlers.onDragEnter?.(normalizedEvent)
             break
           case 'dragOver':
-            handlers.onDragOver?.(event.payload)
+            if (normalizedEvent.location.targetId) {
+              handlers.onDragOver?.(normalizedEvent)
+            } else {
+              handlers.onDragLeave?.({
+                ...normalizedEvent,
+                eventType: 'dragLeave',
+                location: {
+                  ...normalizedEvent.location,
+                  targetId: null
+                }
+              })
+            }
             break
           case 'dragLeave':
-            handlers.onDragLeave?.(event.payload)
+            handlers.onDragLeave?.(normalizedEvent)
             break
           case 'drop':
-            handlers.onDrop?.(event.payload)
+            handlers.onDrop?.(normalizedEvent)
             break
         }
       })
@@ -77,6 +131,8 @@ export function useDragDetector(handlers: DragDropHandlers) {
       if (unlisten) {
         unlisten()
       }
+      lastTargetId = null
+      lastLogTime = 0
     }
   }, [handlers, enableDragDetection])
 
@@ -95,7 +151,11 @@ interface SidebarDropZoneHandlers {
   onDragLeave?: () => void
 }
 
-export function useSidebarDropZone(onDrop: (paths: string[]) => void, handlers?: SidebarDropZoneHandlers) {
+interface SidebarDropZoneOptions extends SidebarDropZoneHandlers {
+  width?: number
+}
+
+export function useSidebarDropZone(onDrop: (paths: string[]) => void, options?: SidebarDropZoneOptions) {
   const handleDrop = useCallback((event: DragDropEvent) => {
     if (event.location.targetId === 'sidebar' && event.paths.length > 0) {
       onDrop(event.paths)
@@ -106,30 +166,32 @@ export function useSidebarDropZone(onDrop: (paths: string[]) => void, handlers?:
     onDrop: handleDrop,
     onDragEnter: (event) => {
       if (event.location.targetId === 'sidebar') {
-        handlers?.onDragEnter?.()
+        options?.onDragEnter?.()
       }
     },
     onDragOver: (event) => {
       if (event.location.targetId === 'sidebar') {
-        handlers?.onDragOver?.()
+        options?.onDragOver?.()
+      } else {
+        options?.onDragLeave?.()
       }
     },
-    onDragLeave: (event) => {
-      if (event.location.targetId === 'sidebar') {
-        handlers?.onDragLeave?.()
-      }
+    onDragLeave: () => {
+      options?.onDragLeave?.()
     }
-  }), [handleDrop, handlers?.onDragEnter, handlers?.onDragOver, handlers?.onDragLeave])
+  }), [handleDrop, options?.onDragEnter, options?.onDragOver, options?.onDragLeave])
 
   const { setDropZone } = useDragDetector(detectorHandlers)
 
   useEffect(() => {
-    // Enable sidebar as a drop zone
-    setDropZone('sidebar', true)
-
+    void setDropZone('sidebar', true)
     return () => {
-      // Disable sidebar as a drop zone on unmount
-      setDropZone('sidebar', false)
+      void setDropZone('sidebar', false)
     }
   }, [setDropZone])
+
+  useEffect(() => {
+    if (options?.width == null) return
+    void setDropZone('sidebar', true, { width: options.width })
+  }, [setDropZone, options?.width])
 }

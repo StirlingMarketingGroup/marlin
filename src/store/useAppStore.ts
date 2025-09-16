@@ -93,7 +93,7 @@ interface AppState {
   canGoForward: () => boolean
   goUp: () => void
   canGoUp: () => boolean
-  toggleHiddenFiles: () => Promise<void>
+  toggleHiddenFiles: (forceValue?: boolean) => Promise<void>
   toggleFoldersFirst: () => Promise<void>
   refreshCurrentDirectory: () => Promise<void>
   fetchAppIcon: (path: string, size?: number) => Promise<string | undefined>
@@ -292,7 +292,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     return true
   },
 
-  toggleHiddenFiles: async () => {
+  toggleHiddenFiles: async (forceValue?: boolean) => {
     const { currentPath } = get()
     console.log('🔄 toggleHiddenFiles called for path:', currentPath)
     
@@ -307,7 +307,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     
     const { currentShowHidden } = getCurrentState()
-    const newShowHidden = !currentShowHidden
+    const newShowHidden = typeof forceValue === 'boolean' ? forceValue : !currentShowHidden
     console.log('🔄 Toggle hidden files:', { 
       path: currentPath,
       currentShowHidden, 

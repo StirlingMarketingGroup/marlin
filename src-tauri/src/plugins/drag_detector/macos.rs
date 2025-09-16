@@ -1,8 +1,6 @@
 use cocoa::appkit::{NSViewHeightSizable, NSViewWidthSizable, NSWindowOrderingMode};
 use cocoa::base::{id, nil, NO, YES};
-#[allow(unused_imports)]
-use cocoa::foundation::NSArray;
-use cocoa::foundation::{NSAutoreleasePool, NSPoint, NSRect, NSString};
+use cocoa::foundation::{NSArray, NSAutoreleasePool, NSPoint, NSRect, NSString};
 use objc::class;
 use objc::declare::ClassDecl;
 use objc::runtime::{Class, Object, Sel, BOOL};
@@ -15,7 +13,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Runtime, Window};
 
-use super::{DragDropEvent, DragEventType, DropLocation};
+use super::{DragDropEvent, DragEventType, DropLocation, DropZoneConfig};
 
 type DragHandler = dyn Fn(DragDropEvent) + 'static;
 
@@ -23,7 +21,14 @@ type NSDragOperation = u64;
 const NS_DRAG_OPERATION_NONE: NSDragOperation = 0;
 const NS_DRAG_OPERATION_COPY: NSDragOperation = 1;
 
-static DROP_ZONES: Lazy<Mutex<HashMap<String, bool>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+#[derive(Debug, Clone, Default)]
+struct DropZoneState {
+    enabled: bool,
+    width: Option<f64>,
+}
+
+static DROP_ZONES: Lazy<Mutex<HashMap<String, DropZoneState>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 static INITIALIZED_WINDOWS: Lazy<Mutex<HashMap<String, bool>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
 static DRAG_OVERLAY_CLASS: Lazy<&'static Class> = Lazy::new(|| {
@@ -147,19 +152,19 @@ extern "C" fn wants_periodic_dragging_updates(_this: &Object, _sel: Sel) -> BOOL
 }
 
 unsafe fn get_drag_location(sender: id) -> NSPoint {
-    let window: id = msg_send![sender, draggingDestinationWindow];
-    let screen_point: NSPoint = msg_send![sender, draggingLocation];
-    let window_point: NSPoint = msg_send![window, convertPointFromScreen: screen_point];
-
-    let content_view: id = msg_send![window, contentView];
-    msg_send![content_view, convertPoint: window_point fromView: nil]
+    msg_send![sender, draggingLocation]
 }
 
 unsafe fn get_dragged_paths(sender: id) -> Vec<String> {
     let pasteboard: id = msg_send![sender, draggingPasteboard];
-    let ns_array: &Class = class!(NSArray);
-    let types: id = msg_send![ns_array, arrayWithObject: NSString::alloc(nil).init_str("public.file-url")];
-    let urls: id = msg_send![pasteboard, readObjectsForClasses: types options: nil];
+    if pasteboard == nil {
+        return Vec::new();
+    }
+
+    let url_class_ptr: *const Class = class!(NSURL);
+    let url_class_obj: id = url_class_ptr as *const _ as *mut Object;
+    let class_array: id = NSArray::arrayWithObject(nil, url_class_obj);
+    let urls: id = msg_send![pasteboard, readObjectsForClasses: class_array options: nil];
 
     let mut paths = Vec::new();
 
@@ -181,15 +186,29 @@ unsafe fn get_dragged_paths(sender: id) -> Vec<String> {
 }
 
 fn resolve_target(point: NSPoint) -> Option<String> {
+    if point.x < 0.0 || point.y < 0.0 {
+        return None;
+    }
+
     let zones = DROP_ZONES.lock().unwrap();
 
-    if zones.get("sidebar").copied().unwrap_or(false) && point.x <= 280.0 {
-        Some("sidebar".to_string())
-    } else if zones.get("file-grid").copied().unwrap_or(false) {
-        Some("file-grid".to_string())
-    } else {
-        None
+    if let Some(zone) = zones.get("sidebar") {
+        if zone.enabled {
+            let width = zone.width.unwrap_or(280.0);
+            // Allow a small tolerance to smooth minor rounding differences.
+            if point.x <= width + 1.0 {
+                return Some("sidebar".to_string());
+            }
+        }
     }
+
+    if let Some(zone) = zones.get("file-grid") {
+        if zone.enabled {
+            return Some("file-grid".to_string());
+        }
+    }
+
+    None
 }
 
 fn drag_operation_for_target(target: &Option<String>) -> NSDragOperation {
@@ -202,7 +221,12 @@ fn drag_operation_for_target(target: &Option<String>) -> NSDragOperation {
 
 fn is_target_enabled(target: &Option<String>) -> bool {
     match target {
-        Some(id) => DROP_ZONES.lock().unwrap().get(id).copied().unwrap_or(false),
+        Some(id) => DROP_ZONES
+            .lock()
+            .unwrap()
+            .get(id)
+            .map(|zone| zone.enabled)
+            .unwrap_or(false),
         None => false,
     }
 }
@@ -264,9 +288,18 @@ fn install_overlay<R: Runtime>(window: Window<R>) -> Result<(), String> {
         let handler_arc: Arc<DragHandler> = Arc::new({
             let window_clone = window.clone();
             move |event: DragDropEvent| {
+                log::debug!(
+                    "drag detector event: {:?} target={:?} ({}, {})",
+                    event.event_type,
+                    event.location.target_id,
+                    event.location.x,
+                    event.location.y
+                );
+
+                let event_clone = event.clone();
                 let emit_window = window_clone.clone();
                 tauri::async_runtime::spawn(async move {
-                    if let Err(err) = emit_window.emit("drag-drop-event", event) {
+                    if let Err(err) = emit_window.emit("drag-drop-event", event_clone) {
                         log::warn!("Failed to emit drag-drop-event: {err}");
                     }
                 });
@@ -317,7 +350,11 @@ pub fn setup_drag_handlers<R: Runtime>(window: &Window<R>) -> Result<(), String>
         .map_err(|_| "Failed to acquire drag detector result".to_string())?
 }
 
-pub fn set_drop_zone(zone_id: &str, enabled: bool) {
+pub fn set_drop_zone(zone_id: &str, enabled: bool, config: Option<DropZoneConfig>) {
     let mut zones = DROP_ZONES.lock().unwrap();
-    zones.insert(zone_id.to_string(), enabled);
+    let entry = zones.entry(zone_id.to_string()).or_default();
+    entry.enabled = enabled;
+    if let Some(cfg) = config {
+        entry.width = cfg.width;
+    }
 }

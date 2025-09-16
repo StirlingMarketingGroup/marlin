@@ -874,9 +874,6 @@ pub fn show_native_context_menu(
         let rename_item = MenuItemBuilder::with_id("ctx:rename", "Rename")
             .build(&app)
             .map_err(|e| e.to_string())?;
-        let pin_sidebar_item = MenuItemBuilder::with_id("ctx:pin_sidebar", "Pin to Sidebar")
-            .build(&app)
-            .map_err(|e| e.to_string())?;
         let copy_name_item = MenuItemBuilder::with_id("ctx:copy_name", "Copy File Name")
             .build(&app)
             .map_err(|e| e.to_string())?;
@@ -884,7 +881,7 @@ pub fn show_native_context_menu(
             .build(&app)
             .map_err(|e| e.to_string())?;
         builder = builder
-            .items(&[&rename_item, &pin_sidebar_item, &copy_name_item, &copy_full_name_item])
+            .items(&[&rename_item, &copy_name_item, &copy_full_name_item])
             .separator();
     }
 

@@ -11,6 +11,7 @@ export interface Toast {
     label: string
     onClick: () => void
   }
+  closing?: boolean
 }
 
 interface ToastStore {
@@ -19,12 +20,14 @@ interface ToastStore {
   removeToast: (id: string) => void
 }
 
-export const useToastStore = create<ToastStore>((set) => ({
+const FADE_DURATION = 250
+
+export const useToastStore = create<ToastStore>((set, get) => ({
   toasts: [],
   
   addToast: (toast) => {
     const id = Math.random().toString(36).substring(7)
-    const newToast = { ...toast, id }
+    const newToast = { ...toast, id, closing: false }
     
     set((state) => ({
       toasts: [...state.toasts, newToast]
@@ -34,15 +37,33 @@ export const useToastStore = create<ToastStore>((set) => ({
     const duration = toast.duration ?? 5000
     if (duration > 0) {
       setTimeout(() => {
+        // Abort if toast already removed
+        if (!get().toasts.some((t) => t.id === id)) return
+
         set((state) => ({
-          toasts: state.toasts.filter((t) => t.id !== id)
+          toasts: state.toasts.map((t) => t.id === id ? { ...t, closing: true } : t)
         }))
+
+        setTimeout(() => {
+          set((state) => ({
+            toasts: state.toasts.filter((t) => t.id !== id)
+          }))
+        }, FADE_DURATION)
       }, duration)
     }
   },
   
-  removeToast: (id) =>
+  removeToast: (id) => {
+    if (!get().toasts.some((t) => t.id === id)) return
+
     set((state) => ({
-      toasts: state.toasts.filter((t) => t.id !== id)
+      toasts: state.toasts.map((t) => t.id === id ? { ...t, closing: true } : t)
     }))
+
+    setTimeout(() => {
+      set((state) => ({
+        toasts: state.toasts.filter((t) => t.id !== id)
+      }))
+    }, FADE_DURATION)
+  }
 }))

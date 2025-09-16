@@ -11,6 +11,7 @@ mod windows;
 mod linux;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DropLocation {
     pub x: f64,
     pub y: f64,
@@ -18,6 +19,7 @@ pub struct DropLocation {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DragDropEvent {
     pub paths: Vec<String>,
     pub location: DropLocation,
@@ -44,14 +46,21 @@ pub async fn enable_drag_detection<R: Runtime>(window: Window<R>) -> Result<(), 
     Ok(())
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DropZoneConfig {
+    pub width: Option<f64>,
+}
+
 #[tauri::command]
 pub async fn set_drop_zone(
     zone_id: String,
     enabled: bool,
+    #[allow(unused_variables)] config: Option<DropZoneConfig>,
 ) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        macos::set_drop_zone(&zone_id, enabled);
+        macos::set_drop_zone(&zone_id, enabled, config);
     }
 
     Ok(())

@@ -402,9 +402,6 @@ pub fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, event: &tauri::menu::Me
         "ctx:rename" => {
             let _ = app.emit("menu:rename", ());
         }
-        "ctx:pin_sidebar" => {
-            let _ = app.emit("ctx:pin_sidebar", ());
-        }
         "menu:folders_first" => {
             // Toggle and emit new value
             let state: tauri::State<crate::state::MenuState<R>> = app.state();

@@ -187,4 +187,19 @@
   .animate-slide-in {
     animation: slide-in 0.3s ease-out;
   }
+
+  @keyframes fade-out-toast {
+    from {
+      opacity: 1;
+      transform: translateX(0);
+    }
+    to {
+      opacity: 0;
+      transform: translateX(8px);
+    }
+  }
+
+  .animate-fade-out {
+    animation: fade-out-toast 0.25s ease-in forwards;
+  }
 }
