@@ -215,10 +215,7 @@ function GridFilePreview({
     >
       <div style={{ transform: `scale(${scale})`, transformOrigin: 'center' }}>{fallbackIcon}</div>
       {isGitRepo && (
-        <GitRepoBadge
-          size={badgeSize}
-          style={{ bottom: verticalInset, left: horizontalInset }}
-        />
+        <GitRepoBadge size={badgeSize} style={{ bottom: verticalInset, left: horizontalInset }} />
       )}
       {isSymlink && (
         <SymlinkBadge size={badgeSize} style={{ bottom: verticalInset, right: horizontalInset }} />

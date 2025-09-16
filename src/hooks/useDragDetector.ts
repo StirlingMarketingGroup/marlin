@@ -179,7 +179,11 @@ export function useSidebarDropZone(
       const sortedKey = event.paths.slice().sort().join('|');
       const now = Date.now();
       const lastDrop = lastDropRef.current;
-      if (lastDrop && lastDrop.key === sortedKey && now - lastDrop.timestamp < DROP_DEDUPE_WINDOW_MS) {
+      if (
+        lastDrop &&
+        lastDrop.key === sortedKey &&
+        now - lastDrop.timestamp < DROP_DEDUPE_WINDOW_MS
+      ) {
         onDragLeave?.();
         return;
       }
