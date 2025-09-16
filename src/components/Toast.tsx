@@ -1,5 +1,6 @@
 import { useToastStore } from '../store/useToastStore';
 import type { Toast as ToastData } from '../store/useToastStore';
+import type { ReactElement } from 'react';
 import { X, CheckCircle, XCircle, Info } from 'phosphor-react';
 
 export default function Toast() {
@@ -17,7 +18,7 @@ export default function Toast() {
 }
 
 function ToastItem({ toast, onClose }: { toast: ToastData; onClose: () => void }) {
-  const getIcon = (): JSX.Element | null => {
+  const getIcon = (): ReactElement | null => {
     switch (toast.type) {
       case 'success':
         return <CheckCircle className="w-5 h-5 text-green-500" weight="fill" />;
