@@ -72,7 +72,14 @@ jobs:
           node-version: 20
 
       - name: Update npm metadata
-        run: npm version "$RELEASE_VERSION" --no-git-tag-version
+        shell: bash
+        run: |
+          current=$(node -p "require('./package.json').version")
+          if [[ "$current" == "$RELEASE_VERSION" ]]; then
+            echo "package.json already version $current; skipping."
+          else
+            npm version "$RELEASE_VERSION" --no-git-tag-version
+          fi
 
       - name: Update Tauri config
         run: |
