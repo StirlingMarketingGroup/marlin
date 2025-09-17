@@ -4,6 +4,11 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag (for example v1.2.3) to build and publish'
+        required: true
 
 jobs:
   release:
@@ -36,7 +41,41 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v5
+      - name: Determine release metadata
+        id: resolve
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          REF: ${{ github.ref }}
+          INPUT_TAG: ${{ github.event.inputs.tag || '' }}
+        run: |
+          tag=""
+          ref="$REF"
+          if [[ "$REF_TYPE" == "tag" ]]; then
+            tag="$REF_NAME"
+            ref="$REF"
+          elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            tag="$INPUT_TAG"
+            ref="refs/tags/$tag"
+          fi
+          echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
+          echo "RELEASE_REF=$ref" >> "$GITHUB_ENV"
+
+      - name: Validate release tag
+        shell: bash
+        run: |
+          if [ -z "$RELEASE_TAG" ]; then
+            echo "RELEASE_TAG must be provided (triggered tag push or workflow_dispatch input)." >&2
+            exit 1
+          fi
+
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ env.RELEASE_REF }}
 
       - name: Install dependencies (Ubuntu)
         if: startsWith(matrix.os, 'ubuntu')
@@ -84,10 +123,85 @@ jobs:
           TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
           TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: Marlin ${{ github.ref_name }}
+          tagName: ${{ env.RELEASE_TAG }}
+          releaseName: Marlin ${{ env.RELEASE_TAG }}
           releaseBody: |
             Automated binaries for Marlin. Download the installer matching your platform.
           releaseDraft: false
-          prerelease: ${{ startsWith(github.ref_name, 'v0.') }}
+          prerelease: ${{ startsWith(env.RELEASE_TAG, 'v0.') }}
           args: --target ${{ matrix.target }}
+
+  sync-version:
+    name: Sync Version Metadata
+    needs: release
+    if: ${{ (github.ref_type == 'tag' && startsWith(github.ref_name, 'v')) || (github.event.inputs.tag && startsWith(github.event.inputs.tag, 'v')) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Determine release tag
+        shell: bash
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag || '' }}
+        run: |
+          tag=""
+          if [[ "$REF_TYPE" == "tag" ]]; then
+            tag="$REF_NAME"
+          else
+            tag="$INPUT_TAG"
+          fi
+          echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
+
+      - name: Checkout target branch
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.repository.default_branch || 'master' }}
+
+      - name: Prepare release version
+        run: |
+          version="${RELEASE_TAG#v}"
+          if [ -z "$version" ]; then
+            echo "RELEASE_VERSION=$RELEASE_TAG" >> "$GITHUB_ENV"
+          else
+            echo "RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+          fi
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 20
+
+      - name: Update npm metadata
+        run: npm version "$RELEASE_VERSION" --no-git-tag-version
+
+      - name: Update Tauri config
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const version = process.env.RELEASE_VERSION;
+          const file = 'src-tauri/tauri.conf.json';
+          const content = fs.readFileSync(file, 'utf8');
+          const json = JSON.parse(content);
+          json.version = version;
+          fs.writeFileSync(file, JSON.stringify(json, null, 2) + '\n');
+          NODE
+
+      - name: Detect changes
+        id: diff
+        run: |
+          if git diff --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit version bump
+        if: steps.diff.outputs.changed == 'true'
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: 'chore: sync version to ${{ env.RELEASE_TAG }}'
+          branch: ${{ github.event.repository.default_branch || 'master' }}
+          commit_user_name: marlin-release-bot
+          commit_user_email: releases@marlin.app
