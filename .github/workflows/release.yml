@@ -7,12 +7,120 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing tag (for example v1.2.3) to build and publish'
+        description: 'Release tag (for example v1.2.3)'
         required: true
 
 jobs:
+  sync-version:
+    name: Sync Version Metadata
+    if: ${{ (github.ref_type == 'tag' && startsWith(github.ref_name, 'v')) || (github.event.inputs.tag && startsWith(github.event.inputs.tag, 'v')) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      release_tag: ${{ steps.context.outputs.release_tag }}
+      release_ref: ${{ steps.context.outputs.release_ref }}
+      release_version: ${{ steps.context.outputs.release_version }}
+      default_branch: ${{ steps.context.outputs.default_branch }}
+      changes_detected: ${{ steps.diff.outputs.changed }}
+    steps:
+      - name: Resolve release context
+        id: context
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag || '' }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'master' }}
+        run: |
+          tag=""
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            tag="$INPUT_TAG"
+          elif [[ "$REF_TYPE" == "tag" ]]; then
+            tag="$REF_NAME"
+          fi
+
+          if [[ -z "$tag" ]]; then
+            echo "Release tag is required (tag push or workflow input)." >&2
+            exit 1
+          fi
+
+          version="${tag#v}"
+          if [[ "$version" == "$tag" ]]; then
+            version="$tag"
+          fi
+
+          echo "release_tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "release_ref=refs/tags/$tag" >> "$GITHUB_OUTPUT"
+          echo "release_version=$version" >> "$GITHUB_OUTPUT"
+          echo "default_branch=$DEFAULT_BRANCH" >> "$GITHUB_OUTPUT"
+
+          echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
+          echo "RELEASE_REF=refs/tags/$tag" >> "$GITHUB_ENV"
+          echo "RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+          echo "TARGET_BRANCH=$DEFAULT_BRANCH" >> "$GITHUB_ENV"
+
+      - name: Checkout target branch
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ steps.context.outputs.default_branch }}
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 20
+
+      - name: Update npm metadata
+        run: npm version "$RELEASE_VERSION" --no-git-tag-version
+
+      - name: Update Tauri config
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const version = process.env.RELEASE_VERSION;
+          const file = 'src-tauri/tauri.conf.json';
+          const content = fs.readFileSync(file, 'utf8');
+          const json = JSON.parse(content);
+          json.version = version;
+          fs.writeFileSync(file, JSON.stringify(json, null, 2) + '\n');
+          NODE
+
+      - name: Detect changes
+        id: diff
+        run: |
+          if git diff --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Abort on mismatched tag contents
+        if: github.event_name != 'workflow_dispatch' && steps.diff.outputs.changed == 'true'
+        run: |
+          echo "Version files differ from release tag $RELEASE_TAG. Please update the code and recreate the tag before releasing." >&2
+          exit 1
+
+      - name: Commit version bump
+        if: github.event_name == 'workflow_dispatch' && steps.diff.outputs.changed == 'true'
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: 'chore: sync version to ${{ env.RELEASE_TAG }}'
+          branch: ${{ env.TARGET_BRANCH }}
+          commit_user_name: marlin-release-bot
+          commit_user_email: releases@marlin.app
+
+      - name: Ensure release tag exists
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          git fetch --tags --force
+          git tag -f "$RELEASE_TAG"
+          git push origin "refs/tags/$RELEASE_TAG" --force
+
   release:
     name: Release (${{ matrix.os }} • ${{ matrix.arch }})
+    needs: sync-version
+    if: ${{ needs.sync-version.result == 'success' }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -40,34 +148,15 @@ jobs:
             rust-targets: aarch64-unknown-linux-gnu
     permissions:
       contents: write
+    env:
+      RELEASE_TAG: ${{ needs.sync-version.outputs.release_tag || github.ref_name }}
+      RELEASE_REF: ${{ needs.sync-version.outputs.release_ref || github.ref }}
     steps:
-      - name: Determine release metadata
-        id: resolve
-        shell: bash
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          REF_TYPE: ${{ github.ref_type }}
-          REF_NAME: ${{ github.ref_name }}
-          REF: ${{ github.ref }}
-          INPUT_TAG: ${{ github.event.inputs.tag || '' }}
-        run: |
-          tag=""
-          ref="$REF"
-          if [[ "$REF_TYPE" == "tag" ]]; then
-            tag="$REF_NAME"
-            ref="$REF"
-          elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
-            tag="$INPUT_TAG"
-            ref="refs/tags/$tag"
-          fi
-          echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
-          echo "RELEASE_REF=$ref" >> "$GITHUB_ENV"
-
       - name: Validate release tag
         shell: bash
         run: |
           if [ -z "$RELEASE_TAG" ]; then
-            echo "RELEASE_TAG must be provided (triggered tag push or workflow_dispatch input)." >&2
+            echo "RELEASE_TAG is not available." >&2
             exit 1
           fi
 
@@ -130,78 +219,3 @@ jobs:
           releaseDraft: false
           prerelease: ${{ startsWith(env.RELEASE_TAG, 'v0.') }}
           args: --target ${{ matrix.target }}
-
-  sync-version:
-    name: Sync Version Metadata
-    needs: release
-    if: ${{ (github.ref_type == 'tag' && startsWith(github.ref_name, 'v')) || (github.event.inputs.tag && startsWith(github.event.inputs.tag, 'v')) }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Determine release tag
-        shell: bash
-        env:
-          REF_TYPE: ${{ github.ref_type }}
-          REF_NAME: ${{ github.ref_name }}
-          INPUT_TAG: ${{ github.event.inputs.tag || '' }}
-        run: |
-          tag=""
-          if [[ "$REF_TYPE" == "tag" ]]; then
-            tag="$REF_NAME"
-          else
-            tag="$INPUT_TAG"
-          fi
-          echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
-
-      - name: Checkout target branch
-        uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-          ref: ${{ github.event.repository.default_branch || 'master' }}
-
-      - name: Prepare release version
-        run: |
-          version="${RELEASE_TAG#v}"
-          if [ -z "$version" ]; then
-            echo "RELEASE_VERSION=$RELEASE_TAG" >> "$GITHUB_ENV"
-          else
-            echo "RELEASE_VERSION=$version" >> "$GITHUB_ENV"
-          fi
-
-      - uses: actions/setup-node@v5
-        with:
-          node-version: 20
-
-      - name: Update npm metadata
-        run: npm version "$RELEASE_VERSION" --no-git-tag-version
-
-      - name: Update Tauri config
-        run: |
-          node <<'NODE'
-          const fs = require('fs');
-          const version = process.env.RELEASE_VERSION;
-          const file = 'src-tauri/tauri.conf.json';
-          const content = fs.readFileSync(file, 'utf8');
-          const json = JSON.parse(content);
-          json.version = version;
-          fs.writeFileSync(file, JSON.stringify(json, null, 2) + '\n');
-          NODE
-
-      - name: Detect changes
-        id: diff
-        run: |
-          if git diff --quiet; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Commit version bump
-        if: steps.diff.outputs.changed == 'true'
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: 'chore: sync version to ${{ env.RELEASE_TAG }}'
-          branch: ${{ github.event.repository.default_branch || 'master' }}
-          commit_user_name: marlin-release-bot
-          commit_user_email: releases@marlin.app
