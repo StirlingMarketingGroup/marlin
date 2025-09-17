@@ -3,6 +3,11 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[cfg(target_os = "macos")]
+use crate::macos_security;
+#[cfg(target_os = "macos")]
+use log::warn;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileItem {
     pub name: String,
@@ -110,6 +115,9 @@ fn build_file_item(path: &Path) -> Result<FileItem, String> {
 }
 
 pub fn read_directory_contents(path: &Path) -> Result<Vec<FileItem>, String> {
+    #[cfg(target_os = "macos")]
+    let _scope_guard = macos_security::retain_access(path)?;
+
     let entries = fs::read_dir(path).map_err(|e| format!("Failed to read directory: {}", e))?;
 
     let mut files = Vec::new();
@@ -124,18 +132,60 @@ pub fn read_directory_contents(path: &Path) -> Result<Vec<FileItem>, String> {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    if let Err(err) = macos_security::store_bookmark_if_needed(path) {
+        warn!(
+            "Failed to persist security bookmark for {}: {}",
+            path.display(),
+            err
+        );
+    }
+
     Ok(files)
 }
 
 pub fn get_file_info(path: &Path) -> Result<FileItem, String> {
-    build_file_item(path)
+    #[cfg(target_os = "macos")]
+    let _scope_guard = macos_security::retain_access(path)?;
+
+    let item = build_file_item(path);
+
+    #[cfg(target_os = "macos")]
+    if item.is_ok() {
+        if let Err(err) = macos_security::store_bookmark_if_needed(path) {
+            warn!(
+                "Failed to persist security bookmark for {}: {}",
+                path.display(),
+                err
+            );
+        }
+    }
+
+    item
 }
 
 pub fn create_directory(path: &Path) -> Result<(), String> {
-    fs::create_dir_all(path).map_err(|e| format!("Failed to create directory: {}", e))
+    #[cfg(target_os = "macos")]
+    let _scope_guard = macos_security::retain_access(path)?;
+
+    fs::create_dir_all(path).map_err(|e| format!("Failed to create directory: {}", e))?;
+
+    #[cfg(target_os = "macos")]
+    if let Err(err) = macos_security::store_bookmark_if_needed(path) {
+        warn!(
+            "Failed to persist security bookmark for new directory {}: {}",
+            path.display(),
+            err
+        );
+    }
+
+    Ok(())
 }
 
 pub fn delete_file_or_directory(path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let _scope_guard = macos_security::retain_access(path)?;
+
     if path.is_dir() {
         fs::remove_dir_all(path).map_err(|e| format!("Failed to delete directory: {}", e))
     } else {
@@ -144,16 +194,63 @@ pub fn delete_file_or_directory(path: &Path) -> Result<(), String> {
 }
 
 pub fn rename_file_or_directory(from: &Path, to: &Path) -> Result<(), String> {
-    fs::rename(from, to).map_err(|e| format!("Failed to rename: {}", e))
+    #[cfg(target_os = "macos")]
+    let _from_scope = macos_security::retain_access(from)?;
+    #[cfg(target_os = "macos")]
+    let _to_scope = macos_security::retain_access(to)?;
+
+    fs::rename(from, to).map_err(|e| format!("Failed to rename: {}", e))?;
+
+    #[cfg(target_os = "macos")]
+    if let Err(err) = macos_security::store_bookmark_if_needed(to) {
+        warn!(
+            "Failed to persist security bookmark after rename for {}: {}",
+            to.display(),
+            err
+        );
+    }
+
+    Ok(())
 }
 
 pub fn copy_file_or_directory(from: &Path, to: &Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let _from_scope = macos_security::retain_access(from)?;
+    #[cfg(target_os = "macos")]
+    let _to_scope = macos_security::retain_access(to)?;
+
     if from.is_dir() {
-        copy_dir_recursive(from, to)
+        let result = copy_dir_recursive(from, to);
+
+        #[cfg(target_os = "macos")]
+        if result.is_ok() {
+            if let Err(err) = macos_security::store_bookmark_if_needed(to) {
+                warn!(
+                    "Failed to persist security bookmark after copy to {}: {}",
+                    to.display(),
+                    err
+                );
+            }
+        }
+
+        result
     } else {
-        fs::copy(from, to)
+        let result = fs::copy(from, to)
             .map(|_| ())
-            .map_err(|e| format!("Failed to copy file: {}", e))
+            .map_err(|e| format!("Failed to copy file: {}", e));
+
+        #[cfg(target_os = "macos")]
+        if result.is_ok() {
+            if let Err(err) = macos_security::store_bookmark_if_needed(to) {
+                warn!(
+                    "Failed to persist security bookmark after file copy to {}: {}",
+                    to.display(),
+                    err
+                );
+            }
+        }
+
+        result
     }
 }
 

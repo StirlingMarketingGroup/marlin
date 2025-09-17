@@ -1,6 +1,8 @@
 #![allow(unexpected_cfgs)]
 
 #[cfg(target_os = "macos")]
+use crate::macos_security;
+#[cfg(target_os = "macos")]
 use base64::Engine as _; // bring encode() into scope
 #[cfg(target_os = "macos")]
 use cocoa::base::{id, nil};
@@ -9,18 +11,23 @@ use cocoa::foundation::{NSAutoreleasePool, NSSize, NSString};
 #[cfg(target_os = "macos")]
 use dirs;
 #[cfg(target_os = "macos")]
+use log::warn;
+#[cfg(target_os = "macos")]
 use objc::{class, msg_send, sel, sel_impl};
 #[cfg(target_os = "macos")]
 use std::collections::hash_map::DefaultHasher;
 #[cfg(target_os = "macos")]
 use std::hash::{Hash, Hasher};
 #[cfg(target_os = "macos")]
-use std::{fs, time::UNIX_EPOCH};
+use std::{fs, path::Path, time::UNIX_EPOCH};
 
 #[cfg(target_os = "macos")]
 pub fn app_icon_png_base64(path: &str, size: u32) -> Result<String, String> {
     unsafe {
         let _pool: id = NSAutoreleasePool::new(nil);
+
+        let path_obj = Path::new(path);
+        let _scope_guard = macos_security::retain_access(path_obj)?;
 
         // Build a persistent cache file path under user's cache dir, keyed by (path,size,mtime,len)
         let meta = fs::metadata(path).map_err(|e| format!("metadata failed: {}", e))?;
@@ -90,6 +97,15 @@ pub fn app_icon_png_base64(path: &str, size: u32) -> Result<String, String> {
         // Persist to cache for reuse across restarts
         let _ = fs::write(&cache_file, bytes);
         let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
-        Ok(format!("data:image/png;base64,{}", encoded))
+        let result = Ok(format!("data:image/png;base64,{}", encoded));
+
+        if let Err(err) = macos_security::store_bookmark_if_needed(path_obj) {
+            warn!(
+                "Failed to persist security bookmark while reading {}: {}",
+                path, err
+            );
+        }
+
+        result
     }
 }
