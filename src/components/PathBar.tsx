@@ -14,6 +14,7 @@ import {
 import { useAppStore } from '../store/useAppStore';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import ZoomSlider from './ZoomSlider';
+import UpdateNotice from '@/components/UpdateNotice';
 
 export default function PathBar() {
   const { currentPath, navigateTo, showZoomSliderNow, scheduleHideZoomSlider, showZoomSlider } =
@@ -163,42 +164,46 @@ export default function PathBar() {
         />
       </div>
 
-      {/* View toggles */}
-      <div className="flex items-center gap-1">
-        <button
-          className={`btn-icon ${
-            (useAppStore.getState().directoryPreferences[currentPath]?.viewMode ||
-              useAppStore.getState().globalPreferences.viewMode) === 'grid'
-              ? 'bg-accent-soft text-accent'
-              : ''
-          }`}
-          onClick={() =>
-            useAppStore.getState().updateDirectoryPreferences(currentPath, { viewMode: 'grid' })
-          }
-          title="Icons"
-          data-tauri-drag-region={false}
-          onMouseEnter={() => showZoomSliderNow()}
-          onMouseLeave={() => scheduleHideZoomSlider(400)}
-          onFocus={() => showZoomSliderNow()}
-          onBlur={() => scheduleHideZoomSlider(400)}
-        >
-          <SquaresFour className="w-4 h-4 text-accent" />
-        </button>
-        <button
-          className={`btn-icon ${
-            (useAppStore.getState().directoryPreferences[currentPath]?.viewMode ||
-              useAppStore.getState().globalPreferences.viewMode) === 'list'
-              ? 'bg-accent-soft text-accent'
-              : ''
-          }`}
-          onClick={() =>
-            useAppStore.getState().updateDirectoryPreferences(currentPath, { viewMode: 'list' })
-          }
-          title="List"
-          data-tauri-drag-region={false}
-        >
-          <List className="w-4 h-4 text-accent" />
-        </button>
+      {/* View toggles + update notice */}
+      <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1">
+          <button
+            className={`btn-icon ${
+              (useAppStore.getState().directoryPreferences[currentPath]?.viewMode ||
+                useAppStore.getState().globalPreferences.viewMode) === 'grid'
+                ? 'bg-accent-soft text-accent'
+                : ''
+            }`}
+            onClick={() =>
+              useAppStore.getState().updateDirectoryPreferences(currentPath, { viewMode: 'grid' })
+            }
+            title="Icons"
+            data-tauri-drag-region={false}
+            onMouseEnter={() => showZoomSliderNow()}
+            onMouseLeave={() => scheduleHideZoomSlider(400)}
+            onFocus={() => showZoomSliderNow()}
+            onBlur={() => scheduleHideZoomSlider(400)}
+          >
+            <SquaresFour className="w-4 h-4 text-accent" />
+          </button>
+          <button
+            className={`btn-icon ${
+              (useAppStore.getState().directoryPreferences[currentPath]?.viewMode ||
+                useAppStore.getState().globalPreferences.viewMode) === 'list'
+                ? 'bg-accent-soft text-accent'
+                : ''
+            }`}
+            onClick={() =>
+              useAppStore.getState().updateDirectoryPreferences(currentPath, { viewMode: 'list' })
+            }
+            title="List"
+            data-tauri-drag-region={false}
+          >
+            <List className="w-4 h-4 text-accent" />
+          </button>
+        </div>
+
+        <UpdateNotice />
       </div>
 
       {isLinux && (
