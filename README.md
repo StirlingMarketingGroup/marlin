@@ -170,6 +170,17 @@ Prefer to build locally or script your own pipeline? See the
 - [Node.js](https://nodejs.org/) 18+
 - [Rust](https://rustup.rs/) 1.77+
 - [Tauri CLI](https://tauri.app/v1/guides/getting-started/prerequisites)
+- Linux (Debian/Ubuntu) builds also need the GTK/WebKit toolchain:
+
+  ```bash
+  sudo apt update
+  sudo apt install build-essential pkg-config libssl-dev \
+    libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+  sudo apt install libwebkit2gtk-4.1-dev || sudo apt install libwebkit2gtk-4.0-dev
+  ```
+
+  > Use whichever `libwebkit2gtk` version your distro provides (24.04 ships 4.1,
+  > while older LTS releases still use 4.0).
 
 ### Setup
 
@@ -184,6 +195,10 @@ npm install
 # Start development server
 npm run tauri dev
 ```
+
+> Tip: running inside a Snap-distributed terminal/editor can inject an old
+> `LD_LIBRARY_PATH`. Launch the dev server with `env -u LD_LIBRARY_PATH npm run tauri dev`
+> if you hit glibc-related symbol errors.
 
 ### Build
 
@@ -209,6 +224,10 @@ After pushing `v0.1.0` you'll have the first pre-1.0 release ready to share.
 
 The installation snippets above always fetch the latest release tag, so no README
 updates are needed after tagging.
+
+> Every pull request runs the release workflow in a dry-run matrix to make sure the
+> desktop bundles continue to build across macOS, Windows (x64/ARM64), and Linux
+> (x64/ARM64) before you tag a real release.
 
 The YOLO installer script and the npm helper consume the same release assets; if you
 change asset names adjust `scripts/install.sh` and `scripts/install.mjs` accordingly
