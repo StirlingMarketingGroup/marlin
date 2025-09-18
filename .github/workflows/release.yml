@@ -188,13 +188,6 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev
 
-      - name: Install cross toolchain (Ubuntu x64)
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo apt-get install -y \
-            g++-aarch64-linux-gnu \
-            pkg-config-aarch64-linux-gnu
-
       - uses: actions/setup-node@v5
         with:
           node-version: 20

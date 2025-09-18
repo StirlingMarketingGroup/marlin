@@ -170,6 +170,13 @@ Prefer to build locally or script your own pipeline? See the
 - [Node.js](https://nodejs.org/) 18+
 - [Rust](https://rustup.rs/) 1.77+
 - [Tauri CLI](https://tauri.app/v1/guides/getting-started/prerequisites)
+- Linux (Debian/Ubuntu) builds also need the GTK/WebKit toolchain:
+
+  ```bash
+  sudo apt update
+  sudo apt install build-essential pkg-config libwebkit2gtk-4.1-dev \
+    libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+  ```
 
 ### Setup
 
@@ -184,6 +191,10 @@ npm install
 # Start development server
 npm run tauri dev
 ```
+
+> Tip: running inside a Snap-distributed terminal/editor can inject an old
+> `LD_LIBRARY_PATH`. Launch the dev server with `env -u LD_LIBRARY_PATH npm run tauri dev`
+> if you hit glibc-related symbol errors.
 
 ### Build
 
