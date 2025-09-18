@@ -204,6 +204,15 @@ jobs:
           override: true
           targets: ${{ matrix.rust-targets }}
 
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri -> target
+          shared-key: ${{ matrix.target }}
+          cache-all-crates: true
+          cache-on-failure: true
+
       - name: Install frontend dependencies
         run: npm ci
 
@@ -283,6 +292,15 @@ jobs:
           profile: minimal
           override: true
           targets: ${{ matrix.rust-targets }}
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri -> target
+          shared-key: pr-${{ matrix.target }}
+          cache-all-crates: true
+          cache-on-failure: true
 
       - name: Install frontend dependencies
         run: npm ci
