@@ -174,9 +174,13 @@ Prefer to build locally or script your own pipeline? See the
 
   ```bash
   sudo apt update
-  sudo apt install build-essential pkg-config libwebkit2gtk-4.1-dev \
+  sudo apt install build-essential pkg-config libssl-dev \
     libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+  sudo apt install libwebkit2gtk-4.1-dev || sudo apt install libwebkit2gtk-4.0-dev
   ```
+
+  > Use whichever `libwebkit2gtk` version your distro provides (24.04 ships 4.1,
+  > while older LTS releases still use 4.0).
 
 ### Setup
 
