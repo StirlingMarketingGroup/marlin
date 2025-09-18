@@ -225,6 +225,10 @@ After pushing `v0.1.0` you'll have the first pre-1.0 release ready to share.
 The installation snippets above always fetch the latest release tag, so no README
 updates are needed after tagging.
 
+> Every pull request runs the release workflow in a dry-run matrix to make sure the
+> desktop bundles continue to build across macOS, Windows (x64/ARM64), and Linux
+> (x64/ARM64) before you tag a real release.
+
 The YOLO installer script and the npm helper consume the same release assets; if you
 change asset names adjust `scripts/install.sh` and `scripts/install.mjs` accordingly
 before tagging.
