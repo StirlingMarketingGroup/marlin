@@ -179,7 +179,10 @@ mod imp {
         if url == nil {
             return Err("Failed to create NSURL".to_string());
         }
-        Ok(StrongPtr::new(url))
+        // `fileURLWithPath:` returns an autoreleased NSURL; retain it so the
+        // StrongPtr owns a stable +1 reference regardless of the surrounding
+        // autorelease pool lifetime.
+        Ok(StrongPtr::retain(url))
     }
 
     unsafe fn bookmark_from_url(url: &StrongPtr) -> Result<Vec<u8>, String> {
