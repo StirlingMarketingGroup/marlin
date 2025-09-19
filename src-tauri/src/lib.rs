@@ -12,6 +12,56 @@ mod thumbnails;
 
 use state::MenuState;
 use std::sync::Mutex;
+#[cfg(target_os = "linux")]
+use std::sync::OnceLock;
+
+#[cfg(target_os = "linux")]
+fn apply_linux_menu_css() {
+    static CSS_ONCE: OnceLock<()> = OnceLock::new();
+    CSS_ONCE.get_or_init(|| {
+        use gtk::prelude::*;
+
+        if !gtk::is_initialized() && !gtk::is_initialized_main_thread() {
+            return;
+        }
+
+        const MENU_CSS: &str = r#"
+            menu menuitem {
+                padding-left: 6px;
+            }
+
+            menu menuitem > box {
+                margin-left: -28px;
+                padding-left: 0;
+            }
+
+            menu menuitem > box > image {
+                margin-right: 6px;
+            }
+
+            menu menuitem > box > label,
+            menu menuitem > box > accel-label {
+                margin-left: 0;
+            }
+        "#;
+
+        let provider = gtk::CssProvider::new();
+        if provider.load_from_data(MENU_CSS.as_bytes()).is_err() {
+            log::warn!("Failed to load menu CSS override for Linux");
+            return;
+        }
+
+        if let Some(screen) = gtk::gdk::Screen::default() {
+            gtk::StyleContext::add_provider_for_screen(
+                &screen,
+                &provider,
+                gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+            );
+        } else {
+            log::warn!("Failed to acquire default GDK screen for menu CSS application");
+        }
+    });
+}
 use tauri::Manager;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -54,6 +104,7 @@ pub fn run() {
             commands::set_dir_prefs,
             commands::clear_all_dir_prefs,
             commands::set_last_dir,
+            commands::toggle_menu_visibility,
             commands::start_native_drag,
             commands::start_watching_directory,
             commands::stop_watching_directory,
@@ -103,6 +154,20 @@ pub fn run() {
                 sort_order_desc_item,
             ) = menu::create_menu(&app.handle())?;
             app.set_menu(app_menu)?;
+
+            #[cfg(target_os = "linux")]
+            {
+                if let Some(main_window) = app.get_webview_window("main") {
+                    if let Err(err) = main_window.set_decorations(false) {
+                        log::warn!("Failed to disable window decorations: {err}");
+                    }
+                    if let Err(err) = main_window.hide_menu() {
+                        log::warn!("Failed to hide menu on startup: {err}");
+                    }
+                }
+
+                apply_linux_menu_css();
+            }
 
             // Store the menu item in managed state
             app.manage(MenuState {

@@ -1,0 +1,67 @@
+import { spawn } from 'node:child_process';
+
+const args = process.argv.slice(2);
+const env = { ...process.env };
+
+if (process.platform === 'linux') {
+  if (env.LD_LIBRARY_PATH) {
+    const filtered = env.LD_LIBRARY_PATH.split(':').filter(
+      (part) => part && !part.includes('/snap/')
+    );
+    if (filtered.length === 0) {
+      delete env.LD_LIBRARY_PATH;
+    } else if (filtered.length !== env.LD_LIBRARY_PATH.split(':').length) {
+      env.LD_LIBRARY_PATH = filtered.join(':');
+      console.info('[marlin] Sanitized LD_LIBRARY_PATH to avoid Snap glibc conflicts.');
+    }
+  }
+
+  const SNAP_SUFFIX = '_VSCODE_SNAP_ORIG';
+  const restoredKeys = [];
+  for (const [key, value] of Object.entries(env)) {
+    if (!key.endsWith(SNAP_SUFFIX)) continue;
+    const baseKey = key.slice(0, -SNAP_SUFFIX.length);
+    const current = env[baseKey];
+    if (!current || !current.includes('/snap/')) continue;
+    if (value) env[baseKey] = value;
+    else delete env[baseKey];
+    restoredKeys.push(baseKey);
+  }
+  if (restoredKeys.length) {
+    console.info(`[marlin] Restored VS Code snap overrides for: ${restoredKeys.join(', ')}.`);
+  }
+
+  const removedKeys = [];
+  for (const key of [
+    'GTK_PATH',
+    'GIO_MODULE_DIR',
+    'GTK_IM_MODULE_FILE',
+    'GTK_EXE_PREFIX',
+    'GSETTINGS_SCHEMA_DIR',
+    'LOCPATH',
+  ]) {
+    if (env[key] && env[key].includes('/snap/')) {
+      delete env[key];
+      removedKeys.push(key);
+    }
+  }
+  if (removedKeys.length) {
+    console.info(`[marlin] Removed snap-related environment keys: ${removedKeys.join(', ')}.`);
+  }
+}
+
+const command = process.platform === 'win32' ? 'tauri.cmd' : 'tauri';
+const child = spawn(command, args, { env, stdio: 'inherit' });
+
+child.on('exit', (code, signal) => {
+  if (signal) {
+    process.kill(process.pid, signal);
+  } else {
+    process.exit(code ?? 0);
+  }
+});
+
+child.on('error', (error) => {
+  console.error('[marlin] Failed to launch the Tauri CLI:', error);
+  process.exit(1);
+});
