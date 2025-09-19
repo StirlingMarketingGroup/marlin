@@ -396,4 +396,5 @@ mod imp_stub {
 }
 
 #[cfg(not(target_os = "macos"))]
+#[allow(unused_imports)]
 pub use imp_stub::{persist_bookmark, retain_access, AccessToken};
