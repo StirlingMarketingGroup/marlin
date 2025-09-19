@@ -766,8 +766,10 @@ export default function FileList({ files, preferences }: FileListProps) {
             return (
               <div
                 key={file.path}
-                className={`relative grid grid-cols-12 gap-3 py-[2px] leading-5 text-[13px] cursor-pointer transition-colors duration-75 rounded-full odd:bg-app-gray ${
-                  isSelected ? 'bg-accent-selected text-white' : 'hover:bg-app-light'
+                className={`relative grid grid-cols-12 gap-3 py-[2px] leading-5 text-[13px] cursor-pointer transition-colors duration-75 rounded-full ${
+                  isSelected
+                    ? 'bg-accent-selected text-white'
+                    : 'odd:bg-app-gray hover:bg-app-light'
                 } ${isDragged ? 'opacity-50' : ''} ${file.is_hidden ? 'opacity-60' : ''}`}
                 data-file-item="true"
                 data-file-path={file.path}
