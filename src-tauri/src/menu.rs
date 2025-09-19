@@ -2,6 +2,9 @@ use tauri::{
     menu::{AboutMetadata, CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder, SubmenuBuilder},
     AppHandle, Emitter, Manager, Runtime,
 };
+use tauri_plugin_opener::OpenerExt;
+
+const GITHUB_REPO_URL: &str = "https://github.com/StirlingMarketingGroup/marlin";
 
 pub fn create_menu<R: Runtime>(
     app: &AppHandle<R>,
@@ -127,6 +130,10 @@ pub fn create_menu<R: Runtime>(
         .fullscreen()
         .build()?;
 
+    let help_submenu = SubmenuBuilder::new(app, "Help")
+        .text("menu:view_github", "View on GitHub")
+        .build()?;
+
     // Build the complete menu with all submenus
     let menu = MenuBuilder::new(app)
         .items(&[
@@ -135,6 +142,7 @@ pub fn create_menu<R: Runtime>(
             &edit_submenu,
             &view_submenu,
             &window_submenu,
+            &help_submenu,
         ])
         .build()?;
 
@@ -329,6 +337,11 @@ pub fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, event: &tauri::menu::Me
         }
         "menu:new_window" => {
             let _ = app.emit("menu:new_window", ());
+        }
+        "menu:view_github" => {
+            if let Err(error) = app.opener().open_url(GITHUB_REPO_URL, None::<&str>) {
+                log::warn!("Failed to open GitHub repo page: {error}");
+            }
         }
         "ctx:toggle_hidden" => {
             let state: tauri::State<crate::state::MenuState<R>> = app.state();
