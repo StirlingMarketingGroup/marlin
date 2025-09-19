@@ -38,17 +38,70 @@ const __scheduleIconTask = <T>(task: () => Promise<T>): Promise<T> =>
   });
 
 const normalizePath = (input: string): string => {
-  let path = input || '/';
-  path = path.replace(/\\/g, '/');
-  path = path.replace(/\/+/, '/');
-  path = path.replace(/\/+/, '/');
-  if (/^[A-Za-z]:$/.test(path)) {
-    path = `${path}/`;
+  const raw = (input ?? '').trim();
+  if (!raw) return '/';
+
+  let path = raw.replace(/\\/g, '/');
+  let drivePrefix = '';
+
+  if (/^[A-Za-z]:/.test(path)) {
+    drivePrefix = path.slice(0, 2);
+    path = path.slice(2);
   }
-  if (path.length > 1 && path.endsWith('/')) {
-    path = path.slice(0, -1);
+
+  let rootPrefix = '';
+  if (!drivePrefix && path.startsWith('//')) {
+    rootPrefix = '//';
+    path = path.slice(2);
   }
-  return path || '/';
+
+  if (drivePrefix) {
+    // Ensure we treat drive paths as absolute
+    path = path.replace(/^\/+/, '');
+    rootPrefix = '/';
+  } else if (path.startsWith('/')) {
+    rootPrefix = '/';
+  }
+
+  path = path.replace(/^\/+/, '');
+
+  const segments: string[] = [];
+  for (const segment of path.split('/')) {
+    if (!segment || segment === '.') continue;
+    if (segment === '..') {
+      if (segments.length > 0) {
+        segments.pop();
+      } else if (!drivePrefix && !rootPrefix) {
+        segments.push(segment);
+      }
+      continue;
+    }
+    segments.push(segment);
+  }
+
+  let normalized = segments.join('/');
+
+  if (drivePrefix) {
+    normalized = `${drivePrefix}/${normalized}`;
+    if (!segments.length) normalized = `${drivePrefix}/`;
+  } else if (rootPrefix) {
+    normalized = `${rootPrefix}${normalized}`;
+    if (!segments.length) normalized = rootPrefix || '/';
+  } else if (!normalized) {
+    normalized = '.';
+  }
+
+  const driveRoot = drivePrefix ? `${drivePrefix}/` : null;
+  if (driveRoot && normalized === driveRoot) {
+    return driveRoot;
+  }
+
+  if (normalized.length > 1 && normalized.endsWith('/')) {
+    normalized = normalized.slice(0, -1);
+  }
+
+  if (!normalized) return '/';
+  return normalized;
 };
 
 interface AppState {
