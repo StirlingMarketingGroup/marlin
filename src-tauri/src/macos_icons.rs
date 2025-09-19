@@ -11,8 +11,6 @@ use cocoa::foundation::{NSAutoreleasePool, NSSize, NSString};
 #[cfg(target_os = "macos")]
 use dirs;
 #[cfg(target_os = "macos")]
-use log::warn;
-#[cfg(target_os = "macos")]
 use objc::{class, msg_send, sel, sel_impl};
 #[cfg(target_os = "macos")]
 use std::collections::hash_map::DefaultHasher;
@@ -99,12 +97,7 @@ pub fn app_icon_png_base64(path: &str, size: u32) -> Result<String, String> {
         let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
         let result = Ok(format!("data:image/png;base64,{}", encoded));
 
-        if let Err(err) = macos_security::store_bookmark_if_needed(path_obj) {
-            warn!(
-                "Failed to persist security bookmark while reading {}: {}",
-                path, err
-            );
-        }
+        macos_security::persist_bookmark(path_obj, "generating native icon");
 
         result
     }

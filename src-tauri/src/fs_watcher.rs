@@ -8,8 +8,6 @@ use tokio::sync::mpsc;
 
 #[cfg(target_os = "macos")]
 use crate::macos_security;
-#[cfg(target_os = "macos")]
-use log::warn;
 
 #[derive(Debug)]
 pub struct FsWatcher {
@@ -161,13 +159,7 @@ impl FsWatcher {
         });
 
         #[cfg(target_os = "macos")]
-        if let Err(err) = macos_security::store_bookmark_if_needed(&path_buf) {
-            warn!(
-                "Failed to persist security bookmark while watching {}: {}",
-                path_buf.display(),
-                err
-            );
-        }
+        macos_security::persist_bookmark(&path_buf, "starting watcher");
 
         Ok(())
     }

@@ -11,6 +11,7 @@ mod imp {
     use cocoa::base::{id, nil};
     use cocoa::foundation::{NSAutoreleasePool, NSString};
     use dirs;
+    use log::warn;
     use objc::rc::StrongPtr;
     use objc::runtime::BOOL;
     use objc::{class, msg_send, sel, sel_impl};
@@ -297,7 +298,13 @@ mod imp {
             if let Ok(new_data) = unsafe { bookmark_from_url(&url) } {
                 let mut store = store_lock.lock().unwrap();
                 store.upsert(entry.path.clone(), new_data);
-                let _ = store.save();
+                if let Err(err) = store.save() {
+                    warn!(
+                        "Failed to persist refreshed security bookmark for {}: {}",
+                        entry.path,
+                        err
+                    );
+                }
             }
         }
 
@@ -342,6 +349,17 @@ mod imp {
         store.save()
     }
 
+    pub fn persist_bookmark(path: &Path, context: &str) {
+        if let Err(err) = store_bookmark_if_needed(path) {
+            warn!(
+                "Failed to persist security bookmark after {} for {}: {}",
+                context,
+                path.display(),
+                err
+            );
+        }
+    }
+
     pub fn has_bookmark(path: &Path) -> bool {
         let key = discover_scope_key(path);
         let store = store_mutex().lock().unwrap();
@@ -350,7 +368,10 @@ mod imp {
 }
 
 #[cfg(target_os = "macos")]
-pub use imp::{retain_access, store_bookmark_if_needed, AccessToken};
+pub use imp::{persist_bookmark, retain_access, AccessToken};
+#[cfg(target_os = "macos")]
+#[allow(unused_imports)]
+pub use imp::store_bookmark_if_needed;
 
 #[cfg(not(target_os = "macos"))]
 mod imp_stub {
@@ -367,10 +388,14 @@ mod imp_stub {
         Ok(())
     }
 
+    pub fn persist_bookmark(_path: &Path, _context: &str) {}
+
     pub fn has_bookmark(_path: &Path) -> bool {
         false
     }
 }
 
 #[cfg(not(target_os = "macos"))]
-pub use imp_stub::{retain_access, store_bookmark_if_needed, AccessToken};
+pub use imp_stub::{persist_bookmark, retain_access, AccessToken};
+#[cfg(not(target_os = "macos"))]
+pub use imp_stub::store_bookmark_if_needed;
