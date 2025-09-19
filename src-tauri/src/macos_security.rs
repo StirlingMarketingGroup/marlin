@@ -8,7 +8,7 @@ mod imp {
     use std::sync::{Mutex, OnceLock};
 
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-    use cocoa::base::{id, nil};
+    use cocoa::base::{id, nil, NO, YES};
     use cocoa::foundation::{NSAutoreleasePool, NSString};
     use dirs;
     use log::warn;
@@ -221,7 +221,7 @@ mod imp {
             return Err("Failed to build NSData from bookmark".to_string());
         }
         let mut error: id = nil;
-        let mut is_stale: BOOL = false;
+        let mut is_stale: BOOL = NO;
         let resolved: id = msg_send![class!(NSURL),
             URLByResolvingBookmarkData: nsdata
             options: NS_URL_BOOKMARK_RESOLUTION_WITH_SECURITY_SCOPE
@@ -233,10 +233,10 @@ mod imp {
             return Err("Failed to resolve bookmark".to_string());
         }
         let started: BOOL = msg_send![resolved, startAccessingSecurityScopedResource];
-        if !started {
+        if started == NO {
             return Err("startAccessingSecurityScopedResource returned false".to_string());
         }
-        Ok((StrongPtr::retain(resolved), is_stale))
+        Ok((StrongPtr::retain(resolved), is_stale == YES))
     }
 
     fn longest_matching_key<'a>(store: &'a BookmarkStore, path: &str) -> Option<&'a BookmarkEntry> {
