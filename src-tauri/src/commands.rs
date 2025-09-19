@@ -1066,6 +1066,28 @@ pub fn set_last_dir(path: String) -> Result<(), String> {
     write_prefs_value(&v)
 }
 
+#[tauri::command]
+pub fn toggle_menu_visibility(app: AppHandle) -> Result<bool, String> {
+    #[cfg(target_os = "linux")]
+    {
+        let window = app
+            .get_webview_window("main")
+            .ok_or_else(|| "Main window not found".to_string())?;
+        let is_visible = window.is_menu_visible().map_err(|e| e.to_string())?;
+        if is_visible {
+            window.hide_menu().map_err(|e| e.to_string())?;
+        } else {
+            window.show_menu().map_err(|e| e.to_string())?;
+        }
+        Ok(!is_visible)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = app;
+        Ok(true)
+    }
+}
+
 #[cfg(target_os = "macos")]
 #[tauri::command]
 pub fn start_native_drag(

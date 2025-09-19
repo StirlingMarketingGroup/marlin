@@ -158,7 +158,6 @@ export default function FileList({ files, preferences }: FileListProps) {
   const renameInputRef = useRef<HTMLInputElement>(null);
   const { fetchAppIcon } = useAppStore();
   const [draggedFile, setDraggedFile] = useState<string | null>(null);
-  const [hoveredFile, setHoveredFile] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const [flashPath, setFlashPath] = useState<string | null>(null);
   const flashTimeoutRef = useRef<number | undefined>(undefined);
@@ -488,9 +487,8 @@ export default function FileList({ files, preferences }: FileListProps) {
           } catch (error) {
             console.warn('Native drag failed:', error);
           } finally {
-            // Clear dragging state and hover state
+            // Clear dragging state
             setDraggedFile(null);
-            setHoveredFile(null);
             // If we were tracking a directory drag, end it
             if (file.is_directory) {
               endNativeDrag();
@@ -768,12 +766,8 @@ export default function FileList({ files, preferences }: FileListProps) {
             return (
               <div
                 key={file.path}
-                className={`relative grid grid-cols-12 gap-3 py-[2px] leading-5 text-[13px] cursor-pointer transition-colors duration-75 rounded-full ${
-                  isSelected
-                    ? 'bg-accent-selected text-white'
-                    : hoveredFile === file.path
-                      ? 'bg-app-light'
-                      : 'odd:bg-app-gray'
+                className={`relative grid grid-cols-12 gap-3 py-[2px] leading-5 text-[13px] cursor-pointer transition-colors duration-75 rounded-full odd:bg-app-gray ${
+                  isSelected ? 'bg-accent-selected text-white' : 'hover:bg-app-light'
                 } ${isDragged ? 'opacity-50' : ''} ${file.is_hidden ? 'opacity-60' : ''}`}
                 data-file-item="true"
                 data-file-path={file.path}
@@ -792,8 +786,6 @@ export default function FileList({ files, preferences }: FileListProps) {
                   handleDoubleClick(file);
                 }}
                 onMouseDown={(e) => handleMouseDownForFile(e, file)}
-                onMouseEnter={() => setHoveredFile(file.path)}
-                onMouseLeave={() => setHoveredFile(null)}
                 draggable={false}
               >
                 {/* Name column */}

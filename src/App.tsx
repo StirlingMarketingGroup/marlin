@@ -37,6 +37,7 @@ function App() {
   const [showLoadingOverlay, setShowLoadingOverlay] = useState(false);
   const prefsLoadedRef = useRef(false);
   const firstLoadRef = useRef(true);
+  const altTogglePendingRef = useRef(false);
   const currentDirectoryPreference = directoryPreferences[currentPath];
   // Apply smart default view and sort preferences based on folder name or contents
   const applySmartViewDefaults = async (path: string, files?: FileItem[]) => {
@@ -712,11 +713,25 @@ function App() {
 
     // Keyboard shortcuts as fallback (mac-like)
     const onKey = (e: KeyboardEvent) => {
-      const isMac = navigator.userAgent.toUpperCase().includes('MAC');
+      const uaUpper = navigator.userAgent.toUpperCase();
+      const isMac = uaUpper.includes('MAC');
+      const isLinux = uaUpper.includes('LINUX');
       const active = document.activeElement as HTMLElement | null;
       const inEditable =
         !!active &&
         (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable);
+
+      if (!isMac && isLinux) {
+        if (e.key === 'Alt') {
+          if (!e.repeat) {
+            altTogglePendingRef.current = true;
+          }
+          return;
+        }
+        if (e.altKey) {
+          altTogglePendingRef.current = false;
+        }
+      }
 
       // Arrow-key file navigation (no modifiers, not typing in inputs)
       if (!inEditable && !e.metaKey && !e.ctrlKey && !e.altKey) {
@@ -1064,6 +1079,19 @@ function App() {
     unsubs.push(() => window.removeEventListener('keydown', onKey));
 
     const onKeyUp = (e: KeyboardEvent) => {
+      if (e.key === 'Alt') {
+        const uaUpper = navigator.userAgent.toUpperCase();
+        const isMac = uaUpper.includes('MAC');
+        const isLinux = uaUpper.includes('LINUX');
+        if (!isMac && isLinux) {
+          if (altTogglePendingRef.current) {
+            void invoke('toggle_menu_visibility').catch((err) => {
+              console.warn('Failed to toggle menu visibility:', err);
+            });
+          }
+          altTogglePendingRef.current = false;
+        }
+      }
       if (e.key === 'Shift') {
         useAppStore.getState().setShiftBaseSelection(null);
       }

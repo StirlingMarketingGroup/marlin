@@ -16,8 +16,9 @@
   --color-accent-soft: var(--accent-soft);
   --color-accent-selected: var(--accent-selected);
   --font-sans:
-    'ui-sans-serif', '-apple-system', 'BlinkMacSystemFont', 'SF Pro Text', 'SF Pro Display',
-    'Segoe UI', 'Helvetica Neue', 'Helvetica', 'Arial', 'Noto Sans', 'Liberation Sans', 'sans-serif';
+    system-ui, -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Display', 'Segoe UI',
+    'Ubuntu', 'Cantarell', 'Noto Sans', 'Liberation Sans', 'Helvetica Neue', 'Helvetica', 'Arial',
+    sans-serif;
   --font-mono: 'JetBrains Mono', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace';
 }
 
@@ -101,7 +102,7 @@
   }
 
   .input-field {
-    @apply bg-app-gray border border-app-border rounded-md px-3 py-2 text-app-text placeholder-app-muted focus:outline-none focus:border-app-accent;
+    @apply bg-app-gray border border-app-border rounded-md px-3 py-1.5 text-app-text placeholder-app-muted focus:outline-none focus:border-app-accent;
     -webkit-app-region: no-drag;
   }
 
@@ -113,7 +114,7 @@
 
   /* Header/toolbar surface: flat, subtle divider */
   .toolbar {
-    @apply flex items-center gap-2 px-3 py-3 bg-transparent;
+    @apply flex items-center gap-2 px-3 py-2 bg-transparent;
   }
 
   /* Breadcrumb chip */

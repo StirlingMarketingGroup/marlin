@@ -286,6 +286,10 @@ export default function Sidebar() {
     weight: 'fill' | 'regular';
   }[];
 
+  const dragRegionHeightClass = isMac ? 'h-16' : 'h-0';
+  const listTopOffsetClass = isMac ? '-mt-8' : '';
+  const listPaddingTopClass = 'pt-2';
+
   return (
     <div
       ref={sidebarRef}
@@ -299,7 +303,7 @@ export default function Sidebar() {
     >
       {/* Expanded draggable area around traffic lights - covers entire top area */}
       <div
-        className="h-16 w-full select-none"
+        className={`${dragRegionHeightClass} w-full select-none`}
         data-tauri-drag-region
         onMouseDown={async (e: MouseEvent<HTMLDivElement>) => {
           if (e.button !== 0) return;
@@ -320,7 +324,9 @@ export default function Sidebar() {
       />
 
       {/* Flat list */}
-      <div className="flex-1 overflow-y-auto px-2 py-2 pb-2 space-y-[2px] -mt-8">
+      <div
+        className={`flex-1 overflow-y-auto px-2 ${listPaddingTopClass} pb-2 space-y-[2px] ${listTopOffsetClass}`}
+      >
         {/* Favorites section */}
         <div className="px-1 py-1 text-xs text-app-muted select-none">Favorites</div>
         {/* User directories */}

@@ -64,3 +64,6 @@ block = "0.1"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62", features = ["Win32_Storage_FileSystem"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = { version = "0.18", package = "gtk" }

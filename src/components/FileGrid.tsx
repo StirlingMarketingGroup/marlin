@@ -239,7 +239,6 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
   const { startNativeDrag, endNativeDrag, isDraggedDirectory } = useDragStore();
   const [renameText, setRenameText] = useState<string>('');
   const [draggedFile, setDraggedFile] = useState<string | null>(null);
-  const [hoveredFile, setHoveredFile] = useState<string | null>(null);
   const renameInputRef = useRef<HTMLInputElement>(null);
   const gridRef = useRef<HTMLDivElement>(null);
   const [flashPath, setFlashPath] = useState<string | null>(null);
@@ -492,9 +491,8 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
           } catch (error) {
             console.warn('Native drag failed:', error);
           } finally {
-            // Clear dragging state and hover state
+            // Clear dragging state
             setDraggedFile(null);
-            setHoveredFile(null);
             // If we were tracking a directory drag, end it
             if (file.is_directory) {
               endNativeDrag();
@@ -842,9 +840,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
               className={`relative flex flex-col items-center px-3 py-2 rounded-md cursor-pointer transition-all duration-75 ${
                 isSelected || isRenaming
                   ? 'bg-accent-selected z-20 overflow-visible'
-                  : hoveredFile === file.path
-                    ? 'bg-app-light/70'
-                    : ''
+                  : 'hover:bg-app-light/70'
               } ${isDragged ? 'opacity-50' : ''} ${file.is_hidden ? 'opacity-60' : ''}`}
               data-file-item="true"
               data-file-path={file.path}
@@ -863,8 +859,6 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
                 handleDoubleClick(file);
               }}
               onMouseDown={(e) => handleMouseDownForFile(e, file)}
-              onMouseEnter={() => setHoveredFile(file.path)}
-              onMouseLeave={() => setHoveredFile(null)}
               draggable={false}
             >
               <div
