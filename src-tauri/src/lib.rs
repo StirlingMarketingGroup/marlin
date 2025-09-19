@@ -3,6 +3,7 @@ mod fs_utils;
 mod fs_watcher;
 #[cfg(target_os = "macos")]
 mod macos_icons;
+mod macos_security;
 mod menu;
 #[cfg(target_os = "macos")]
 mod native_drag;

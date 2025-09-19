@@ -6,11 +6,16 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc;
 
+#[cfg(target_os = "macos")]
+use crate::macos_security;
+
 #[derive(Debug)]
 pub struct FsWatcher {
     watchers: Arc<Mutex<HashMap<String, RecommendedWatcher>>>,
     debounce_map: Arc<Mutex<HashMap<String, Instant>>>,
     app_handle: AppHandle,
+    #[cfg(target_os = "macos")]
+    scope_tokens: Arc<Mutex<HashMap<String, macos_security::AccessToken>>>,
 }
 
 impl FsWatcher {
@@ -19,6 +24,8 @@ impl FsWatcher {
             watchers: Arc::new(Mutex::new(HashMap::new())),
             debounce_map: Arc::new(Mutex::new(HashMap::new())),
             app_handle,
+            #[cfg(target_os = "macos")]
+            scope_tokens: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -35,10 +42,15 @@ impl FsWatcher {
 
         let normalized_path = path_buf.to_string_lossy().to_string();
 
+        #[cfg(target_os = "macos")]
+        let scope_token = macos_security::retain_access(&path_buf)?;
+
         // Check if already watching this path
         {
             let watchers = self.watchers.lock().unwrap();
             if watchers.contains_key(&normalized_path) {
+                #[cfg(target_os = "macos")]
+                drop(scope_token);
                 return Ok(()); // Already watching
             }
         }
@@ -72,6 +84,12 @@ impl FsWatcher {
         {
             let mut watchers = self.watchers.lock().unwrap();
             watchers.insert(normalized_path.clone(), watcher);
+        }
+
+        #[cfg(target_os = "macos")]
+        if let Some(token) = scope_token {
+            let mut tokens = self.scope_tokens.lock().unwrap();
+            tokens.insert(normalized_path.clone(), token);
         }
 
         // Use a thread to handle events since we're not in a Tokio context yet
@@ -140,6 +158,9 @@ impl FsWatcher {
             }
         });
 
+        #[cfg(target_os = "macos")]
+        macos_security::persist_bookmark(&path_buf, "starting watcher");
+
         Ok(())
     }
 
@@ -151,6 +172,12 @@ impl FsWatcher {
             // Also clean up debounce entry
             let mut debounce = self.debounce_map.lock().unwrap();
             debounce.remove(&normalized_path);
+
+            #[cfg(target_os = "macos")]
+            {
+                let mut tokens = self.scope_tokens.lock().unwrap();
+                tokens.remove(&normalized_path);
+            }
             Ok(())
         } else {
             Err("Path is not being watched".to_string())
@@ -163,6 +190,12 @@ impl FsWatcher {
 
         let mut debounce = self.debounce_map.lock().unwrap();
         debounce.clear();
+
+        #[cfg(target_os = "macos")]
+        {
+            let mut tokens = self.scope_tokens.lock().unwrap();
+            tokens.clear();
+        }
     }
 
     pub fn is_watching(&self, path: &str) -> bool {

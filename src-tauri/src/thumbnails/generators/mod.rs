@@ -6,6 +6,8 @@ use std::path::Path;
 use super::{ThumbnailFormat, ThumbnailQuality, ThumbnailRequest};
 
 #[cfg(target_os = "macos")]
+use crate::macos_security;
+#[cfg(target_os = "macos")]
 pub mod apps;
 pub mod images;
 pub mod pdf;
@@ -22,6 +24,12 @@ impl ThumbnailGenerator {
         if !path.exists() {
             return Err("File does not exist".to_string());
         }
+
+        #[cfg(target_os = "macos")]
+        let _scope_guard = macos_security::retain_access(path)?;
+
+        #[cfg(target_os = "macos")]
+        macos_security::persist_bookmark(path, "preparing thumbnail");
 
         // Determine generator based on file type
         #[cfg(target_os = "macos")]

@@ -438,6 +438,10 @@ function App() {
 
   // File system watcher for auto-reload
   useEffect(() => {
+    if (!currentPath || loading) {
+      return;
+    }
+
     let isActive = true;
     let debounceTimer: number | undefined;
     let cleanupFunction: (() => void) | undefined;
