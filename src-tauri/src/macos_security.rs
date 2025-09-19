@@ -397,5 +397,3 @@ mod imp_stub {
 
 #[cfg(not(target_os = "macos"))]
 pub use imp_stub::{persist_bookmark, retain_access, AccessToken};
-#[cfg(not(target_os = "macos"))]
-pub use imp_stub::store_bookmark_if_needed;
