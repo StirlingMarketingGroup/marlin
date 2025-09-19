@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, MouseEvent, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import type { Event } from '@tauri-apps/api/event';
@@ -8,6 +8,7 @@ import PathBar from './components/PathBar';
 import { useAppStore } from './store/useAppStore';
 import { useToastStore } from './store/useToastStore';
 import { message } from '@tauri-apps/plugin-dialog';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 
 import Toast from './components/Toast';
 import type {
@@ -38,6 +39,7 @@ function App() {
   const prefsLoadedRef = useRef(false);
   const firstLoadRef = useRef(true);
   const altTogglePendingRef = useRef(false);
+  const windowRef = useRef(getCurrentWindow());
   const currentDirectoryPreference = directoryPreferences[currentPath];
   // Apply smart default view and sort preferences based on folder name or contents
   const applySmartViewDefaults = async (path: string, files?: FileItem[]) => {
@@ -1159,6 +1161,16 @@ function App() {
 
   // No verbose debug logging in production UI
 
+  const handleSidebarFrameMouseDown = useCallback(async (event: MouseEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    if (event.target !== event.currentTarget) return;
+    try {
+      await windowRef.current.startDragging();
+    } catch (error) {
+      console.warn('Frame drag start failed:', error);
+    }
+  }, []);
+
   if (showLoadingOverlay) {
     return (
       <div className="h-screen flex items-center justify-center bg-app-dark text-app-text">
@@ -1174,7 +1186,11 @@ function App() {
   return (
     <div className="h-screen flex bg-app-dark text-app-text overflow-hidden">
       {/* Sidebar full-height */}
-      <div className="h-screen p-2">
+      <div
+        className="h-screen p-2"
+        data-tauri-drag-region
+        onMouseDown={handleSidebarFrameMouseDown}
+      >
         <Sidebar />
       </div>
 

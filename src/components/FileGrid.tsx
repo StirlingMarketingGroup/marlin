@@ -241,8 +241,6 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
   const [draggedFile, setDraggedFile] = useState<string | null>(null);
   const renameInputRef = useRef<HTMLInputElement>(null);
   const gridRef = useRef<HTMLDivElement>(null);
-  const [flashPath, setFlashPath] = useState<string | null>(null);
-  const flashTimeoutRef = useRef<number | undefined>(undefined);
 
   // Clean up dragged state when drag ends
   // No longer needed - native drag handles cleanup
@@ -691,15 +689,6 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     : sortedFiles.filter((file) => !file.is_hidden);
 
   useEffect(() => {
-    return () => {
-      if (flashTimeoutRef.current) {
-        window.clearTimeout(flashTimeoutRef.current);
-        flashTimeoutRef.current = undefined;
-      }
-    };
-  }, []);
-
-  useEffect(() => {
     if (!pendingRevealTarget) return;
     const targetPath = pendingRevealTarget;
     if (!files.some((file) => file.path === targetPath)) return;
@@ -723,13 +712,6 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
         }
       }
     });
-
-    setFlashPath(targetPath);
-    if (flashTimeoutRef.current) window.clearTimeout(flashTimeoutRef.current);
-    flashTimeoutRef.current = window.setTimeout(() => {
-      setFlashPath((prev) => (prev === targetPath ? null : prev));
-      flashTimeoutRef.current = undefined;
-    }, 1600);
 
     setPendingRevealTarget(undefined);
   }, [
@@ -845,11 +827,6 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
               data-file-item="true"
               data-file-path={file.path}
               data-tauri-drag-region={false}
-              style={
-                flashPath === file.path
-                  ? { outline: '2px solid var(--color-accent)', outlineOffset: '2px' }
-                  : undefined
-              }
               onClick={(e) => {
                 e.stopPropagation();
                 handleFileClick(e, file);

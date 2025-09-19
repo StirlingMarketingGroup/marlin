@@ -40,6 +40,24 @@ export default function Sidebar() {
   const [isDragOver, setIsDragOver] = useState(false);
   const sidebarRef = useRef<HTMLDivElement>(null);
   const isProcessingDropRef = useRef(false);
+  const windowRef = useRef(getCurrentWindow());
+
+  const handleDragRegionMouseDown = useCallback(async (event: MouseEvent<HTMLElement>) => {
+    if (event.button !== 0) return;
+    const target = event.target as HTMLElement | null;
+    if (
+      target?.closest(
+        '[data-tauri-drag-region="false"], button, input, select, textarea, [role="button"]'
+      )
+    ) {
+      return;
+    }
+    try {
+      await windowRef.current.startDragging();
+    } catch (error) {
+      console.warn('Sidebar drag start failed:', error);
+    }
+  }, []);
 
   // Use the new drag detector hook for native drop detection
   const handleDragEnter = useCallback(() => {
@@ -288,7 +306,6 @@ export default function Sidebar() {
 
   const dragRegionHeightClass = isMac ? 'h-16' : 'h-0';
   const listTopOffsetClass = isMac ? '-mt-8' : '';
-  const listPaddingTopClass = 'pt-2';
 
   return (
     <div
@@ -305,30 +322,24 @@ export default function Sidebar() {
       <div
         className={`${dragRegionHeightClass} w-full select-none`}
         data-tauri-drag-region
-        onMouseDown={async (e: MouseEvent<HTMLDivElement>) => {
-          if (e.button !== 0) return;
-          const target = e.target as HTMLElement;
-          if (
-            target.closest(
-              '[data-tauri-drag-region="false"], button, input, select, textarea, [role="button"]'
-            )
-          )
-            return;
-          try {
-            const win = getCurrentWindow();
-            await win.startDragging();
-          } catch (error) {
-            console.warn('Sidebar drag start failed:', error);
-          }
-        }}
+        onMouseDown={handleDragRegionMouseDown}
       />
 
       {/* Flat list */}
-      <div
-        className={`flex-1 overflow-y-auto px-2 ${listPaddingTopClass} pb-2 space-y-[2px] ${listTopOffsetClass}`}
-      >
+      <div className={`flex-1 overflow-y-auto px-2 pb-2 space-y-[2px] ${listTopOffsetClass}`}>
+        <div
+          className="w-full h-[6px]"
+          data-tauri-drag-region
+          onMouseDown={handleDragRegionMouseDown}
+        />
         {/* Favorites section */}
-        <div className="px-1 py-1 text-xs text-app-muted select-none">Favorites</div>
+        <div
+          className="px-1 py-1 text-xs text-app-muted select-none"
+          data-tauri-drag-region
+          onMouseDown={handleDragRegionMouseDown}
+        >
+          Favorites
+        </div>
         {/* User directories */}
         {links.slice(0, 6).map((item) => {
           const isDisabled = item.path == null;
