@@ -9,7 +9,7 @@ const CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
 
 type GithubRelease = {
   tag_name: string;
-  html_url: string;
+  html_url?: string;
   draft?: boolean;
   prerelease?: boolean;
 };
@@ -40,6 +40,31 @@ const initialState: UpdateState = {
 
 const safeParse = (version: string | null | undefined) => (version || '').trim().replace(/^v/i, '');
 
+const isUpdateCache = (value: unknown): value is UpdateCache => {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Record<string, unknown>;
+  return (
+    typeof candidate.latestVersion === 'string' &&
+    candidate.latestVersion.trim() !== '' &&
+    typeof candidate.releaseUrl === 'string' &&
+    candidate.releaseUrl.trim() !== '' &&
+    typeof candidate.checkedAt === 'number' &&
+    Number.isFinite(candidate.checkedAt)
+  );
+};
+
+const isGithubRelease = (value: unknown): value is GithubRelease => {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Record<string, unknown>;
+  return (
+    typeof candidate.tag_name === 'string' &&
+    candidate.tag_name.trim() !== '' &&
+    (candidate.html_url === undefined || typeof candidate.html_url === 'string') &&
+    (candidate.draft === undefined || typeof candidate.draft === 'boolean') &&
+    (candidate.prerelease === undefined || typeof candidate.prerelease === 'boolean')
+  );
+};
+
 const extractNumericSegments = (version: string) => {
   const core = version.split('-')[0];
   return core
@@ -68,16 +93,35 @@ const loadCache = (): UpdateCache | null => {
   try {
     const raw = window.localStorage.getItem(CACHE_KEY);
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as UpdateCache;
-    if (!parsed.latestVersion || !parsed.releaseUrl || !parsed.checkedAt) {
+    const parsed = JSON.parse(raw);
+    if (!isUpdateCache(parsed)) {
+      window.localStorage.removeItem(CACHE_KEY);
+      return null;
+    }
+    const latestVersion = safeParse(parsed.latestVersion);
+    if (!latestVersion) {
+      window.localStorage.removeItem(CACHE_KEY);
+      return null;
+    }
+    const releaseUrl = parsed.releaseUrl.trim();
+    if (!releaseUrl) {
+      window.localStorage.removeItem(CACHE_KEY);
       return null;
     }
     if (Date.now() - parsed.checkedAt > CACHE_TTL_MS) {
+      window.localStorage.removeItem(CACHE_KEY);
       return null;
     }
-    return parsed;
+    return {
+      latestVersion,
+      releaseUrl,
+      checkedAt: parsed.checkedAt,
+    };
   } catch (error) {
     console.warn('Failed to read cached update info:', error);
+    if (typeof window !== 'undefined') {
+      window.localStorage.removeItem(CACHE_KEY);
+    }
     return null;
   }
 };
@@ -117,9 +161,12 @@ const fetchLatestRelease = async (): Promise<UpdateCache> => {
     throw new Error(`GitHub responded with ${response.status}`);
   }
 
-  const data = (await response.json()) as GithubRelease;
+  const data = await response.json();
+  if (!isGithubRelease(data)) {
+    throw new Error('Unexpected response format from GitHub releases API');
+  }
   const latestVersion = safeParse(data.tag_name);
-  const releaseUrl = data.html_url || RELEASES_PAGE;
+  const releaseUrl = data.html_url?.trim() || RELEASES_PAGE;
 
   if (!latestVersion) {
     throw new Error('Latest release is missing a tag name');
