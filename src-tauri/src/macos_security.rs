@@ -75,6 +75,12 @@ mod imp {
             }
         }
 
+        fn remove(&mut self, path: &str) -> bool {
+            let len_before = self.entries.len();
+            self.entries.retain(|entry| entry.path != path);
+            self.entries.len() != len_before
+        }
+
         fn decode_data(entry: &BookmarkEntry) -> Option<Vec<u8>> {
             BASE64.decode(&entry.data).ok()
         }
@@ -268,6 +274,22 @@ mod imp {
         }
     }
 
+    fn forget_invalid_bookmark(store_lock: &Mutex<BookmarkStore>, path: &str, reason: &str) {
+        let mut store = store_lock.lock().unwrap();
+        if store.remove(path) {
+            match store.save() {
+                Ok(_) => warn!(
+                    "Removed invalid security bookmark for {} after {}",
+                    path, reason
+                ),
+                Err(err) => warn!(
+                    "Failed to persist removal of invalid security bookmark for {} after {}: {}",
+                    path, reason, err
+                ),
+            }
+        }
+    }
+
     pub fn retain_access(path: &Path) -> Result<Option<AccessToken>, String> {
         let store_lock = store_mutex();
         let path_key = discover_scope_key(path);
@@ -281,18 +303,37 @@ mod imp {
             None => return Ok(None),
         };
 
-        let data = BookmarkStore::decode_data(&entry)
-            .ok_or_else(|| "Failed to decode stored bookmark".to_string())?;
+        let data = match BookmarkStore::decode_data(&entry) {
+            Some(data) => data,
+            None => {
+                forget_invalid_bookmark(&store_lock, &entry.path, "decode failure");
+                return Err(
+                    "macOS revoked the saved permission for this folder. Please open it again in Marlin to restore access. (corrupted bookmark)"
+                        .to_string(),
+                );
+            }
+        };
 
-        let mut active = active_scopes_mutex().lock().unwrap();
-        if let Some(scope) = active.get_mut(&entry.path) {
-            scope.increment();
-            return Ok(Some(AccessToken {
-                key: entry.path.clone(),
-            }));
+        {
+            let mut active = active_scopes_mutex().lock().unwrap();
+            if let Some(scope) = active.get_mut(&entry.path) {
+                scope.increment();
+                return Ok(Some(AccessToken {
+                    key: entry.path.clone(),
+                }));
+            }
         }
 
-        let (url, stale) = unsafe { resolve_bookmark(&data)? };
+        let (url, stale) = match unsafe { resolve_bookmark(&data) } {
+            Ok(result) => result,
+            Err(err) => {
+                forget_invalid_bookmark(&store_lock, &entry.path, "resolve failure");
+                return Err(format!(
+                    "macOS revoked the saved permission for this folder. Please open it again in Marlin to restore access. ({})",
+                    err
+                ));
+            }
+        };
 
         if stale {
             if let Ok(new_data) = unsafe { bookmark_from_url(&url) } {
@@ -301,14 +342,16 @@ mod imp {
                 if let Err(err) = store.save() {
                     warn!(
                         "Failed to persist refreshed security bookmark for {}: {}",
-                        entry.path,
-                        err
+                        entry.path, err
                     );
                 }
             }
         }
 
-        active.insert(entry.path.clone(), ActiveScope { url, count: 1 });
+        {
+            let mut active = active_scopes_mutex().lock().unwrap();
+            active.insert(entry.path.clone(), ActiveScope { url, count: 1 });
+        }
 
         Ok(Some(AccessToken {
             key: entry.path.clone(),
@@ -368,10 +411,10 @@ mod imp {
 }
 
 #[cfg(target_os = "macos")]
-pub use imp::{persist_bookmark, retain_access, AccessToken};
-#[cfg(target_os = "macos")]
 #[allow(unused_imports)]
 pub use imp::store_bookmark_if_needed;
+#[cfg(target_os = "macos")]
+pub use imp::{persist_bookmark, retain_access, AccessToken};
 
 #[cfg(not(target_os = "macos"))]
 mod imp_stub {
