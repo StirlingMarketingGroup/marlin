@@ -275,7 +275,16 @@ mod imp {
     }
 
     fn forget_invalid_bookmark(store_lock: &Mutex<BookmarkStore>, path: &str, reason: &str) {
-        let mut store = store_lock.lock().unwrap();
+        let mut store = match store_lock.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                warn!(
+                    "BookmarkStore mutex poisoned while removing invalid bookmark for {} ({}); recovering with prior data. Error: {}",
+                    path, reason, poisoned
+                );
+                poisoned.into_inner()
+            }
+        };
         if store.remove(path) {
             match store.save() {
                 Ok(_) => warn!(
@@ -306,6 +315,7 @@ mod imp {
         let data = match BookmarkStore::decode_data(&entry) {
             Some(data) => data,
             None => {
+                warn!("Failed to decode bookmark data for path '{}'", entry.path);
                 forget_invalid_bookmark(&store_lock, &entry.path, "decode failure");
                 return Err(
                     "macOS revoked the saved permission for this folder. Please open it again in Marlin to restore access. (corrupted bookmark)"
@@ -327,11 +337,15 @@ mod imp {
         let (url, stale) = match unsafe { resolve_bookmark(&data) } {
             Ok(result) => result,
             Err(err) => {
+                warn!(
+                    "Failed to resolve bookmark for path '{}': {}",
+                    entry.path, err
+                );
                 forget_invalid_bookmark(&store_lock, &entry.path, "resolve failure");
-                return Err(format!(
-                    "macOS revoked the saved permission for this folder. Please open it again in Marlin to restore access. ({})",
-                    err
-                ));
+                return Err(
+                    "macOS revoked the saved permission for this folder. Please open it again in Marlin to restore access."
+                        .to_string(),
+                );
             }
         };
 
