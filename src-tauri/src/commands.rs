@@ -940,7 +940,7 @@ pub fn get_system_drives() -> Result<Vec<SystemDrive>, String> {
     {
         // On Unix-like systems, add the root filesystem
         drives.push(SystemDrive {
-            name: "Root".to_string(),
+            name: "File System".to_string(),
             path: "/".to_string(),
             drive_type: "system".to_string(),
             is_ejectable: false,
