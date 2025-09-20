@@ -1170,7 +1170,7 @@ pub fn new_window(app: AppHandle, path: Option<String>) -> Result<(), String> {
         url = tauri::WebviewUrl::App(format!("index.html?path={}", encoded_path).into());
     }
 
-    let mut builder = tauri::WebviewWindowBuilder::new(&app, &window_label, url)
+    let builder = tauri::WebviewWindowBuilder::new(&app, &window_label, url)
         .title("")
         .inner_size(1200.0, 800.0)
         .resizable(true)
@@ -1178,12 +1178,10 @@ pub fn new_window(app: AppHandle, path: Option<String>) -> Result<(), String> {
         .decorations(true);
 
     #[cfg(target_os = "macos")]
-    {
-        builder = builder
-            .title_bar_style(tauri::TitleBarStyle::Overlay)
-            .hidden_title(true)
-            .traffic_light_position(tauri::LogicalPosition::new(18.0, 18.0));
-    }
+    let builder = builder
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true)
+        .traffic_light_position(tauri::LogicalPosition::new(18.0, 18.0));
 
     let _window = builder
         .build()
@@ -1227,7 +1225,7 @@ pub fn open_folder_size_window(
         return Ok(());
     }
 
-    let mut builder = tauri::WebviewWindowBuilder::new(&app, FOLDER_SIZE_WINDOW_LABEL, url)
+    let builder = tauri::WebviewWindowBuilder::new(&app, FOLDER_SIZE_WINDOW_LABEL, url)
         .title("Folder Size")
         .inner_size(420.0, 420.0)
         .resizable(false)
@@ -1238,12 +1236,10 @@ pub fn open_folder_size_window(
         .decorations(true);
 
     #[cfg(target_os = "macos")]
-    {
-        builder = builder
-            .title_bar_style(tauri::TitleBarStyle::Overlay)
-            .hidden_title(true)
-            .traffic_light_position(tauri::LogicalPosition::new(18.0, 18.0));
-    }
+    let builder = builder
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true)
+        .traffic_light_position(tauri::LogicalPosition::new(18.0, 18.0));
 
     FOLDER_SIZE_WINDOW_READY.store(false, Ordering::SeqCst);
 
