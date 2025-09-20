@@ -1,4 +1,6 @@
-use std::sync::Mutex;
+use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 use tauri::menu::CheckMenuItem;
 
 pub struct MenuState<R: tauri::Runtime> {
@@ -17,4 +19,21 @@ pub struct MenuState<R: tauri::Runtime> {
     pub sort_desc_item: Mutex<Option<CheckMenuItem<R>>>,
     // Selection state to drive context menu enable/visibility
     pub has_selection: Mutex<bool>,
+}
+
+#[derive(Clone)]
+pub struct FolderSizeTaskHandle {
+    pub cancel_flag: Arc<AtomicBool>,
+}
+
+pub struct FolderSizeState {
+    pub tasks: Mutex<HashMap<String, FolderSizeTaskHandle>>,
+}
+
+impl Default for FolderSizeState {
+    fn default() -> Self {
+        Self {
+            tasks: Mutex::new(HashMap::new()),
+        }
+    }
 }

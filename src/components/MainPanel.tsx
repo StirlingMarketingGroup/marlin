@@ -66,6 +66,7 @@ export default function MainPanel() {
       // If right-clicked a file, ensure it is selected and pass it explicitly
       let filePaths: string[] | undefined;
       let selectedIsSymlink: boolean | undefined;
+      let selectionHasDirectory = false;
       if (isFileCtx && ctxPath) {
         if (!state.selectedFiles.includes(ctxPath)) {
           setSelectedFiles([ctxPath]);
@@ -75,10 +76,13 @@ export default function MainPanel() {
           filePaths = state.selectedFiles;
         }
         const activeSelection = filePaths ?? state.selectedFiles;
-        if (activeSelection && activeSelection.length === 1) {
-          const map = new Map(state.files.map((f) => [f.path, f]));
-          const file = map.get(activeSelection[0]);
-          selectedIsSymlink = file?.is_symlink ?? false;
+        const map = new Map(state.files.map((f) => [f.path, f]));
+        if (activeSelection && activeSelection.length > 0) {
+          selectionHasDirectory = activeSelection.some((path) => map.get(path)?.is_directory);
+          if (activeSelection.length === 1) {
+            const file = map.get(activeSelection[0]);
+            selectedIsSymlink = file?.is_symlink ?? false;
+          }
         }
       } else {
         filePaths = undefined;
@@ -98,6 +102,7 @@ export default function MainPanel() {
         // Only send file paths when clicking on a file
         filePaths: isFileCtx ? filePaths : undefined,
         selectedIsSymlink,
+        selectionHasDirectory,
       });
       return;
     } catch (error) {

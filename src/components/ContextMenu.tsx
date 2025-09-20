@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { useAppStore } from '@/store/useAppStore';
 import { invoke } from '@tauri-apps/api/core';
 import { useToastStore } from '@/store/useToastStore';
+import { openFolderSizeWindow } from '@/store/useFolderSizeStore';
 
 type SortBy = 'name' | 'size' | 'type' | 'modified';
 type SortOrder = 'asc' | 'desc';
@@ -93,6 +94,7 @@ export default function ContextMenu({ x, y, isFileContext, onRequestClose }: Con
       .filter((file): file is (typeof files)[number] => Boolean(file));
   }, [fileSpecific, files, selectedFiles]);
 
+  const hasDirectorySelection = selectedFileItems.some((file) => file.is_directory);
   const singleSymlink =
     selectedFileItems.length === 1 && selectedFileItems[0]?.is_symlink
       ? selectedFileItems[0]
@@ -138,6 +140,23 @@ export default function ContextMenu({ x, y, isFileContext, onRequestClose }: Con
             >
               Copy Full Path
             </button>
+            {hasDirectorySelection && (
+              <button
+                className="w-full text-left px-3 py-2 hover:bg-app-light"
+                onClick={() => {
+                  void openFolderSizeWindow(
+                    selectedFileItems.map((item) => ({
+                      path: item.path,
+                      name: item.name,
+                      isDirectory: item.is_directory,
+                    }))
+                  );
+                  onRequestClose();
+                }}
+              >
+                Calculate Total Size
+              </button>
+            )}
             {singleSymlink && (
               <button
                 className="w-full text-left px-3 py-2 hover:bg-app-light"

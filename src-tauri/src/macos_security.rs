@@ -300,6 +300,13 @@ mod imp {
     }
 
     pub fn retain_access(path: &Path) -> Result<Option<AccessToken>, String> {
+        retain_access_internal(path, true)
+    }
+
+    fn retain_access_internal(
+        path: &Path,
+        allow_retry: bool,
+    ) -> Result<Option<AccessToken>, String> {
         let store_lock = store_mutex();
         let path_key = discover_scope_key(path);
         let maybe_entry = {
@@ -315,12 +322,12 @@ mod imp {
         let data = match BookmarkStore::decode_data(&entry) {
             Some(data) => data,
             None => {
-                warn!("Failed to decode bookmark data for path '{}'", entry.path);
-                forget_invalid_bookmark(&store_lock, &entry.path, "decode failure");
-                return Err(
-                    "macOS revoked the saved permission for this folder. Please open it again in Marlin to restore access. (corrupted bookmark)"
-                        .to_string(),
+                warn!(
+                    "Failed to decode bookmark data for path '{}'; attempting automatic refresh",
+                    entry.path
                 );
+                forget_invalid_bookmark(&store_lock, &entry.path, "decode failure");
+                return recover_revoked_access(path, &entry.path, allow_retry, "decode failure");
             }
         };
 
@@ -338,14 +345,11 @@ mod imp {
             Ok(result) => result,
             Err(err) => {
                 warn!(
-                    "Failed to resolve bookmark for path '{}': {}",
+                    "Failed to resolve bookmark for path '{}': {}. Attempting automatic refresh",
                     entry.path, err
                 );
                 forget_invalid_bookmark(&store_lock, &entry.path, "resolve failure");
-                return Err(
-                    "macOS revoked the saved permission for this folder. Please open it again in Marlin to restore access."
-                        .to_string(),
-                );
+                return recover_revoked_access(path, &entry.path, allow_retry, "resolve failure");
             }
         };
 
@@ -370,6 +374,35 @@ mod imp {
         Ok(Some(AccessToken {
             key: entry.path.clone(),
         }))
+    }
+
+    fn recover_revoked_access(
+        original_path: &Path,
+        entry_path: &str,
+        allow_retry: bool,
+        reason: &str,
+    ) -> Result<Option<AccessToken>, String> {
+        if !allow_retry {
+            return Err(
+                "macOS could not restore saved access to this folder automatically. Please open it again in Marlin to re-authorize."
+                    .to_string(),
+            );
+        }
+
+        let entry_path_buf = PathBuf::from(entry_path);
+        match store_bookmark_if_needed(&entry_path_buf) {
+            Ok(_) => retain_access_internal(original_path, false),
+            Err(store_err) => {
+                warn!(
+                    "Failed to refresh bookmark for {} after {}: {}",
+                    entry_path, reason, store_err
+                );
+                Err(
+                    "macOS could not restore saved access to this folder automatically. Please open it again in Marlin to re-authorize."
+                        .to_string(),
+                )
+            }
+        }
     }
 
     pub fn store_bookmark_if_needed(path: &Path) -> Result<(), String> {
