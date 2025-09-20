@@ -63,6 +63,14 @@ jobs:
           profile: minimal
           override: true
 
+      - name: Cache cargo build artifacts
+        if: steps.changes.outputs.check == 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri -> target
+          cache-on-failure: true
+
       - name: Install dependencies
         if: steps.changes.outputs.check == 'true'
         run: npm ci
