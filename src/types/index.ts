@@ -56,3 +56,25 @@ export interface DirectoryChangeEventPayload {
   changeType: string;
   affectedFiles: string[];
 }
+
+export interface FolderSizeProgressPayload {
+  requestId: string;
+  totalBytes: number;
+  totalApparentBytes: number;
+  totalItems: number;
+  currentPath?: string | null;
+  finished: boolean;
+  cancelled: boolean;
+  error?: string | null;
+}
+
+export interface FolderSizeTargetPayload {
+  path: string;
+  name: string;
+  isDirectory: boolean;
+}
+
+export interface FolderSizeInitPayload {
+  requestId: string;
+  targets: FolderSizeTargetPayload[];
+}

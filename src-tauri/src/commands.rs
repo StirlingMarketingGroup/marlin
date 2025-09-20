@@ -1,17 +1,27 @@
 use base64::Engine as _;
 use chrono::{DateTime, Utc};
 use dirs;
+use log::{info, warn};
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command as OsCommand;
-use std::sync::Arc;
-use tauri::{command, AppHandle, Manager};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use tauri::{command, AppHandle, Emitter, Manager};
 use tokio::process::Command as TokioCommand;
 use tokio::sync::OnceCell;
+use uuid::Uuid;
+use walkdir::WalkDir;
+
+#[cfg(target_family = "unix")]
+use std::os::unix::fs::MetadataExt;
 
 use crate::fs_utils::{
     self, copy_file_or_directory, delete_file_or_directory, expand_path, get_file_info,
@@ -19,6 +29,465 @@ use crate::fs_utils::{
     SymlinkResolution,
 };
 use crate::fs_watcher;
+#[cfg(target_os = "macos")]
+use crate::macos_security;
+use crate::state::{FolderSizeState, FolderSizeTaskHandle};
+
+const FOLDER_SIZE_EVENT: &str = "folder-size-progress";
+const FOLDER_SIZE_INIT_EVENT: &str = "folder-size:init";
+const FOLDER_SIZE_WINDOW_LABEL: &str = "folder-size";
+
+static FOLDER_SIZE_WINDOW_READY: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
+static PENDING_FOLDER_SIZE_PAYLOAD: Lazy<Mutex<Option<FolderSizeInitPayload>>> =
+    Lazy::new(|| Mutex::new(None));
+
+fn queue_folder_size_payload(app: &AppHandle, payload: FolderSizeInitPayload) {
+    {
+        let mut pending = PENDING_FOLDER_SIZE_PAYLOAD
+            .lock()
+            .expect("Failed to lock pending folder size payload");
+        *pending = Some(payload);
+    }
+    try_emit_pending_folder_size_payload(app);
+}
+
+fn try_emit_pending_folder_size_payload(app: &AppHandle) {
+    if !FOLDER_SIZE_WINDOW_READY.load(Ordering::SeqCst) {
+        return;
+    }
+
+    let payload_opt = {
+        let mut pending = PENDING_FOLDER_SIZE_PAYLOAD
+            .lock()
+            .expect("Failed to lock pending folder size payload");
+        pending.take()
+    };
+
+    if let Some(payload) = payload_opt {
+        match app.get_webview_window(FOLDER_SIZE_WINDOW_LABEL) {
+            Some(window) => {
+                if let Err(err) = window.emit(FOLDER_SIZE_INIT_EVENT, &payload) {
+                    warn!("Failed to emit folder size init payload: {err}");
+                    let mut pending = PENDING_FOLDER_SIZE_PAYLOAD
+                        .lock()
+                        .expect("Failed to relock pending folder size payload");
+                    *pending = Some(payload);
+                } else {
+                    info!(
+                        "Emitted folder-size:init with {} targets",
+                        payload.targets.len()
+                    );
+                }
+            }
+            None => {
+                warn!("Folder size window not available for payload emission");
+                let mut pending = PENDING_FOLDER_SIZE_PAYLOAD
+                    .lock()
+                    .expect("Failed to relock pending folder size payload");
+                *pending = Some(payload);
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderSizeTargetPayload {
+    pub path: String,
+    pub name: String,
+    #[serde(default)]
+    pub is_directory: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FolderSizeInitPayload {
+    request_id: String,
+    targets: Vec<FolderSizeTargetPayload>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct FolderSizeProgressPayload {
+    request_id: String,
+    total_bytes: u64,
+    total_apparent_bytes: u64,
+    total_items: u64,
+    current_path: Option<String>,
+    finished: bool,
+    cancelled: bool,
+    error: Option<String>,
+}
+
+fn emit_folder_size_event(
+    app: &AppHandle,
+    request_id: &str,
+    total_bytes: u64,
+    total_apparent_bytes: u64,
+    total_items: u64,
+    current_path: Option<String>,
+    finished: bool,
+    cancelled: bool,
+    error: Option<String>,
+) {
+    let payload = FolderSizeProgressPayload {
+        request_id: request_id.to_string(),
+        total_bytes,
+        total_apparent_bytes,
+        total_items,
+        current_path,
+        finished,
+        cancelled,
+        error,
+    };
+    if let Err(err) = app.emit(FOLDER_SIZE_EVENT, payload) {
+        warn!("Failed to emit folder size progress event: {err}");
+    }
+}
+
+const FOLDER_SIZE_EMIT_INTERVAL: Duration = Duration::from_millis(150);
+const FOLDER_SIZE_EMIT_STEP: u64 = 256;
+
+struct ProgressReporter<'a> {
+    app: &'a AppHandle,
+    request_id: &'a str,
+    last_emit: Instant,
+    items_since_emit: u64,
+    total_bytes: u64,
+    total_apparent_bytes: u64,
+    total_items: u64,
+}
+
+impl<'a> ProgressReporter<'a> {
+    fn new(app: &'a AppHandle, request_id: &'a str) -> Self {
+        let mut reporter = Self {
+            app,
+            request_id,
+            last_emit: Instant::now(),
+            items_since_emit: 0,
+            total_bytes: 0,
+            total_apparent_bytes: 0,
+            total_items: 0,
+        };
+        reporter.emit_internal(None, false, false, None);
+        reporter
+    }
+
+    fn add_file(
+        &mut self,
+        metadata: &fs::Metadata,
+        seen_inodes: &mut HashSet<(u64, u64)>,
+        current_path: Option<&Path>,
+    ) {
+        self.total_apparent_bytes = self.total_apparent_bytes.saturating_add(metadata.len());
+        let should_add_physical = match file_identity(metadata) {
+            Some(identity) => seen_inodes.insert(identity),
+            None => true,
+        };
+        if should_add_physical {
+            self.total_bytes = self
+                .total_bytes
+                .saturating_add(physical_file_size(metadata));
+        }
+        self.record_item(current_path);
+    }
+
+    fn add_entry(&mut self, current_path: Option<&Path>) {
+        self.record_item(current_path);
+    }
+
+    fn flush(&mut self, current_path: Option<&Path>) {
+        if self.items_since_emit > 0 {
+            self.emit_internal(current_path, false, false, None);
+        }
+    }
+
+    fn emit_error(&mut self, current_path: Option<&Path>, error: impl Into<String>) {
+        self.emit_internal(current_path, false, false, Some(error.into()));
+    }
+
+    fn finish(&mut self, cancelled: bool) {
+        self.emit_internal(None, true, cancelled, None);
+    }
+
+    fn totals(&self) -> (u64, u64, u64) {
+        (
+            self.total_bytes,
+            self.total_apparent_bytes,
+            self.total_items,
+        )
+    }
+
+    fn record_item(&mut self, current_path: Option<&Path>) {
+        self.total_items = self.total_items.saturating_add(1);
+        self.items_since_emit = self.items_since_emit.saturating_add(1);
+        if self.items_since_emit >= FOLDER_SIZE_EMIT_STEP
+            || self.last_emit.elapsed() >= FOLDER_SIZE_EMIT_INTERVAL
+        {
+            self.emit_internal(current_path, false, false, None);
+        }
+    }
+
+    fn emit_internal(
+        &mut self,
+        current_path: Option<&Path>,
+        finished: bool,
+        cancelled: bool,
+        error: Option<String>,
+    ) {
+        emit_folder_size_event(
+            self.app,
+            self.request_id,
+            self.total_bytes,
+            self.total_apparent_bytes,
+            self.total_items,
+            current_path.map(|p| p.to_string_lossy().to_string()),
+            finished,
+            cancelled,
+            error,
+        );
+        self.last_emit = Instant::now();
+        self.items_since_emit = 0;
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn persist_bookmark_for_scan(path: &Path) {
+    macos_security::persist_bookmark(path, "calculating folder size");
+}
+
+#[cfg(not(target_os = "macos"))]
+fn persist_bookmark_for_scan(_path: &Path) {}
+
+#[cfg(target_family = "unix")]
+fn physical_file_size(metadata: &fs::Metadata) -> u64 {
+    metadata.blocks().saturating_mul(512)
+}
+
+#[cfg(not(target_family = "unix"))]
+fn physical_file_size(metadata: &fs::Metadata) -> u64 {
+    metadata.len()
+}
+
+#[cfg(target_family = "unix")]
+fn file_identity(metadata: &fs::Metadata) -> Option<(u64, u64)> {
+    Some((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(not(target_family = "unix"))]
+fn file_identity(_metadata: &fs::Metadata) -> Option<(u64, u64)> {
+    None
+}
+
+fn should_skip_path(path: &Path) -> bool {
+    // Skip cloud storage directories
+    let path_str = path.to_string_lossy().to_lowercase();
+
+    // iCloud paths
+    if path_str.contains("/library/mobile documents") || path_str.contains("library/cloudstorage") {
+        info!("Skipping iCloud path: {:?}", path);
+        return true;
+    }
+
+    // Other cloud storage
+    if path_str.contains("/onedrive")
+        || path_str.contains("/dropbox")
+        || path_str.contains("/google drive")
+        || path_str.contains("/gdrive")
+    {
+        info!("Skipping cloud storage path: {:?}", path);
+        return true;
+    }
+
+    // Skip network volumes on macOS (they typically mount under /Volumes/)
+    // but keep local external drives which also mount there
+    #[cfg(target_os = "macos")]
+    {
+        // This is a simple heuristic - network volumes often have specific patterns
+        // For more accuracy, we'd need to use system APIs to check mount type
+        if path.starts_with("/Volumes/") {
+            let volume_name = path.strip_prefix("/Volumes/").unwrap_or(path);
+            let volume_str = volume_name.to_string_lossy().to_lowercase();
+
+            // Common patterns for network mounts
+            if volume_str.starts_with("smb")
+                || volume_str.starts_with("afp")
+                || volume_str.starts_with("nfs")
+                || volume_str.contains("server")
+                || volume_str.contains("share")
+            {
+                info!("Skipping network volume: {:?}", path);
+                return true;
+            }
+        }
+
+        // Skip /System/Volumes paths except for /System/Volumes/Data which is the local disk
+        if path.starts_with("/System/Volumes/") && !path.starts_with("/System/Volumes/Data") {
+            info!("Skipping system volume: {:?}", path);
+            return true;
+        }
+    }
+
+    false
+}
+
+fn walk_paths_for_size(
+    app: &AppHandle,
+    request_id: &str,
+    roots: &[PathBuf],
+    cancel_flag: &Arc<AtomicBool>,
+) -> bool {
+    let mut reporter = ProgressReporter::new(app, request_id);
+    let mut seen_inodes: HashSet<(u64, u64)> = HashSet::new();
+
+    info!(
+        "walk_paths_for_size started with {} roots for request {}",
+        roots.len(),
+        request_id
+    );
+
+    for root in roots {
+        info!("Processing root path: {:?}", root);
+
+        if should_skip_path(root) {
+            continue;
+        }
+
+        if cancel_flag.load(Ordering::Relaxed) {
+            reporter.finish(true);
+            return true;
+        }
+
+        #[cfg(target_os = "macos")]
+        let _scope_guard = match macos_security::retain_access(root) {
+            Ok(guard) => guard,
+            Err(initial_err) => {
+                warn!(
+                    "Failed to reuse security scope for {}: {}. Attempting to refresh bookmark...",
+                    root.display(),
+                    initial_err
+                );
+
+                if let Err(store_err) = macos_security::store_bookmark_if_needed(root) {
+                    warn!(
+                        "Unable to refresh bookmark for {}: {}",
+                        root.display(),
+                        store_err
+                    );
+                    reporter.emit_error(Some(root.as_path()), initial_err);
+                    continue;
+                }
+
+                match macos_security::retain_access(root) {
+                    Ok(guard) => guard,
+                    Err(err) => {
+                        reporter.emit_error(Some(root.as_path()), err);
+                        continue;
+                    }
+                }
+            }
+        };
+
+        let symlink_meta = match fs::symlink_metadata(root) {
+            Ok(meta) => meta,
+            Err(err) => {
+                reporter.emit_error(
+                    Some(root.as_path()),
+                    format!("Failed to access entry: {err}"),
+                );
+                continue;
+            }
+        };
+
+        let is_symlink = symlink_meta.file_type().is_symlink();
+        let mut target_metadata: Option<fs::Metadata> = None;
+
+        if is_symlink {
+            match fs::metadata(root) {
+                Ok(meta) => {
+                    target_metadata = Some(meta);
+                    if let Ok(resolved) = fs::canonicalize(root) {
+                        if should_skip_path(&resolved) {
+                            info!("Skipping symlink target path: {:?}", resolved);
+                            continue;
+                        }
+                    }
+                }
+                Err(err) => {
+                    warn!("Failed to resolve symlink target for {:?}: {}", root, err);
+                    reporter.add_entry(Some(root.as_path()));
+                    persist_bookmark_for_scan(root);
+                    continue;
+                }
+            }
+        }
+
+        let metadata = target_metadata.as_ref().unwrap_or(&symlink_meta);
+
+        if metadata.is_file() {
+            reporter.add_file(metadata, &mut seen_inodes, Some(root.as_path()));
+            persist_bookmark_for_scan(root);
+            continue;
+        }
+
+        if metadata.is_dir() {
+            info!("Starting directory walk for {:?}", root);
+            let walker = WalkDir::new(root).follow_links(false).into_iter();
+            for entry in walker {
+                if cancel_flag.load(Ordering::Relaxed) {
+                    reporter.finish(true);
+                    return true;
+                }
+
+                let entry = match entry {
+                    Ok(value) => value,
+                    Err(err) => {
+                        warn!("Failed to traverse directory {:?}: {err}", root);
+                        continue;
+                    }
+                };
+
+                let entry_path = entry.path();
+                let file_type = entry.file_type();
+                let metadata = match entry.metadata() {
+                    Ok(meta) => meta,
+                    Err(err) => {
+                        warn!("Failed to read metadata for {:?}: {err}", entry_path);
+                        continue;
+                    }
+                };
+
+                if file_type.is_symlink() {
+                    reporter.add_entry(Some(entry_path));
+                } else if metadata.is_file() {
+                    reporter.add_file(&metadata, &mut seen_inodes, Some(entry_path));
+                } else {
+                    reporter.add_entry(Some(entry_path));
+                }
+            }
+
+            reporter.flush(Some(root.as_path()));
+            persist_bookmark_for_scan(root);
+            continue;
+        }
+
+        if is_symlink {
+            reporter.add_entry(Some(root.as_path()));
+            persist_bookmark_for_scan(root);
+            continue;
+        }
+
+        persist_bookmark_for_scan(root);
+    }
+
+    let (total_bytes, total_apparent_bytes, total_items) = reporter.totals();
+    info!(
+        "Folder size calculation completed. Physical bytes: {}, Logical bytes: {}, Total items: {}",
+        total_bytes, total_apparent_bytes, total_items
+    );
+    reporter.finish(false);
+    false
+}
 
 #[command]
 pub fn get_home_directory() -> Result<String, String> {
@@ -705,26 +1174,94 @@ pub fn new_window(app: AppHandle, path: Option<String>) -> Result<(), String> {
         .title("")
         .inner_size(1200.0, 800.0)
         .resizable(true)
-        .fullscreen(false);
+        .fullscreen(false)
+        .decorations(true);
 
     #[cfg(target_os = "macos")]
-    let builder = builder.title_bar_style(tauri::TitleBarStyle::Overlay);
+    let builder = builder
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true)
+        .traffic_light_position(tauri::LogicalPosition::new(18.0, 18.0));
 
-    let window = builder
+    let _window = builder
         .build()
         .map_err(|e| format!("Failed to create window: {}", e))?;
 
+    Ok(())
+}
+
+#[command]
+pub fn open_folder_size_window(
+    app: AppHandle,
+    targets: Vec<FolderSizeTargetPayload>,
+) -> Result<(), String> {
+    if targets.is_empty() {
+        return Err("At least one directory must be selected".to_string());
+    }
+
+    if !targets.iter().any(|target| target.is_directory) {
+        return Err("Folder size requires at least one directory".to_string());
+    }
+
+    let mut unique = HashSet::new();
+    let deduped: Vec<_> = targets
+        .into_iter()
+        .filter(|target| unique.insert(target.path.clone()))
+        .collect();
+
+    let request_id = Uuid::new_v4().to_string();
+
+    let url = tauri::WebviewUrl::App("index.html?view=folder-size".into());
+
+    let payload = FolderSizeInitPayload {
+        request_id: request_id.clone(),
+        targets: deduped,
+    };
+
+    if let Some(existing) = app.get_webview_window(FOLDER_SIZE_WINDOW_LABEL) {
+        queue_folder_size_payload(&app, payload.clone());
+        let _ = existing.show();
+        let _ = existing.set_focus();
+        return Ok(());
+    }
+
+    let builder = tauri::WebviewWindowBuilder::new(&app, FOLDER_SIZE_WINDOW_LABEL, url)
+        .title("Folder Size")
+        .inner_size(420.0, 420.0)
+        .resizable(false)
+        .fullscreen(false)
+        .minimizable(false)
+        .maximizable(false)
+        .closable(true)
+        .decorations(true);
+
     #[cfg(target_os = "macos")]
-    {
-        use tauri_plugin_decorum::WebviewWindowExt;
-        let _ = window.set_traffic_lights_inset(16.0, 24.0);
-    }
+    let builder = builder
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true)
+        .traffic_light_position(tauri::LogicalPosition::new(18.0, 18.0));
 
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = window;
-    }
+    FOLDER_SIZE_WINDOW_READY.store(false, Ordering::SeqCst);
 
+    let _window = builder
+        .build()
+        .map_err(|e| format!("Failed to create folder size window: {}", e))?;
+
+    queue_folder_size_payload(&app, payload);
+
+    Ok(())
+}
+
+#[command]
+pub fn folder_size_window_ready(app: AppHandle) -> Result<(), String> {
+    FOLDER_SIZE_WINDOW_READY.store(true, Ordering::SeqCst);
+    try_emit_pending_folder_size_payload(&app);
+    Ok(())
+}
+
+#[command]
+pub fn folder_size_window_unready() -> Result<(), String> {
+    FOLDER_SIZE_WINDOW_READY.store(false, Ordering::SeqCst);
     Ok(())
 }
 
@@ -740,6 +1277,7 @@ pub fn show_native_context_menu(
     has_file_context: Option<bool>,
     file_paths: Option<Vec<String>>,
     selected_is_symlink: Option<bool>,
+    selection_has_directory: Option<bool>,
 ) -> Result<(), String> {
     // Resolve window
     let webview = if let Some(label) = window_label {
@@ -889,6 +1427,7 @@ pub fn show_native_context_menu(
     // (or explicit file paths are provided by the frontend).
     let selection_len = file_paths.as_ref().map(|v| v.len()).unwrap_or(0);
     let is_file_ctx = has_file_context.unwrap_or(false) || selection_len > 0;
+    let has_directory_selection = selection_has_directory.unwrap_or(false);
 
     let mut builder = MenuBuilder::new(&app);
     if is_file_ctx {
@@ -901,6 +1440,15 @@ pub fn show_native_context_menu(
         let copy_full_name_item = MenuItemBuilder::with_id("ctx:copy_full_name", "Copy Full Path")
             .build(&app)
             .map_err(|e| e.to_string())?;
+        let calculate_size_item = if has_directory_selection {
+            Some(
+                MenuItemBuilder::with_id("ctx:calculate_total_size", "Calculate Total Size")
+                    .build(&app)
+                    .map_err(|e| e.to_string())?,
+            )
+        } else {
+            None
+        };
 
         let reveal_item = if selected_is_symlink.unwrap_or(false) {
             Some(
@@ -915,6 +1463,9 @@ pub fn show_native_context_menu(
             .item(&rename_item)
             .item(&copy_name_item)
             .item(&copy_full_name_item);
+        if let Some(ref item) = calculate_size_item {
+            builder = builder.item(item);
+        }
         if let Some(ref item) = reveal_item {
             builder = builder.item(item);
         }
@@ -934,6 +1485,134 @@ pub fn show_native_context_menu(
     webview
         .popup_menu_at(&ctx_menu, Position::Logical(LogicalPosition { x, y }))
         .map_err(|e| e.to_string())
+}
+
+#[command]
+pub async fn calculate_folder_size(
+    app: AppHandle,
+    state: tauri::State<'_, FolderSizeState>,
+    request_id: String,
+    paths: Vec<String>,
+) -> Result<(), String> {
+    let trimmed_id = request_id.trim();
+    if trimmed_id.is_empty() {
+        return Err("request_id cannot be empty".to_string());
+    }
+    if paths.is_empty() {
+        return Err("At least one path must be provided".to_string());
+    }
+
+    let mut unique = HashSet::new();
+    let mut resolved: Vec<PathBuf> = Vec::new();
+    for raw in paths {
+        let expanded = expand_path(&raw)?;
+        let candidate = PathBuf::from(&expanded);
+        if !candidate.exists() {
+            continue;
+        }
+        if unique.insert(candidate.clone()) {
+            resolved.push(candidate);
+        }
+    }
+
+    if resolved.is_empty() {
+        return Err("None of the provided paths could be accessed".to_string());
+    }
+
+    let normalized_id = trimmed_id.to_string();
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+
+    {
+        let mut guard = state
+            .tasks
+            .lock()
+            .map_err(|_| "Failed to access folder size state".to_string())?;
+        if let Some(existing) = guard.insert(
+            normalized_id.clone(),
+            FolderSizeTaskHandle {
+                cancel_flag: cancel_flag.clone(),
+            },
+        ) {
+            existing.cancel_flag.store(true, Ordering::SeqCst);
+        }
+    }
+
+    let app_for_task = app.clone();
+    let request_key = normalized_id.clone();
+    info!(
+        "Starting folder size calculation task for request {}",
+        request_key
+    );
+    tauri::async_runtime::spawn(async move {
+        let paths_for_task = resolved;
+        let cancel_for_task = cancel_flag;
+        let app_for_compute = app_for_task.clone();
+        let request_for_compute = request_key.clone();
+
+        info!("Spawning blocking task for {} paths", paths_for_task.len());
+        let join_result = tauri::async_runtime::spawn_blocking(move || {
+            info!(
+                "Starting walk_paths_for_size for request {}",
+                request_for_compute
+            );
+            walk_paths_for_size(
+                &app_for_compute,
+                &request_for_compute,
+                &paths_for_task,
+                &cancel_for_task,
+            )
+        })
+        .await;
+
+        if let Err(join_err) = join_result {
+            emit_folder_size_event(
+                &app_for_task,
+                &request_key,
+                0,
+                0,
+                0,
+                None,
+                true,
+                false,
+                Some(format!("Folder size task failed: {join_err}")),
+            );
+        }
+
+        {
+            let folder_state = app_for_task.state::<FolderSizeState>();
+            if let Ok(mut guard) = folder_state.tasks.lock() {
+                guard.remove(&request_key);
+            };
+        }
+    });
+
+    Ok(())
+}
+
+#[command]
+pub fn cancel_folder_size_calculation(
+    _app: AppHandle,
+    state: tauri::State<'_, FolderSizeState>,
+    request_id: String,
+) -> Result<(), String> {
+    let trimmed_id = request_id.trim();
+    if trimmed_id.is_empty() {
+        return Err("request_id cannot be empty".to_string());
+    }
+
+    let handle = {
+        let guard = state
+            .tasks
+            .lock()
+            .map_err(|_| "Failed to access folder size state".to_string())?;
+        guard.get(trimmed_id).cloned()
+    };
+
+    if let Some(task) = handle {
+        task.cancel_flag.store(true, Ordering::SeqCst);
+    }
+
+    Ok(())
 }
 
 fn preferences_path() -> Result<PathBuf, String> {
