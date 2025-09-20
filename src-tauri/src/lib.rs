@@ -11,7 +11,7 @@ mod plugins;
 mod state;
 mod thumbnails;
 
-use state::MenuState;
+use state::{FolderSizeState, MenuState};
 use std::sync::Mutex;
 #[cfg(target_os = "linux")]
 use std::sync::OnceLock;
@@ -97,8 +97,13 @@ pub fn run() {
             commands::clear_thumbnail_cache,
             commands::open_path,
             commands::new_window,
+            commands::open_folder_size_window,
+            commands::folder_size_window_ready,
+            commands::folder_size_window_unready,
             commands::show_native_context_menu,
             commands::update_selection_menu_state,
+            commands::calculate_folder_size,
+            commands::cancel_folder_size_calculation,
             commands::render_svg_to_png,
             commands::read_preferences,
             commands::write_preferences,
@@ -187,6 +192,8 @@ pub fn run() {
                 sort_desc_item: Mutex::new(Some(sort_order_desc_item)),
                 has_selection: Mutex::new(false),
             });
+
+            app.manage(FolderSizeState::default());
 
             Ok(())
         })

@@ -7,6 +7,7 @@ import MainPanel from './components/MainPanel';
 import PathBar from './components/PathBar';
 import { useAppStore } from './store/useAppStore';
 import { useToastStore } from './store/useToastStore';
+import { openFolderSizeWindow } from './store/useFolderSizeStore';
 import { message } from '@tauri-apps/plugin-dialog';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 
@@ -603,6 +604,29 @@ function App() {
       await register('menu:sort_order_asc', () => setSortOrder('asc'));
       await register('menu:sort_order_desc', () => setSortOrder('desc'));
 
+      const handleCalculateTotalSize = async () => {
+        const state = useAppStore.getState();
+        const selection = state.selectedFiles;
+        if (!selection || selection.length === 0) return;
+        const byPath = new Map(state.files.map((f) => [f.path, f]));
+        const targets = selection
+          .map((path) => byPath.get(path))
+          .filter((file): file is FileItem => Boolean(file));
+        if (targets.length === 0) return;
+        if (!targets.some((file) => file.is_directory)) {
+          return;
+        }
+        await openFolderSizeWindow(
+          targets.map((file) => ({
+            path: file.path,
+            name: file.name,
+            isDirectory: file.is_directory,
+          }))
+        );
+      };
+
+      await register('menu:calculate_total_size', () => handleCalculateTotalSize());
+
       // Copy actions from context menu
       const copyToClipboard = async (text: string) => {
         try {
@@ -1184,10 +1208,11 @@ function App() {
   }
 
   return (
-    <div className="h-screen flex bg-app-dark text-app-text overflow-hidden">
+    <div className="relative h-screen flex bg-app-dark text-app-text overflow-hidden pt-12">
+      <div data-tauri-drag-region className="absolute inset-x-0 top-0 h-12" />
       {/* Sidebar full-height */}
       <div
-        className="h-screen p-2"
+        className="h-[calc(100vh-3rem)] p-2"
         data-tauri-drag-region
         onMouseDown={handleSidebarFrameMouseDown}
       >
