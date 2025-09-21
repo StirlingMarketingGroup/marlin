@@ -22,7 +22,14 @@ interface FolderSizeState {
   isRunning: boolean;
   error?: string;
   lastPath?: string;
-  initializeAndStart: (requestId: string, targets: FolderSizeTarget[]) => Promise<void>;
+  initializeAndStart: (
+    requestId: string,
+    targets: FolderSizeTarget[],
+    options?: {
+      invokeBackend?: boolean;
+      markRunning?: boolean;
+    }
+  ) => Promise<void>;
   applyProgress: (payload: FolderSizeProgressPayload) => void;
   cancel: () => Promise<void>;
   reset: () => void;
@@ -65,19 +72,27 @@ const extractErrorMessage = (error: unknown): string => {
 export const useFolderSizeStore = create<FolderSizeState>((set, get) => ({
   ...INITIAL_STATE,
 
-  initializeAndStart: async (requestId, targets) => {
+  initializeAndStart: async (requestId, targets, options) => {
     if (!requestId || !targets || targets.length === 0) {
       return;
     }
+
+    const shouldInvoke = options?.invokeBackend ?? true;
+    const shouldMarkRunning = options?.markRunning ?? true;
+    const now = Date.now();
 
     set({
       ...INITIAL_STATE,
       requestId,
       targets,
-      isRunning: true,
-      startedAt: Date.now(),
-      updatedAt: Date.now(),
+      isRunning: shouldMarkRunning,
+      startedAt: now,
+      updatedAt: now,
     });
+
+    if (!shouldInvoke) {
+      return;
+    }
 
     try {
       await invoke('calculate_folder_size', {
@@ -127,7 +142,6 @@ export const useFolderSizeStore = create<FolderSizeState>((set, get) => ({
         next.cancelRequested = false;
         next.completedAt = Date.now();
       }
-
       return { ...state, ...next };
     });
   },

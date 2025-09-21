@@ -41,32 +41,43 @@ export default function FolderSizeWindow() {
   useEffect(() => {
     let unlistenInit: (() => void) | undefined;
     let unlistenProgress: (() => void) | undefined;
-
-    console.log('[FolderSizeWindow] Component mounted, setting up event listeners...');
+    let mounted = true;
+    let readyNotified = false;
 
     (async () => {
       try {
         unlistenInit = await listen<FolderSizeInitPayload>('folder-size:init', async (event) => {
-          console.log('[FolderSizeWindow] Received folder-size:init event:', event.payload);
           if (!event.payload) {
             console.warn('[FolderSizeWindow] Event payload is empty');
             return;
           }
+
           reset();
-          const { requestId, targets: payloadTargets } = event.payload;
-          console.log(
-            `[FolderSizeWindow] Starting calculation for ${payloadTargets.length} targets`
-          );
-          await initializeAndStart(
-            requestId,
-            payloadTargets.map((target) => ({
-              path: target.path,
-              name: target.name,
-              isDirectory: target.isDirectory,
-            }))
-          );
+          const { requestId, targets: payloadTargets, autoStart, initialError } = event.payload;
+          const mappedTargets = payloadTargets.map((target) => ({
+            path: target.path,
+            name: target.name,
+            isDirectory: target.isDirectory,
+          }));
+
+          await initializeAndStart(requestId, mappedTargets, {
+            invokeBackend: !autoStart,
+            markRunning: autoStart && !initialError,
+          });
+
+          if (initialError) {
+            applyProgress({
+              requestId,
+              totalBytes: 0,
+              totalApparentBytes: 0,
+              totalItems: 0,
+              currentPath: null,
+              finished: true,
+              cancelled: false,
+              error: initialError,
+            });
+          }
         });
-        console.log('[FolderSizeWindow] Successfully set up folder-size:init listener');
       } catch (initError) {
         console.warn('Failed to listen for folder size init event:', initError);
       }
@@ -76,46 +87,42 @@ export default function FolderSizeWindow() {
           'folder-size-progress',
           (event) => {
             if (event.payload) {
-              console.log(
-                '[FolderSizeWindow] Progress update:',
-                event.payload.totalBytes,
-                'physical bytes,',
-                event.payload.totalApparentBytes,
-                'logical bytes,',
-                event.payload.totalItems,
-                'items'
-              );
               applyProgress(event.payload);
             }
           }
         );
-        console.log('[FolderSizeWindow] Successfully set up folder-size-progress listener');
       } catch (progressError) {
         console.warn('Failed to listen for progress events:', progressError);
+      }
+
+      if (!mounted) {
+        return;
+      }
+
+      try {
+        await invoke('folder_size_window_ready');
+        readyNotified = true;
+      } catch (error) {
+        console.warn('Failed to notify folder size readiness:', error);
       }
     })();
 
     return () => {
+      mounted = false;
       if (unlistenInit) {
         unlistenInit();
       }
       if (unlistenProgress) {
         unlistenProgress();
       }
+      if (readyNotified) {
+        void invoke('folder_size_window_unready').catch((error) => {
+          console.warn('Failed to reset folder size readiness:', error);
+        });
+      }
       reset();
     };
   }, [initializeAndStart, applyProgress, reset, isMacPlatform]);
-
-  useEffect(() => {
-    void invoke('folder_size_window_ready').catch((error) => {
-      console.warn('Failed to notify folder size readiness:', error);
-    });
-    return () => {
-      void invoke('folder_size_window_unready').catch((error) => {
-        console.warn('Failed to reset folder size readiness:', error);
-      });
-    };
-  }, []);
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {

@@ -1,7 +1,21 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+#[cfg(target_family = "unix")]
+use std::ffi::CString;
 use std::fs;
+#[cfg(target_family = "unix")]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(target_os = "windows")]
+use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+
+#[cfg(target_family = "unix")]
+use std::io;
+
+#[cfg(target_os = "windows")]
+use windows::core::PCWSTR;
+#[cfg(target_os = "windows")]
+use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 
 #[cfg(target_os = "macos")]
 use crate::macos_security;
@@ -110,6 +124,128 @@ fn build_file_item(path: &Path) -> Result<FileItem, String> {
         is_git_repo,
         extension,
     })
+}
+
+#[derive(Debug, Clone)]
+pub struct DiskUsageMetrics {
+    pub total_bytes: u64,
+    pub available_bytes: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct DiskUsage {
+    pub path: PathBuf,
+    pub total_bytes: u64,
+    pub available_bytes: u64,
+}
+
+pub fn get_disk_usage(path: &Path) -> Result<DiskUsage, String> {
+    if !path.exists() {
+        return Err("Path does not exist".to_string());
+    }
+
+    let metadata = fs::metadata(path).map_err(|e| format!("Failed to retrieve metadata: {}", e))?;
+
+    let effective_path = if metadata.is_dir() {
+        path.to_path_buf()
+    } else {
+        path.parent()
+            .map(|parent| parent.to_path_buf())
+            .ok_or_else(|| "Unable to determine parent directory".to_string())?
+    };
+
+    #[cfg(target_os = "macos")]
+    let _scope_guard = macos_security::retain_access(&effective_path)?;
+
+    let metrics = query_platform_disk_usage(&effective_path)?;
+
+    #[cfg(target_os = "macos")]
+    macos_security::persist_bookmark(&effective_path, "disk usage query");
+
+    Ok(DiskUsage {
+        path: effective_path,
+        total_bytes: metrics.total_bytes,
+        available_bytes: metrics.available_bytes,
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn query_platform_disk_usage(path: &Path) -> Result<DiskUsageMetrics, String> {
+    let mut wide_path: Vec<u16> = path.as_os_str().encode_wide().collect();
+    if !wide_path.ends_with(&[0]) {
+        wide_path.push(0);
+    }
+
+    let mut free_to_caller: u64 = 0;
+    let mut total_bytes: u64 = 0;
+    let mut total_free: u64 = 0;
+
+    unsafe {
+        if let Err(err) = GetDiskFreeSpaceExW(
+            PCWSTR(wide_path.as_ptr()),
+            Some(&mut free_to_caller),
+            Some(&mut total_bytes),
+            Some(&mut total_free),
+        ) {
+            return Err(format!("Failed to query disk usage: {}", err));
+        }
+    }
+
+    Ok(DiskUsageMetrics {
+        total_bytes,
+        available_bytes: free_to_caller,
+    })
+}
+
+#[cfg(target_family = "unix")]
+fn query_platform_disk_usage(path: &Path) -> Result<DiskUsageMetrics, String> {
+    let bytes = path.as_os_str().as_bytes().to_vec();
+    let c_path = CString::new(bytes).map_err(|_| "Path contains null bytes".to_string())?;
+
+    #[cfg(target_os = "macos")]
+    unsafe {
+        let mut stats: libc::statfs = std::mem::zeroed();
+        if libc::statfs(c_path.as_ptr(), &mut stats) != 0 {
+            return Err(format!(
+                "Failed to query disk usage: {}",
+                io::Error::last_os_error()
+            ));
+        }
+
+        let block_size = stats.f_bsize as u128;
+        let total = (stats.f_blocks as u128).saturating_mul(block_size);
+        let available = (stats.f_bavail as u128).saturating_mul(block_size);
+
+        return Ok(DiskUsageMetrics {
+            total_bytes: total.min(u128::from(u64::MAX)) as u64,
+            available_bytes: available.min(u128::from(u64::MAX)) as u64,
+        });
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    unsafe {
+        let mut stats: libc::statvfs = std::mem::zeroed();
+        if libc::statvfs(c_path.as_ptr(), &mut stats) != 0 {
+            return Err(format!(
+                "Failed to query disk usage: {}",
+                io::Error::last_os_error()
+            ));
+        }
+
+        let block_size = if stats.f_frsize > 0 {
+            stats.f_frsize as u128
+        } else {
+            stats.f_bsize as u128
+        };
+
+        let total = (stats.f_blocks as u128).saturating_mul(block_size);
+        let available = (stats.f_bavail as u128).saturating_mul(block_size);
+
+        Ok(DiskUsageMetrics {
+            total_bytes: total.min(u128::from(u64::MAX)) as u64,
+            available_bytes: available.min(u128::from(u64::MAX)) as u64,
+        })
+    }
 }
 
 pub fn read_directory_contents(path: &Path) -> Result<Vec<FileItem>, String> {

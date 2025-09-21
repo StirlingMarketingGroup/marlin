@@ -6,7 +6,6 @@ export default function DragDebug() {
   const [isDragOver, setIsDragOver] = useState(false);
 
   const addEvent = (event: string) => {
-    console.log(`🧪 DragDebug: ${event}`);
     setDragEvents((prev) => [...prev.slice(-4), event]);
   };
 

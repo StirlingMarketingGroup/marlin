@@ -250,11 +250,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   updateDirectoryPreferences: (path, preferences) =>
     set((state) => {
       const norm = normalizePath(path);
-      console.log('📝 updateDirectoryPreferences:', {
-        path: norm,
-        preferences,
-        timestamp: Date.now(),
-      });
       return {
         directoryPreferences: {
           ...state.directoryPreferences,
@@ -364,7 +359,6 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   toggleHiddenFiles: async (forceValue?: boolean) => {
     const { currentPath } = get();
-    console.log('🔄 toggleHiddenFiles called for path:', currentPath);
 
     // Get current state fresh each time to avoid stale closure values
     const getCurrentState = () => {
@@ -379,17 +373,9 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     const { currentShowHidden } = getCurrentState();
     const newShowHidden = typeof forceValue === 'boolean' ? forceValue : !currentShowHidden;
-    console.log('🔄 Toggle hidden files:', {
-      path: currentPath,
-      currentShowHidden,
-      newShowHidden,
-      timestamp: Date.now(),
-    });
 
     // Update directory preference first
-    console.log('📝 About to update directory preferences...');
     get().updateDirectoryPreferences(currentPath, { showHidden: newShowHidden });
-    console.log('✅ Directory preferences updated');
 
     // Also update global preference as default for new directories
     get().updateGlobalPreferences({ showHidden: newShowHidden });
@@ -404,7 +390,6 @@ export const useAppStore = create<AppState>((set, get) => ({
     // Save to backend with updated values
     try {
       await invoke('set_dir_prefs', { path: currentPath, prefs: JSON.stringify(updatedDirPrefs) });
-      console.log('✅ Successfully saved directory preferences to disk for:', currentPath);
     } catch (error) {
       console.warn('Failed to save directory preferences:', error);
     }
@@ -417,9 +402,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
 
     // Refresh directory to apply new filter
-    console.log('🔄 Calling refreshCurrentDirectory to apply hidden files filter');
     await get().refreshCurrentDirectory();
-    console.log('✅ Refresh completed, new state should show hidden files:', newShowHidden);
   },
 
   toggleFoldersFirst: async () => {
@@ -439,13 +422,10 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   refreshCurrentDirectory: async () => {
     const { currentPath, setFiles, setLoading, setError } = get();
-    console.log('🔄 refreshCurrentDirectory called for:', currentPath);
     try {
       setLoading(true);
       setError(undefined);
       const files = await invoke<FileItem[]>('read_directory', { path: currentPath });
-      console.log('📁 Loaded files:', files.length, 'total files');
-      console.log('👻 Hidden files in loaded set:', files.filter((f) => f.is_hidden).length);
       setFiles(files);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

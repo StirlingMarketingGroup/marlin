@@ -39,6 +39,12 @@ export interface SystemDrive {
   is_ejectable: boolean;
 }
 
+export interface DiskUsage {
+  path: string;
+  totalBytes: number;
+  availableBytes: number;
+}
+
 export interface PinnedDirectory {
   name: string;
   path: string;
@@ -77,4 +83,6 @@ export interface FolderSizeTargetPayload {
 export interface FolderSizeInitPayload {
   requestId: string;
   targets: FolderSizeTargetPayload[];
+  autoStart: boolean;
+  initialError?: string | null;
 }

@@ -423,12 +423,6 @@ export default function FileList({ files, preferences }: FileListProps) {
         if (dragStarted) return;
         dragStarted = true;
 
-        console.log('🚀 FileList: Native drag started for', {
-          fileName: file.name,
-          isDirectory: file.is_directory,
-          selectedFiles: selectedFiles.length,
-        });
-
         // If dragging a directory, track it for potential pinning
         if (file.is_directory) {
           startNativeDrag({ path: file.path, name: file.name });
@@ -475,13 +469,11 @@ export default function FileList({ files, preferences }: FileListProps) {
             }
 
             // Use new unified native drag API
-            const result = await invoke('start_native_drag', {
+            await invoke('start_native_drag', {
               paths: selected.map((f) => f.path),
               previewImage: dragImageDataUrl,
               dragOffsetY: 0,
             });
-
-            console.log('🏁 FileList: Native drag completed', result);
           } catch (error) {
             console.warn('Native drag failed:', error);
           } finally {

@@ -5,6 +5,7 @@ import type { Event } from '@tauri-apps/api/event';
 import Sidebar from './components/Sidebar';
 import MainPanel from './components/MainPanel';
 import PathBar from './components/PathBar';
+import StatusBar from './components/StatusBar';
 import { useAppStore } from './store/useAppStore';
 import { useToastStore } from './store/useToastStore';
 import { openFolderSizeWindow } from './store/useFolderSizeStore';
@@ -185,32 +186,19 @@ function App() {
         let lastDir: string | undefined;
         try {
           const raw = await invoke<string>('read_preferences');
-          console.log('🔍 Raw preferences:', raw);
           if (raw) {
             const parsed = JSON.parse(raw || '{}') as PersistedPreferences;
-            console.log('🔍 Parsed preferences:', parsed);
             if (parsed.globalPreferences) {
               useAppStore.getState().updateGlobalPreferences(parsed.globalPreferences);
-              console.log('✅ Updated global preferences:', parsed.globalPreferences);
             }
             if (parsed.directoryPreferences) {
               Object.entries(parsed.directoryPreferences).forEach(([dirPath, prefs]) => {
                 useAppStore.getState().updateDirectoryPreferences(dirPath, prefs);
               });
-              console.log(
-                '✅ Updated directory preferences:',
-                Object.keys(parsed.directoryPreferences).length,
-                'directories'
-              );
             }
             if (parsed.lastDir) {
               lastDir = parsed.lastDir;
-              console.log('🎯 Found lastDir:', lastDir);
-            } else {
-              console.log('⚠️ No lastDir found in preferences');
             }
-          } else {
-            console.log('⚠️ No preferences data found');
           }
         } catch (error) {
           console.error('❌ Error loading preferences:', error);
@@ -218,7 +206,6 @@ function App() {
 
         // Mark preferences as loaded regardless of whether we found any
         prefsLoadedRef.current = true;
-        console.log('🔧 Preferences loading completed, prefsLoadedRef set to true');
 
         const homeDir = await invoke<string>('get_home_directory');
         setHomeDir(homeDir);
@@ -230,12 +217,6 @@ function App() {
         const urlParams = new URLSearchParams(window.location.search);
         const initialPath = urlParams.get('path');
         const startPath = initialPath ? decodeURIComponent(initialPath) : lastDir || homeDir;
-        console.log('🚀 Starting path decision:', {
-          initialPath,
-          lastDir,
-          homeDir,
-          finalStartPath: startPath,
-        });
 
         // Apply system accent color (macOS) to CSS variables FIRST
         try {
@@ -339,15 +320,12 @@ function App() {
   // Persist lastDir on navigation
   useEffect(() => {
     if (!prefsLoadedRef.current) {
-      console.log('⏳ Skipping lastDir save, preferences not loaded yet');
       return;
     }
     const currentPath = useAppStore.getState().currentPath;
-    console.log('💾 Saving lastDir:', currentPath);
     (async () => {
       try {
         await invoke('set_last_dir', { path: currentPath });
-        console.log('✅ Successfully saved lastDir to disk:', currentPath);
       } catch (error) {
         console.error('❌ Failed to save lastDir:', error);
       }
@@ -373,21 +351,12 @@ function App() {
           const timeSinceUpdate = Date.now() - lastPreferenceUpdate;
           const shouldSkipLoad = timeSinceUpdate < 2000; // Skip if updated within 2 seconds
 
-          if (shouldSkipLoad) {
-            console.log('🛡️ Skipping preference load to prevent race condition', {
-              timeSinceUpdate,
-              path: currentPath,
-            });
-          } else {
+          if (!shouldSkipLoad) {
             const raw = await invoke<string>('get_dir_prefs', { path: currentPath });
             if (raw) {
               const parsed = JSON.parse(raw || '{}') as unknown;
               if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
                 const prefs = parsed as Partial<ViewPreferences>;
-                console.log('📂 Loading directory preferences from disk:', {
-                  path: currentPath,
-                  prefs,
-                });
                 useAppStore.getState().updateDirectoryPreferences(currentPath, prefs);
               }
             }
@@ -730,8 +699,7 @@ function App() {
       await register('menu:clear_thumbnail_cache', async () => {
         // Clear the thumbnail cache
         try {
-          const result = await invoke('clear_thumbnail_cache');
-          console.log('Thumbnail cache cleared:', result);
+          await invoke('clear_thumbnail_cache');
           // Optionally refresh current view to show the effect
           const { refreshCurrentDirectory } = useAppStore.getState();
           await refreshCurrentDirectory();
@@ -1208,21 +1176,19 @@ function App() {
   }
 
   return (
-    <div className="relative h-screen flex bg-app-dark text-app-text overflow-hidden pt-12">
-      <div data-tauri-drag-region className="absolute inset-x-0 top-0 h-12" />
+    <div className="relative h-screen flex bg-app-dark text-app-text overflow-hidden">
       {/* Sidebar full-height */}
-      <div
-        className="h-[calc(100vh-3rem)] p-2"
-        data-tauri-drag-region
-        onMouseDown={handleSidebarFrameMouseDown}
-      >
+      <div className="h-full p-2" data-tauri-drag-region onMouseDown={handleSidebarFrameMouseDown}>
         <Sidebar />
       </div>
 
       {/* Content column with path bar + panel */}
-      <div className="flex-1 flex flex-col overflow-hidden min-h-0">
+      <div className="flex-1 flex flex-col overflow-hidden min-h-0 relative">
         <PathBar />
         <MainPanel />
+        <div className="pointer-events-none absolute bottom-0 right-0 z-20">
+          <StatusBar />
+        </div>
       </div>
 
       {/* Toast notifications */}
