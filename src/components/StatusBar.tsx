@@ -145,7 +145,7 @@ export default function StatusBar() {
     return () => {
       cancelled = true;
     };
-  }, [currentPath, files]);
+  }, [currentPath]);
 
   const diskSummary = useMemo(() => {
     if (diskLoading && !diskUsage) {
