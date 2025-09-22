@@ -332,35 +332,37 @@ fn file_identity(_metadata: &fs::Metadata) -> Option<(u64, u64)> {
     None
 }
 
+#[cfg(target_os = "macos")]
 fn should_skip_path(path: &Path) -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        let path_str = path.to_string_lossy().to_lowercase();
+    let path_str = path.to_string_lossy().to_lowercase();
 
-        // Skip obvious network volumes mounted under /Volumes/
-        if path.starts_with("/Volumes/") {
-            let volume_name = path.strip_prefix("/Volumes/").unwrap_or(path);
-            let volume_str = volume_name.to_string_lossy().to_lowercase();
+    // Skip obvious network volumes mounted under /Volumes/
+    if path.starts_with("/Volumes/") {
+        let volume_name = path.strip_prefix("/Volumes/").unwrap_or(path);
+        let volume_str = volume_name.to_string_lossy().to_lowercase();
 
-            if volume_str.starts_with("smb")
-                || volume_str.starts_with("afp")
-                || volume_str.starts_with("nfs")
-                || volume_str.contains("server")
-                || volume_str.contains("share")
-            {
-                info!("Skipping network volume: {:?}", path);
-                return true;
-            }
-        }
-
-        // Skip system volumes that are not the main data volume
-        if path_str.starts_with("/system/volumes/") && !path_str.starts_with("/system/volumes/data")
+        if volume_str.starts_with("smb")
+            || volume_str.starts_with("afp")
+            || volume_str.starts_with("nfs")
+            || volume_str.contains("server")
+            || volume_str.contains("share")
         {
-            info!("Skipping system volume: {:?}", path);
+            info!("Skipping network volume: {:?}", path);
             return true;
         }
     }
 
+    // Skip system volumes that are not the main data volume
+    if path_str.starts_with("/system/volumes/") && !path_str.starts_with("/system/volumes/data") {
+        info!("Skipping system volume: {:?}", path);
+        return true;
+    }
+
+    false
+}
+
+#[cfg(not(target_os = "macos"))]
+fn should_skip_path(_path: &Path) -> bool {
     false
 }
 
