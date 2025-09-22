@@ -237,7 +237,7 @@ jobs:
             tauri-${{ runner.os }}-
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache@v0
+        uses: mozilla-actions/sccache-action@v0.0.3
         with:
           cache-key: release-${{ matrix.os }}-${{ matrix.target }}
 
@@ -352,7 +352,7 @@ jobs:
             tauri-${{ runner.os }}-
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache@v0
+        uses: mozilla-actions/sccache-action@v0.0.3
         with:
           cache-key: dryrun-${{ matrix.os }}-${{ matrix.target }}
 
