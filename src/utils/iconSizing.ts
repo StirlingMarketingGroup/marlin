@@ -1,6 +1,7 @@
 import { cloneElement, isValidElement } from 'react';
 import type { ReactElement, ReactNode } from 'react';
 import { FileTypeIcon } from '@/components/FileTypeIcon';
+import FileExtensionBadge from '@/components/FileExtensionBadge';
 
 interface NormalizeOptions {
   className?: string;
@@ -36,6 +37,8 @@ export function normalizePreviewIcon(
   const nextProps: Record<string, unknown> = { className: mergedClassName };
 
   if (element.type === FileTypeIcon) {
+    nextProps.pixelSize = targetPx;
+  } else if (element.type === FileExtensionBadge) {
     nextProps.pixelSize = targetPx;
   } else {
     if (typeof elementProps.size === 'undefined' || typeof elementProps.size === 'number') {

@@ -1,7 +1,6 @@
 import { useState, useMemo, useEffect, useLayoutEffect, useRef, type ReactNode } from 'react';
 import {
   Folder,
-  File,
   ImageSquare,
   MusicNote,
   VideoCamera,
@@ -20,6 +19,7 @@ import { useAppStore } from '../store/useAppStore';
 import { useDragStore } from '../store/useDragStore';
 import AppIcon from '@/components/AppIcon';
 import { FileTypeIcon, resolveVSCodeIcon } from '@/components/FileTypeIcon';
+import FileExtensionBadge from '@/components/FileExtensionBadge';
 import { open } from '@tauri-apps/plugin-shell';
 
 import { invoke } from '@tauri-apps/api/core';
@@ -31,7 +31,7 @@ import FileNameDisplay from './FileNameDisplay';
 import SymlinkBadge from '@/components/SymlinkBadge';
 import GitRepoBadge from '@/components/GitRepoBadge';
 import { normalizePreviewIcon } from '@/utils/iconSizing';
-import { isVideoExtension } from '@/utils/fileTypes';
+import { getEffectiveExtension, isVideoExtension } from '@/utils/fileTypes';
 
 interface FileGridProps {
   files: FileItem[];
@@ -291,11 +291,12 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
       return <Folder className="w-12 h-12 text-accent" weight="fill" />;
     }
 
-    const ext = file.extension?.toLowerCase();
+    const effectiveExtension = getEffectiveExtension(file);
+    const ext = effectiveExtension?.toLowerCase();
     if (!ext) {
       const special = resolveVSCodeIcon(file.name);
       if (special) return <FileTypeIcon name={file.name} size="large" />;
-      return <File className="w-12 h-12 text-app-muted" />;
+      return <FileExtensionBadge extension={effectiveExtension} size="large" />;
     }
 
     // Image files
@@ -365,7 +366,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
       return <FileText className="w-12 h-12 text-app-text" />;
     }
 
-    return <File className="w-12 h-12 text-app-muted" />;
+    return <FileExtensionBadge extension={effectiveExtension} size="large" />;
   };
 
   // (moved FilePreview to top-level GridFilePreview to avoid remounting)
