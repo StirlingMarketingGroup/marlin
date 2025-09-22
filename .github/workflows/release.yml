@@ -140,14 +140,6 @@ jobs:
             target: universal-apple-darwin
             arch: universal
             rust-targets: x86_64-apple-darwin,aarch64-apple-darwin
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            arch: x64
-            rust-targets: x86_64-pc-windows-msvc
-          - os: windows-latest
-            target: aarch64-pc-windows-msvc
-            arch: arm64
-            rust-targets: aarch64-pc-windows-msvc
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             arch: x86_64
@@ -161,6 +153,9 @@ jobs:
     env:
       RELEASE_TAG: ${{ needs.sync-version.outputs.release_tag || github.ref_name }}
       RELEASE_REF: ${{ needs.sync-version.outputs.release_ref || github.ref }}
+      RUSTC_WRAPPER: sccache
+      SCCACHE_CACHE_SIZE: 2G
+      SCCACHE_GHA_ENABLED: 'true'
     steps:
       - name: Validate release tag
         shell: bash
@@ -237,15 +232,10 @@ jobs:
             tauri-${{ runner.os }}-${{ matrix.target }}-
             tauri-${{ runner.os }}-
 
-      - name: Cache Tauri downloads (Windows)
-        if: runner.os == 'Windows'
-        uses: actions/cache@v4
+      - name: Setup sccache
+        uses: mozilla-actions/sccache@v0
         with:
-          path: '${{ env.LOCALAPPDATA }}\\tauri'
-          key: tauri-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('src-tauri/tauri.conf.json') }}
-          restore-keys: |
-            tauri-${{ runner.os }}-${{ matrix.target }}-
-            tauri-${{ runner.os }}-
+          cache-key: release-${{ matrix.os }}-${{ matrix.target }}
 
       - name: Install frontend dependencies
         run: npm ci
@@ -256,6 +246,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
           TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
+          RUSTC_WRAPPER: sccache
+          SCCACHE_CACHE_SIZE: 2G
+          SCCACHE_GHA_ENABLED: 'true'
         with:
           tagName: ${{ env.RELEASE_TAG }}
           releaseName: Marlin ${{ env.RELEASE_TAG }}
@@ -269,6 +262,10 @@ jobs:
     name: Dry Run (${{ matrix.os }} • ${{ matrix.arch }})
     if: ${{ github.event_name == 'pull_request' }}
     runs-on: ${{ matrix.os }}
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_CACHE_SIZE: 2G
+      SCCACHE_GHA_ENABLED: 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -277,14 +274,6 @@ jobs:
             target: universal-apple-darwin
             arch: universal
             rust-targets: x86_64-apple-darwin,aarch64-apple-darwin
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            arch: x64
-            rust-targets: x86_64-pc-windows-msvc
-          - os: windows-latest
-            target: aarch64-pc-windows-msvc
-            arch: arm64
-            rust-targets: aarch64-pc-windows-msvc
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             arch: x86_64
@@ -358,18 +347,17 @@ jobs:
             tauri-${{ runner.os }}-${{ matrix.target }}-
             tauri-${{ runner.os }}-
 
-      - name: Cache Tauri downloads (Windows)
-        if: runner.os == 'Windows'
-        uses: actions/cache@v4
+      - name: Setup sccache
+        uses: mozilla-actions/sccache@v0
         with:
-          path: '${{ env.LOCALAPPDATA }}\\tauri'
-          key: tauri-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('src-tauri/tauri.conf.json') }}
-          restore-keys: |
-            tauri-${{ runner.os }}-${{ matrix.target }}-
-            tauri-${{ runner.os }}-
+          cache-key: dryrun-${{ matrix.os }}-${{ matrix.target }}
 
       - name: Install frontend dependencies
         run: npm ci
 
       - name: Build Tauri bundle
         run: npm run tauri build -- --ci --target ${{ matrix.target }}
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_CACHE_SIZE: 2G
+          SCCACHE_GHA_ENABLED: 'true'
