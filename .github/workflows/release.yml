@@ -11,6 +11,10 @@ on:
         description: 'Release tag (for example v1.2.3)'
         required: true
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   sync-version:
     name: Sync Version Metadata
