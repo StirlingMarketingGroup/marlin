@@ -190,11 +190,30 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev || sudo apt-get install -y libwebkit2gtk-4.0-dev
           sudo apt-get install -y libfuse2 || sudo apt-get install -y libfuse2t64
 
+      - name: Normalize npm lockfile for caching
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          src = Path('package-lock.json')
+          data = json.loads(src.read_text())
+
+          data['version'] = ''
+          root_pkg = data.get('packages', {}).get('')
+          if isinstance(root_pkg, dict):
+            root_pkg['version'] = ''
+
+          Path('package-lock.ci.json').write_text(
+            json.dumps(data, sort_keys=True, separators=(',', ':'))
+          )
+          PY
+
       - uses: actions/setup-node@v5
         with:
           node-version: 20
           cache: 'npm'
-          cache-dependency-path: package-lock.json
+          cache-dependency-path: package-lock.ci.json
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -209,7 +228,7 @@ jobs:
         with:
           workspaces: |
             src-tauri -> target
-          shared-key: ${{ matrix.target }}
+          shared-key: release-${{ matrix.target }}
           cache-all-crates: true
           cache-on-failure: true
 
@@ -318,11 +337,30 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev || sudo apt-get install -y libwebkit2gtk-4.0-dev
           sudo apt-get install -y libfuse2 || sudo apt-get install -y libfuse2t64
 
+      - name: Normalize npm lockfile for caching
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          src = Path('package-lock.json')
+          data = json.loads(src.read_text())
+
+          data['version'] = ''
+          root_pkg = data.get('packages', {}).get('')
+          if isinstance(root_pkg, dict):
+            root_pkg['version'] = ''
+
+          Path('package-lock.ci.json').write_text(
+            json.dumps(data, sort_keys=True, separators=(',', ':'))
+          )
+          PY
+
       - uses: actions/setup-node@v5
         with:
           node-version: 20
           cache: 'npm'
-          cache-dependency-path: package-lock.json
+          cache-dependency-path: package-lock.ci.json
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -337,7 +375,7 @@ jobs:
         with:
           workspaces: |
             src-tauri -> target
-          shared-key: pr-${{ matrix.target }}
+          shared-key: release-${{ matrix.target }}
           cache-all-crates: true
           cache-on-failure: true
 
