@@ -387,15 +387,6 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
 
   // Handle mouse down for drag initiation and right-click selection
   const handleMouseDownForFile = (e: React.MouseEvent, file: FileItem) => {
-    console.log('🖱️ FileGrid: handleMouseDownForFile called', {
-      fileName: file.name,
-      isDirectory: file.is_directory,
-      button: e.button,
-      ctrlKey: e.ctrlKey,
-      metaKey: e.metaKey,
-      altKey: e.altKey,
-    });
-
     // If we're renaming this item and the event started in an input, ignore to allow text selection
     const target = e.target as HTMLElement;
     if (
@@ -426,12 +417,6 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
       const startDrag = () => {
         if (dragStarted) return;
         dragStarted = true;
-
-        console.log('🚀 FileGrid: Native drag started for', {
-          fileName: file.name,
-          isDirectory: file.is_directory,
-          selectedFiles: selectedFiles.length,
-        });
 
         // If dragging a directory, track it for potential pinning
         if (file.is_directory) {
@@ -479,13 +464,11 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
             }
 
             // Use new unified native drag API
-            const result = await invoke('start_native_drag', {
+            await invoke('start_native_drag', {
               paths: selected.map((f) => f.path),
               previewImage: dragImageDataUrl,
               dragOffsetY: 0,
             });
-
-            console.log('🏁 FileGrid: Native drag completed', result);
           } catch (error) {
             console.warn('Native drag failed:', error);
           } finally {

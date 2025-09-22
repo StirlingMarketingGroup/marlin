@@ -19,7 +19,7 @@ export default function DragDropTest() {
       const event = new DragEvent('dragstart');
       testElement.dispatchEvent(event);
     } catch (error) {
-      console.log('DragEvent constructor not supported', error);
+      console.warn('DragEvent constructor not supported', error);
     }
 
     setStatus((prev) => prev + ` | Drag support: ${dragSupported ? 'YES' : 'NO'}`);

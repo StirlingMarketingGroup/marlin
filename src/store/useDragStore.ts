@@ -21,14 +21,12 @@ export const useDragStore = create<DragStore>((set, get) => ({
   nativeDragDirectory: null,
 
   startNativeDrag: (directory: DraggedDirectory) => {
-    console.log('🚀 Native drag started for directory:', directory);
     set({
       nativeDragDirectory: directory,
     });
   },
 
   endNativeDrag: () => {
-    console.log('🏁 Native drag ended');
     set({
       nativeDragDirectory: null,
     });

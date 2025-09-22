@@ -5,6 +5,10 @@ on:
     branches: ['main', 'master']
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   lint-typecheck-rust:
     runs-on: ubuntu-latest
@@ -40,6 +44,7 @@ jobs:
         with:
           node-version: 20
           cache: 'npm'
+          cache-dependency-path: package-lock.json
 
       - name: Install system dependencies
         if: steps.changes.outputs.check == 'true'
@@ -70,6 +75,25 @@ jobs:
           workspaces: |
             src-tauri -> target
           cache-on-failure: true
+
+      - name: Setup sccache
+        if: steps.changes.outputs.check == 'true'
+        uses: mozilla-actions/sccache-action@v0.0.3
+
+      - name: Configure compiler caching
+        if: steps.changes.outputs.check == 'true'
+        run: |
+          echo "SCCACHE_CACHE_SIZE=1G" >> "$GITHUB_ENV"
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "SCCACHE_IGNORE_SERVER_IO_FAILURES=1" >> "$GITHUB_ENV"
+          echo "SCCACHE_DIR=$RUNNER_TEMP/sccache" >> "$GITHUB_ENV"
+          if sccache --start-server >/dev/null 2>&1; then
+            echo "Using sccache for rustc wrapper"
+            echo "RUSTC_WRAPPER=$(command -v sccache)" >> "$GITHUB_ENV"
+          else
+            echo "Sccache unavailable; falling back to rustc"
+            echo "RUSTC_WRAPPER=$(command -v rustc)" >> "$GITHUB_ENV"
+          fi
 
       - name: Install dependencies
         if: steps.changes.outputs.check == 'true'

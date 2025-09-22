@@ -76,6 +76,7 @@ pub fn run() {
         .plugin(tauri_plugin_drag::init())
         .invoke_handler(tauri::generate_handler![
             commands::get_home_directory,
+            commands::get_disk_usage,
             commands::read_directory,
             commands::get_file_metadata,
             commands::resolve_symlink_parent_command,

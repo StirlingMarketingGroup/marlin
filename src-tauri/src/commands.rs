@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use tauri::{command, AppHandle, Emitter, Manager};
 use tokio::process::Command as TokioCommand;
 use tokio::sync::OnceCell;
+use tokio::time::sleep;
 use uuid::Uuid;
 use walkdir::WalkDir;
 
@@ -25,7 +26,7 @@ use std::os::unix::fs::MetadataExt;
 
 use crate::fs_utils::{
     self, copy_file_or_directory, delete_file_or_directory, expand_path, get_file_info,
-    read_directory_contents, rename_file_or_directory, resolve_symlink_parent, FileItem,
+    read_directory_contents, rename_file_or_directory, resolve_symlink_parent, DiskUsage, FileItem,
     SymlinkResolution,
 };
 use crate::fs_watcher;
@@ -40,6 +41,10 @@ const FOLDER_SIZE_WINDOW_LABEL: &str = "folder-size";
 static FOLDER_SIZE_WINDOW_READY: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
 static PENDING_FOLDER_SIZE_PAYLOAD: Lazy<Mutex<Option<FolderSizeInitPayload>>> =
     Lazy::new(|| Mutex::new(None));
+
+const FOLDER_SIZE_WINDOW_READY_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const FOLDER_SIZE_WINDOW_READY_POLL_ATTEMPTS: u32 = 40;
+const FOLDER_SIZE_WINDOW_READY_STABILIZE_DELAY: Duration = Duration::from_millis(25);
 
 fn queue_folder_size_payload(app: &AppHandle, payload: FolderSizeInitPayload) {
     {
@@ -90,6 +95,48 @@ fn try_emit_pending_folder_size_payload(app: &AppHandle) {
     }
 }
 
+fn schedule_folder_size_auto_start(app: &AppHandle, request_id: String, paths: Vec<String>) {
+    if paths.is_empty() {
+        return;
+    }
+
+    let app_handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        // Wait for the window to report readiness so we don't emit progress events
+        // before its listeners are attached.
+        for _ in 0..FOLDER_SIZE_WINDOW_READY_POLL_ATTEMPTS {
+            if FOLDER_SIZE_WINDOW_READY.load(Ordering::SeqCst) {
+                break;
+            }
+            sleep(FOLDER_SIZE_WINDOW_READY_POLL_INTERVAL).await;
+        }
+
+        // Allow a small buffer for the renderer to process the init payload.
+        sleep(FOLDER_SIZE_WINDOW_READY_STABILIZE_DELAY).await;
+
+        let state = app_handle.state::<FolderSizeState>();
+        if let Err(err) =
+            calculate_folder_size(app_handle.clone(), state, request_id.clone(), paths).await
+        {
+            warn!(
+                "Auto-start folder size calculation failed for {}: {}",
+                request_id, err
+            );
+            emit_folder_size_event(
+                &app_handle,
+                &request_id,
+                0,
+                0,
+                0,
+                None,
+                true,
+                false,
+                Some(format!("Failed to start folder size calculation: {}", err)),
+            );
+        }
+    });
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FolderSizeTargetPayload {
@@ -104,6 +151,8 @@ pub struct FolderSizeTargetPayload {
 struct FolderSizeInitPayload {
     request_id: String,
     targets: Vec<FolderSizeTargetPayload>,
+    auto_start: bool,
+    initial_error: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -117,6 +166,14 @@ struct FolderSizeProgressPayload {
     finished: bool,
     cancelled: bool,
     error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DiskUsageResponse {
+    pub path: String,
+    pub total_bytes: u64,
+    pub available_bytes: u64,
 }
 
 fn emit_folder_size_event(
@@ -279,55 +336,37 @@ fn file_identity(_metadata: &fs::Metadata) -> Option<(u64, u64)> {
     None
 }
 
+#[cfg(target_os = "macos")]
 fn should_skip_path(path: &Path) -> bool {
-    // Skip cloud storage directories
     let path_str = path.to_string_lossy().to_lowercase();
 
-    // iCloud paths
-    if path_str.contains("/library/mobile documents") || path_str.contains("library/cloudstorage") {
-        info!("Skipping iCloud path: {:?}", path);
-        return true;
-    }
+    // Skip obvious network volumes mounted under /Volumes/
+    if path.starts_with("/Volumes/") {
+        let volume_name = path.strip_prefix("/Volumes/").unwrap_or(path);
+        let volume_str = volume_name.to_string_lossy().to_lowercase();
 
-    // Other cloud storage
-    if path_str.contains("/onedrive")
-        || path_str.contains("/dropbox")
-        || path_str.contains("/google drive")
-        || path_str.contains("/gdrive")
-    {
-        info!("Skipping cloud storage path: {:?}", path);
-        return true;
-    }
-
-    // Skip network volumes on macOS (they typically mount under /Volumes/)
-    // but keep local external drives which also mount there
-    #[cfg(target_os = "macos")]
-    {
-        // This is a simple heuristic - network volumes often have specific patterns
-        // For more accuracy, we'd need to use system APIs to check mount type
-        if path.starts_with("/Volumes/") {
-            let volume_name = path.strip_prefix("/Volumes/").unwrap_or(path);
-            let volume_str = volume_name.to_string_lossy().to_lowercase();
-
-            // Common patterns for network mounts
-            if volume_str.starts_with("smb")
-                || volume_str.starts_with("afp")
-                || volume_str.starts_with("nfs")
-                || volume_str.contains("server")
-                || volume_str.contains("share")
-            {
-                info!("Skipping network volume: {:?}", path);
-                return true;
-            }
-        }
-
-        // Skip /System/Volumes paths except for /System/Volumes/Data which is the local disk
-        if path.starts_with("/System/Volumes/") && !path.starts_with("/System/Volumes/Data") {
-            info!("Skipping system volume: {:?}", path);
+        if volume_str.starts_with("smb")
+            || volume_str.starts_with("afp")
+            || volume_str.starts_with("nfs")
+            || volume_str.contains("server")
+            || volume_str.contains("share")
+        {
+            info!("Skipping network volume: {:?}", path);
             return true;
         }
     }
 
+    // Skip system volumes that are not the main data volume
+    if path_str.starts_with("/system/volumes/") && !path_str.starts_with("/system/volumes/data") {
+        info!("Skipping system volume: {:?}", path);
+        return true;
+    }
+
+    false
+}
+
+#[cfg(not(target_os = "macos"))]
+fn should_skip_path(_path: &Path) -> bool {
     false
 }
 
@@ -494,6 +533,23 @@ pub fn get_home_directory() -> Result<String, String> {
     dirs::home_dir()
         .map(|path| path.to_string_lossy().to_string())
         .ok_or_else(|| "Could not determine home directory".to_string())
+}
+
+#[command]
+pub fn get_disk_usage(path: String) -> Result<DiskUsageResponse, String> {
+    let expanded_path = expand_path(&path)?;
+    let path = PathBuf::from(expanded_path);
+
+    if !path.exists() {
+        return Err("Path does not exist".to_string());
+    }
+
+    let usage: DiskUsage = fs_utils::get_disk_usage(&path)?;
+    Ok(DiskUsageResponse {
+        path: usage.path.to_string_lossy().to_string(),
+        total_bytes: usage.total_bytes,
+        available_bytes: usage.available_bytes,
+    })
 }
 
 #[command]
@@ -1204,10 +1260,19 @@ pub fn open_folder_size_window(
     }
 
     let mut unique = HashSet::new();
-    let deduped: Vec<_> = targets
-        .into_iter()
-        .filter(|target| unique.insert(target.path.clone()))
-        .collect();
+    let mut deduped: Vec<FolderSizeTargetPayload> = Vec::new();
+    let mut path_args: Vec<String> = Vec::new();
+
+    for target in targets {
+        if unique.insert(target.path.clone()) {
+            path_args.push(target.path.clone());
+            deduped.push(target);
+        }
+    }
+
+    if deduped.is_empty() {
+        return Err("At least one directory must be selected".to_string());
+    }
 
     let request_id = Uuid::new_v4().to_string();
 
@@ -1216,10 +1281,13 @@ pub fn open_folder_size_window(
     let payload = FolderSizeInitPayload {
         request_id: request_id.clone(),
         targets: deduped,
+        auto_start: true,
+        initial_error: None,
     };
 
     if let Some(existing) = app.get_webview_window(FOLDER_SIZE_WINDOW_LABEL) {
         queue_folder_size_payload(&app, payload.clone());
+        schedule_folder_size_auto_start(&app, request_id, path_args);
         let _ = existing.show();
         let _ = existing.set_focus();
         return Ok(());
@@ -1248,6 +1316,7 @@ pub fn open_folder_size_window(
         .map_err(|e| format!("Failed to create folder size window: {}", e))?;
 
     queue_folder_size_payload(&app, payload);
+    schedule_folder_size_auto_start(&app, request_id, path_args);
 
     Ok(())
 }

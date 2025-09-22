@@ -57,6 +57,7 @@ usvg = { version = "0.45", default-features = true, features = ["text"] }
 # File system watching
 notify = { version = "8.2", default-features = false, features = ["macos_fsevent"] }
 walkdir = "2.5"
+libc = "0.2"
 
 
 [target.'cfg(target_os = "macos")'.dependencies]
