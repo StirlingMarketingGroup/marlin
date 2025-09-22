@@ -5,9 +5,17 @@ on:
     branches: ['main', 'master']
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   lint-typecheck-rust:
     runs-on: ubuntu-latest
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_CACHE_SIZE: 1G
+      SCCACHE_GHA_ENABLED: 'true'
     steps:
       - uses: actions/checkout@v5
         with:
@@ -40,6 +48,7 @@ jobs:
         with:
           node-version: 20
           cache: 'npm'
+          cache-dependency-path: package-lock.json
 
       - name: Install system dependencies
         if: steps.changes.outputs.check == 'true'
@@ -70,6 +79,12 @@ jobs:
           workspaces: |
             src-tauri -> target
           cache-on-failure: true
+
+      - name: Setup sccache
+        if: steps.changes.outputs.check == 'true'
+        uses: mozilla-actions/sccache-action@v0.0.3
+        with:
+          cache-key: check-${{ github.ref }}
 
       - name: Install dependencies
         if: steps.changes.outputs.check == 'true'
