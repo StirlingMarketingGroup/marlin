@@ -42,6 +42,10 @@ static FOLDER_SIZE_WINDOW_READY: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new
 static PENDING_FOLDER_SIZE_PAYLOAD: Lazy<Mutex<Option<FolderSizeInitPayload>>> =
     Lazy::new(|| Mutex::new(None));
 
+const FOLDER_SIZE_WINDOW_READY_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const FOLDER_SIZE_WINDOW_READY_POLL_ATTEMPTS: u32 = 40;
+const FOLDER_SIZE_WINDOW_READY_STABILIZE_DELAY: Duration = Duration::from_millis(25);
+
 fn queue_folder_size_payload(app: &AppHandle, payload: FolderSizeInitPayload) {
     {
         let mut pending = PENDING_FOLDER_SIZE_PAYLOAD
@@ -100,15 +104,15 @@ fn schedule_folder_size_auto_start(app: &AppHandle, request_id: String, paths: V
     tauri::async_runtime::spawn(async move {
         // Wait for the window to report readiness so we don't emit progress events
         // before its listeners are attached.
-        for _ in 0..40 {
+        for _ in 0..FOLDER_SIZE_WINDOW_READY_POLL_ATTEMPTS {
             if FOLDER_SIZE_WINDOW_READY.load(Ordering::SeqCst) {
                 break;
             }
-            sleep(Duration::from_millis(25)).await;
+            sleep(FOLDER_SIZE_WINDOW_READY_POLL_INTERVAL).await;
         }
 
         // Allow a small buffer for the renderer to process the init payload.
-        sleep(Duration::from_millis(25)).await;
+        sleep(FOLDER_SIZE_WINDOW_READY_STABILIZE_DELAY).await;
 
         let state = app_handle.state::<FolderSizeState>();
         if let Err(err) =
