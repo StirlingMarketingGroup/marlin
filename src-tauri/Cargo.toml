@@ -56,6 +56,7 @@ num_cpus = "1.16"
 mupdf = { version = "0.5", default-features = false, features = [] }
 resvg = { version = "0.45", default-features = true }
 usvg = { version = "0.45", default-features = true, features = ["text"] }
+ffmpeg-sidecar = "2.2"
 # File system watching
 notify = { version = "8.2", default-features = false, features = ["macos_fsevent"] }
 walkdir = "2.5"

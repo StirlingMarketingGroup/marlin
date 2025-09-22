@@ -13,6 +13,7 @@ import {
   Palette,
   Disc,
   Cube,
+  Play,
 } from 'phosphor-react';
 import { FileItem, ViewPreferences } from '../types';
 import { useAppStore } from '../store/useAppStore';
@@ -29,6 +30,8 @@ import { useVisibility } from '@/hooks/useVisibility';
 import FileNameDisplay from './FileNameDisplay';
 import SymlinkBadge from '@/components/SymlinkBadge';
 import GitRepoBadge from '@/components/GitRepoBadge';
+import { normalizePreviewIcon } from '@/utils/iconSizing';
+import { isVideoExtension } from '@/utils/fileTypes';
 
 interface FileGridProps {
   files: FileItem[];
@@ -64,6 +67,7 @@ function GridFilePreview({
   const isPsd = ext === 'psd' || ext === 'psb';
 
   const isStl = ext === 'stl';
+  const isVideo = isVideoExtension(ext);
   const isAppBundle = isMac && file.is_directory && file.name.toLowerCase().endsWith('.app');
 
   const badgeSize: 'sm' | 'md' | 'lg' = tile >= 200 ? 'lg' : tile >= 120 ? 'md' : 'sm';
@@ -101,7 +105,7 @@ function GridFilePreview({
     return best;
   };
 
-  const shouldLoadThumbnail = isImage || isPdf || isAi || isPsd || isStl;
+  const shouldLoadThumbnail = isImage || isPdf || isAi || isPsd || isStl || isVideo;
   const requestSize = pickBucket(Math.round((box - pad * 2) * dpr));
   const thumbnailPriority = stage === 'visible' ? 'high' : 'medium';
   const { dataUrl, loading, hasTransparency } = useThumbnail(
@@ -134,6 +138,13 @@ function GridFilePreview({
             style={{ objectFit: 'contain', transform: 'none' }}
             draggable={false}
           />
+          {isVideo && (
+            <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+              <div className="flex items-center justify-center rounded-full bg-black/45 p-3">
+                <Play weight="fill" className="h-6 w-6 text-white/90" />
+              </div>
+            </div>
+          )}
         </div>
       );
     }
@@ -195,31 +206,26 @@ function GridFilePreview({
     );
   }
 
-  // Non-image fallback icon (reuse the same padding rule)
-  const thumb = Math.max(48, Math.min(tile - pad * 2, 320));
-  // Base icons ~48px; target ~50% of thumb at default
-  const target = Math.max(32, Math.min(thumb * 0.5, 140));
-  const scale = Math.max(0.75, Math.min(2.0, target / 48));
-  const iconPixels = 48 * scale;
-  const gap = Math.max(0, (thumb - iconPixels) / 2);
-  const overlayInset = Math.max(0, Math.min(thumb - 4, gap + Math.min(iconPixels * 0.12, 8)));
-  const adjust = Math.max(6, iconPixels * 0.12);
-  const verticalInset = Math.max(0, overlayInset - adjust);
-  const badgeInsetAdjust = badgeSize === 'lg' ? 3 : badgeSize === 'md' ? 2 : 1;
-  const horizontalInset = Math.max(0, verticalInset - badgeInsetAdjust);
+  // Non-thumbnail fallback icons should share the same footprint as thumbnails
+  const contentSize = Math.max(32, box - pad * 2);
+  const iconSize = Math.round(Math.min(contentSize, Math.max(36, contentSize * 0.85)));
+  const normalizedIcon = normalizePreviewIcon(fallbackIcon, iconSize);
   return (
     <div
       ref={previewRef}
-      className="relative rounded-md flex items-center justify-center"
-      style={{ width: thumb, height: thumb }}
+      className="relative overflow-hidden rounded-md border border-app-border bg-app-gray flex items-center justify-center"
+      style={{ width: box, height: box, padding: pad }}
     >
-      <div style={{ transform: `scale(${scale})`, transformOrigin: 'center' }}>{fallbackIcon}</div>
-      {isGitRepo && (
-        <GitRepoBadge size={badgeSize} style={{ bottom: verticalInset, left: horizontalInset }} />
-      )}
-      {isSymlink && (
-        <SymlinkBadge size={badgeSize} style={{ bottom: verticalInset, right: horizontalInset }} />
-      )}
+      <div className="flex items-center justify-center w-full h-full">
+        <div
+          className="flex items-center justify-center"
+          style={{ width: iconSize, height: iconSize }}
+        >
+          {normalizedIcon}
+        </div>
+      </div>
+      {isGitRepo && <GitRepoBadge className={gitBadgeOffset} size={badgeSize} />}
+      {isSymlink && <SymlinkBadge className={badgeOffset} size={badgeSize} />}
     </div>
   );
 }
@@ -318,7 +324,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     }
 
     // Video files
-    if (['mp4', 'mkv', 'avi', 'mov', 'webm', 'flv'].includes(ext)) {
+    if (isVideoExtension(ext)) {
       return <VideoCamera className="w-12 h-12 text-app-red" />;
     }
 

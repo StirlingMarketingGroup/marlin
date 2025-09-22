@@ -112,15 +112,17 @@ export function FileTypeIcon({
   ext,
   size = 'small',
   className,
+  pixelSize,
 }: {
   name: string;
   ext?: string;
   size?: FileIconSize;
   className?: string;
+  pixelSize?: number;
 }) {
   const iconName = resolveVSCodeIcon(name, ext);
   if (!iconName) return null;
-  const px = size === 'small' ? 20 : 48;
+  const px = pixelSize ?? (size === 'small' ? 20 : 48);
   // Use inline SVG for icons to preserve exact alignment and crispness
   return <Icon icon={iconName} width={px} height={px} className={className} />;
 }
