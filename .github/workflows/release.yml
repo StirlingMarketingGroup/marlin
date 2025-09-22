@@ -157,9 +157,6 @@ jobs:
     env:
       RELEASE_TAG: ${{ needs.sync-version.outputs.release_tag || github.ref_name }}
       RELEASE_REF: ${{ needs.sync-version.outputs.release_ref || github.ref }}
-      RUSTC_WRAPPER: sccache
-      SCCACHE_CACHE_SIZE: 2G
-      SCCACHE_GHA_ENABLED: 'true'
     steps:
       - name: Validate release tag
         shell: bash
@@ -216,6 +213,10 @@ jobs:
           cache-all-crates: true
           cache-on-failure: true
 
+      - name: Prepare Tauri cache directory (Linux)
+        if: runner.os == 'Linux'
+        run: mkdir -p ~/.cache/tauri
+
       - name: Cache Tauri downloads (Linux)
         if: runner.os == 'Linux'
         uses: actions/cache@v4
@@ -225,6 +226,10 @@ jobs:
           restore-keys: |
             tauri-${{ runner.os }}-${{ matrix.target }}-
             tauri-${{ runner.os }}-
+
+      - name: Prepare Tauri cache directory (macOS)
+        if: runner.os == 'macOS'
+        run: mkdir -p ~/Library/Caches/tauri
 
       - name: Cache Tauri downloads (macOS)
         if: runner.os == 'macOS'
@@ -238,8 +243,20 @@ jobs:
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.3
-        with:
-          cache-key: release-${{ matrix.os }}-${{ matrix.target }}
+
+      - name: Configure compiler caching
+        run: |
+          echo "SCCACHE_CACHE_SIZE=2G" >> "$GITHUB_ENV"
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "SCCACHE_IGNORE_SERVER_IO_FAILURES=1" >> "$GITHUB_ENV"
+          echo "SCCACHE_DIR=$RUNNER_TEMP/sccache" >> "$GITHUB_ENV"
+          if sccache --start-server >/dev/null 2>&1; then
+            echo "Using sccache for rustc wrapper"
+            echo "RUSTC_WRAPPER=$(command -v sccache)" >> "$GITHUB_ENV"
+          else
+            echo "Sccache unavailable; falling back to rustc"
+            echo "RUSTC_WRAPPER=$(command -v rustc)" >> "$GITHUB_ENV"
+          fi
 
       - name: Install frontend dependencies
         run: npm ci
@@ -250,9 +267,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
           TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
-          RUSTC_WRAPPER: sccache
-          SCCACHE_CACHE_SIZE: 2G
-          SCCACHE_GHA_ENABLED: 'true'
         with:
           tagName: ${{ env.RELEASE_TAG }}
           releaseName: Marlin ${{ env.RELEASE_TAG }}
@@ -266,10 +280,6 @@ jobs:
     name: Dry Run (${{ matrix.os }} • ${{ matrix.arch }})
     if: ${{ github.event_name == 'pull_request' }}
     runs-on: ${{ matrix.os }}
-    env:
-      RUSTC_WRAPPER: sccache
-      SCCACHE_CACHE_SIZE: 2G
-      SCCACHE_GHA_ENABLED: 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -331,6 +341,10 @@ jobs:
           cache-all-crates: true
           cache-on-failure: true
 
+      - name: Prepare Tauri cache directory (Linux)
+        if: runner.os == 'Linux'
+        run: mkdir -p ~/.cache/tauri
+
       - name: Cache Tauri downloads (Linux)
         if: runner.os == 'Linux'
         uses: actions/cache@v4
@@ -340,6 +354,10 @@ jobs:
           restore-keys: |
             tauri-${{ runner.os }}-${{ matrix.target }}-
             tauri-${{ runner.os }}-
+
+      - name: Prepare Tauri cache directory (macOS)
+        if: runner.os == 'macOS'
+        run: mkdir -p ~/Library/Caches/tauri
 
       - name: Cache Tauri downloads (macOS)
         if: runner.os == 'macOS'
@@ -353,15 +371,23 @@ jobs:
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.3
-        with:
-          cache-key: dryrun-${{ matrix.os }}-${{ matrix.target }}
+
+      - name: Configure compiler caching
+        run: |
+          echo "SCCACHE_CACHE_SIZE=2G" >> "$GITHUB_ENV"
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "SCCACHE_IGNORE_SERVER_IO_FAILURES=1" >> "$GITHUB_ENV"
+          echo "SCCACHE_DIR=$RUNNER_TEMP/sccache" >> "$GITHUB_ENV"
+          if sccache --start-server >/dev/null 2>&1; then
+            echo "Using sccache for rustc wrapper"
+            echo "RUSTC_WRAPPER=$(command -v sccache)" >> "$GITHUB_ENV"
+          else
+            echo "Sccache unavailable; falling back to rustc"
+            echo "RUSTC_WRAPPER=$(command -v rustc)" >> "$GITHUB_ENV"
+          fi
 
       - name: Install frontend dependencies
         run: npm ci
 
       - name: Build Tauri bundle
         run: npm run tauri build -- --ci --target ${{ matrix.target }}
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_CACHE_SIZE: 2G
-          SCCACHE_GHA_ENABLED: 'true'
