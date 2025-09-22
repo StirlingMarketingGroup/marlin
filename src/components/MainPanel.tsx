@@ -276,16 +276,11 @@ export default function MainPanel() {
       const width = Math.abs(dx);
       const height = Math.abs(dy);
 
-      const visualOriginX = state.originClientX - rect.left;
-      const visualOriginY = state.originClientY - rect.top;
-      const visualCurrentX = clientX - rect.left;
-      const visualCurrentY = clientY - rect.top;
-
       setMarqueeRect({
-        visualLeft: Math.min(visualOriginX, visualCurrentX),
-        visualTop: Math.min(visualOriginY, visualCurrentY),
-        visualWidth: Math.abs(visualCurrentX - visualOriginX),
-        visualHeight: Math.abs(visualCurrentY - visualOriginY),
+        visualLeft: left,
+        visualTop: top,
+        visualWidth: width,
+        visualHeight: height,
       });
 
       if (!state.didMove && width < 1 && height < 1) {
@@ -474,8 +469,8 @@ export default function MainPanel() {
 
     marqueeStateRef.current = state;
     setMarqueeRect({
-      visualLeft: e.clientX - rect.left,
-      visualTop: e.clientY - rect.top,
+      visualLeft: originX,
+      visualTop: originY,
       visualWidth: 0,
       visualHeight: 0,
     });
