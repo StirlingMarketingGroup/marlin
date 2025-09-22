@@ -14,6 +14,7 @@ pub mod pdf;
 pub mod psd;
 pub mod stl;
 pub mod svg;
+pub mod video;
 
 pub struct ThumbnailGenerator;
 
@@ -80,7 +81,11 @@ impl ThumbnailGenerator {
             return stl::StlGenerator::generate(request);
         }
 
-        // TODO: Add support for videos, documents
+        if Self::is_video_file(path) {
+            return video::VideoGenerator::generate(request);
+        }
+
+        // TODO: Add support for documents
         Err("Unsupported file type for thumbnail generation".to_string())
     }
 
@@ -128,6 +133,30 @@ impl ThumbnailGenerator {
         match path.extension().and_then(|s| s.to_str()) {
             Some(ext) => ext.eq_ignore_ascii_case("stl"),
             None => false,
+        }
+    }
+
+    fn is_video_file(path: &Path) -> bool {
+        if let Some(extension) = path.extension().and_then(|s| s.to_str()) {
+            matches!(
+                extension.to_lowercase().as_str(),
+                "mp4"
+                    | "m4v"
+                    | "mov"
+                    | "mkv"
+                    | "webm"
+                    | "avi"
+                    | "flv"
+                    | "wmv"
+                    | "mpg"
+                    | "mpeg"
+                    | "m2ts"
+                    | "mts"
+                    | "3gp"
+                    | "ogv"
+            )
+        } else {
+            false
         }
     }
 

@@ -15,6 +15,7 @@ import {
   Palette,
   Disc,
   Cube,
+  Play,
 } from 'phosphor-react';
 import { FileItem, ViewPreferences } from '../types';
 import { useAppStore } from '../store/useAppStore';
@@ -31,6 +32,8 @@ import { useVisibility } from '@/hooks/useVisibility';
 import FileNameDisplay from './FileNameDisplay';
 import SymlinkBadge from '@/components/SymlinkBadge';
 import GitRepoBadge from '@/components/GitRepoBadge';
+import { normalizePreviewIcon } from '@/utils/iconSizing';
+import { isVideoExtension } from '@/utils/fileTypes';
 
 interface FileListProps {
   files: FileItem[];
@@ -60,8 +63,9 @@ function ListFilePreview({
   const isPsd = ext === 'psd' || ext === 'psb';
   const isSvg = ext === 'svg';
   const isStl = ext === 'stl';
+  const isVideo = isVideoExtension(ext);
 
-  const isThumbnailCandidate = isImage || isPdf || isAi || isPsd || isStl;
+  const isThumbnailCandidate = isImage || isPdf || isAi || isPsd || isStl || isVideo;
   const dpr =
     typeof window !== 'undefined' ? Math.min(2, Math.max(1, window.devicePixelRatio || 1)) : 1;
   const priority = stage === 'visible' ? 'high' : 'medium';
@@ -94,11 +98,11 @@ function ListFilePreview({
 
   if (isThumbnailCandidate) {
     if (dataUrl) {
-      const isRaster = isImage && !isSvg;
+      const isRaster = (isImage && !isSvg) || isVideo;
       return (
         <div
           ref={previewRef}
-          className={`w-5 h-5 rounded-sm border border-app-border ${hasTransparency ? 'bg-checker' : ''} ${isRaster ? '' : 'p-[1px]'} overflow-hidden`}
+          className={`relative w-5 h-5 rounded-sm border border-app-border ${hasTransparency ? 'bg-checker' : ''} ${isRaster ? '' : 'p-[1px]'} overflow-hidden`}
         >
           <img
             src={dataUrl}
@@ -124,6 +128,13 @@ function ListFilePreview({
             }}
             draggable={false}
           />
+          {isVideo && (
+            <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+              <div className="flex items-center justify-center rounded-full bg-black/45 p-[2px]">
+                <Play weight="fill" className="h-[10px] w-[10px] text-white/90" />
+              </div>
+            </div>
+          )}
         </div>
       );
     }
@@ -138,7 +149,25 @@ function ListFilePreview({
     return <div ref={previewRef} className="w-5 h-5 rounded-sm border border-app-border" />;
   }
 
-  return <span className="inline-flex w-5 h-5 items-center justify-center">{fallbackIcon}</span>;
+  const containerPx = 20; // matches w-5/h-5
+  const padding = 2;
+  const iconSize = Math.round(Math.min(containerPx - padding * 2, 18));
+  const normalizedIcon = normalizePreviewIcon(fallbackIcon, iconSize);
+
+  return (
+    <div
+      ref={previewRef}
+      className="flex w-5 h-5 items-center justify-center rounded-sm border border-app-border bg-app-gray"
+      style={{ padding }}
+    >
+      <div
+        className="flex items-center justify-center"
+        style={{ width: iconSize, height: iconSize }}
+      >
+        {normalizedIcon}
+      </div>
+    </div>
+  );
 }
 
 export default function FileList({ files, preferences }: FileListProps) {
@@ -251,7 +280,7 @@ export default function FileList({ files, preferences }: FileListProps) {
     if (['mp3', 'wav', 'flac', 'aac', 'm4a', 'ogg'].includes(ext)) {
       return <MusicNote className="w-5 h-5 text-app-yellow" />;
     }
-    if (['mp4', 'mkv', 'avi', 'mov', 'webm', 'flv'].includes(ext)) {
+    if (isVideoExtension(ext)) {
       return <VideoCamera className="w-5 h-5 text-app-red" />;
     }
     if (
