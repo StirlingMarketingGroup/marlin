@@ -42,6 +42,7 @@ function App() {
   const firstLoadRef = useRef(true);
   const altTogglePendingRef = useRef(false);
   const windowRef = useRef(getCurrentWindow());
+  const thumbnailPrewarmRequestedRef = useRef(false);
   const currentDirectoryPreference = directoryPreferences[currentPath];
   // Apply smart default view and sort preferences based on folder name or contents
   const applySmartViewDefaults = async (path: string, files?: FileItem[]) => {
@@ -181,6 +182,28 @@ function App() {
       try {
         setLoading(true);
         setError(undefined);
+
+        if (!thumbnailPrewarmRequestedRef.current) {
+          thumbnailPrewarmRequestedRef.current = true;
+          const startedAt = performance.now();
+          invoke<boolean>('initialize_thumbnail_service')
+            .then((serviceReady) => {
+              if (!import.meta.env.DEV) {
+                return;
+              }
+              const elapsed = Math.round(performance.now() - startedAt);
+              if (serviceReady) {
+                console.info(`Thumbnail worker ready in ${elapsed}ms`);
+              } else {
+                console.warn(`Thumbnail worker prewarm failed after ${elapsed}ms`);
+              }
+            })
+            .catch((error) => {
+              if (import.meta.env.DEV) {
+                console.warn('Thumbnail worker prewarm error:', error);
+              }
+            });
+        }
 
         // Load persisted preferences first
         let lastDir: string | undefined;

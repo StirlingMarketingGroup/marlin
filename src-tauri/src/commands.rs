@@ -1414,6 +1414,35 @@ pub async fn request_thumbnail(
 }
 
 #[tauri::command]
+pub async fn initialize_thumbnail_service() -> bool {
+    if let Some(existing) = THUMBNAIL_SERVICE.get() {
+        return match existing {
+            Ok(_) => {
+                info!("Thumbnail service prewarm skipped; already running");
+                true
+            }
+            Err(err) => {
+                warn!("Thumbnail service prewarm previously failed: {err}");
+                false
+            }
+        };
+    }
+
+    let start = Instant::now();
+    match get_thumbnail_service().await {
+        Ok(_) => {
+            let elapsed_ms = start.elapsed().as_millis();
+            info!("Thumbnail service prewarmed in {elapsed_ms}ms");
+            true
+        }
+        Err(err) => {
+            warn!("Thumbnail service prewarm failed: {err}");
+            false
+        }
+    }
+}
+
+#[tauri::command]
 pub async fn cancel_thumbnail(request_id: String) -> Result<bool, String> {
     let service = get_thumbnail_service().await?;
     Ok(service.cancel_request(&request_id).await)
