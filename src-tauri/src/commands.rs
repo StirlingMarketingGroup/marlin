@@ -1,6 +1,7 @@
 use base64::Engine as _;
 use chrono::{DateTime, Utc};
 use dirs;
+use git2::{Branch, BranchType, ErrorCode as GitErrorCode, Oid, Repository, Status, StatusOptions};
 use log::{info, warn};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
@@ -18,6 +19,8 @@ use tauri::{command, AppHandle, Emitter, Manager};
 use tokio::process::Command as TokioCommand;
 use tokio::sync::OnceCell;
 use tokio::time::sleep;
+use url::Url;
+use urlencoding::encode;
 use uuid::Uuid;
 use walkdir::WalkDir;
 
@@ -174,6 +177,268 @@ pub struct DiskUsageResponse {
     pub path: String,
     pub total_bytes: u64,
     pub available_bytes: u64,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct GitStatusResponse {
+    pub repository_root: String,
+    pub branch: Option<String>,
+    pub detached: bool,
+    pub ahead: u32,
+    pub behind: u32,
+    pub dirty: bool,
+    pub has_untracked: bool,
+    pub remote_url: Option<String>,
+    pub remote_branch_url: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct BranchState {
+    name: Option<String>,
+    detached: bool,
+    head_oid: Option<Oid>,
+    ahead: u32,
+    behind: u32,
+    remote_url: Option<String>,
+}
+
+fn normalize_remote_url(raw: &str) -> Option<String> {
+    if raw.is_empty() {
+        return None;
+    }
+
+    let trimmed = raw.trim();
+
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        return Some(trimmed.trim_end_matches(".git").to_string());
+    }
+
+    if trimmed.starts_with("git://") {
+        let without_scheme = trimmed.trim_start_matches("git://");
+        if let Some((host, path)) = without_scheme.split_once('/') {
+            let clean_path = path.trim_end_matches(".git");
+            return Some(format!("https://{host}/{clean_path}"));
+        }
+    }
+
+    if trimmed.starts_with("ssh://") {
+        let without_scheme = trimmed.trim_start_matches("ssh://");
+        let host_and_path = if let Some(idx) = without_scheme.find('@') {
+            &without_scheme[idx + 1..]
+        } else {
+            without_scheme
+        };
+        if let Some((host, path)) = host_and_path.split_once('/') {
+            let clean_path = path.trim_end_matches(".git");
+            return Some(format!("https://{host}/{clean_path}"));
+        }
+    }
+
+    if let Some(rest) = trimmed.strip_prefix("git@") {
+        if let Some((host, path)) = rest.split_once(':') {
+            let clean_path = path.trim_end_matches(".git");
+            return Some(format!("https://{host}/{clean_path}"));
+        }
+    }
+
+    None
+}
+
+fn upstream_remote_url(repo: &Repository, upstream_branch: &Branch) -> Option<String> {
+    let upstream_name = upstream_branch.name().ok().flatten()?;
+    let trimmed = upstream_name.strip_prefix("refs/remotes/")?;
+    let (remote_name, _) = trimmed.split_once('/')?;
+    let remote = repo.find_remote(remote_name).ok()?;
+    let url = remote.url()?;
+    normalize_remote_url(url)
+}
+
+fn fallback_remote_url(repo: &Repository) -> Option<String> {
+    if let Ok(remote) = repo.find_remote("origin") {
+        if let Some(url) = remote.url() {
+            if let Some(normalized) = normalize_remote_url(url) {
+                return Some(normalized);
+            }
+        }
+    }
+
+    if let Ok(remotes) = repo.remotes() {
+        for name in remotes.iter().flatten() {
+            if let Ok(remote) = repo.find_remote(name) {
+                if let Some(url) = remote.url() {
+                    if let Some(normalized) = normalize_remote_url(url) {
+                        return Some(normalized);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn resolve_branch_state(repo: &Repository) -> BranchState {
+    let mut state = BranchState::default();
+
+    let head = match repo.head() {
+        Ok(head) => head,
+        Err(_) => {
+            state.detached = true;
+            return state;
+        }
+    };
+
+    state.name = head.shorthand().map(|s| s.to_string());
+    state.detached = !head.is_branch();
+    state.head_oid = head
+        .target()
+        .or_else(|| head.peel_to_commit().ok().map(|commit| commit.id()));
+
+    if head.is_branch() {
+        if let Some(short_name) = head.shorthand() {
+            if let Ok(local_branch) = repo.find_branch(short_name, BranchType::Local) {
+                if let Ok(upstream_branch) = local_branch.upstream() {
+                    if let (Some(local_oid), Some(upstream_oid)) =
+                        (local_branch.get().target(), upstream_branch.get().target())
+                    {
+                        if let Ok((ahead, behind)) =
+                            repo.graph_ahead_behind(local_oid, upstream_oid)
+                        {
+                            state.ahead = ahead as u32;
+                            state.behind = behind as u32;
+                        }
+                    }
+
+                    state.remote_url = upstream_remote_url(repo, &upstream_branch);
+                }
+            }
+        }
+    }
+
+    if state.remote_url.is_none() {
+        state.remote_url = fallback_remote_url(repo);
+    }
+
+    state
+}
+
+fn build_remote_branch_url(
+    remote: &str,
+    branch: Option<&str>,
+    detached: bool,
+    head_oid: Option<Oid>,
+) -> Option<String> {
+    let parsed = Url::parse(remote).ok()?;
+    let host = parsed.host_str()?.to_lowercase();
+    let base = remote.trim_end_matches('/');
+
+    if detached {
+        let sha = head_oid?.to_string();
+        if host.contains("github") {
+            return Some(format!("{}/commit/{}", base, sha));
+        }
+        if host.contains("gitlab") {
+            return Some(format!("{}/-/commit/{}", base, sha));
+        }
+        if host.contains("bitbucket") {
+            return Some(format!("{}/commits/{}", base, sha));
+        }
+        return Some(format!("{}/commit/{}", base, sha));
+    }
+
+    let branch = branch?;
+    let encoded = encode(branch).into_owned();
+
+    if host.contains("github") {
+        return Some(format!("{}/tree/{}", base, encoded));
+    }
+    if host.contains("gitlab") {
+        return Some(format!("{}/-/tree/{}", base, encoded));
+    }
+    if host.contains("bitbucket") {
+        return Some(format!("{}/branch/{}", base, encoded));
+    }
+
+    None
+}
+
+fn compute_git_status(path: &Path) -> Result<Option<GitStatusResponse>, String> {
+    let repo = match Repository::discover(path) {
+        Ok(repo) => repo,
+        Err(err) => {
+            if err.code() == GitErrorCode::NotFound {
+                return Ok(None);
+            }
+            return Err(format!("Failed to open Git repository: {err}"));
+        }
+    };
+
+    let workdir = match repo.workdir() {
+        Some(path) => path,
+        None => {
+            // Bare repositories have no working directory; surface as unsupported for now.
+            return Ok(None);
+        }
+    };
+
+    let repository_root = workdir
+        .canonicalize()
+        .unwrap_or_else(|_| workdir.to_path_buf())
+        .to_string_lossy()
+        .to_string();
+
+    let BranchState {
+        name: branch_name,
+        detached,
+        head_oid,
+        ahead,
+        behind,
+        remote_url,
+    } = resolve_branch_state(&repo);
+
+    let mut status_options = StatusOptions::new();
+    status_options
+        .include_untracked(true)
+        .recurse_untracked_dirs(true)
+        .renames_head_to_index(true)
+        .renames_index_to_workdir(true);
+
+    let statuses = repo
+        .statuses(Some(&mut status_options))
+        .map_err(|err| format!("Failed to compute repository status: {err}"))?;
+
+    let mut dirty = false;
+    let mut has_untracked = false;
+
+    for entry in statuses.iter() {
+        let status = entry.status();
+        if !status.is_empty() {
+            dirty = true;
+        }
+        if status.contains(Status::WT_NEW) {
+            has_untracked = true;
+        }
+        if dirty && has_untracked {
+            break;
+        }
+    }
+
+    let remote_branch_url = remote_url.as_ref().and_then(|remote| {
+        build_remote_branch_url(remote, branch_name.as_deref(), detached, head_oid)
+    });
+
+    Ok(Some(GitStatusResponse {
+        repository_root,
+        branch: branch_name,
+        detached,
+        ahead,
+        behind,
+        dirty,
+        has_untracked,
+        remote_url,
+        remote_branch_url,
+    }))
 }
 
 fn emit_folder_size_event(
@@ -550,6 +815,20 @@ pub fn get_disk_usage(path: String) -> Result<DiskUsageResponse, String> {
         total_bytes: usage.total_bytes,
         available_bytes: usage.available_bytes,
     })
+}
+
+#[command]
+pub async fn get_git_status(path: String) -> Result<Option<GitStatusResponse>, String> {
+    let expanded_path = expand_path(&path)?;
+    let path = PathBuf::from(expanded_path);
+
+    if !path.exists() {
+        return Err("Path does not exist".to_string());
+    }
+
+    tauri::async_runtime::spawn_blocking(move || compute_git_status(&path))
+        .await
+        .map_err(|err| format!("Failed to join Git status task: {err}"))?
 }
 
 #[command]

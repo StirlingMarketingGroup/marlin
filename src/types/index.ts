@@ -45,6 +45,18 @@ export interface DiskUsage {
   availableBytes: number;
 }
 
+export interface GitStatus {
+  repositoryRoot: string;
+  branch?: string;
+  detached: boolean;
+  ahead: number;
+  behind: number;
+  dirty: boolean;
+  hasUntracked: boolean;
+  remoteUrl?: string;
+  remoteBranchUrl?: string;
+}
+
 export interface PinnedDirectory {
   name: string;
   path: string;

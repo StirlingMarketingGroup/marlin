@@ -5,6 +5,7 @@ import {
   Theme,
   PinnedDirectory,
   DirectoryPreferencesMap,
+  GitStatus,
 } from '../types';
 import { invoke } from '@tauri-apps/api/core';
 import { message } from '@tauri-apps/plugin-dialog';
@@ -36,6 +37,13 @@ const __scheduleIconTask = <T>(task: () => Promise<T>): Promise<T> =>
     __iconQueue.push(run);
     __pumpIconQueue();
   });
+
+const GIT_STATUS_TTL_MS = 5_000;
+
+interface GitStatusCacheEntry {
+  status: GitStatus | null;
+  timestamp: number;
+}
 
 const normalizePath = (input: string): string => {
   const raw = (input ?? '').trim();
@@ -104,6 +112,26 @@ const normalizePath = (input: string): string => {
   return normalized;
 };
 
+const isPathInsideRepo = (path: string, repoRoot: string): boolean => {
+  if (!repoRoot) return false;
+  const normalizeForCompare = (value: string) =>
+    normalizePath(value).replace(/\/+$/, '').toLowerCase();
+
+  const normalizedPath = normalizeForCompare(path);
+  let normalizedRoot = normalizeForCompare(repoRoot);
+
+  if (normalizedRoot === '') {
+    normalizedRoot = '/';
+  }
+
+  if (normalizedPath === normalizedRoot) {
+    return true;
+  }
+
+  const rootWithSlash = normalizedRoot.endsWith('/') ? normalizedRoot : `${normalizedRoot}/`;
+  return normalizedPath.startsWith(rootWithSlash);
+};
+
 interface AppState {
   // Navigation
   currentPath: string;
@@ -119,6 +147,12 @@ interface AppState {
   shiftBaseSelection?: string[] | null;
   loading: boolean;
   error?: string;
+  gitStatus: GitStatus | null;
+  gitStatusLoading: boolean;
+  gitStatusError?: string;
+  gitStatusCache: Record<string, GitStatusCacheEntry>;
+  gitStatusRequestId?: string;
+  gitStatusRequestPath?: string;
 
   // Preferences
   globalPreferences: ViewPreferences;
@@ -171,6 +205,8 @@ interface AppState {
   refreshCurrentDirectory: () => Promise<void>;
   fetchAppIcon: (path: string, size?: number) => Promise<string | undefined>;
   resetDirectoryPreferences: () => void;
+  refreshGitStatus: (options?: { force?: boolean; path?: string }) => Promise<void>;
+  invalidateGitStatus: (path?: string) => void;
   // Pinned directories
   loadPinnedDirectories: () => Promise<void>;
   addPinnedDirectory: (path: string, name?: string) => Promise<PinnedDirectory>;
@@ -198,6 +234,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   shiftBaseSelection: null,
   loading: false,
   error: undefined,
+  gitStatus: null,
+  gitStatusLoading: false,
+  gitStatusError: undefined,
+  gitStatusCache: {},
+  gitStatusRequestId: undefined,
+  gitStatusRequestPath: undefined,
 
   globalPreferences: {
     viewMode: 'list',
@@ -220,7 +262,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   _zoomSliderHideTimer: undefined,
 
   // Actions
-  setCurrentPath: (path) => set({ currentPath: normalizePath(path) }),
+  setCurrentPath: (path) => {
+    const norm = normalizePath(path);
+    set({ currentPath: norm });
+    void get().refreshGitStatus({ path: norm });
+  },
   setHomeDir: (path) => set({ homeDir: path }),
   setFiles: (files) => set({ files }),
   setLoading: (loading) => set({ loading }),
@@ -297,6 +343,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       pathHistory: newHistory,
       historyIndex: newHistory.length - 1,
     });
+    void get().refreshGitStatus({ path: norm });
   },
 
   goBack: () => {
@@ -307,6 +354,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         currentPath: pathHistory[newIndex],
         historyIndex: newIndex,
       });
+      void get().refreshGitStatus({ path: pathHistory[newIndex] });
     }
   },
 
@@ -318,6 +366,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         currentPath: pathHistory[newIndex],
         historyIndex: newIndex,
       });
+      void get().refreshGitStatus({ path: pathHistory[newIndex] });
     }
   },
 
@@ -427,6 +476,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       setError(undefined);
       const files = await invoke<FileItem[]>('read_directory', { path: currentPath });
       setFiles(files);
+      void get().refreshGitStatus({ path: currentPath, force: true });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error('❌ refreshCurrentDirectory failed:', msg);
@@ -434,6 +484,120 @@ export const useAppStore = create<AppState>((set, get) => ({
     } finally {
       setLoading(false);
     }
+  },
+
+  refreshGitStatus: async (options) => {
+    const { force = false, path } = options ?? {};
+    const state = get();
+    const targetPath = normalizePath(path ?? state.currentPath ?? '/');
+
+    const now = Date.now();
+    const cachedDirect = state.gitStatusCache[targetPath];
+
+    if (!force && state.gitStatusRequestPath && state.gitStatusLoading) {
+      const activePath = state.gitStatusRequestPath;
+      if (activePath === targetPath) {
+        return;
+      }
+    }
+
+    const cachedByRepo = (() => {
+      if (cachedDirect) return cachedDirect;
+      for (const entry of Object.values(state.gitStatusCache)) {
+        if (!entry.status) continue;
+        if (now - entry.timestamp >= GIT_STATUS_TTL_MS) continue;
+        if (isPathInsideRepo(targetPath, entry.status.repositoryRoot)) {
+          return entry;
+        }
+      }
+      return undefined;
+    })();
+
+    if (!force && cachedByRepo && now - cachedByRepo.timestamp < GIT_STATUS_TTL_MS) {
+      set({
+        gitStatus: cachedByRepo.status,
+        gitStatusLoading: false,
+        gitStatusError: undefined,
+      });
+      return;
+    }
+
+    const requestId = `${targetPath}:${now}`;
+
+    set({
+      gitStatusLoading: true,
+      gitStatusError: undefined,
+      gitStatusRequestId: requestId,
+      gitStatusRequestPath: targetPath,
+    });
+
+    try {
+      const result = await invoke<GitStatus | null>('get_git_status', { path: targetPath });
+      const entry: GitStatusCacheEntry = { status: result, timestamp: Date.now() };
+      const rootKey = result ? normalizePath(result.repositoryRoot) : null;
+
+      set((current) => {
+        if (current.gitStatusRequestId !== requestId) {
+          return {};
+        }
+
+        const nextCache = { ...current.gitStatusCache, [targetPath]: entry };
+        if (rootKey) {
+          nextCache[rootKey] = entry;
+        }
+
+        return {
+          gitStatus: result,
+          gitStatusLoading: false,
+          gitStatusError: undefined,
+          gitStatusCache: nextCache,
+          gitStatusRequestId: undefined,
+          gitStatusRequestPath: undefined,
+        };
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      set((current) => {
+        if (current.gitStatusRequestId !== requestId) {
+          return {};
+        }
+
+        return {
+          gitStatusLoading: false,
+          gitStatusError: message,
+          gitStatusRequestId: undefined,
+          gitStatusRequestPath: undefined,
+        };
+      });
+    }
+  },
+
+  invalidateGitStatus: (path) => {
+    if (!path) {
+      set({ gitStatusCache: {}, gitStatus: null, gitStatusError: undefined });
+      return;
+    }
+
+    const normalized = normalizePath(path);
+
+    set((state) => {
+      const next = { ...state.gitStatusCache };
+      delete next[normalized];
+
+      if (state.gitStatus && isPathInsideRepo(normalized, state.gitStatus.repositoryRoot)) {
+        const rootKey = normalizePath(state.gitStatus.repositoryRoot);
+        delete next[rootKey];
+      } else {
+        for (const [key, entry] of Object.entries(state.gitStatusCache)) {
+          if (!entry.status) continue;
+          if (isPathInsideRepo(normalized, entry.status.repositoryRoot)) {
+            delete next[key];
+          }
+        }
+      }
+
+      return { gitStatusCache: next };
+    });
   },
 
   fetchAppIcon: async (path: string, size = 128) => {

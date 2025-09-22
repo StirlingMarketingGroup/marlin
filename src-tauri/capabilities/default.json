@@ -8,6 +8,8 @@
     "core:window:allow-start-dragging",
     "dialog:default",
     "shell:allow-open",
+    "opener:allow-open-url",
+    "opener:allow-reveal-item-in-dir",
     "core:window:allow-minimize",
     "core:window:allow-maximize",
     "core:window:allow-unmaximize",
