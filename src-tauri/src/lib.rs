@@ -93,6 +93,7 @@ pub fn run() {
             commands::update_sort_menu_state,
             commands::get_system_drives,
             commands::eject_drive,
+            commands::initialize_thumbnail_service,
             commands::request_thumbnail,
             commands::cancel_thumbnail,
             commands::get_thumbnail_cache_stats,
