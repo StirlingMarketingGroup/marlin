@@ -717,13 +717,6 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     );
   }
 
-  const handleBackgroundClick = (e: React.MouseEvent) => {
-    // Only clear when the click is directly on the background container
-    if (e.target === e.currentTarget) {
-      setSelectedFiles([]);
-    }
-  };
-
   // Click selection handling with Shift/Cmd/Ctrl support
   function handleFileClick(e: React.MouseEvent, file: FileItem) {
     const meta = e.ctrlKey || e.metaKey;
@@ -784,7 +777,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
   }
 
   return (
-    <div className="p-2" onClick={handleBackgroundClick} ref={gridRef}>
+    <div className="p-2" ref={gridRef}>
       <div
         className="grid gap-2 file-grid"
         style={{
