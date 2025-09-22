@@ -594,13 +594,6 @@ export default function FileList({ files, preferences }: FileListProps) {
     );
   }
 
-  const handleBackgroundClick = (e: React.MouseEvent) => {
-    // Only clear when the click is directly on the background container
-    if (e.target === e.currentTarget) {
-      setSelectedFiles([]);
-    }
-  };
-
   // Click selection handling with Shift/Cmd/Ctrl support
   function handleFileClick(e: React.MouseEvent, file: FileItem) {
     const meta = e.ctrlKey || e.metaKey;
@@ -663,7 +656,7 @@ export default function FileList({ files, preferences }: FileListProps) {
 
   return (
     <>
-      <div className="h-full" onClick={handleBackgroundClick} ref={listRef}>
+      <div className="h-full" ref={listRef}>
         {/* Header */}
         <div className="grid grid-cols-12 gap-3 px-3 py-2 border-b border-app-border border-t-0 text-[12px] font-medium text-app-muted bg-transparent select-none mb-1">
           <button
