@@ -456,19 +456,20 @@ jobs:
           find ~/.cache/tauri -type f -name '*.log' -print -exec tail -n +1 {} + || true
           target_dir="src-tauri/target/${{ matrix.target }}/release"
           appdir="$target_dir/bundle/appimage/Marlin.AppDir"
+          case "${{ matrix.target }}" in
+            *x86_64*) linuxdeploy_pattern="linuxdeploy-x86_64.AppImage" ;;
+            *aarch64*|*arm64*) linuxdeploy_pattern="linuxdeploy-aarch64.AppImage" ;;
+            *) linuxdeploy_pattern="linuxdeploy-*.AppImage" ;;
+          esac
           shopt -s nullglob
-          linuxdeploy_candidates=(~/.cache/tauri/linuxdeploy-*.AppImage)
+          linuxdeploy_candidates=(~/.cache/tauri/${linuxdeploy_pattern})
           shopt -u nullglob
           if [ ${#linuxdeploy_candidates[@]} -gt 0 ] && [ -d "$appdir" ]; then
             linuxdeploy_path="${linuxdeploy_candidates[0]}"
             echo "Re-running linuxdeploy with DEBUG=1 for additional context" >&2
-            tmpdir="$(mktemp -d)"
-            cp "$linuxdeploy_path" "$tmpdir/linuxdeploy.AppImage"
-            chmod +x "$tmpdir/linuxdeploy.AppImage"
-            pushd "$tmpdir" >/dev/null
-            ./linuxdeploy.AppImage --appimage-extract >/dev/null || true
-            if [ -x squashfs-root/AppRun ]; then
-              DEBUG=1 LINUXDEPLOY="$PWD/squashfs-root/AppRun" squashfs-root/usr/plugins/linuxdeploy-plugin-gtk.sh --appdir "$GITHUB_WORKSPACE/$appdir" || true
-            fi
-            popd >/dev/null
+            set +e
+            DEBUG=1 "$linuxdeploy_path" --appimage-extract-and-run --verbosity 3 --appdir "$GITHUB_WORKSPACE/$appdir" --plugin gtk --output appimage
+            replay_status=$?
+            echo "linuxdeploy replay exited with status $replay_status" >&2
+            set -e
           fi
