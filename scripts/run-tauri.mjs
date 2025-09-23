@@ -4,6 +4,11 @@ const args = process.argv.slice(2);
 const env = { ...process.env };
 
 if (process.platform === 'linux') {
+  if (!env.APPIMAGE_EXTRACT_AND_RUN) {
+    env.APPIMAGE_EXTRACT_AND_RUN = '1';
+    console.info('[marlin] Enabled AppImage extract-and-run mode to avoid FUSE requirements.');
+  }
+
   if (env.LD_LIBRARY_PATH) {
     const filtered = env.LD_LIBRARY_PATH.split(':').filter(
       (part) => part && !part.includes('/snap/')
