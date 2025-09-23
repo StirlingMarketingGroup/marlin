@@ -287,6 +287,10 @@ jobs:
           TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
           TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
           APPIMAGE_EXTRACT_AND_RUN: ${{ runner.os == 'Linux' && '1' || '' }}
+          TAURI_BUNDLE_DEBUG: '1'
+          TAURI_LOG: trace
+          RUST_LOG: tauri_bundler=debug
+          TAURI_BUNDLE_LINUX_APPIMAGE_ARGS: ${{ runner.os == 'Linux' && '--verbosity=2' || '' }}
         with:
           tagName: ${{ env.RELEASE_TAG }}
           releaseName: Marlin ${{ env.RELEASE_TAG }}
@@ -294,7 +298,7 @@ jobs:
             Automated binaries for Marlin. Download the installer matching your platform.
           releaseDraft: false
           prerelease: ${{ startsWith(env.RELEASE_TAG, 'v0.') }}
-          args: --target ${{ matrix.target }}
+          args: --target ${{ matrix.target }} --verbose
 
   release-dry-run:
     name: Dry Run (${{ matrix.os }} • ${{ matrix.arch }})
@@ -430,6 +434,23 @@ jobs:
         run: npm ci
 
       - name: Build Tauri bundle
-        run: npm run tauri build -- --ci --target ${{ matrix.target }}
+        run: |
+          set -euxo pipefail
+          npm run tauri build -- --ci --target ${{ matrix.target }} --verbose
         env:
-          APPIMAGE_EXTRACT_AND_RUN: ${{ runner.os == 'Linux' && '1' || '' }}
+          APPIMAGE_EXTRACT_AND_RUN: ${{ runner.os == 'Linux' && '1' || '0' }}
+          TAURI_BUNDLE_DEBUG: '1'
+          TAURI_LOG: trace
+          RUST_LOG: tauri_bundler=debug
+          TAURI_BUNDLE_LINUX_APPIMAGE_ARGS: ${{ runner.os == 'Linux' && '--verbosity=2' || '' }}
+
+      - name: Dump linuxdeploy diagnostics
+        if: failure() && runner.os == 'Linux'
+        run: |
+          set -euxo pipefail
+          echo "Listing tauri cache directory" >&2
+          ls -R ~/.cache/tauri | head -n 200 || true
+          echo "Inspecting extracted linuxdeploy payloads" >&2
+          find ~/.cache/tauri -maxdepth 2 -type d -name 'squashfs-root' -print || true
+          echo "Searching for linuxdeploy logs" >&2
+          find ~/.cache/tauri -type f -name '*.log' -print -exec tail -n +1 {} + || true
