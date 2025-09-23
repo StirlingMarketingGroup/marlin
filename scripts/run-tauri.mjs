@@ -1,9 +1,83 @@
 import { spawn } from 'node:child_process';
+import os from 'node:os';
+import path from 'node:path';
+import fs from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 
 const args = process.argv.slice(2);
 const env = { ...process.env };
 
+const LINUXDEPLOY_OVERRIDES = {
+  x64: {
+    filename: 'linuxdeploy-x86_64.AppImage',
+    url: 'https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20240109-1/linuxdeploy-x86_64.AppImage',
+    sha256: 'c86d6540f1df31061f02f539a2d3445f8d7f85cc3994eee1e74cd1ac97b76df0',
+    versionLabel: '1-alpha-20240109-1',
+  },
+  arm64: {
+    filename: 'linuxdeploy-aarch64.AppImage',
+    url: 'https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20240109-1/linuxdeploy-aarch64.AppImage',
+    sha256: '77d4d5918b5c9c7620dd74465c717ea59e8655eb83410cd86ebd24cec38c4679',
+    versionLabel: '1-alpha-20240109-1',
+  },
+};
+
+async function ensureLinuxdeployBinary() {
+  const override = LINUXDEPLOY_OVERRIDES[process.arch];
+  if (!override) return;
+
+  const cacheDir = path.join(os.homedir(), '.cache', 'tauri');
+  const targetPath = path.join(cacheDir, override.filename);
+
+  await fs.mkdir(cacheDir, { recursive: true });
+
+  let needsDownload = false;
+  try {
+    const existing = await fs.readFile(targetPath);
+    const digest = createHash('sha256').update(existing).digest('hex');
+    if (digest !== override.sha256) {
+      needsDownload = true;
+      console.info('[marlin] Replacing cached linuxdeploy binary due to checksum mismatch.');
+    }
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      needsDownload = true;
+    } else {
+      throw error;
+    }
+  }
+
+  if (needsDownload) {
+    console.info(`[marlin] Fetching linuxdeploy ${override.versionLabel} for ${process.arch}.`);
+    const response = await fetch(override.url);
+    if (!response.ok) {
+      throw new Error(
+        `Failed to download linuxdeploy from ${override.url}: ${response.status} ${response.statusText}`
+      );
+    }
+    const buffer = Buffer.from(await response.arrayBuffer());
+    const digest = createHash('sha256').update(buffer).digest('hex');
+    if (digest !== override.sha256) {
+      throw new Error(
+        `linuxdeploy checksum mismatch (expected ${override.sha256}, received ${digest}).`
+      );
+    }
+    await fs.writeFile(targetPath, buffer, { mode: 0o770 });
+  }
+
+  const zsyncPath = `${targetPath}.zsync`;
+  try {
+    await fs.unlink(zsyncPath);
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      throw error;
+    }
+  }
+}
+
 if (process.platform === 'linux') {
+  await ensureLinuxdeployBinary();
+
   if (!env.APPIMAGE_EXTRACT_AND_RUN) {
     env.APPIMAGE_EXTRACT_AND_RUN = '1';
     console.info('[marlin] Enabled AppImage extract-and-run mode to avoid FUSE requirements.');
