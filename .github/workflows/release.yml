@@ -182,11 +182,16 @@ jobs:
             wget \
             file \
             xdg-utils \
-            pkg-config \
             libssl-dev \
             libgtk-3-dev \
             libayatana-appindicator3-dev \
-            librsvg2-dev
+            librsvg2-dev \
+            pkg-config \
+            patchelf \
+            libglib2.0-bin \
+            libgdk-pixbuf2.0-bin \
+            desktop-file-utils \
+            shared-mime-info
           sudo apt-get install -y libwebkit2gtk-4.1-dev || sudo apt-get install -y libwebkit2gtk-4.0-dev
           sudo apt-get install -y libfuse2 || sudo apt-get install -y libfuse2t64
 
@@ -286,6 +291,11 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
           TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
+          APPIMAGE_EXTRACT_AND_RUN: ${{ runner.os == 'Linux' && '1' || '' }}
+          TAURI_BUNDLE_DEBUG: '1'
+          TAURI_LOG: trace
+          RUST_LOG: tauri_bundler=debug
+          TAURI_BUNDLE_LINUX_APPIMAGE_ARGS: ${{ runner.os == 'Linux' && '--verbosity=2' || '' }}
         with:
           tagName: ${{ env.RELEASE_TAG }}
           releaseName: Marlin ${{ env.RELEASE_TAG }}
@@ -293,7 +303,7 @@ jobs:
             Automated binaries for Marlin. Download the installer matching your platform.
           releaseDraft: false
           prerelease: ${{ startsWith(env.RELEASE_TAG, 'v0.') }}
-          args: --target ${{ matrix.target }}
+          args: --target ${{ matrix.target }} --verbose
 
   release-dry-run:
     name: Dry Run (${{ matrix.os }} • ${{ matrix.arch }})
@@ -333,7 +343,12 @@ jobs:
             libgtk-3-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
-            pkg-config
+            pkg-config \
+            patchelf \
+            libglib2.0-bin \
+            libgdk-pixbuf2.0-bin \
+            desktop-file-utils \
+            shared-mime-info
           sudo apt-get install -y libwebkit2gtk-4.1-dev || sudo apt-get install -y libwebkit2gtk-4.0-dev
           sudo apt-get install -y libfuse2 || sudo apt-get install -y libfuse2t64
 
@@ -428,4 +443,42 @@ jobs:
         run: npm ci
 
       - name: Build Tauri bundle
-        run: npm run tauri build -- --ci --target ${{ matrix.target }}
+        run: |
+          set -euxo pipefail
+          npm run tauri build -- --ci --target ${{ matrix.target }} --verbose
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: ${{ runner.os == 'Linux' && '1' || '0' }}
+          TAURI_BUNDLE_DEBUG: '1'
+          TAURI_LOG: trace
+          RUST_LOG: tauri_bundler=debug
+          TAURI_BUNDLE_LINUX_APPIMAGE_ARGS: ${{ runner.os == 'Linux' && '--verbosity=2' || '' }}
+
+      - name: Dump linuxdeploy diagnostics
+        if: failure() && runner.os == 'Linux'
+        run: |
+          set -euxo pipefail
+          echo "Listing tauri cache directory" >&2
+          ls -R ~/.cache/tauri | head -n 200 || true
+          echo "Inspecting extracted linuxdeploy payloads" >&2
+          find ~/.cache/tauri -maxdepth 2 -type d -name 'squashfs-root' -print || true
+          echo "Searching for linuxdeploy logs" >&2
+          find ~/.cache/tauri -type f -name '*.log' -print -exec tail -n +1 {} + || true
+          target_dir="src-tauri/target/${{ matrix.target }}/release"
+          appdir="$target_dir/bundle/appimage/Marlin.AppDir"
+          case "${{ matrix.target }}" in
+            *x86_64*) linuxdeploy_pattern="linuxdeploy-x86_64.AppImage" ;;
+            *aarch64*|*arm64*) linuxdeploy_pattern="linuxdeploy-aarch64.AppImage" ;;
+            *) linuxdeploy_pattern="linuxdeploy-*.AppImage" ;;
+          esac
+          shopt -s nullglob
+          linuxdeploy_candidates=(~/.cache/tauri/${linuxdeploy_pattern})
+          shopt -u nullglob
+          if [ ${#linuxdeploy_candidates[@]} -gt 0 ] && [ -d "$appdir" ]; then
+            linuxdeploy_path="${linuxdeploy_candidates[0]}"
+            echo "Re-running linuxdeploy with DEBUG=1 for additional context" >&2
+            set +e
+            DEBUG=1 "$linuxdeploy_path" --appimage-extract-and-run --verbosity 3 --appdir "$GITHUB_WORKSPACE/$appdir" --plugin gtk --output appimage
+            replay_status=$?
+            echo "linuxdeploy replay exited with status $replay_status" >&2
+            set -e
+          fi

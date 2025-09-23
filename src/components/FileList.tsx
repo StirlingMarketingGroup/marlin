@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   Folder,
-  File,
   ImageSquare,
   MusicNote,
   VideoCamera,
@@ -22,6 +21,7 @@ import { useAppStore } from '../store/useAppStore';
 import { useDragStore } from '../store/useDragStore';
 import AppIcon from '@/components/AppIcon';
 import { FileTypeIcon, resolveVSCodeIcon } from '@/components/FileTypeIcon';
+import FileExtensionBadge from '@/components/FileExtensionBadge';
 import { open } from '@tauri-apps/plugin-shell';
 
 import { createDragImageForSelection, createDragImageForSelectionAsync } from '@/utils/dragImage';
@@ -33,7 +33,7 @@ import FileNameDisplay from './FileNameDisplay';
 import SymlinkBadge from '@/components/SymlinkBadge';
 import GitRepoBadge from '@/components/GitRepoBadge';
 import { normalizePreviewIcon } from '@/utils/iconSizing';
-import { isVideoExtension } from '@/utils/fileTypes';
+import { getEffectiveExtension, isVideoExtension } from '@/utils/fileTypes';
 
 interface FileListProps {
   files: FileItem[];
@@ -257,11 +257,12 @@ export default function FileList({ files, preferences }: FileListProps) {
       return <Folder className="w-5 h-5 text-accent" weight="fill" />;
     }
 
-    const ext = file.extension?.toLowerCase();
+    const effectiveExtension = getEffectiveExtension(file);
+    const ext = effectiveExtension?.toLowerCase();
     if (!ext) {
       const special = resolveVSCodeIcon(file.name);
       if (special) return <FileTypeIcon name={file.name} size="small" />;
-      return <File className="w-5 h-5 text-app-muted" />;
+      return <FileExtensionBadge extension={effectiveExtension} size="small" />;
     }
 
     // Same icon logic as FileGrid but smaller
@@ -319,7 +320,7 @@ export default function FileList({ files, preferences }: FileListProps) {
       return <FileText className="w-5 h-5 text-app-text" />;
     }
 
-    return <File className="w-5 h-5 text-app-muted" />;
+    return <FileExtensionBadge extension={effectiveExtension} size="small" />;
   };
 
   const getTypeLabel = (file: FileItem) => {
