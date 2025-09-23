@@ -454,3 +454,21 @@ jobs:
           find ~/.cache/tauri -maxdepth 2 -type d -name 'squashfs-root' -print || true
           echo "Searching for linuxdeploy logs" >&2
           find ~/.cache/tauri -type f -name '*.log' -print -exec tail -n +1 {} + || true
+          target_dir="src-tauri/target/${{ matrix.target }}/release"
+          appdir="$target_dir/bundle/appimage/Marlin.AppDir"
+          shopt -s nullglob
+          linuxdeploy_candidates=(~/.cache/tauri/linuxdeploy-*.AppImage)
+          shopt -u nullglob
+          if [ ${#linuxdeploy_candidates[@]} -gt 0 ] && [ -d "$appdir" ]; then
+            linuxdeploy_path="${linuxdeploy_candidates[0]}"
+            echo "Re-running linuxdeploy with DEBUG=1 for additional context" >&2
+            tmpdir="$(mktemp -d)"
+            cp "$linuxdeploy_path" "$tmpdir/linuxdeploy.AppImage"
+            chmod +x "$tmpdir/linuxdeploy.AppImage"
+            pushd "$tmpdir" >/dev/null
+            ./linuxdeploy.AppImage --appimage-extract >/dev/null || true
+            if [ -x squashfs-root/AppRun ]; then
+              DEBUG=1 LINUXDEPLOY="$PWD/squashfs-root/AppRun" squashfs-root/usr/plugins/linuxdeploy-plugin-gtk.sh --appdir "$GITHUB_WORKSPACE/$appdir" || true
+            fi
+            popd >/dev/null
+          fi
