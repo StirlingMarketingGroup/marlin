@@ -4,6 +4,7 @@ import {
   FileText,
   DownloadSimple,
   ImageSquare,
+  VideoCamera,
   SquaresFour,
   UsersThree,
   HardDrives,
@@ -12,6 +13,7 @@ import {
   Trash,
   Recycle,
   Folder,
+  MusicNotes,
 } from 'phosphor-react';
 import type { IconProps } from 'phosphor-react';
 import { useAppStore } from '../store/useAppStore';
@@ -22,6 +24,13 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useToastStore } from '../store/useToastStore';
 import { useSidebarDropZone } from '../hooks/useDragDetector';
 import QuickTooltip from './QuickTooltip';
+
+type SidebarLink = {
+  name: string;
+  path: string | null;
+  iconType: React.ComponentType<IconProps>;
+  weight: 'fill' | 'regular';
+};
 
 export default function Sidebar() {
   const {
@@ -265,44 +274,44 @@ export default function Sidebar() {
       ? null
       : join(home, '.local/share/Trash/files');
   const trashLabel = isWindows ? 'Recycle Bin' : 'Trash';
+  const videoFolderLabel = isMac ? 'Movies' : 'Videos';
+  const videoFolderSubdir = isMac ? 'Movies' : 'Videos';
 
-  const links = [
-    { name: userLabel, path: home || '/', iconType: House, weight: 'fill' as const },
-    { name: 'Desktop', path: join(home, 'Desktop'), iconType: Desktop, weight: 'fill' as const },
-    {
-      name: 'Documents',
-      path: join(home, 'Documents'),
-      iconType: FileText,
-      weight: 'fill' as const,
-    },
-    {
-      name: 'Downloads',
-      path: join(home, 'Downloads'),
-      iconType: DownloadSimple,
-      weight: 'fill' as const,
-    },
-    {
-      name: 'Pictures',
-      path: join(home, 'Pictures'),
-      iconType: ImageSquare,
-      weight: 'fill' as const,
-    },
-    {
-      name: trashLabel,
-      path: trashPath,
-      iconType: isWindows ? Recycle : Trash,
-      weight: 'fill' as const,
-    },
+  const favoriteLinks: SidebarLink[] = [
+    { name: userLabel, path: home || '/', iconType: House, weight: 'fill' },
+    { name: 'Desktop', path: join(home, 'Desktop'), iconType: Desktop, weight: 'fill' },
+    { name: 'Documents', path: join(home, 'Documents'), iconType: FileText, weight: 'fill' },
+    { name: 'Downloads', path: join(home, 'Downloads'), iconType: DownloadSimple, weight: 'fill' },
+    { name: 'Pictures', path: join(home, 'Pictures'), iconType: ImageSquare, weight: 'fill' },
+  ];
+
+  favoriteLinks.push({
+    name: videoFolderLabel,
+    path: join(home, videoFolderSubdir),
+    iconType: VideoCamera,
+    weight: 'fill',
+  });
+
+  favoriteLinks.push({
+    name: 'Music',
+    path: join(home, 'Music'),
+    iconType: MusicNotes,
+    weight: 'fill',
+  });
+
+  favoriteLinks.push({
+    name: trashLabel,
+    path: trashPath,
+    iconType: isWindows ? Recycle : Trash,
+    weight: 'fill',
+  });
+
+  const systemLinks: SidebarLink[] = [
     // macOS locations
-    { name: 'Applications', path: '/Applications', iconType: SquaresFour, weight: 'fill' as const },
-    { name: 'Users', path: '/Users', iconType: UsersThree, weight: 'fill' as const },
-    { name: 'System', path: '/System', iconType: HardDrives, weight: 'regular' as const },
-  ] as {
-    name: string;
-    path: string | null;
-    iconType: React.ComponentType<IconProps>;
-    weight: 'fill' | 'regular';
-  }[];
+    { name: 'Applications', path: '/Applications', iconType: SquaresFour, weight: 'fill' },
+    { name: 'Users', path: '/Users', iconType: UsersThree, weight: 'fill' },
+    { name: 'System', path: '/System', iconType: HardDrives, weight: 'regular' },
+  ];
 
   const dragRegionHeightClass = isMac ? 'h-16' : 'h-0';
   const listTopOffsetClass = isMac ? '-mt-8' : '';
@@ -341,7 +350,7 @@ export default function Sidebar() {
           Favorites
         </div>
         {/* User directories */}
-        {links.slice(0, 6).map((item) => {
+        {favoriteLinks.map((item) => {
           const isDisabled = item.path == null;
           const isActive = !isDisabled && currentPath === item.path;
           return (
@@ -411,28 +420,25 @@ export default function Sidebar() {
 
         {/* Locations section */}
         <div className="px-1 pt-3 pb-1 text-xs text-app-muted select-none">System</div>
-        {(() => {
-          const systemLinks = links.slice(6); // Applications, Users, System
-          return systemLinks.map((item) => {
-            const isDisabled = item.path == null;
-            const isActive = !isDisabled && currentPath === item.path;
-            return (
-              <button
-                key={`sys-${item.name}`}
-                onClick={() => !isDisabled && navigateTo(item.path!)}
-                className={`w-full flex items-center gap-2 px-1.5 py-1 rounded-md text-left leading-5 text-[13px] ${
-                  isActive ? 'bg-app-light' : 'hover:bg-app-light/70'
-                } ${isDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
-                title={item.path || ''}
-                data-tauri-drag-region={false}
-                disabled={isDisabled}
-              >
-                {createIcon(item.iconType, item.weight, isActive)}
-                <span className={`truncate ${isActive ? 'text-accent' : ''}`}>{item.name}</span>
-              </button>
-            );
-          });
-        })()}
+        {systemLinks.map((item) => {
+          const isDisabled = item.path == null;
+          const isActive = !isDisabled && currentPath === item.path;
+          return (
+            <button
+              key={`sys-${item.name}`}
+              onClick={() => !isDisabled && navigateTo(item.path!)}
+              className={`w-full flex items-center gap-2 px-1.5 py-1 rounded-md text-left leading-5 text-[13px] ${
+                isActive ? 'bg-app-light' : 'hover:bg-app-light/70'
+              } ${isDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
+              title={item.path || ''}
+              data-tauri-drag-region={false}
+              disabled={isDisabled}
+            >
+              {createIcon(item.iconType, item.weight, isActive)}
+              <span className={`truncate ${isActive ? 'text-accent' : ''}`}>{item.name}</span>
+            </button>
+          );
+        })}
 
         {/* System drives */}
         {systemDrives.length > 0 && (
