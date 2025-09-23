@@ -275,7 +275,6 @@ export default function Sidebar() {
       : join(home, '.local/share/Trash/files');
   const trashLabel = isWindows ? 'Recycle Bin' : 'Trash';
   const videoFolderLabel = isMac ? 'Movies' : 'Videos';
-  const videoFolderSubdir = isMac ? 'Movies' : 'Videos';
 
   const favoriteLinks: SidebarLink[] = [
     { name: userLabel, path: home || '/', iconType: House, weight: 'fill' },
@@ -283,28 +282,25 @@ export default function Sidebar() {
     { name: 'Documents', path: join(home, 'Documents'), iconType: FileText, weight: 'fill' },
     { name: 'Downloads', path: join(home, 'Downloads'), iconType: DownloadSimple, weight: 'fill' },
     { name: 'Pictures', path: join(home, 'Pictures'), iconType: ImageSquare, weight: 'fill' },
+    {
+      name: videoFolderLabel,
+      path: join(home, videoFolderLabel),
+      iconType: VideoCamera,
+      weight: 'fill',
+    },
+    {
+      name: 'Music',
+      path: join(home, 'Music'),
+      iconType: MusicNotes,
+      weight: 'fill',
+    },
+    {
+      name: trashLabel,
+      path: trashPath,
+      iconType: isWindows ? Recycle : Trash,
+      weight: 'fill',
+    },
   ];
-
-  favoriteLinks.push({
-    name: videoFolderLabel,
-    path: join(home, videoFolderSubdir),
-    iconType: VideoCamera,
-    weight: 'fill',
-  });
-
-  favoriteLinks.push({
-    name: 'Music',
-    path: join(home, 'Music'),
-    iconType: MusicNotes,
-    weight: 'fill',
-  });
-
-  favoriteLinks.push({
-    name: trashLabel,
-    path: trashPath,
-    iconType: isWindows ? Recycle : Trash,
-    weight: 'fill',
-  });
 
   const systemLinks: SidebarLink[] = [
     // macOS locations
