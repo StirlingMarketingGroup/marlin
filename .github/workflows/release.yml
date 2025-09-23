@@ -182,11 +182,16 @@ jobs:
             wget \
             file \
             xdg-utils \
-            pkg-config \
             libssl-dev \
             libgtk-3-dev \
             libayatana-appindicator3-dev \
-            librsvg2-dev
+            librsvg2-dev \
+            pkg-config \
+            patchelf \
+            libglib2.0-bin \
+            libgdk-pixbuf2.0-bin \
+            desktop-file-utils \
+            shared-mime-info
           sudo apt-get install -y libwebkit2gtk-4.1-dev || sudo apt-get install -y libwebkit2gtk-4.0-dev
           sudo apt-get install -y libfuse2 || sudo apt-get install -y libfuse2t64
 
@@ -339,7 +344,11 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev \
             pkg-config \
-            patchelf
+            patchelf \
+            libglib2.0-bin \
+            libgdk-pixbuf2.0-bin \
+            desktop-file-utils \
+            shared-mime-info
           sudo apt-get install -y libwebkit2gtk-4.1-dev || sudo apt-get install -y libwebkit2gtk-4.0-dev
           sudo apt-get install -y libfuse2 || sudo apt-get install -y libfuse2t64
 
