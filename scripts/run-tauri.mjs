@@ -22,6 +22,15 @@ const LINUXDEPLOY_OVERRIDES = {
   },
 };
 
+const LINUXDEPLOY_PLUGIN_OVERRIDES = {
+  x64: {
+    filename: 'linuxdeploy-plugin-appimage.AppImage',
+    url: 'https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/1-alpha-20230713-1/linuxdeploy-plugin-appimage-x86_64.AppImage',
+    sha256: '1c77541ad7903bc3ea3f235d4c8197557a0559f0fff6e6f768c3fd6918e9b4e3',
+    versionLabel: '1-alpha-20230713-1',
+  },
+};
+
 async function ensureLinuxdeployBinary() {
   const override = LINUXDEPLOY_OVERRIDES[process.arch];
   if (!override) return;
@@ -75,8 +84,65 @@ async function ensureLinuxdeployBinary() {
   }
 }
 
+async function ensureLinuxdeployPlugin() {
+  const override = LINUXDEPLOY_PLUGIN_OVERRIDES[process.arch];
+  if (!override) return;
+
+  const cacheDir = path.join(os.homedir(), '.cache', 'tauri');
+  const targetPath = path.join(cacheDir, override.filename);
+
+  await fs.mkdir(cacheDir, { recursive: true });
+
+  let needsDownload = false;
+  try {
+    const existing = await fs.readFile(targetPath);
+    const digest = createHash('sha256').update(existing).digest('hex');
+    if (digest !== override.sha256) {
+      needsDownload = true;
+      console.info(
+        '[marlin] Replacing cached linuxdeploy appimage plugin due to checksum mismatch.'
+      );
+    }
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      needsDownload = true;
+    } else {
+      throw error;
+    }
+  }
+
+  if (needsDownload) {
+    console.info(
+      `[marlin] Fetching linuxdeploy AppImage plugin ${override.versionLabel} for ${process.arch}.`
+    );
+    const response = await fetch(override.url);
+    if (!response.ok) {
+      throw new Error(
+        `Failed to download linuxdeploy AppImage plugin from ${override.url}: ${response.status} ${response.statusText}`
+      );
+    }
+    const buffer = Buffer.from(await response.arrayBuffer());
+    const digest = createHash('sha256').update(buffer).digest('hex');
+    if (digest !== override.sha256) {
+      throw new Error(
+        `linuxdeploy AppImage plugin checksum mismatch (expected ${override.sha256}, received ${digest}).`
+      );
+    }
+    await fs.writeFile(targetPath, buffer, { mode: 0o770 });
+  }
+
+  try {
+    await fs.unlink(`${targetPath}.zsync`);
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      throw error;
+    }
+  }
+}
+
 if (process.platform === 'linux') {
   await ensureLinuxdeployBinary();
+  await ensureLinuxdeployPlugin();
 
   if (!env.APPIMAGE_EXTRACT_AND_RUN) {
     env.APPIMAGE_EXTRACT_AND_RUN = '1';
