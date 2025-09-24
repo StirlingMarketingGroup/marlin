@@ -1242,6 +1242,39 @@ fn extract_tar_from_reader<R: Read>(
     Ok(())
 }
 
+fn create_tar_reader(
+    archive_format: ArchiveFormat,
+    archive_path: &Path,
+) -> Result<Box<dyn Read>, String> {
+    let file = fs::File::open(archive_path).map_err(|err| {
+        format!(
+            "Failed to open archive {}: {}",
+            archive_path.display(),
+            err
+        )
+    })?;
+
+    let reader: Box<dyn Read> = match archive_format {
+        ArchiveFormat::Tar => Box::new(file),
+        ArchiveFormat::TarGz => Box::new(GzDecoder::new(file)),
+        ArchiveFormat::TarBz2 => Box::new(BzDecoder::new(file)),
+        ArchiveFormat::TarXz => Box::new(XzDecoder::new(file)),
+        ArchiveFormat::TarZst => {
+            let decoder = ZstdDecoder::new(file).map_err(|err| {
+                format!(
+                    "Failed to read archive {}: {}",
+                    archive_path.display(),
+                    err
+                )
+            })?;
+            Box::new(decoder)
+        }
+        ArchiveFormat::Zip => unreachable!(),
+    };
+
+    Ok(reader)
+}
+
 fn derive_folder_base_name(path: &Path, format: ArchiveFormat) -> Result<String, String> {
     let name = path
         .file_name()
@@ -1525,151 +1558,32 @@ pub async fn extract_archive(
                         }
                     }
                 }
-                ArchiveFormat::Tar => {
-                    let file = fs::File::open(&archive_for_task).map_err(|err| {
-                        format!(
-                            "Failed to open archive {}: {}",
-                            archive_for_task.display(),
-                            err
-                        )
-                    })?;
-                    extract_tar_from_reader(file, &target_dir, |entry_name| {
-                        emit_archive_progress_update(
-                            &app_handle,
-                            &archive_name,
-                            Some(entry_name),
-                            archive_format,
-                            false,
-                        );
-                    })
-                    .map_err(|err| {
+                ArchiveFormat::Tar
+                | ArchiveFormat::TarGz
+                | ArchiveFormat::TarBz2
+                | ArchiveFormat::TarXz
+                | ArchiveFormat::TarZst => {
+                    let extraction_result = (|| -> Result<(), String> {
+                        let reader = create_tar_reader(archive_format, &archive_for_task)?;
+                        extract_tar_from_reader(reader, &target_dir, |entry_name| {
+                            emit_archive_progress_update(
+                                &app_handle,
+                                &archive_name,
+                                Some(entry_name),
+                                archive_format,
+                                false,
+                            );
+                        })
+                    })();
+
+                    extraction_result.map_err(|err| {
                         cleanup_directory(&target_dir);
                         err
                     })?;
+
                     info!(
-                        "TAR extraction succeeded for {} into {}",
-                        archive_for_task.display(),
-                        target_dir.display()
-                    );
-                    Ok((target_dir, false))
-                }
-                ArchiveFormat::TarGz => {
-                    let file = fs::File::open(&archive_for_task).map_err(|err| {
-                        format!(
-                            "Failed to open archive {}: {}",
-                            archive_for_task.display(),
-                            err
-                        )
-                    })?;
-                    let decoder = GzDecoder::new(file);
-                    extract_tar_from_reader(decoder, &target_dir, |entry_name| {
-                        emit_archive_progress_update(
-                            &app_handle,
-                            &archive_name,
-                            Some(entry_name),
-                            archive_format,
-                            false,
-                        );
-                    })
-                    .map_err(|err| {
-                        cleanup_directory(&target_dir);
-                        err
-                    })?;
-                    info!(
-                        "TAR.GZ extraction succeeded for {} into {}",
-                        archive_for_task.display(),
-                        target_dir.display()
-                    );
-                    Ok((target_dir, false))
-                }
-                ArchiveFormat::TarBz2 => {
-                    let file = fs::File::open(&archive_for_task).map_err(|err| {
-                        format!(
-                            "Failed to open archive {}: {}",
-                            archive_for_task.display(),
-                            err
-                        )
-                    })?;
-                    let decoder = BzDecoder::new(file);
-                    extract_tar_from_reader(decoder, &target_dir, |entry_name| {
-                        emit_archive_progress_update(
-                            &app_handle,
-                            &archive_name,
-                            Some(entry_name),
-                            archive_format,
-                            false,
-                        );
-                    })
-                    .map_err(|err| {
-                        cleanup_directory(&target_dir);
-                        err
-                    })?;
-                    info!(
-                        "TAR.BZ2 extraction succeeded for {} into {}",
-                        archive_for_task.display(),
-                        target_dir.display()
-                    );
-                    Ok((target_dir, false))
-                }
-                ArchiveFormat::TarXz => {
-                    let file = fs::File::open(&archive_for_task).map_err(|err| {
-                        format!(
-                            "Failed to open archive {}: {}",
-                            archive_for_task.display(),
-                            err
-                        )
-                    })?;
-                    let decoder = XzDecoder::new(file);
-                    extract_tar_from_reader(decoder, &target_dir, |entry_name| {
-                        emit_archive_progress_update(
-                            &app_handle,
-                            &archive_name,
-                            Some(entry_name),
-                            archive_format,
-                            false,
-                        );
-                    })
-                    .map_err(|err| {
-                        cleanup_directory(&target_dir);
-                        err
-                    })?;
-                    info!(
-                        "TAR.XZ extraction succeeded for {} into {}",
-                        archive_for_task.display(),
-                        target_dir.display()
-                    );
-                    Ok((target_dir, false))
-                }
-                ArchiveFormat::TarZst => {
-                    let file = fs::File::open(&archive_for_task).map_err(|err| {
-                        format!(
-                            "Failed to open archive {}: {}",
-                            archive_for_task.display(),
-                            err
-                        )
-                    })?;
-                    let decoder = ZstdDecoder::new(file).map_err(|err| {
-                        format!(
-                            "Failed to read archive {}: {}",
-                            archive_for_task.display(),
-                            err
-                        )
-                    })?;
-                    extract_tar_from_reader(decoder, &target_dir, |entry_name| {
-                        emit_archive_progress_update(
-                            &app_handle,
-                            &archive_name,
-                            Some(entry_name),
-                            archive_format,
-                            false,
-                        );
-                    })
-                    .map_err(|err| {
-                        cleanup_directory(&target_dir);
-                        err
-                    })?;
-                    info!(
-                        "TAR.ZST extraction succeeded for {} into {}",
+                        "{} extraction succeeded for {} into {}",
+                        archive_format.as_str().to_uppercase(),
                         archive_for_task.display(),
                         target_dir.display()
                     );
