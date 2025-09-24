@@ -1334,10 +1334,10 @@ fn extract_with_system(archive_path: &Path, target_dir: &Path) -> Result<(), Str
         cleanup_directory(target_dir);
     }
 
-    let archive_str = archive_path.to_string_lossy().replace('"', "\"");
-    let target_str = target_dir.to_string_lossy().replace('"', "\"");
+    let archive_str = archive_path.to_string_lossy().replace('\'', "''");
+    let target_str = target_dir.to_string_lossy().replace('\'', "''");
     let command = format!(
-        "Expand-Archive -LiteralPath \"{archive}\" -DestinationPath \"{destination}\" -Force",
+        "Expand-Archive -LiteralPath '{archive}' -DestinationPath '{destination}' -Force",
         archive = archive_str,
         destination = target_str
     );
