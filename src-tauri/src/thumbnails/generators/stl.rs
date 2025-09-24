@@ -133,7 +133,10 @@ impl StlGenerator {
 
         // Simple light and color
         let light_dir = Vec3::new(-0.45, 0.80, 0.35).normalize();
-        let base = [66u8, 175u8, 160u8]; // teal-ish
+        let base_rgb_f32 = request
+            .accent
+            .map(|color| [color.r as f32, color.g as f32, color.b as f32])
+            .unwrap_or([66.0, 175.0, 160.0]);
 
         // Rasterize triangles
         for t in &tris {
@@ -204,11 +207,16 @@ impl StlGenerator {
 
             // Lambert shading
             let ndotl = (fnrm.mul(-1.0)).dot(light_dir).max(0.0);
-            let shade = 0.18 + 0.82 * ndotl;
+            let shade = 0.25 + 0.65 * ndotl; // keep faces visible even in shadow
+            let highlight = 0.08 * ndotl; // subtle highlight towards white for contrast
+            let apply_shade = |component: f32| -> u8 {
+                let lit = component * shade + 255.0 * highlight;
+                lit.min(255.0).max(28.0) as u8
+            };
             let col = [
-                (base[0] as f32 * shade).min(255.0) as u8,
-                (base[1] as f32 * shade).min(255.0) as u8,
-                (base[2] as f32 * shade).min(255.0) as u8,
+                apply_shade(base_rgb_f32[0]),
+                apply_shade(base_rgb_f32[1]),
+                apply_shade(base_rgb_f32[2]),
                 255u8,
             ];
 

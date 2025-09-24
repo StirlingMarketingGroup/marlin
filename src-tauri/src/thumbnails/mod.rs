@@ -11,6 +11,13 @@ pub mod worker;
 use cache::ThumbnailCache;
 use worker::ThumbnailWorker;
 
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct AccentColor {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ThumbnailRequest {
     pub id: String,
@@ -19,6 +26,7 @@ pub struct ThumbnailRequest {
     pub quality: ThumbnailQuality,
     pub priority: ThumbnailPriority,
     pub format: ThumbnailFormat,
+    pub accent: Option<AccentColor>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -71,8 +79,10 @@ impl ThumbnailService {
         request: ThumbnailRequest,
     ) -> Result<ThumbnailResponse, String> {
         // Try cache first (L1 memory, then L2 disk)
-        if let Some((cached_data, has_transparency)) =
-            self.cache.get(&request.path, request.size).await
+        if let Some((cached_data, has_transparency)) = self
+            .cache
+            .get(&request.path, request.size, request.accent.as_ref())
+            .await
         {
             return Ok(ThumbnailResponse {
                 id: request.id,
@@ -100,11 +110,19 @@ impl ThumbnailService {
     }
 }
 
-pub fn generate_cache_key(path: &str, size: u32, mtime: u64) -> String {
+pub fn generate_cache_key(
+    path: &str,
+    size: u32,
+    mtime: u64,
+    accent: Option<&AccentColor>,
+) -> String {
     let mut hasher = Sha256::new();
     hasher.update(path.as_bytes());
     hasher.update(size.to_be_bytes());
     hasher.update(mtime.to_be_bytes());
+    if let Some(color) = accent {
+        hasher.update([color.r, color.g, color.b]);
+    }
     let result = hasher.finalize();
     format!("{:x}", result)[..16].to_string()
 }
