@@ -1380,6 +1380,7 @@ pub async fn request_thumbnail(
     quality: Option<String>,
     priority: Option<String>,
     format: Option<String>,
+    accent: Option<crate::thumbnails::AccentColor>,
 ) -> Result<crate::thumbnails::ThumbnailResponse, String> {
     let service = get_thumbnail_service().await?;
 
@@ -1408,6 +1409,7 @@ pub async fn request_thumbnail(
         quality,
         priority,
         format,
+        accent,
     };
 
     service.request_thumbnail(request).await

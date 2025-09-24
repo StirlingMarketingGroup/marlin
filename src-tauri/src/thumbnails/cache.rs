@@ -8,6 +8,8 @@ use std::sync::Arc;
 use tokio::fs;
 use tokio::sync::RwLock;
 
+use super::AccentColor;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CacheEntry {
     pub data_url: String,
@@ -85,8 +87,13 @@ impl ThumbnailCache {
         Ok(cache)
     }
 
-    pub async fn get(&self, path: &str, size: u32) -> Option<(String, bool)> {
-        let cache_key = self.generate_cache_key(path, size).await?;
+    pub async fn get(
+        &self,
+        path: &str,
+        size: u32,
+        accent: Option<&AccentColor>,
+    ) -> Option<(String, bool)> {
+        let cache_key = self.generate_cache_key(path, size, accent).await?;
 
         // Try L1 memory cache first
         {
@@ -115,12 +122,13 @@ impl ThumbnailCache {
         &self,
         path: &str,
         size: u32,
+        accent: Option<&AccentColor>,
         data_url: String,
         generation_time_ms: u64,
         has_transparency: bool,
     ) -> Result<(), String> {
         let cache_key = self
-            .generate_cache_key(path, size)
+            .generate_cache_key(path, size, accent)
             .await
             .ok_or("Failed to generate cache key")?;
 
@@ -236,10 +244,15 @@ impl ThumbnailCache {
         Some((entry.data_url, entry.has_transparency))
     }
 
-    async fn generate_cache_key(&self, path: &str, size: u32) -> Option<String> {
+    async fn generate_cache_key(
+        &self,
+        path: &str,
+        size: u32,
+        accent: Option<&AccentColor>,
+    ) -> Option<String> {
         let path_obj = Path::new(path);
         let mtime = super::get_file_mtime(path_obj);
-        Some(super::generate_cache_key(path, size, mtime))
+        Some(super::generate_cache_key(path, size, mtime, accent))
     }
 
     async fn load_disk_cache_index(&mut self) -> Result<(), String> {

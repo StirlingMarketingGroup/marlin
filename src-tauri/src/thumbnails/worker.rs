@@ -153,6 +153,7 @@ impl ThumbnailWorker {
                                     .put(
                                         &request.path,
                                         request.size,
+                                        request.accent.as_ref(),
                                         data_url.clone(),
                                         generation_time_ms,
                                         has_transparency,
