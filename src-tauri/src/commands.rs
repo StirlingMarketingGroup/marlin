@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command as OsCommand;
@@ -25,7 +25,7 @@ use uuid::Uuid;
 use walkdir::WalkDir;
 
 #[cfg(target_family = "unix")]
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 use crate::fs_utils::{
     self, copy_file_or_directory, delete_file_or_directory, expand_path, get_file_info,
@@ -36,13 +36,25 @@ use crate::fs_watcher;
 #[cfg(target_os = "macos")]
 use crate::macos_security;
 use crate::state::{FolderSizeState, FolderSizeTaskHandle};
+use bzip2::read::BzDecoder;
+use flate2::read::GzDecoder;
+use tar::Archive as TarArchive;
+use xz2::read::XzDecoder;
+use zip::ZipArchive;
+use zstd::stream::read::Decoder as ZstdDecoder;
 
 const FOLDER_SIZE_EVENT: &str = "folder-size-progress";
 const FOLDER_SIZE_INIT_EVENT: &str = "folder-size:init";
 const FOLDER_SIZE_WINDOW_LABEL: &str = "folder-size";
+const ARCHIVE_PROGRESS_EVENT: &str = "archive-progress:init";
+const ARCHIVE_PROGRESS_WINDOW_LABEL: &str = "archive-progress";
+const ARCHIVE_PROGRESS_UPDATE_EVENT: &str = "archive-progress:update";
 
 static FOLDER_SIZE_WINDOW_READY: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
 static PENDING_FOLDER_SIZE_PAYLOAD: Lazy<Mutex<Option<FolderSizeInitPayload>>> =
+    Lazy::new(|| Mutex::new(None));
+static ARCHIVE_PROGRESS_WINDOW_READY: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
+static PENDING_ARCHIVE_PROGRESS_PAYLOAD: Lazy<Mutex<Option<ArchiveProgressPayload>>> =
     Lazy::new(|| Mutex::new(None));
 
 const FOLDER_SIZE_WINDOW_READY_POLL_INTERVAL: Duration = Duration::from_millis(25);
@@ -92,6 +104,41 @@ fn try_emit_pending_folder_size_payload(app: &AppHandle) {
                 let mut pending = PENDING_FOLDER_SIZE_PAYLOAD
                     .lock()
                     .expect("Failed to relock pending folder size payload");
+                *pending = Some(payload);
+            }
+        }
+    }
+}
+
+fn queue_archive_progress_payload(app: &AppHandle, payload: ArchiveProgressPayload) {
+    {
+        let mut pending = PENDING_ARCHIVE_PROGRESS_PAYLOAD
+            .lock()
+            .expect("Failed to lock pending archive progress payload");
+        *pending = Some(payload);
+    }
+    try_emit_archive_progress_payload(app);
+}
+
+fn try_emit_archive_progress_payload(app: &AppHandle) {
+    if !ARCHIVE_PROGRESS_WINDOW_READY.load(Ordering::SeqCst) {
+        return;
+    }
+
+    let payload_opt = {
+        let mut pending = PENDING_ARCHIVE_PROGRESS_PAYLOAD
+            .lock()
+            .expect("Failed to lock pending archive progress payload");
+        pending.take()
+    };
+
+    if let Some(payload) = payload_opt {
+        if let Some(window) = app.get_webview_window(ARCHIVE_PROGRESS_WINDOW_LABEL) {
+            if let Err(err) = window.emit(ARCHIVE_PROGRESS_EVENT, &payload) {
+                warn!("Failed to emit archive progress payload: {err}");
+                let mut pending = PENDING_ARCHIVE_PROGRESS_PAYLOAD
+                    .lock()
+                    .expect("Failed to relock pending archive progress payload");
                 *pending = Some(payload);
             }
         }
@@ -158,6 +205,23 @@ struct FolderSizeInitPayload {
     initial_error: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ArchiveProgressPayload {
+    file_name: String,
+    destination_dir: String,
+    format: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ArchiveProgressUpdatePayload {
+    archive_name: String,
+    entry_name: Option<String>,
+    format: String,
+    finished: bool,
+}
+
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct FolderSizeProgressPayload {
@@ -177,6 +241,14 @@ pub struct DiskUsageResponse {
     pub path: String,
     pub total_bytes: u64,
     pub available_bytes: u64,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtractArchiveResponse {
+    pub folder_path: String,
+    pub used_system_fallback: bool,
+    pub format: String,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -977,6 +1049,568 @@ pub fn move_file(from_path: String, to_path: String) -> Result<(), String> {
     rename_file_or_directory(from, to)
 }
 
+fn allocate_destination_folder(destination_root: &Path, base_name: &str) -> Result<String, String> {
+    let trimmed = base_name.trim();
+    let base = if trimmed.is_empty() {
+        "Archive"
+    } else {
+        trimmed
+    };
+    let mut candidate = base.to_string();
+    let mut counter: u32 = 2;
+
+    loop {
+        let attempt_path = destination_root.join(&candidate);
+        if !attempt_path.exists() {
+            return Ok(candidate);
+        }
+
+        candidate = format!("{base} ({counter})");
+        counter += 1;
+
+        if counter > 10_000 {
+            return Err("Unable to allocate unique folder name for extracted archive".to_string());
+        }
+    }
+}
+
+fn extract_zip_contents<R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
+    target_dir: &Path,
+    mut on_entry: impl FnMut(&str),
+) -> Result<(), String> {
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|err| format!("Failed to read archive entry {index}: {err}"))?;
+
+        let enclosed_path = match entry.enclosed_name() {
+            Some(path) => path.to_path_buf(),
+            None => {
+                warn!(
+                    "Skipping archive entry {name:?} due to invalid path",
+                    name = entry.name()
+                );
+                continue;
+            }
+        };
+
+        let out_path = target_dir.join(&enclosed_path);
+
+        let entry_name = enclosed_path.to_string_lossy().to_string();
+
+        if entry.name().ends_with('/') || entry.is_dir() {
+            fs::create_dir_all(&out_path).map_err(|err| {
+                format!("Failed to create directory {}: {}", out_path.display(), err)
+            })?;
+            #[cfg(target_family = "unix")]
+            if let Some(mode) = entry.unix_mode() {
+                if let Err(err) = fs::set_permissions(&out_path, fs::Permissions::from_mode(mode)) {
+                    warn!(
+                        "Failed to set permissions on {}: {}",
+                        out_path.display(),
+                        err
+                    );
+                }
+            }
+            continue;
+        }
+
+        if let Some(parent) = out_path.parent() {
+            fs::create_dir_all(parent).map_err(|err| {
+                format!("Failed to create directory {}: {}", parent.display(), err)
+            })?;
+        }
+
+        let mut outfile = fs::File::create(&out_path)
+            .map_err(|err| format!("Failed to create file {}: {}", out_path.display(), err))?;
+
+        std::io::copy(&mut entry, &mut outfile)
+            .map_err(|err| format!("Failed to write file {}: {}", out_path.display(), err))?;
+
+        #[cfg(target_family = "unix")]
+        if let Some(mode) = entry.unix_mode() {
+            if let Err(err) = fs::set_permissions(&out_path, fs::Permissions::from_mode(mode)) {
+                warn!(
+                    "Failed to set permissions on {}: {}",
+                    out_path.display(),
+                    err
+                );
+            }
+        }
+        on_entry(&entry_name);
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ArchiveFormat {
+    Zip,
+    Tar,
+    TarGz,
+    TarBz2,
+    TarXz,
+    TarZst,
+}
+
+impl ArchiveFormat {
+    fn as_str(&self) -> &'static str {
+        match self {
+            ArchiveFormat::Zip => "zip",
+            ArchiveFormat::Tar => "tar",
+            ArchiveFormat::TarGz => "tar.gz",
+            ArchiveFormat::TarBz2 => "tar.bz2",
+            ArchiveFormat::TarXz => "tar.xz",
+            ArchiveFormat::TarZst => "tar.zst",
+        }
+    }
+}
+
+fn archive_format_from_hint(hint: &str) -> Option<ArchiveFormat> {
+    match hint {
+        "zip" => Some(ArchiveFormat::Zip),
+        "tar" => Some(ArchiveFormat::Tar),
+        "tar.gz" => Some(ArchiveFormat::TarGz),
+        "tar.bz2" => Some(ArchiveFormat::TarBz2),
+        "tar.xz" => Some(ArchiveFormat::TarXz),
+        "tar.zst" => Some(ArchiveFormat::TarZst),
+        _ => None,
+    }
+}
+
+fn infer_archive_format_from_name(name: &str) -> Option<ArchiveFormat> {
+    let lower = name.to_lowercase();
+    if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
+        Some(ArchiveFormat::TarGz)
+    } else if lower.ends_with(".tar.bz2") || lower.ends_with(".tbz2") || lower.ends_with(".tbz") {
+        Some(ArchiveFormat::TarBz2)
+    } else if lower.ends_with(".tar.xz") || lower.ends_with(".txz") {
+        Some(ArchiveFormat::TarXz)
+    } else if lower.ends_with(".tar.zst") || lower.ends_with(".tzst") {
+        Some(ArchiveFormat::TarZst)
+    } else if lower.ends_with(".tar") {
+        Some(ArchiveFormat::Tar)
+    } else if lower.ends_with(".zip") {
+        Some(ArchiveFormat::Zip)
+    } else {
+        None
+    }
+}
+
+fn determine_archive_format(
+    path: &Path,
+    format_hint: Option<&str>,
+) -> Result<ArchiveFormat, String> {
+    if let Some(hint) = format_hint.and_then(archive_format_from_hint) {
+        return Ok(hint);
+    }
+
+    let name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| "Unable to determine archive file name".to_string())?;
+
+    infer_archive_format_from_name(name)
+        .ok_or_else(|| format!("Unsupported archive format for {}", path.to_string_lossy()))
+}
+
+fn extract_tar_from_reader<R: Read>(
+    reader: R,
+    target_dir: &Path,
+    mut on_entry: impl FnMut(&str),
+) -> Result<(), String> {
+    let mut archive = TarArchive::new(reader);
+    let entries = archive
+        .entries()
+        .map_err(|err| format!("Failed to iterate TAR entries: {}", err))?;
+
+    for entry_result in entries {
+        let mut entry = entry_result.map_err(|err| format!("Failed to read TAR entry: {}", err))?;
+        let entry_path = entry
+            .path()
+            .map_err(|err| format!("Failed to resolve TAR entry path: {}", err))?;
+
+        let entry_name = entry_path.to_string_lossy().to_string();
+        entry
+            .unpack_in(target_dir)
+            .map_err(|err| format!("Failed to unpack TAR entry {}: {}", entry_name, err))?;
+
+        on_entry(&entry_name);
+    }
+
+    Ok(())
+}
+
+fn create_tar_reader(
+    archive_format: ArchiveFormat,
+    archive_path: &Path,
+) -> Result<Box<dyn Read>, String> {
+    let file = fs::File::open(archive_path).map_err(|err| {
+        format!(
+            "Failed to open archive {}: {}",
+            archive_path.display(),
+            err
+        )
+    })?;
+
+    let reader: Box<dyn Read> = match archive_format {
+        ArchiveFormat::Tar => Box::new(file),
+        ArchiveFormat::TarGz => Box::new(GzDecoder::new(file)),
+        ArchiveFormat::TarBz2 => Box::new(BzDecoder::new(file)),
+        ArchiveFormat::TarXz => Box::new(XzDecoder::new(file)),
+        ArchiveFormat::TarZst => {
+            let decoder = ZstdDecoder::new(file).map_err(|err| {
+                format!(
+                    "Failed to read archive {}: {}",
+                    archive_path.display(),
+                    err
+                )
+            })?;
+            Box::new(decoder)
+        }
+        ArchiveFormat::Zip => unreachable!(),
+    };
+
+    Ok(reader)
+}
+
+fn derive_folder_base_name(path: &Path, format: ArchiveFormat) -> Result<String, String> {
+    let name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| "Unable to derive folder name from archive".to_string())?;
+    let lower = name.to_lowercase();
+
+    let patterns: &[&str] = match format {
+        ArchiveFormat::Zip => &[".zip"],
+        ArchiveFormat::Tar => &[".tar"],
+        ArchiveFormat::TarGz => &[".tar.gz", ".tgz"],
+        ArchiveFormat::TarBz2 => &[".tar.bz2", ".tbz2", ".tbz"],
+        ArchiveFormat::TarXz => &[".tar.xz", ".txz"],
+        ArchiveFormat::TarZst => &[".tar.zst", ".tzst"],
+    };
+
+    for pattern in patterns {
+        if lower.ends_with(pattern) && name.len() > pattern.len() {
+            let end = name.len() - pattern.len();
+            return Ok(name[..end].to_string());
+        }
+    }
+
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or(name);
+    Ok(stem.to_string())
+}
+
+fn emit_archive_progress_update(
+    app: &AppHandle,
+    archive_name: &str,
+    entry_name: Option<&str>,
+    format: ArchiveFormat,
+    finished: bool,
+) {
+    let payload = ArchiveProgressUpdatePayload {
+        archive_name: archive_name.to_string(),
+        entry_name: entry_name.map(|s| s.to_string()),
+        format: format.as_str().to_string(),
+        finished,
+    };
+
+    if let Err(err) = app.emit(ARCHIVE_PROGRESS_UPDATE_EVENT, payload) {
+        warn!("Failed to emit archive progress update: {err}");
+    }
+}
+
+fn cleanup_directory(path: &Path) {
+    if let Err(err) = fs::remove_dir_all(path) {
+        if path.exists() {
+            warn!(
+                "Failed to remove extraction directory {}: {}",
+                path.display(),
+                err
+            );
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn extract_with_system(archive_path: &Path, target_dir: &Path) -> Result<(), String> {
+    if target_dir.exists() {
+        cleanup_directory(target_dir);
+    }
+    fs::create_dir(target_dir).map_err(|err| {
+        format!(
+            "Failed to create extraction directory {} before fallback: {}",
+            target_dir.display(),
+            err
+        )
+    })?;
+
+    let status = OsCommand::new("ditto")
+        .arg("-x")
+        .arg("-k")
+        .arg(archive_path)
+        .arg(target_dir)
+        .status()
+        .map_err(|err| format!("Failed to spawn 'ditto' for fallback extraction: {}", err))?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("ditto exited with status: {}", status))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn extract_with_system(archive_path: &Path, target_dir: &Path) -> Result<(), String> {
+    if target_dir.exists() {
+        cleanup_directory(target_dir);
+    }
+
+    let archive_str = archive_path.to_string_lossy().replace('\'', "''");
+    let target_str = target_dir.to_string_lossy().replace('\'', "''");
+    let command = format!(
+        "Expand-Archive -LiteralPath '{archive}' -DestinationPath '{destination}' -Force",
+        archive = archive_str,
+        destination = target_str
+    );
+
+    let status = OsCommand::new("powershell")
+        .args(["-NoLogo", "-NoProfile", "-Command", &command])
+        .status()
+        .map_err(|err| {
+            format!(
+                "Failed to spawn PowerShell for fallback extraction: {}",
+                err
+            )
+        })?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "PowerShell Expand-Archive exited with status: {}",
+            status
+        ))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn extract_with_system(archive_path: &Path, target_dir: &Path) -> Result<(), String> {
+    if target_dir.exists() {
+        cleanup_directory(target_dir);
+    }
+
+    fs::create_dir_all(target_dir).map_err(|err| {
+        format!(
+            "Failed to create extraction directory {} before fallback: {}",
+            target_dir.display(),
+            err
+        )
+    })?;
+
+    let status = OsCommand::new("unzip")
+        .args([
+            "-q",
+            archive_path.to_string_lossy().as_ref(),
+            "-d",
+            target_dir.to_string_lossy().as_ref(),
+        ])
+        .status()
+        .map_err(|err| format!("Failed to spawn 'unzip' for fallback extraction: {}", err))?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("'unzip' exited with status: {}", status))
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+fn extract_with_system(_archive_path: &Path, _target_dir: &Path) -> Result<(), String> {
+    Err("System fallback extraction is not supported on this platform".to_string())
+}
+
+#[command]
+pub async fn extract_archive(
+    app: AppHandle,
+    archive_path: String,
+    destination_dir: String,
+    format_hint: Option<String>,
+) -> Result<ExtractArchiveResponse, String> {
+    let expanded_archive = expand_path(&archive_path)?;
+    let expanded_destination = expand_path(&destination_dir)?;
+
+    let archive_path = PathBuf::from(&expanded_archive);
+    if !archive_path.exists() {
+        return Err("Archive path does not exist".to_string());
+    }
+    if !archive_path.is_file() {
+        return Err("Archive path is not a file".to_string());
+    }
+
+    let destination_root = PathBuf::from(&expanded_destination);
+    if !destination_root.exists() {
+        return Err("Destination directory does not exist".to_string());
+    }
+    if !destination_root.is_dir() {
+        return Err("Destination path is not a directory".to_string());
+    }
+
+    let archive_format = determine_archive_format(&archive_path, format_hint.as_deref())?;
+    let base_name = derive_folder_base_name(&archive_path, archive_format)?;
+    let allocated_folder = allocate_destination_folder(&destination_root, &base_name)?;
+
+    let archive_for_task = archive_path.clone();
+    let destination_for_task = destination_root.clone();
+    let folder_name_for_task = allocated_folder.clone();
+    let app_handle = app.clone();
+    let archive_name = archive_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| base_name.clone());
+    let archive_name_for_task = archive_name.clone();
+
+    info!(
+        "extract_archive requested: {} -> {} (format: {})",
+        archive_path.display(),
+        destination_root.display(),
+        archive_format.as_str()
+    );
+
+    emit_archive_progress_update(&app, &archive_name, None, archive_format, false);
+
+    let (extracted_path, used_system_fallback) =
+        tauri::async_runtime::spawn_blocking(move || -> Result<(PathBuf, bool), String> {
+            let archive_name = archive_name_for_task;
+            let target_dir = destination_for_task.join(&folder_name_for_task);
+
+            fs::create_dir(&target_dir).map_err(|err| {
+                format!(
+                    "Failed to create extraction directory {}: {}",
+                    target_dir.display(),
+                    err
+                )
+            })?;
+
+            match archive_format {
+                ArchiveFormat::Zip => {
+                    let native_result = (|| -> Result<(), String> {
+                        let file = fs::File::open(&archive_for_task).map_err(|err| {
+                            format!(
+                                "Failed to open archive {}: {}",
+                                archive_for_task.display(),
+                                err
+                            )
+                        })?;
+
+                        let mut zip_archive = ZipArchive::new(file).map_err(|err| {
+                            format!(
+                                "Failed to read archive {}: {}",
+                                archive_for_task.display(),
+                                err
+                            )
+                        })?;
+
+                        extract_zip_contents(&mut zip_archive, &target_dir, |entry_name| {
+                            emit_archive_progress_update(
+                                &app_handle,
+                                &archive_name,
+                                Some(entry_name),
+                                archive_format,
+                                false,
+                            );
+                        })
+                    })();
+
+                    match native_result {
+                        Ok(()) => {
+                            info!(
+                                "Native ZIP extraction succeeded for {} into {}",
+                                archive_for_task.display(),
+                                target_dir.display()
+                            );
+                            Ok((target_dir, false))
+                        }
+                        Err(native_err) => {
+                            warn!(
+                                "Native ZIP extraction failed for {}: {}. Attempting system fallback...",
+                                archive_for_task.display(),
+                                native_err
+                            );
+
+                            cleanup_directory(&target_dir);
+
+                            match extract_with_system(&archive_for_task, &target_dir) {
+                                Ok(()) => {
+                                    info!(
+                                        "System fallback extraction succeeded for {} into {}",
+                                        archive_for_task.display(),
+                                        target_dir.display()
+                                    );
+                                    Ok((target_dir, true))
+                                }
+                                Err(fallback_err) => Err(format!(
+                                    "Native extraction failed ({native_err}). System fallback failed: {fallback_err}"
+                                )),
+                            }
+                        }
+                    }
+                }
+                ArchiveFormat::Tar
+                | ArchiveFormat::TarGz
+                | ArchiveFormat::TarBz2
+                | ArchiveFormat::TarXz
+                | ArchiveFormat::TarZst => {
+                    let extraction_result = (|| -> Result<(), String> {
+                        let reader = create_tar_reader(archive_format, &archive_for_task)?;
+                        extract_tar_from_reader(reader, &target_dir, |entry_name| {
+                            emit_archive_progress_update(
+                                &app_handle,
+                                &archive_name,
+                                Some(entry_name),
+                                archive_format,
+                                false,
+                            );
+                        })
+                    })();
+
+                    extraction_result.map_err(|err| {
+                        cleanup_directory(&target_dir);
+                        err
+                    })?;
+
+                    info!(
+                        "{} extraction succeeded for {} into {}",
+                        archive_format.as_str().to_uppercase(),
+                        archive_for_task.display(),
+                        target_dir.display()
+                    );
+                    Ok((target_dir, false))
+                }
+            }
+        })
+        .await
+        .map_err(|err| format!("Failed to join archive extraction task: {}", err))??;
+
+    info!(
+        "Extraction complete for {} -> {} (fallback: {}, format: {})",
+        archive_path.display(),
+        extracted_path.display(),
+        used_system_fallback,
+        archive_format.as_str()
+    );
+
+    emit_archive_progress_update(&app, &archive_name, None, archive_format, true);
+
+    Ok(ExtractArchiveResponse {
+        folder_path: extracted_path.to_string_lossy().to_string(),
+        used_system_fallback,
+        format: archive_format.as_str().to_string(),
+    })
+}
+
 #[command]
 pub fn get_system_accent_color() -> Result<String, String> {
     #[cfg(target_os = "macos")]
@@ -1522,6 +2156,60 @@ pub fn open_path(path: String) -> Result<(), String> {
 }
 
 #[command]
+pub fn open_path_with(path: String, application_path: String) -> Result<(), String> {
+    let expanded_path = expand_path(&path)?;
+    let expanded_application = expand_path(&application_path)?;
+
+    let file_path = PathBuf::from(&expanded_path);
+    if !file_path.exists() {
+        return Err("Target path does not exist".to_string());
+    }
+
+    let app_path = PathBuf::from(&expanded_application);
+    if !app_path.exists() {
+        return Err("Selected application path does not exist".to_string());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let status = OsCommand::new("open")
+            .arg("-a")
+            .arg(&expanded_application)
+            .arg(&expanded_path)
+            .status()
+            .map_err(|e| format!("Failed to spawn 'open -a': {}", e))?;
+        return if status.success() {
+            Ok(())
+        } else {
+            Err(format!("'open -a' exited with status: {}", status))
+        };
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        return OsCommand::new(&expanded_application)
+            .arg(&expanded_path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("Failed to launch application: {}", e));
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        return OsCommand::new(&expanded_application)
+            .arg(&expanded_path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("Failed to launch application: {}", e));
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        Err("open_path_with is not supported on this platform".to_string())
+    }
+}
+
+#[command]
 pub fn new_window(app: AppHandle, path: Option<String>) -> Result<(), String> {
     let window_label = format!(
         "window-{}",
@@ -1605,7 +2293,7 @@ pub fn open_folder_size_window(
 
     let builder = tauri::WebviewWindowBuilder::new(&app, FOLDER_SIZE_WINDOW_LABEL, url)
         .title("Folder Size")
-        .inner_size(420.0, 420.0)
+        .inner_size(420.0, 480.0)
         .resizable(false)
         .fullscreen(false)
         .minimizable(false)
@@ -1641,6 +2329,82 @@ pub fn folder_size_window_ready(app: AppHandle) -> Result<(), String> {
 #[command]
 pub fn folder_size_window_unready() -> Result<(), String> {
     FOLDER_SIZE_WINDOW_READY.store(false, Ordering::SeqCst);
+    Ok(())
+}
+
+#[command]
+pub fn show_archive_progress_window(
+    app: AppHandle,
+    file_name: String,
+    destination_dir: String,
+    format: Option<String>,
+) -> Result<(), String> {
+    let payload = ArchiveProgressPayload {
+        file_name,
+        destination_dir,
+        format: format.unwrap_or_else(|| "archive".to_string()),
+    };
+
+    if let Some(existing) = app.get_webview_window(ARCHIVE_PROGRESS_WINDOW_LABEL) {
+        queue_archive_progress_payload(&app, payload);
+        let _ = existing.show();
+        let _ = existing.set_focus();
+        return Ok(());
+    }
+
+    let url = tauri::WebviewUrl::App("index.html?view=archive-progress".into());
+    let builder = tauri::WebviewWindowBuilder::new(&app, ARCHIVE_PROGRESS_WINDOW_LABEL, url)
+        .title("Extracting Archive")
+        .inner_size(420.0, 480.0)
+        .resizable(false)
+        .fullscreen(false)
+        .minimizable(true)
+        .maximizable(false)
+        .closable(true)
+        .decorations(true);
+
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true)
+        .traffic_light_position(tauri::LogicalPosition::new(14.0, 14.0));
+
+    ARCHIVE_PROGRESS_WINDOW_READY.store(false, Ordering::SeqCst);
+
+    builder
+        .build()
+        .map_err(|e| format!("Failed to create archive progress window: {}", e))?;
+
+    queue_archive_progress_payload(&app, payload);
+    Ok(())
+}
+
+#[command]
+pub fn hide_archive_progress_window(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(ARCHIVE_PROGRESS_WINDOW_LABEL) {
+        if let Err(err) = window.close() {
+            warn!("Failed to close archive progress window: {err}");
+        }
+    }
+
+    ARCHIVE_PROGRESS_WINDOW_READY.store(false, Ordering::SeqCst);
+    let mut pending = PENDING_ARCHIVE_PROGRESS_PAYLOAD
+        .lock()
+        .expect("Failed to clear pending archive payload");
+    *pending = None;
+    Ok(())
+}
+
+#[command]
+pub fn archive_progress_window_ready(app: AppHandle) -> Result<(), String> {
+    ARCHIVE_PROGRESS_WINDOW_READY.store(true, Ordering::SeqCst);
+    try_emit_archive_progress_payload(&app);
+    Ok(())
+}
+
+#[command]
+pub fn archive_progress_window_unready() -> Result<(), String> {
+    ARCHIVE_PROGRESS_WINDOW_READY.store(false, Ordering::SeqCst);
     Ok(())
 }
 

@@ -16,7 +16,7 @@ export interface Toast {
 
 interface ToastStore {
   toasts: Toast[];
-  addToast: (toast: Omit<Toast, 'id'>) => void;
+  addToast: (toast: Omit<Toast, 'id'>) => string;
   removeToast: (id: string) => void;
 }
 
@@ -51,6 +51,8 @@ export const useToastStore = create<ToastStore>((set, get) => ({
         }, FADE_DURATION);
       }, duration);
     }
+
+    return id;
   },
 
   removeToast: (id) => {

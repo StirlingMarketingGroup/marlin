@@ -8,7 +8,10 @@ import {
   GitStatus,
 } from '../types';
 import { invoke } from '@tauri-apps/api/core';
-import { message } from '@tauri-apps/plugin-dialog';
+import { open as openShell } from '@tauri-apps/plugin-shell';
+import { message, open as openDialog } from '@tauri-apps/plugin-dialog';
+import { getExtractableArchiveFormat, isArchiveFile } from '@/utils/fileTypes';
+import { useToastStore } from './useToastStore';
 
 // Concurrency limiter for app icon generation requests (macOS)
 const __iconQueue: Array<() => void> = [];
@@ -39,6 +42,8 @@ const __scheduleIconTask = <T>(task: () => Promise<T>): Promise<T> =>
   });
 
 const GIT_STATUS_TTL_MS = 5_000;
+let lastOpenWithDefaultPath: string | undefined;
+const activeArchiveExtractions = new Set<string>();
 
 interface GitStatusCacheEntry {
   status: GitStatus | null;
@@ -203,6 +208,8 @@ interface AppState {
   toggleHiddenFiles: (forceValue?: boolean) => Promise<void>;
   toggleFoldersFirst: () => Promise<void>;
   refreshCurrentDirectory: () => Promise<void>;
+  openFile: (file: FileItem) => Promise<void>;
+  extractArchive: (file: FileItem) => Promise<boolean>;
   fetchAppIcon: (path: string, size?: number) => Promise<string | undefined>;
   resetDirectoryPreferences: () => void;
   refreshGitStatus: (options?: { force?: boolean; path?: string }) => Promise<void>;
@@ -483,6 +490,218 @@ export const useAppStore = create<AppState>((set, get) => ({
       setError(`Failed to refresh: ${msg}`);
     } finally {
       setLoading(false);
+    }
+  },
+
+  openFile: async (file) => {
+    const toastStore = useToastStore.getState();
+
+    try {
+      await openShell(file.path);
+      return;
+    } catch (shellError) {
+      console.warn('Plugin shell open failed:', shellError);
+    }
+
+    try {
+      await invoke('open_path', { path: file.path });
+      return;
+    } catch (fallbackError) {
+      console.warn('Fallback open_path failed:', fallbackError);
+    }
+
+    const platform = typeof navigator !== 'undefined' ? navigator.platform.toLowerCase() : '';
+    const isMac = platform.includes('mac');
+    const isWindows = platform.includes('win');
+
+    let applicationPath: string | undefined;
+    try {
+      const selection = await openDialog({
+        title: 'Select Application',
+        multiple: false,
+        directory: false,
+        defaultPath: lastOpenWithDefaultPath,
+        filters: (() => {
+          if (isMac) {
+            return [{ name: 'Applications', extensions: ['app'] }];
+          }
+          if (isWindows) {
+            return [{ name: 'Applications', extensions: ['exe', 'bat', 'cmd', 'com', 'lnk'] }];
+          }
+          return undefined;
+        })(),
+      });
+
+      if (selection === null || selection === undefined) {
+        return;
+      }
+
+      applicationPath = Array.isArray(selection) ? selection[0] : selection;
+      if (!applicationPath) {
+        return;
+      }
+    } catch (dialogError) {
+      console.warn('Application selection dialog failed:', dialogError);
+      toastStore.addToast({
+        type: 'error',
+        message: `Unable to choose application for ${file.name}.`,
+        duration: 6000,
+      });
+      return;
+    }
+
+    try {
+      await invoke('open_path_with', {
+        path: file.path,
+        applicationPath,
+      });
+
+      if (isMac) {
+        lastOpenWithDefaultPath = applicationPath;
+      } else {
+        const slashIndex = Math.max(
+          applicationPath.lastIndexOf('/'),
+          applicationPath.lastIndexOf('\\')
+        );
+        lastOpenWithDefaultPath =
+          slashIndex >= 0 ? applicationPath.slice(0, slashIndex) : applicationPath;
+      }
+    } catch (error) {
+      console.error('Open with application failed:', error);
+      const messageText = error instanceof Error ? error.message : String(error);
+      toastStore.addToast({
+        type: 'error',
+        message: `Unable to open ${file.name}: ${messageText}`,
+        duration: 6000,
+      });
+    }
+  },
+
+  extractArchive: async (file) => {
+    const state = get();
+    const archivePath = file?.path;
+    const destinationDir = state.currentPath;
+
+    if (!archivePath || !destinationDir) {
+      console.warn('extractArchive called without a valid path or destination');
+      return false;
+    }
+
+    if (!isArchiveFile(file)) {
+      await get().openFile(file);
+      return false;
+    }
+
+    const archiveFormat = getExtractableArchiveFormat(file);
+    if (!archiveFormat) {
+      try {
+        await message(
+          `${file.name} uses an archive format we can't extract yet. Opening with the default application instead.`,
+          {
+            title: 'Archive Extraction',
+            kind: 'info',
+          }
+        );
+      } catch (dialogError) {
+        console.warn('Failed to show unsupported archive dialog:', dialogError);
+      }
+      await get().openFile(file);
+      return false;
+    }
+
+    if (activeArchiveExtractions.has(archivePath)) {
+      console.info('[extractArchive] skip duplicate request', archivePath);
+      return false;
+    }
+
+    activeArchiveExtractions.add(archivePath);
+    console.info(
+      '[extractArchive] start',
+      archivePath,
+      '->',
+      destinationDir,
+      'format:',
+      archiveFormat
+    );
+
+    const progressTimer = window.setTimeout(() => {
+      void showProgressWindow();
+    }, 500);
+    let progressWindowShown = false;
+
+    const showProgressWindow = async () => {
+      try {
+        await invoke('show_archive_progress_window', {
+          fileName: file.name,
+          destinationDir,
+          format: archiveFormat,
+        });
+        progressWindowShown = true;
+      } catch (error) {
+        console.warn('Failed to show archive progress window:', error);
+      }
+    };
+
+    try {
+      const result = await invoke<{
+        folderPath: string;
+        usedSystemFallback?: boolean;
+        format?: string;
+      }>('extract_archive', {
+        archivePath,
+        destinationDir,
+        formatHint: archiveFormat,
+      });
+
+      if (result?.folderPath) {
+        set({ pendingRevealTarget: result.folderPath });
+      }
+
+      const usedFallback = result?.usedSystemFallback === true;
+      const resolvedFormat = result?.format ?? archiveFormat;
+
+      console.info('[extractArchive] success', {
+        folderPath: result?.folderPath,
+        usedFallback,
+        format: resolvedFormat,
+      });
+
+      await state.refreshCurrentDirectory();
+      return true;
+    } catch (error) {
+      console.error('Failed to extract archive:', error);
+
+      const messageText = error instanceof Error ? error.message : String(error);
+      console.info('[extractArchive] error', { error: messageText, format: archiveFormat });
+
+      try {
+        await message(`Unable to extract ${file.name}. Opening with the system handler.`, {
+          title: 'Archive Extraction',
+          kind: 'warning',
+        });
+      } catch (dialogError) {
+        console.warn('Failed to show extraction error dialog:', dialogError);
+      }
+      try {
+        await openShell(file.path);
+        return false;
+      } catch (openErr) {
+        console.warn('Fallback to system open failed after extraction error:', openErr);
+        try {
+          await invoke('open_path', { path: file.path });
+        } catch (invokeErr) {
+          console.error('Fallback open_path after extraction error failed:', invokeErr);
+        }
+      }
+      return false;
+    } finally {
+      window.clearTimeout(progressTimer);
+      if (progressWindowShown) {
+        void invoke('hide_archive_progress_window').catch((error) => {
+          console.warn('Failed to hide archive progress window:', error);
+        });
+      }
+      activeArchiveExtractions.delete(archivePath);
     }
   },
 
