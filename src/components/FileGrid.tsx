@@ -20,8 +20,6 @@ import { useDragStore } from '../store/useDragStore';
 import AppIcon from '@/components/AppIcon';
 import { FileTypeIcon, resolveVSCodeIcon } from '@/components/FileTypeIcon';
 import FileExtensionBadge from '@/components/FileExtensionBadge';
-import { open } from '@tauri-apps/plugin-shell';
-
 import { invoke } from '@tauri-apps/api/core';
 import { createDragImageForSelection, createDragImageForSelectionAsync } from '@/utils/dragImage';
 // no direct invoke here; background opens the menu
@@ -31,7 +29,12 @@ import FileNameDisplay from './FileNameDisplay';
 import SymlinkBadge from '@/components/SymlinkBadge';
 import GitRepoBadge from '@/components/GitRepoBadge';
 import { normalizePreviewIcon } from '@/utils/iconSizing';
-import { getEffectiveExtension, isVideoExtension } from '@/utils/fileTypes';
+import {
+  getEffectiveExtension,
+  isArchiveExtension,
+  isArchiveFile,
+  isVideoExtension,
+} from '@/utils/fileTypes';
 
 interface FileGridProps {
   files: FileItem[];
@@ -240,6 +243,8 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     setSelectionLead,
     pendingRevealTarget,
     setPendingRevealTarget,
+    extractArchive,
+    openFile,
   } = useAppStore();
   const { renameTargetPath, setRenameTarget, renameFile } = useAppStore();
   const { startNativeDrag, endNativeDrag, isDraggedDirectory } = useDragStore();
@@ -247,6 +252,8 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
   const [draggedFile, setDraggedFile] = useState<string | null>(null);
   const renameInputRef = useRef<HTMLInputElement>(null);
   const gridRef = useRef<HTMLDivElement>(null);
+  const lastClickRef = useRef<{ path: string; time: number; x: number; y: number } | null>(null);
+  const lastHandledDoubleRef = useRef<{ path: string; time: number } | null>(null);
 
   // Clean up dragged state when drag ends
   // No longer needed - native drag handles cleanup
@@ -330,24 +337,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     }
 
     // Archive files
-    if (
-      [
-        'zip',
-        'rar',
-        '7z',
-        '7zip',
-        'tar',
-        'gz',
-        'tgz',
-        'bz2',
-        'tbz2',
-        'xz',
-        'txz',
-        'zst',
-        'lz',
-        'lzma',
-      ].includes(ext)
-    ) {
+    if (isArchiveExtension(ext)) {
       return <FileTypeIcon name={file.name} ext={ext} size="large" />;
     }
 
@@ -377,19 +367,16 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
 
     if (shouldNavigate) {
       navigateTo(file.path);
-    } else {
-      // Open file or app with system default
-      try {
-        await open(file.path);
-      } catch (error) {
-        // Fallback to backend command if plugin shell is unavailable/blocked
-        try {
-          await invoke('open_path', { path: file.path });
-        } catch (err2) {
-          console.error('Failed to open file:', error, err2);
-        }
-      }
+      return;
     }
+
+    const isArchive = !file.is_directory && isArchiveFile(file);
+    if (isArchive) {
+      await extractArchive(file);
+      return;
+    }
+
+    await openFile(file);
   };
 
   // Handle mouse down for drag initiation and right-click selection
@@ -728,6 +715,29 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
   function handleFileClick(e: React.MouseEvent, file: FileItem) {
     const meta = e.ctrlKey || e.metaKey;
     const shift = e.shiftKey;
+    const isPrimary = e.button === 0;
+
+    if (isPrimary && !meta && !shift && !e.altKey) {
+      const now = Date.now();
+      const last = lastClickRef.current;
+      const distance = last
+        ? Math.hypot(e.clientX - last.x, e.clientY - last.y)
+        : Number.POSITIVE_INFINITY;
+      if (last && last.path === file.path && now - last.time <= 350 && distance <= 6) {
+        lastClickRef.current = null;
+        lastHandledDoubleRef.current = { path: file.path, time: now };
+        setSelectedFiles([file.path]);
+        setSelectionAnchor(file.path);
+        setSelectionLead(file.path);
+        void handleDoubleClick(file);
+        return;
+      }
+      lastClickRef.current = { path: file.path, time: now, x: e.clientX, y: e.clientY };
+    } else if (isPrimary) {
+      lastClickRef.current = { path: file.path, time: Date.now(), x: e.clientX, y: e.clientY };
+    } else {
+      lastClickRef.current = null;
+    }
     const order = filteredFiles.map((f) => f.path);
 
     if (shift) {
@@ -816,7 +826,19 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
               }}
               onDoubleClick={(e) => {
                 e.stopPropagation();
-                handleDoubleClick(file);
+                const now = Date.now();
+                const recentlyHandled =
+                  lastHandledDoubleRef.current &&
+                  lastHandledDoubleRef.current.path === file.path &&
+                  now - lastHandledDoubleRef.current.time < 500;
+                if (recentlyHandled) {
+                  return;
+                }
+                lastHandledDoubleRef.current = { path: file.path, time: now };
+                setSelectedFiles([file.path]);
+                setSelectionAnchor(file.path);
+                setSelectionLead(file.path);
+                void handleDoubleClick(file);
               }}
               onMouseDown={(e) => handleMouseDownForFile(e, file)}
               draggable={false}

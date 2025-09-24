@@ -98,3 +98,16 @@ export interface FolderSizeInitPayload {
   autoStart: boolean;
   initialError?: string | null;
 }
+
+export interface ArchiveProgressPayload {
+  fileName: string;
+  destinationDir: string;
+  format?: string;
+}
+
+export interface ArchiveProgressUpdatePayload {
+  archiveName: string;
+  entryName?: string;
+  format?: string;
+  finished?: boolean;
+}
