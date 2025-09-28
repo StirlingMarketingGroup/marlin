@@ -20,7 +20,7 @@ import {
   X,
 } from 'phosphor-react';
 import { invoke } from '@tauri-apps/api/core';
-import type { DirectoryPreferencesMap, FileItem } from '@/types';
+import type { DirectoryPreferencesMap, DirectoryListingResponse, FileItem } from '@/types';
 import { useAppStore } from '@/store/useAppStore';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import ZoomSlider from './ZoomSlider';
@@ -118,9 +118,10 @@ const fetchSuggestionsForInfo = async ({
     entries = files;
   } else {
     const fetchPath = prefix.length === 0 ? sep : prefix;
-    entries = await invoke<FileItem[]>('read_directory', {
+    const response = await invoke<DirectoryListingResponse>('read_directory', {
       path: fetchPath || '/',
     });
+    entries = response.entries;
   }
 
   const partialLower = partialSegment.toLocaleLowerCase();
