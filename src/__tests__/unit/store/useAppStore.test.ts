@@ -12,6 +12,8 @@ describe('useAppStore', () => {
     // Reset store to initial state
     useAppStore.setState({
       currentPath: '/test',
+      currentLocationRaw: 'file:///test',
+      currentProviderCapabilities: undefined,
       globalPreferences: {
         viewMode: 'grid' as const,
         sortBy: 'name' as const,
@@ -39,7 +41,29 @@ describe('useAppStore', () => {
     // Mock the read_directory command that refreshCurrentDirectory calls
     mockInvoke.mockImplementation((cmd) => {
       if (cmd === 'read_directory') {
-        return Promise.resolve([]);
+        return Promise.resolve({
+          entries: [],
+          location: {
+            raw: 'file:///test',
+            scheme: 'file',
+            authority: null,
+            path: '/test',
+            displayPath: '/test',
+          },
+          capabilities: {
+            scheme: 'file',
+            displayName: 'Local Filesystem',
+            canRead: true,
+            canWrite: true,
+            canCreateDirectories: true,
+            canDelete: true,
+            canRename: true,
+            canCopy: true,
+            canMove: true,
+            supportsWatching: true,
+            requiresExplicitRefresh: false,
+          },
+        });
       }
       return Promise.resolve(undefined);
     });
@@ -51,8 +75,6 @@ describe('useAppStore', () => {
 
   describe('toggleHiddenFiles', () => {
     it('should toggle global hidden files preference from false to true', async () => {
-      mockInvoke.mockResolvedValue(undefined);
-
       const store = useAppStore.getState();
       expect(store.globalPreferences.showHidden).toBe(false);
 
@@ -72,8 +94,6 @@ describe('useAppStore', () => {
           foldersFirst: false,
         },
       });
-      mockInvoke.mockResolvedValue(undefined);
-
       const store = useAppStore.getState();
       expect(store.globalPreferences.showHidden).toBe(true);
 
@@ -84,8 +104,6 @@ describe('useAppStore', () => {
     });
 
     it('should save directory-specific preference', async () => {
-      mockInvoke.mockResolvedValue(undefined);
-
       await useAppStore.getState().toggleHiddenFiles();
 
       expect(mockInvoke).toHaveBeenCalledWith('set_dir_prefs', {
@@ -95,8 +113,6 @@ describe('useAppStore', () => {
     });
 
     it('should sync native menu state', async () => {
-      mockInvoke.mockResolvedValue(undefined);
-
       await useAppStore.getState().toggleHiddenFiles();
 
       expect(mockInvoke).toHaveBeenCalledWith('update_hidden_files_menu', {
@@ -106,8 +122,6 @@ describe('useAppStore', () => {
     });
 
     it('should call refreshCurrentDirectory after toggling', async () => {
-      mockInvoke.mockResolvedValue(undefined);
-
       await useAppStore.getState().toggleHiddenFiles();
 
       expect(mockInvoke).toHaveBeenCalledWith('read_directory', { path: '/test' });
@@ -126,8 +140,6 @@ describe('useAppStore', () => {
           foldersFirst: false,
         },
       });
-      mockInvoke.mockResolvedValue(undefined);
-
       await useAppStore.getState().toggleHiddenFiles();
 
       const updatedStore = useAppStore.getState();
@@ -244,8 +256,6 @@ describe('useAppStore', () => {
 
   describe('persistence regression tests', () => {
     it('should persist directory preferences when toggling hidden files', async () => {
-      mockInvoke.mockResolvedValue(undefined);
-
       const testPath = '/specific/directory';
       useAppStore.setState({ currentPath: testPath });
 

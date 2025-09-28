@@ -15,6 +15,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import Toast from './components/Toast';
 import type {
   DirectoryChangeEventPayload,
+  DirectoryListingResponse,
   FileItem,
   PersistedPreferences,
   ViewPreferences,
@@ -277,11 +278,19 @@ function App() {
         // Now try to load the initial directory
         let loadSuccess = false;
         try {
-          const files = await invoke<FileItem[]>('read_directory', { path: startPath });
+          const listing = await invoke<DirectoryListingResponse>('read_directory', {
+            path: startPath,
+          });
+          const files = listing.entries;
           setFiles(files);
-          await applySmartViewDefaults(startPath, files);
-          setCurrentPath(startPath);
-          navigateTo(startPath);
+          useAppStore.setState({
+            currentLocationRaw: listing.location.raw,
+            currentProviderCapabilities: listing.capabilities,
+          });
+          await applySmartViewDefaults(listing.location.path, files);
+          const resolvedPath = listing.location.displayPath || listing.location.path;
+          setCurrentPath(resolvedPath);
+          navigateTo(resolvedPath);
           loadSuccess = true;
         } catch (dirError) {
           console.error('Failed to load initial directory:', startPath, dirError);
@@ -289,11 +298,19 @@ function App() {
           // Try fallback to home directory
           if (startPath !== homeDir) {
             try {
-              const files = await invoke<FileItem[]>('read_directory', { path: homeDir });
+              const listing = await invoke<DirectoryListingResponse>('read_directory', {
+                path: homeDir,
+              });
+              const files = listing.entries;
               setFiles(files);
-              await applySmartViewDefaults(homeDir, files);
-              setCurrentPath(homeDir);
-              navigateTo(homeDir);
+              useAppStore.setState({
+                currentLocationRaw: listing.location.raw,
+                currentProviderCapabilities: listing.capabilities,
+              });
+              await applySmartViewDefaults(listing.location.path, files);
+              const resolvedPath = listing.location.displayPath || listing.location.path;
+              setCurrentPath(resolvedPath);
+              navigateTo(resolvedPath);
               loadSuccess = true;
             } catch (homeError) {
               console.error('Failed to load home directory:', homeError);
@@ -304,11 +321,19 @@ function App() {
           if (!loadSuccess) {
             try {
               const rootPath = '/';
-              const files = await invoke<FileItem[]>('read_directory', { path: rootPath });
+              const listing = await invoke<DirectoryListingResponse>('read_directory', {
+                path: rootPath,
+              });
+              const files = listing.entries;
               setFiles(files);
-              await applySmartViewDefaults(rootPath, files);
-              setCurrentPath(rootPath);
-              navigateTo(rootPath);
+              useAppStore.setState({
+                currentLocationRaw: listing.location.raw,
+                currentProviderCapabilities: listing.capabilities,
+              });
+              await applySmartViewDefaults(listing.location.path, files);
+              const resolvedPath = listing.location.displayPath || listing.location.path;
+              setCurrentPath(resolvedPath);
+              navigateTo(resolvedPath);
               loadSuccess = true;
             } catch (rootError) {
               console.error('Failed to load root directory:', rootError);
@@ -404,9 +429,16 @@ function App() {
         }
 
         // Try to load the directory
-        const files = await invoke<FileItem[]>('read_directory', { path: currentPath });
+        const listing = await invoke<DirectoryListingResponse>('read_directory', {
+          path: currentPath,
+        });
+        const files = listing.entries;
         setFiles(files);
-        await applySmartViewDefaults(currentPath, files);
+        useAppStore.setState({
+          currentLocationRaw: listing.location.raw,
+          currentProviderCapabilities: listing.capabilities,
+        });
+        await applySmartViewDefaults(listing.location.path, files);
         setError(undefined); // Clear any previous errors on success
 
         // Check if we have a pending file selection (from navigating to a file path)
@@ -1083,8 +1115,14 @@ function App() {
           try {
             setLoading(true);
             setError(undefined);
-            const files = await invoke<FileItem[]>('read_directory', { path: currentPath });
-            setFiles(files);
+            const listing = await invoke<DirectoryListingResponse>('read_directory', {
+              path: currentPath,
+            });
+            setFiles(listing.entries);
+            useAppStore.setState({
+              currentLocationRaw: listing.location.raw,
+              currentProviderCapabilities: listing.capabilities,
+            });
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
             const hint = msg.includes('Operation not permitted')

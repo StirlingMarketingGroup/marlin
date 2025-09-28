@@ -28,11 +28,10 @@ use walkdir::WalkDir;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 use crate::fs_utils::{
-    self, copy_file_or_directory, delete_file_or_directory, expand_path, get_file_info,
-    read_directory_contents, rename_file_or_directory, resolve_symlink_parent, DiskUsage, FileItem,
-    SymlinkResolution,
+    self, expand_path, resolve_symlink_parent, DiskUsage, FileItem, SymlinkResolution,
 };
 use crate::fs_watcher;
+use crate::locations::{resolve_location, LocationCapabilities, LocationInput, LocationSummary};
 #[cfg(target_os = "macos")]
 use crate::macos_security;
 use crate::state::{FolderSizeState, FolderSizeTaskHandle};
@@ -64,6 +63,14 @@ fn format_error(code: &str, message: &str) -> String {
     format!("[{code}] {message}")
 }
 const ARCHIVE_PROGRESS_UPDATE_EVENT: &str = "archive-progress:update";
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectoryListingResponse {
+    pub location: LocationSummary,
+    pub capabilities: LocationCapabilities,
+    pub entries: Vec<FileItem>,
+}
 
 static FOLDER_SIZE_WINDOW_READY: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
 static PENDING_FOLDER_SIZE_PAYLOAD: Lazy<Mutex<Option<FolderSizeInitPayload>>> =
@@ -919,31 +926,22 @@ pub async fn get_git_status(path: String) -> Result<Option<GitStatusResponse>, S
 }
 
 #[command]
-pub fn read_directory(path: String) -> Result<Vec<FileItem>, String> {
-    let expanded_path = expand_path(&path)?;
-    let path = Path::new(&expanded_path);
+pub fn read_directory(path: LocationInput) -> Result<DirectoryListingResponse, String> {
+    let (provider, location) = resolve_location(path)?;
+    let listing = provider.read_directory(&location)?;
+    let capabilities = provider.capabilities(&location);
 
-    if !path.exists() {
-        return Err(format_error(error_codes::ENOENT, "Path does not exist"));
-    }
-
-    if !path.is_dir() {
-        return Err(format_error(error_codes::ENOTDIR, "Path is not a directory"));
-    }
-
-    read_directory_contents(path)
+    Ok(DirectoryListingResponse {
+        location: listing.location,
+        capabilities,
+        entries: listing.entries,
+    })
 }
 
 #[command]
-pub fn get_file_metadata(path: String) -> Result<FileItem, String> {
-    let expanded_path = expand_path(&path)?;
-    let path = Path::new(&expanded_path);
-
-    if !path.exists() {
-        return Err("Path does not exist".to_string());
-    }
-
-    get_file_info(path)
+pub fn get_file_metadata(path: LocationInput) -> Result<FileItem, String> {
+    let (provider, location) = resolve_location(path)?;
+    provider.get_file_metadata(&location)
 }
 
 #[command]
@@ -955,113 +953,75 @@ pub fn resolve_symlink_parent_command(path: String) -> Result<SymlinkResolution,
 }
 
 #[command]
-pub fn create_directory_command(path: String) -> Result<(), String> {
-    let expanded_path = expand_path(&path)?;
-    let path = Path::new(&expanded_path);
-
-    fs_utils::create_directory(path)
+pub fn create_directory_command(path: LocationInput) -> Result<(), String> {
+    let (provider, location) = resolve_location(path)?;
+    let capabilities = provider.capabilities(&location);
+    if !capabilities.can_create_directories {
+        return Err("Provider does not support creating directories".to_string());
+    }
+    provider.create_directory(&location)
 }
 
 #[command]
-pub fn delete_file(path: String) -> Result<(), String> {
-    let expanded_path = expand_path(&path)?;
-    let path = Path::new(&expanded_path);
-
-    if !path.exists() {
-        return Err("Path does not exist".to_string());
+pub fn delete_file(path: LocationInput) -> Result<(), String> {
+    let (provider, location) = resolve_location(path)?;
+    let capabilities = provider.capabilities(&location);
+    if !capabilities.can_delete {
+        return Err("Provider does not support deleting items".to_string());
     }
-
-    delete_file_or_directory(path)
+    provider.delete(&location)
 }
 
 #[command]
-pub fn rename_file(from_path: String, to_path: String) -> Result<(), String> {
-    let expanded_from = expand_path(&from_path)?;
-    let expanded_to = expand_path(&to_path)?;
-    let from = Path::new(&expanded_from);
-    let to = Path::new(&expanded_to);
+pub fn rename_file(from_path: LocationInput, to_path: LocationInput) -> Result<(), String> {
+    let (from_provider, from_location) = resolve_location(from_path)?;
+    let (_, to_location) = resolve_location(to_path)?;
 
-    if !from.exists() {
-        return Err("Source path does not exist".to_string());
+    if from_location.scheme() != to_location.scheme() {
+        return Err("Renaming across different providers is not supported".to_string());
     }
 
-    // Allow case-only renames on case-insensitive filesystems by using a two-step rename.
-    // If the destination exists but only differs by letter casing, perform: from -> temp -> to
-    let same_parent = from.parent() == to.parent();
-    let from_name = from.file_name().and_then(|s| s.to_str());
-    let to_name = to.file_name().and_then(|s| s.to_str());
-    let is_case_only = same_parent
-        && from_name.is_some()
-        && to_name.is_some()
-        && from_name != to_name
-        && from_name.unwrap().eq_ignore_ascii_case(to_name.unwrap());
-
-    if to.exists() && !is_case_only {
-        return Err("Destination path already exists".to_string());
+    let capabilities = from_provider.capabilities(&from_location);
+    if !capabilities.can_rename {
+        return Err("Provider does not support renaming".to_string());
     }
 
-    if is_case_only {
-        // Two-step rename to update case where FS is case-insensitive
-        let parent = from
-            .parent()
-            .ok_or_else(|| "Invalid source path".to_string())?;
-        // Generate a temporary name that shouldn't collide
-        let mut counter: u32 = 0;
-        let mut temp_path;
-        loop {
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_else(|_| std::time::Duration::from_millis(0))
-                .as_millis();
-            let temp_name = format!(".__rename_tmp_{}_{}", ts, counter);
-            temp_path = parent.join(&temp_name);
-            if !temp_path.exists() {
-                break;
-            }
-            counter += 1;
-            if counter > 1000 {
-                return Err("Failed to allocate temporary name for rename".to_string());
-            }
-        }
-
-        fs::rename(from, &temp_path).map_err(|e| format!("Failed to rename (stage 1): {}", e))?;
-        fs::rename(&temp_path, to).map_err(|e| format!("Failed to rename (stage 2): {}", e))?;
-        return Ok(());
-    }
-
-    rename_file_or_directory(from, to)
+    // When both locations share the same scheme we can rely on the source provider.
+    from_provider.rename(&from_location, &to_location)
 }
 
 #[command]
-pub fn copy_file(from_path: String, to_path: String) -> Result<(), String> {
-    let expanded_from = expand_path(&from_path)?;
-    let expanded_to = expand_path(&to_path)?;
-    let from = Path::new(&expanded_from);
-    let to = Path::new(&expanded_to);
+pub fn copy_file(from_path: LocationInput, to_path: LocationInput) -> Result<(), String> {
+    let (from_provider, from_location) = resolve_location(from_path)?;
+    let (_, to_location) = resolve_location(to_path)?;
 
-    if !from.exists() {
-        return Err("Source path does not exist".to_string());
+    if from_location.scheme() != to_location.scheme() {
+        return Err("Copying across different providers is not yet supported".to_string());
     }
 
-    copy_file_or_directory(from, to)
+    let capabilities = from_provider.capabilities(&from_location);
+    if !capabilities.can_copy {
+        return Err("Provider does not support copy operations".to_string());
+    }
+
+    from_provider.copy(&from_location, &to_location)
 }
 
 #[command]
-pub fn move_file(from_path: String, to_path: String) -> Result<(), String> {
-    let expanded_from = expand_path(&from_path)?;
-    let expanded_to = expand_path(&to_path)?;
-    let from = Path::new(&expanded_from);
-    let to = Path::new(&expanded_to);
+pub fn move_file(from_path: LocationInput, to_path: LocationInput) -> Result<(), String> {
+    let (from_provider, from_location) = resolve_location(from_path)?;
+    let (_, to_location) = resolve_location(to_path)?;
 
-    if !from.exists() {
-        return Err("Source path does not exist".to_string());
+    if from_location.scheme() != to_location.scheme() {
+        return Err("Moving across different providers is not yet supported".to_string());
     }
 
-    if to.exists() {
-        return Err("Destination path already exists".to_string());
+    let capabilities = from_provider.capabilities(&from_location);
+    if !capabilities.can_move {
+        return Err("Provider does not support move operations".to_string());
     }
 
-    rename_file_or_directory(from, to)
+    from_provider.move_item(&from_location, &to_location)
 }
 
 fn allocate_destination_folder(destination_root: &Path, base_name: &str) -> Result<String, String> {
@@ -1261,13 +1221,8 @@ fn create_tar_reader(
     archive_format: ArchiveFormat,
     archive_path: &Path,
 ) -> Result<Box<dyn Read>, String> {
-    let file = fs::File::open(archive_path).map_err(|err| {
-        format!(
-            "Failed to open archive {}: {}",
-            archive_path.display(),
-            err
-        )
-    })?;
+    let file = fs::File::open(archive_path)
+        .map_err(|err| format!("Failed to open archive {}: {}", archive_path.display(), err))?;
 
     let reader: Box<dyn Read> = match archive_format {
         ArchiveFormat::Tar => Box::new(file),
@@ -1276,11 +1231,7 @@ fn create_tar_reader(
         ArchiveFormat::TarXz => Box::new(XzDecoder::new(file)),
         ArchiveFormat::TarZst => {
             let decoder = ZstdDecoder::new(file).map_err(|err| {
-                format!(
-                    "Failed to read archive {}: {}",
-                    archive_path.display(),
-                    err
-                )
+                format!("Failed to read archive {}: {}", archive_path.display(), err)
             })?;
             Box::new(decoder)
         }
