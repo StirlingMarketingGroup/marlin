@@ -266,7 +266,7 @@ jobs:
             tauri-${{ runner.os }}-
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.3
+        uses: mozilla-actions/sccache-action@v0.0.9
 
       - name: Configure compiler caching
         run: |
@@ -423,7 +423,7 @@ jobs:
             tauri-${{ runner.os }}-
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.3
+        uses: mozilla-actions/sccache-action@v0.0.9
 
       - name: Configure compiler caching
         run: |
