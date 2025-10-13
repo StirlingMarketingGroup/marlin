@@ -109,7 +109,7 @@ jobs:
 
       - name: Commit version bump
         if: steps.diff.outputs.changed == 'true'
-        uses: stefanzweifel/git-auto-commit-action@v6
+        uses: stefanzweifel/git-auto-commit-action@v7
         with:
           commit_message: 'chore: sync version to ${{ env.RELEASE_TAG }}'
           branch: ${{ env.TARGET_BRANCH }}
