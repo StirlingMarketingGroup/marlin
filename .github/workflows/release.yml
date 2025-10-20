@@ -72,7 +72,7 @@ jobs:
           fetch-depth: 0
           ref: ${{ steps.context.outputs.default_branch }}
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v6
         with:
           node-version: 20
 
@@ -214,7 +214,7 @@ jobs:
           )
           PY
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v6
         with:
           node-version: 20
           cache: 'npm'
@@ -371,7 +371,7 @@ jobs:
           )
           PY
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v6
         with:
           node-version: 20
           cache: 'npm'
