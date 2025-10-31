@@ -191,7 +191,8 @@ jobs:
             libglib2.0-bin \
             libgdk-pixbuf2.0-bin \
             desktop-file-utils \
-            shared-mime-info
+            shared-mime-info \
+            gperf
           sudo apt-get install -y libwebkit2gtk-4.1-dev || sudo apt-get install -y libwebkit2gtk-4.0-dev
           sudo apt-get install -y libfuse2 || sudo apt-get install -y libfuse2t64
 
@@ -348,7 +349,8 @@ jobs:
             libglib2.0-bin \
             libgdk-pixbuf2.0-bin \
             desktop-file-utils \
-            shared-mime-info
+            shared-mime-info \
+            gperf
           sudo apt-get install -y libwebkit2gtk-4.1-dev || sudo apt-get install -y libwebkit2gtk-4.0-dev
           sudo apt-get install -y libfuse2 || sudo apt-get install -y libfuse2t64
 
