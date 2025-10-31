@@ -155,7 +155,9 @@ export default function DeleteProgressWindow() {
 
         <div className="bg-app-gray/10 border border-app-border/40 rounded-lg p-4 text-xs space-y-3">
           <div>
-            <div className="text-[11px] uppercase tracking-wide text-app-muted">Overall progress</div>
+            <div className="text-[11px] uppercase tracking-wide text-app-muted">
+              Overall progress
+            </div>
             <div className="mt-2 h-2 rounded-full bg-app-gray/40 overflow-hidden">
               <div
                 className="h-full rounded-full bg-[var(--accent)] transition-all duration-200"
@@ -172,7 +174,12 @@ export default function DeleteProgressWindow() {
               <div className="text-[11px] uppercase tracking-wide text-app-muted mb-2">Items</div>
               <div className="max-h-40 overflow-y-auto space-y-1 pr-1">
                 {items.map((item, index) => {
-                  const status = index < completed ? 'done' : index === completed && !finished ? 'current' : 'pending';
+                  const status =
+                    index < completed
+                      ? 'done'
+                      : index === completed && !finished
+                        ? 'current'
+                        : 'pending';
                   const baseClasses =
                     'flex items-center gap-2 rounded-md px-2 py-1 text-sm transition-colors truncate';
                   const className =
@@ -210,22 +217,25 @@ export default function DeleteProgressWindow() {
                 Recently processed
               </div>
               <div className="space-y-1 max-h-32 overflow-y-auto">
-                {[...history].slice(-8).reverse().map((entry, idx) => (
-                  <QuickTooltip key={`${entry}-${idx}`} text={entry}>
-                    {({ onBlur, onFocus, onMouseEnter, onMouseLeave, ref }) => (
-                      <div
-                        ref={ref}
-                        onMouseEnter={onMouseEnter}
-                        onMouseLeave={onMouseLeave}
-                        onFocus={onFocus}
-                        onBlur={onBlur}
-                        className="truncate text-app-text/80"
-                      >
-                        {entry}
-                      </div>
-                    )}
-                  </QuickTooltip>
-                ))}
+                {[...history]
+                  .slice(-8)
+                  .reverse()
+                  .map((entry, idx) => (
+                    <QuickTooltip key={`${entry}-${idx}`} text={entry}>
+                      {({ onBlur, onFocus, onMouseEnter, onMouseLeave, ref }) => (
+                        <div
+                          ref={ref}
+                          onMouseEnter={onMouseEnter}
+                          onMouseLeave={onMouseLeave}
+                          onFocus={onFocus}
+                          onBlur={onBlur}
+                          className="truncate text-app-text/80"
+                        >
+                          {entry}
+                        </div>
+                      )}
+                    </QuickTooltip>
+                  ))}
               </div>
             </div>
           )}

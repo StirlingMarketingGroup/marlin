@@ -1,5 +1,9 @@
 import { create } from 'zustand';
-import type { DeleteItemPayload, DeleteProgressPayload, DeleteProgressUpdatePayload } from '@/types';
+import type {
+  DeleteItemPayload,
+  DeleteProgressPayload,
+  DeleteProgressUpdatePayload,
+} from '@/types';
 
 interface DeleteProgressState {
   requestId?: string;
@@ -46,7 +50,8 @@ export const useDeleteProgressStore = create<DeleteProgressState>((set) => ({
       }
 
       const total = typeof payload.total === 'number' ? payload.total : state.totalItems;
-      const completedTarget = typeof payload.completed === 'number' ? payload.completed : state.completed;
+      const completedTarget =
+        typeof payload.completed === 'number' ? payload.completed : state.completed;
       const nextCompleted = Math.min(completedTarget, total);
       const shouldRecord = payload.currentPath && nextCompleted > state.completed;
 
