@@ -563,7 +563,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         const count = selectedPaths.length;
         const targetLabel =
           count === 1
-            ? selectedItems[0]?.name ?? deriveNameFromPath(selectedPaths[0])
+            ? (selectedItems[0]?.name ?? deriveNameFromPath(selectedPaths[0]))
             : `${count} items`;
 
         const confirmed = await ask(
@@ -597,9 +597,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       const undoToken = response.undoToken;
       const isMacPlatform = typeof navigator !== 'undefined' && /mac/i.test(navigator.userAgent);
       const infoMessage =
-        undoToken || !isMacPlatform
-          ? messageText
-          : `${messageText} Restore via Finder if needed.`;
+        undoToken || !isMacPlatform ? messageText : `${messageText} Restore via Finder if needed.`;
 
       if (undoToken) {
         let toastId = '';
@@ -613,7 +611,9 @@ export const useAppStore = create<AppState>((set, get) => ({
               toastStore.removeToast(toastId);
               void (async () => {
                 try {
-                  const undoResult = await invoke<UndoTrashResponse>('undo_trash', { token: undoToken });
+                  const undoResult = await invoke<UndoTrashResponse>('undo_trash', {
+                    token: undoToken,
+                  });
                   await state.refreshCurrentDirectory();
                   if (Array.isArray(undoResult.restored) && undoResult.restored.length > 0) {
                     state.setSelectedFiles(undoResult.restored);
@@ -666,20 +666,17 @@ export const useAppStore = create<AppState>((set, get) => ({
     const count = selectedPaths.length;
     const targetLabel =
       count === 1
-        ? selectedItems[0]?.name ?? deriveNameFromPath(selectedPaths[0])
+        ? (selectedItems[0]?.name ?? deriveNameFromPath(selectedPaths[0]))
         : `${count} items`;
 
     let confirmed = false;
     try {
-      confirmed = await ask(
-        `Permanently delete ${targetLabel}? This action cannot be undone.`,
-        {
-          title: 'Delete Permanently',
-          kind: 'warning',
-          okLabel: 'Delete',
-          cancelLabel: 'Cancel',
-        }
-      );
+      confirmed = await ask(`Permanently delete ${targetLabel}? This action cannot be undone.`, {
+        title: 'Delete Permanently',
+        kind: 'warning',
+        okLabel: 'Delete',
+        cancelLabel: 'Cancel',
+      });
     } catch (dialogErr) {
       console.warn('Failed to display permanent delete confirmation:', dialogErr);
     }

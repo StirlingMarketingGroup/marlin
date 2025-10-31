@@ -1146,7 +1146,8 @@ function App() {
 
       if (!inEditable) {
         const isDeleteKey =
-          e.key === 'Delete' || (isMac && !e.metaKey && !e.ctrlKey && !e.altKey && e.key === 'Backspace');
+          e.key === 'Delete' ||
+          (isMac && !e.metaKey && !e.ctrlKey && !e.altKey && e.key === 'Backspace');
 
         if (isDeleteKey && useAppStore.getState().selectedFiles.length > 0) {
           e.preventDefault();
