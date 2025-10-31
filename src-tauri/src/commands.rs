@@ -7,6 +7,8 @@ use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashSet;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+use std::ffi::OsString;
 use std::fs;
 use std::io::{Read, Seek, Write};
 use std::path::Path;
@@ -34,13 +36,31 @@ use crate::fs_watcher;
 use crate::locations::{resolve_location, LocationCapabilities, LocationInput, LocationSummary};
 #[cfg(target_os = "macos")]
 use crate::macos_security;
-use crate::state::{FolderSizeState, FolderSizeTaskHandle};
+#[cfg(target_os = "macos")]
+use crate::state::MacTrashUndoItem;
+use crate::state::{FolderSizeState, FolderSizeTaskHandle, TrashUndoRecord, TrashUndoState};
 use bzip2::read::BzDecoder;
 use flate2::read::GzDecoder;
 use tar::Archive as TarArchive;
 use xz2::read::XzDecoder;
 use zip::ZipArchive;
 use zstd::stream::read::Decoder as ZstdDecoder;
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+use trash::os_limited;
+
+#[cfg(target_os = "macos")]
+use cocoa::base::{id, nil, BOOL, NO};
+#[cfg(target_os = "macos")]
+use cocoa::foundation::{NSAutoreleasePool, NSString};
+#[cfg(target_os = "macos")]
+use objc::rc::StrongPtr;
+#[cfg(target_os = "macos")]
+use objc::{class, msg_send, sel, sel_impl};
+#[cfg(target_os = "macos")]
+use std::ffi::CStr;
+#[cfg(target_os = "macos")]
+use std::os::raw::c_char;
 
 const FOLDER_SIZE_EVENT: &str = "folder-size-progress";
 const FOLDER_SIZE_INIT_EVENT: &str = "folder-size:init";
@@ -64,6 +84,9 @@ fn format_error(code: &str, message: &str) -> String {
     format!("[{code}] {message}")
 }
 const ARCHIVE_PROGRESS_UPDATE_EVENT: &str = "archive-progress:update";
+const DELETE_PROGRESS_EVENT: &str = "delete-progress:init";
+const DELETE_PROGRESS_UPDATE_EVENT: &str = "delete-progress:update";
+const DELETE_PROGRESS_WINDOW_LABEL: &str = "delete-progress";
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -78,6 +101,9 @@ static PENDING_FOLDER_SIZE_PAYLOAD: Lazy<Mutex<Option<FolderSizeInitPayload>>> =
     Lazy::new(|| Mutex::new(None));
 static ARCHIVE_PROGRESS_WINDOW_READY: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
 static PENDING_ARCHIVE_PROGRESS_PAYLOAD: Lazy<Mutex<Option<ArchiveProgressPayload>>> =
+    Lazy::new(|| Mutex::new(None));
+static DELETE_PROGRESS_WINDOW_READY: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
+static PENDING_DELETE_PROGRESS_PAYLOAD: Lazy<Mutex<Option<DeleteProgressPayload>>> =
     Lazy::new(|| Mutex::new(None));
 
 const FOLDER_SIZE_WINDOW_READY_POLL_INTERVAL: Duration = Duration::from_millis(25);
@@ -168,6 +194,282 @@ fn try_emit_archive_progress_payload(app: &AppHandle) {
     }
 }
 
+fn queue_delete_progress_payload(app: &AppHandle, payload: DeleteProgressPayload) {
+    {
+        let mut pending = PENDING_DELETE_PROGRESS_PAYLOAD
+            .lock()
+            .expect("Failed to lock pending delete progress payload");
+        *pending = Some(payload);
+    }
+    try_emit_delete_progress_payload(app);
+}
+
+fn try_emit_delete_progress_payload(app: &AppHandle) {
+    if !DELETE_PROGRESS_WINDOW_READY.load(Ordering::SeqCst) {
+        return;
+    }
+
+    let payload_opt = {
+        let mut pending = PENDING_DELETE_PROGRESS_PAYLOAD
+            .lock()
+            .expect("Failed to lock pending delete progress payload");
+        pending.take()
+    };
+
+    if let Some(payload) = payload_opt {
+        if let Some(window) = app.get_webview_window(DELETE_PROGRESS_WINDOW_LABEL) {
+            if let Err(err) = window.emit(DELETE_PROGRESS_EVENT, &payload) {
+                warn!("Failed to emit delete progress payload: {err}");
+                let mut pending = PENDING_DELETE_PROGRESS_PAYLOAD
+                    .lock()
+                    .expect("Failed to relock pending delete progress payload");
+                *pending = Some(payload);
+            }
+        } else {
+            let mut pending = PENDING_DELETE_PROGRESS_PAYLOAD
+                .lock()
+                .expect("Failed to relock pending delete progress payload");
+            *pending = Some(payload);
+        }
+    }
+}
+
+fn emit_delete_progress_update(app: &AppHandle, payload: DeleteProgressUpdatePayload) {
+    if let Err(err) = app.emit(DELETE_PROGRESS_UPDATE_EVENT, payload) {
+        warn!("Failed to emit delete progress update: {err}");
+    }
+}
+
+#[cfg_attr(not(any(target_os = "windows", target_os = "linux")), allow(dead_code))]
+fn normalize_path_for_compare(path: &Path) -> String {
+    let mut value = path.to_string_lossy().replace('\\', "/");
+    while value.ends_with('/') && value.len() > 1 {
+        value.pop();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        value = value.to_lowercase();
+    }
+    value
+}
+
+fn cleanup_trash_undo_records(state: &TrashUndoState) {
+    const TTL: Duration = Duration::from_secs(300);
+    const MAX_RECORDS: usize = 10;
+
+    let now = Instant::now();
+    if let Ok(mut records) = state.records.lock() {
+        records.retain(|_, record| now.saturating_duration_since(record.created_at) <= TTL);
+
+        if records.len() > MAX_RECORDS {
+            let mut entries: Vec<(String, Instant)> = records
+                .iter()
+                .map(|(id, record)| (id.clone(), record.created_at))
+                .collect();
+            entries.sort_by_key(|(_, created)| *created);
+            let excess = records.len() - MAX_RECORDS;
+            for (id, _) in entries.into_iter().take(excess) {
+                records.remove(&id);
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn nsstring_to_string(ns_string: id) -> Option<String> {
+    if ns_string == nil {
+        return None;
+    }
+
+    unsafe {
+        let raw: *const c_char = msg_send![ns_string, UTF8String];
+        if raw.is_null() {
+            None
+        } else {
+            Some(CStr::from_ptr(raw).to_string_lossy().into_owned())
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn nserror_to_string(error: id) -> Option<String> {
+    if error == nil {
+        return None;
+    }
+
+    unsafe {
+        let description: id = msg_send![error, localizedDescription];
+        nsstring_to_string(description)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn nsurl_path(url: id) -> Option<String> {
+    if url == nil {
+        return None;
+    }
+
+    unsafe {
+        let path: id = msg_send![url, path];
+        nsstring_to_string(path)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_trash_items(paths: &[PathBuf]) -> Result<Vec<MacTrashUndoItem>, String> {
+    use std::path::Path;
+
+    unsafe {
+        let _pool = NSAutoreleasePool::new(nil);
+        let file_manager: id = msg_send![class!(NSFileManager), defaultManager];
+
+        if file_manager == nil {
+            return Err("Failed to acquire NSFileManager".to_string());
+        }
+
+        let mut records = Vec::with_capacity(paths.len());
+
+        for path in paths {
+            let original_path_str = path.to_string_lossy().to_string();
+
+            let _scope_guard = macos_security::retain_access(path)?;
+
+            let ns_path = NSString::alloc(nil).init_str(&original_path_str);
+            if ns_path == nil {
+                return Err(format!(
+                    "Failed to create NSString for path: {}",
+                    original_path_str
+                ));
+            }
+            let ns_path = StrongPtr::new(ns_path);
+
+            let url: id = msg_send![class!(NSURL), fileURLWithPath:*ns_path];
+            if url == nil {
+                return Err(format!(
+                    "Failed to create NSURL for path: {}",
+                    original_path_str
+                ));
+            }
+            let url = StrongPtr::retain(url);
+
+            let mut resulting_url: id = nil;
+            let mut error: id = nil;
+
+            let success: BOOL = msg_send![file_manager,
+                trashItemAtURL:*url
+                resultingItemURL:&mut resulting_url
+                error:&mut error
+            ];
+
+            if success == NO {
+                let message = nserror_to_string(error)
+                    .unwrap_or_else(|| "Operation not permitted".to_string());
+                return Err(format!(
+                    "Failed to move {} to Trash: {}",
+                    original_path_str, message
+                ));
+            }
+
+            let trashed_path = nsurl_path(resulting_url).ok_or_else(|| {
+                String::from("Failed to resolve trash destination path")
+            })?;
+
+            let trashed_path_buf = Path::new(&trashed_path).to_path_buf();
+            macos_security::persist_bookmark(&trashed_path_buf, "trashing item");
+
+            records.push(MacTrashUndoItem {
+                trashed_path,
+                original_path: original_path_str,
+            });
+        }
+
+        Ok(records)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_restore_items(items: &[MacTrashUndoItem]) -> Result<(), String> {
+    use std::path::Path;
+
+    unsafe {
+        let _pool = NSAutoreleasePool::new(nil);
+        let file_manager: id = msg_send![class!(NSFileManager), defaultManager];
+
+        if file_manager == nil {
+            return Err("Failed to acquire NSFileManager".to_string());
+        }
+
+        for item in items {
+            let from_path = Path::new(&item.trashed_path);
+            let to_path = Path::new(&item.original_path);
+
+            let parent = to_path.parent().ok_or_else(|| {
+                format!(
+                    "Cannot restore {} because original parent directory could not be determined",
+                    item.original_path
+                )
+            })?;
+
+            if !parent.exists() {
+                return Err(format!(
+                    "Cannot restore {}; destination folder no longer exists",
+                    item.original_path
+                ));
+            }
+
+            if to_path.exists() {
+                return Err(format!(
+                    "Cannot restore {}; an item already exists at that location",
+                    item.original_path
+                ));
+            }
+
+            let _from_scope = macos_security::retain_access(from_path)?;
+            let _to_scope = macos_security::retain_access(parent)?;
+
+            let from_ns = NSString::alloc(nil).init_str(&item.trashed_path);
+            if from_ns == nil {
+                return Err(format!(
+                    "Failed to create NSString for trashed path: {}",
+                    item.trashed_path
+                ));
+            }
+            let from_ns = StrongPtr::new(from_ns);
+            let from_url: id = msg_send![class!(NSURL), fileURLWithPath:*from_ns];
+
+            let to_ns = NSString::alloc(nil).init_str(&item.original_path);
+            if to_ns == nil {
+                return Err(format!(
+                    "Failed to create NSString for original path: {}",
+                    item.original_path
+                ));
+            }
+            let to_ns = StrongPtr::new(to_ns);
+            let to_url: id = msg_send![class!(NSURL), fileURLWithPath:*to_ns];
+
+            let mut error: id = nil;
+            let success: BOOL = msg_send![file_manager,
+                moveItemAtURL:from_url
+                toURL:to_url
+                error:&mut error
+            ];
+
+            if success == NO {
+                let message = nserror_to_string(error)
+                    .unwrap_or_else(|| "Operation not permitted".to_string());
+                return Err(format!(
+                    "Failed to restore {} from Trash: {}",
+                    item.original_path, message
+                ));
+            }
+
+            macos_security::persist_bookmark(to_path, "restoring item from trash");
+        }
+
+        Ok(())
+    }
+}
+
 fn schedule_folder_size_auto_start(app: &AppHandle, request_id: String, paths: Vec<String>) {
     if paths.is_empty() {
         return;
@@ -245,6 +547,34 @@ struct ArchiveProgressUpdatePayload {
     finished: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteItemPayload {
+    path: String,
+    name: String,
+    #[serde(default)]
+    is_directory: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteProgressPayload {
+    request_id: String,
+    total_items: usize,
+    items: Vec<DeleteItemPayload>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteProgressUpdatePayload {
+    request_id: String,
+    current_path: Option<String>,
+    completed: usize,
+    total: usize,
+    finished: bool,
+    error: Option<String>,
+}
+
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct FolderSizeProgressPayload {
@@ -272,6 +602,26 @@ pub struct ExtractArchiveResponse {
     pub folder_path: String,
     pub used_system_fallback: bool,
     pub format: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct TrashPathsResponse {
+    trashed: Vec<String>,
+    undo_token: Option<String>,
+    fallback_to_permanent: bool,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct UndoTrashResponse {
+    restored: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DeletePathsResponse {
+    deleted: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -971,6 +1321,302 @@ pub async fn delete_file(path: LocationInput) -> Result<(), String> {
         return Err("Provider does not support deleting items".to_string());
     }
     provider.delete(&location).await
+}
+
+#[command]
+pub async fn trash_paths(app: AppHandle, paths: Vec<String>) -> Result<TrashPathsResponse, String> {
+    if paths.is_empty() {
+        return Ok(TrashPathsResponse {
+            trashed: Vec::new(),
+            undo_token: None,
+            fallback_to_permanent: false,
+        });
+    }
+
+    let mut expanded: Vec<PathBuf> = Vec::with_capacity(paths.len());
+    for original in paths {
+        let path_buf = expand_path(&original)?;
+        if !path_buf.exists() {
+            return Err(format!("Path does not exist: {}", original));
+        }
+        expanded.push(path_buf);
+    }
+
+    let original_paths: Vec<String> = expanded
+        .iter()
+        .map(|path| path.to_string_lossy().to_string())
+        .collect();
+
+    let delete_targets: Vec<PathBuf> = expanded.clone();
+    let state = app.state::<TrashUndoState>();
+
+    // Capture trash state BEFORE deletion on Windows/Linux for undo tracking
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    let before_ids: HashSet<OsString> = {
+        let before =
+            os_limited::list().map_err(|err| format!("Failed to inspect trash: {err}"))?;
+        before.into_iter().map(|item| item.id).collect()
+    };
+
+    #[cfg(target_os = "macos")]
+    let mac_records = {
+        let task_paths = delete_targets.clone();
+        let task_result = tauri::async_runtime::spawn_blocking(move || macos_trash_items(&task_paths))
+            .await
+            .map_err(|err| format!("Failed to join trash task: {err}"))?;
+
+        match task_result {
+            Ok(records) => records,
+            Err(err) => {
+                let lowered = err.to_lowercase();
+                if lowered.contains("operation not permitted") || lowered.contains("permission") {
+                    return Ok(TrashPathsResponse {
+                        trashed: Vec::new(),
+                        undo_token: None,
+                        fallback_to_permanent: true,
+                    });
+                }
+                return Err(err);
+            }
+        }
+    };
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let delete_result = tauri::async_runtime::spawn_blocking(move || {
+            trash::delete_all(delete_targets.iter())
+        })
+        .await
+        .map_err(|err| format!("Failed to join trash task: {err}"))?;
+
+        if let Err(err) = delete_result {
+            return Err(err.to_string());
+        }
+    }
+
+    cleanup_trash_undo_records(&state);
+
+    let undo_token: Option<String> = {
+        #[cfg(target_os = "macos")]
+        {
+            if mac_records.is_empty() {
+                None
+            } else {
+                let token = Uuid::new_v4().to_string();
+                let record = TrashUndoRecord {
+                    kind: crate::state::TrashUndoKind::MacItems(mac_records.clone()),
+                    original_paths: original_paths.clone(),
+                    created_at: Instant::now(),
+                };
+                if let Ok(mut records) = state.records.lock() {
+                    records.insert(token.clone(), record);
+                }
+                Some(token)
+            }
+        }
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        {
+            let normalized_targets: HashSet<String> = expanded
+                .iter()
+                .map(|path| normalize_path_for_compare(path))
+                .collect();
+            let after = os_limited::list()
+                .map_err(|err| format!("Failed to inspect trash after deletion: {err}"))?;
+
+            let mut new_items = Vec::new();
+            for item in after {
+                if before_ids.contains(&item.id) {
+                    continue;
+                }
+
+                if normalized_targets.contains(&normalize_path_for_compare(&item.original_path())) {
+                    new_items.push(item);
+                }
+            }
+
+            if !new_items.is_empty() {
+                let token = Uuid::new_v4().to_string();
+                let record = TrashUndoRecord {
+                    kind: crate::state::TrashUndoKind::Items(new_items),
+                    original_paths: original_paths.clone(),
+                    created_at: Instant::now(),
+                };
+                if let Ok(mut records) = state.records.lock() {
+                    records.insert(token.clone(), record);
+                }
+                Some(token)
+            } else {
+                None
+            }
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+        {
+            None
+        }
+    };
+
+    Ok(TrashPathsResponse {
+        trashed: original_paths,
+        undo_token,
+        fallback_to_permanent: false,
+    })
+}
+
+#[command]
+pub async fn undo_trash(app: AppHandle, token: String) -> Result<UndoTrashResponse, String> {
+    if token.trim().is_empty() {
+        return Err("Undo token is required".to_string());
+    }
+
+    let state = app.state::<TrashUndoState>();
+    cleanup_trash_undo_records(&state);
+
+    let record = {
+        let mut records = state
+            .records
+            .lock()
+            .map_err(|_| "Failed to access undo state".to_string())?;
+        records.remove(&token)
+    };
+
+    let Some(record) = record else {
+        return Err("Undo request is no longer available.".to_string());
+    };
+
+    #[cfg(target_os = "macos")]
+    {
+        match record.kind {
+            crate::state::TrashUndoKind::MacItems(items) => {
+                let restore_items = items.clone();
+                let restore_result = tauri::async_runtime::spawn_blocking(move || {
+                    macos_restore_items(&restore_items)
+                })
+                .await
+                .map_err(|err| format!("Failed to join restore task: {err}"))?;
+
+                if let Err(err) = restore_result {
+                    return Err(err);
+                }
+            }
+        }
+
+        return Ok(UndoTrashResponse {
+            restored: record.original_paths,
+        });
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    {
+        match record.kind {
+            crate::state::TrashUndoKind::Items(items) => {
+                let restore_result =
+                    tauri::async_runtime::spawn_blocking(move || os_limited::restore_all(items))
+                        .await
+                        .map_err(|err| format!("Failed to join restore task: {err}"))?;
+                if let Err(err) = restore_result {
+                    return Err(err.to_string());
+                }
+            }
+            #[allow(unreachable_patterns)]
+            _ => {
+                return Err("Undo is not supported on this platform.".to_string());
+            }
+        }
+
+        return Ok(UndoTrashResponse {
+            restored: record.original_paths,
+        });
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        let _ = record;
+        return Err("Undo is not supported on this platform.".to_string());
+    }
+}
+
+#[command]
+pub async fn delete_paths_permanently(
+    app: AppHandle,
+    paths: Vec<String>,
+    request_id: String,
+) -> Result<DeletePathsResponse, String> {
+    if paths.is_empty() {
+        return Ok(DeletePathsResponse {
+            deleted: Vec::new(),
+        });
+    }
+
+    let mut expanded: Vec<PathBuf> = Vec::with_capacity(paths.len());
+    for original in paths {
+        let path_buf = expand_path(&original)?;
+        if !path_buf.exists() {
+            return Err(format!("Path does not exist: {}", original));
+        }
+        expanded.push(path_buf);
+    }
+
+    let total = expanded.len();
+    let original_paths: Vec<String> = expanded
+        .iter()
+        .map(|path| path.to_string_lossy().to_string())
+        .collect();
+    let targets: Vec<PathBuf> = expanded.clone();
+
+    let app_handle = app.clone();
+    let request_id_clone = request_id.clone();
+
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        for (idx, target) in targets.iter().enumerate() {
+            let current_path = target.to_string_lossy().to_string();
+            emit_delete_progress_update(
+                &app_handle,
+                DeleteProgressUpdatePayload {
+                    request_id: request_id_clone.clone(),
+                    current_path: Some(current_path.clone()),
+                    completed: idx,
+                    total,
+                    finished: false,
+                    error: None,
+                },
+            );
+
+            if let Err(err) = delete_file_or_directory(target) {
+                emit_delete_progress_update(
+                    &app_handle,
+                    DeleteProgressUpdatePayload {
+                        request_id: request_id_clone.clone(),
+                        current_path: Some(current_path),
+                        completed: idx,
+                        total,
+                        finished: true,
+                        error: Some(err.clone()),
+                    },
+                );
+                return Err(err);
+            }
+        }
+
+        emit_delete_progress_update(
+            &app_handle,
+            DeleteProgressUpdatePayload {
+                request_id: request_id_clone,
+                current_path: None,
+                completed: total,
+                total,
+                finished: true,
+                error: None,
+            },
+        );
+
+        Ok(())
+    })
+    .await
+    .map_err(|err| format!("Failed to join delete task: {err}"))??;
+
+    Ok(DeletePathsResponse {
+        deleted: original_paths,
+    })
 }
 
 #[command]
@@ -2372,6 +3018,82 @@ pub fn archive_progress_window_ready(app: AppHandle) -> Result<(), String> {
 #[command]
 pub fn archive_progress_window_unready() -> Result<(), String> {
     ARCHIVE_PROGRESS_WINDOW_READY.store(false, Ordering::SeqCst);
+    Ok(())
+}
+
+#[command]
+pub fn show_delete_progress_window(
+    app: AppHandle,
+    request_id: String,
+    items: Vec<DeleteItemPayload>,
+) -> Result<(), String> {
+    let total_items = items.len();
+    let payload = DeleteProgressPayload {
+        request_id,
+        total_items,
+        items,
+    };
+
+    if let Some(existing) = app.get_webview_window(DELETE_PROGRESS_WINDOW_LABEL) {
+        queue_delete_progress_payload(&app, payload);
+        let _ = existing.show();
+        let _ = existing.set_focus();
+        return Ok(());
+    }
+
+    let url = tauri::WebviewUrl::App("index.html?view=delete-progress".into());
+    let builder = tauri::WebviewWindowBuilder::new(&app, DELETE_PROGRESS_WINDOW_LABEL, url)
+        .title("Deleting Items")
+        .inner_size(420.0, 420.0)
+        .resizable(false)
+        .fullscreen(false)
+        .minimizable(true)
+        .maximizable(false)
+        .closable(true)
+        .decorations(true);
+
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true)
+        .traffic_light_position(tauri::LogicalPosition::new(14.0, 14.0));
+
+    DELETE_PROGRESS_WINDOW_READY.store(false, Ordering::SeqCst);
+
+    builder
+        .build()
+        .map_err(|e| format!("Failed to create delete progress window: {}", e))?;
+
+    queue_delete_progress_payload(&app, payload);
+    Ok(())
+}
+
+#[command]
+pub fn hide_delete_progress_window(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(DELETE_PROGRESS_WINDOW_LABEL) {
+        if let Err(err) = window.close() {
+            warn!("Failed to close delete progress window: {err}");
+        }
+    }
+
+    DELETE_PROGRESS_WINDOW_READY.store(false, Ordering::SeqCst);
+    let mut pending = PENDING_DELETE_PROGRESS_PAYLOAD
+        .lock()
+        .expect("Failed to clear pending delete payload");
+    *pending = None;
+    Ok(())
+}
+
+#[command]
+pub fn delete_progress_window_ready(app: AppHandle) -> Result<(), String> {
+    DELETE_PROGRESS_WINDOW_READY.store(true, Ordering::SeqCst);
+    try_emit_delete_progress_payload(&app);
+    Ok(())
+}
+
+#[command]
+pub fn delete_progress_window_unready() -> Result<(), String> {
+    DELETE_PROGRESS_WINDOW_READY.store(false, Ordering::SeqCst);
     Ok(())
 }
 

@@ -32,6 +32,8 @@ export default function ContextMenu({ x, y, isFileContext, onRequestClose }: Con
     beginRenameSelected,
     navigateTo,
     setPendingRevealTarget,
+    trashSelected,
+    deleteSelectedPermanently,
   } = state;
 
   const prefs = useMemo(
@@ -119,6 +121,24 @@ export default function ContextMenu({ x, y, isFileContext, onRequestClose }: Con
               }}
             >
               Rename
+            </button>
+            <button
+              className="w-full text-left px-3 py-2 hover:bg-app-light"
+              onClick={() => {
+                onRequestClose();
+                void trashSelected();
+              }}
+            >
+              Move to Trash
+            </button>
+            <button
+              className="w-full text-left px-3 py-2 hover:bg-app-light text-app-red"
+              onClick={() => {
+                onRequestClose();
+                void deleteSelectedPermanently();
+              }}
+            >
+              Delete Permanently
             </button>
             <button
               className="w-full text-left px-3 py-2 hover:bg-app-light"

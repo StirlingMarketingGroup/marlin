@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client';
 import App from './App';
 import FolderSizeWindow from './windows/FolderSizeWindow';
 import ArchiveProgressWindow from './windows/ArchiveProgressWindow';
+import DeleteProgressWindow from './windows/DeleteProgressWindow';
 import './index.css';
 
 const params = new URLSearchParams(window.location.search);
@@ -13,7 +14,9 @@ const Root =
     ? FolderSizeWindow
     : view === 'archive-progress'
       ? ArchiveProgressWindow
-      : App;
+      : view === 'delete-progress'
+        ? DeleteProgressWindow
+        : App;
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

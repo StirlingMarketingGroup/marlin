@@ -12,7 +12,7 @@ mod plugins;
 mod state;
 mod thumbnails;
 
-use state::{FolderSizeState, MenuState};
+use state::{FolderSizeState, MenuState, TrashUndoState};
 use std::sync::Mutex;
 #[cfg(target_os = "linux")]
 use std::sync::OnceLock;
@@ -84,6 +84,9 @@ pub fn run() {
             commands::resolve_symlink_parent_command,
             commands::create_directory_command,
             commands::delete_file,
+            commands::trash_paths,
+            commands::undo_trash,
+            commands::delete_paths_permanently,
             commands::rename_file,
             commands::copy_file,
             commands::move_file,
@@ -110,6 +113,10 @@ pub fn run() {
             commands::hide_archive_progress_window,
             commands::archive_progress_window_ready,
             commands::archive_progress_window_unready,
+            commands::show_delete_progress_window,
+            commands::hide_delete_progress_window,
+            commands::delete_progress_window_ready,
+            commands::delete_progress_window_unready,
             commands::show_native_context_menu,
             commands::update_selection_menu_state,
             commands::calculate_folder_size,
@@ -204,6 +211,7 @@ pub fn run() {
             });
 
             app.manage(FolderSizeState::default());
+            app.manage(TrashUndoState::default());
 
             Ok(())
         })

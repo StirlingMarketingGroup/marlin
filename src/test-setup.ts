@@ -8,6 +8,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 
 vi.mock('@tauri-apps/plugin-dialog', () => ({
   message: vi.fn(),
+  ask: vi.fn(async () => true),
 }));
 
 // Mock window object extensions that Tauri adds
