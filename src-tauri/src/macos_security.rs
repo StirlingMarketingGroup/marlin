@@ -137,6 +137,7 @@ mod imp {
             push_dir("Pictures");
             push_dir("Movies");
             push_dir("Music");
+            push_dir(".Trash");
             push_dir("iCloud Drive");
         }
         dirs_vec
