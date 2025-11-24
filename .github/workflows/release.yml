@@ -67,7 +67,7 @@ jobs:
           echo "TARGET_BRANCH=$DEFAULT_BRANCH" >> "$GITHUB_ENV"
 
       - name: Checkout target branch
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
           ref: ${{ steps.context.outputs.default_branch }}
@@ -167,7 +167,7 @@ jobs:
           fi
 
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
           ref: ${{ env.RELEASE_REF }}
@@ -310,7 +310,7 @@ jobs:
             rust-targets: aarch64-unknown-linux-gnu
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Install dependencies (Ubuntu)
         if: startsWith(matrix.os, 'ubuntu')
