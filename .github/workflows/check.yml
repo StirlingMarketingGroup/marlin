@@ -80,7 +80,7 @@ jobs:
 
       - name: Setup sccache
         if: steps.changes.outputs.check == 'true'
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@v0.0.9
 
       - name: Configure compiler caching
         if: steps.changes.outputs.check == 'true'
