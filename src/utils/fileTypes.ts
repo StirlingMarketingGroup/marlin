@@ -100,3 +100,51 @@ export function getEffectiveExtension(
 
   return undefined;
 }
+
+/**
+ * macOS bundle extensions - directories that should be opened with system apps,
+ * not navigated into like regular folders. These are "packages" in macOS terminology.
+ */
+export const MACOS_BUNDLE_EXTENSIONS = new Set([
+  'app', // Applications
+  'photoslibrary', // Photos Library
+  'musiclibrary', // Music Library
+  'aplibrary', // Aperture Library
+  'fcpbundle', // Final Cut Pro bundle
+  'fcpproject', // Final Cut Pro project
+  'band', // GarageBand project
+  'scriv', // Scrivener project
+  'rtfd', // Rich Text with attachments
+  'playground', // Xcode playground
+  'xcodeproj', // Xcode project
+  'xcworkspace', // Xcode workspace
+  'framework', // macOS framework
+  'bundle', // Generic bundle
+  'plugin', // Plugin bundle
+  'kext', // Kernel extension
+  'prefpane', // System Preferences pane
+  'saver', // Screen saver
+  'slidesaver', // Screen saver (slides)
+  'qlgenerator', // QuickLook generator
+  'mdimporter', // Spotlight importer
+  'appex', // App extension
+]);
+
+/**
+ * Check if a file is a macOS bundle (directory that acts like a file)
+ */
+export function isMacOSBundle(file: Pick<FileItem, 'name' | 'is_directory'>): boolean {
+  if (!file.is_directory) return false;
+  const name = file.name.toLowerCase();
+  const dotIndex = name.lastIndexOf('.');
+  if (dotIndex === -1) return false;
+  const ext = name.slice(dotIndex + 1);
+  return MACOS_BUNDLE_EXTENSIONS.has(ext);
+}
+
+/**
+ * Check if a file is an app bundle specifically (for special icon handling)
+ */
+export function isAppBundle(file: Pick<FileItem, 'name' | 'is_directory'>): boolean {
+  return file.is_directory && file.name.toLowerCase().endsWith('.app');
+}

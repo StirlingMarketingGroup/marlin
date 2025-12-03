@@ -36,6 +36,8 @@ import {
   isArchiveExtension,
   isArchiveFile,
   isVideoExtension,
+  isMacOSBundle,
+  isAppBundle,
 } from '@/utils/fileTypes';
 
 interface FileListProps {
@@ -259,6 +261,11 @@ export default function FileList({ files, preferences }: FileListProps) {
       if (fileName.endsWith('.dmg')) {
         return <Disc className="w-5 h-5 text-app-muted" weight="fill" />;
       }
+
+      // macOS bundles (non-app) get a package icon
+      if (isMacOSBundle(file) && !isAppBundle(file)) {
+        return <Package className="w-5 h-5 text-purple-400" weight="fill" />;
+      }
     }
     if (file.is_directory) {
       return <Folder className="w-5 h-5 text-accent" weight="fill" />;
@@ -306,7 +313,7 @@ export default function FileList({ files, preferences }: FileListProps) {
     if (['txt'].includes(ext)) {
       return <FileText className="w-5 h-5 text-app-text" />;
     }
-    if (['md', 'json', 'xml', 'yml', 'yaml', 'toml', 'ini'].includes(ext)) {
+    if (['md', 'json', 'xml', 'yml', 'yaml', 'toml'].includes(ext)) {
       return <FileText className="w-5 h-5 text-app-text" />;
     }
 
@@ -330,8 +337,8 @@ export default function FileList({ files, preferences }: FileListProps) {
   // (moved FilePreview to top-level ListFilePreview to avoid remounting)
 
   const handleDoubleClick = async (file: FileItem) => {
-    const isAppBundle = file.is_directory && file.name.toLowerCase().endsWith('.app');
-    const shouldNavigate = file.is_directory && (!isAppBundle || file.is_symlink);
+    const isBundle = isMacOSBundle(file);
+    const shouldNavigate = file.is_directory && (!isBundle || file.is_symlink);
 
     if (shouldNavigate) {
       navigateTo(file.path);
@@ -531,13 +538,13 @@ export default function FileList({ files, preferences }: FileListProps) {
     []
   );
   const sortedFiles = [...files].sort((a, b) => {
-    // Treat .app as files for sorting purposes
-    const aIsApp = a.is_directory && a.name.toLowerCase().endsWith('.app');
-    const bIsApp = b.is_directory && b.name.toLowerCase().endsWith('.app');
-    const aIsFolder = a.is_directory && !aIsApp;
-    const bIsFolder = b.is_directory && !bIsApp;
+    // Treat macOS bundles (.app, .photoslibrary, etc.) as files for sorting purposes
+    const aIsBundle = isMacOSBundle(a);
+    const bIsBundle = isMacOSBundle(b);
+    const aIsFolder = a.is_directory && !aIsBundle;
+    const bIsFolder = b.is_directory && !bIsBundle;
 
-    // Optionally sort directories first (but not .app files)
+    // Optionally sort directories first (but not bundles)
     if (preferences.foldersFirst) {
       if (aIsFolder && !bIsFolder) return -1;
       if (!aIsFolder && bIsFolder) return 1;
@@ -870,7 +877,11 @@ export default function FileList({ files, preferences }: FileListProps) {
                 <div
                   className={`col-span-2 flex items-center ${isSelected ? 'text-white' : 'text-app-muted'}`}
                 >
-                  {file.is_directory ? '—' : formatFileSize(file.size)}
+                  {file.is_directory
+                    ? file.child_count != null
+                      ? `${file.child_count} item${file.child_count !== 1 ? 's' : ''}`
+                      : '—'
+                    : formatFileSize(file.size)}
                 </div>
 
                 {/* Type column */}

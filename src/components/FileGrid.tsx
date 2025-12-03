@@ -34,6 +34,8 @@ import {
   isArchiveExtension,
   isArchiveFile,
   isVideoExtension,
+  isMacOSBundle,
+  isAppBundle,
 } from '@/utils/fileTypes';
 
 interface FileGridProps {
@@ -293,6 +295,11 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
       if (fileName.endsWith('.dmg')) {
         return <Disc className="w-12 h-12 text-app-muted" weight="fill" />;
       }
+
+      // macOS bundles (non-app) get a package icon
+      if (isMacOSBundle(file) && !isAppBundle(file)) {
+        return <Package className="w-12 h-12 text-purple-400" weight="fill" />;
+      }
     }
     if (file.is_directory) {
       return <Folder className="w-12 h-12 text-accent" weight="fill" />;
@@ -352,7 +359,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     }
 
     // Text files
-    if (['txt', 'md', 'json', 'xml', 'yml', 'yaml', 'toml', 'ini'].includes(ext)) {
+    if (['txt', 'md', 'json', 'xml', 'yml', 'yaml', 'toml'].includes(ext)) {
       return <FileText className="w-12 h-12 text-app-text" />;
     }
 
@@ -362,8 +369,8 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
   // (moved FilePreview to top-level GridFilePreview to avoid remounting)
 
   const handleDoubleClick = async (file: FileItem) => {
-    const isAppBundle = file.is_directory && file.name.toLowerCase().endsWith('.app');
-    const shouldNavigate = file.is_directory && (!isAppBundle || file.is_symlink);
+    const isBundle = isMacOSBundle(file);
+    const shouldNavigate = file.is_directory && (!isBundle || file.is_symlink);
 
     if (shouldNavigate) {
       navigateTo(file.path);
@@ -630,13 +637,13 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     []
   );
   const sortedFiles = [...files].sort((a, b) => {
-    // Treat .app as files for sorting purposes
-    const aIsApp = a.is_directory && a.name.toLowerCase().endsWith('.app');
-    const bIsApp = b.is_directory && b.name.toLowerCase().endsWith('.app');
-    const aIsFolder = a.is_directory && !aIsApp;
-    const bIsFolder = b.is_directory && !bIsApp;
+    // Treat macOS bundles (.app, .photoslibrary, etc.) as files for sorting purposes
+    const aIsBundle = isMacOSBundle(a);
+    const bIsBundle = isMacOSBundle(b);
+    const aIsFolder = a.is_directory && !aIsBundle;
+    const bIsFolder = b.is_directory && !bIsBundle;
 
-    // Optionally sort directories first (but not .app files)
+    // Optionally sort directories first (but not bundles)
     if (preferences.foldersFirst) {
       if (aIsFolder && !bIsFolder) return -1;
       if (!aIsFolder && bIsFolder) return 1;

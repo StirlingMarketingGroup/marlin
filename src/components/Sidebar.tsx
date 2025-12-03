@@ -15,6 +15,8 @@ import {
   Folder,
   MusicNotes,
 } from 'phosphor-react';
+import GitRepoBadge from './GitRepoBadge';
+import SymlinkBadge from './SymlinkBadge';
 import type { IconProps } from 'phosphor-react';
 import { useAppStore } from '../store/useAppStore';
 import { useCallback, useEffect, useState, MouseEvent, useRef } from 'react';
@@ -392,7 +394,17 @@ export default function Sidebar() {
                           className="flex items-center gap-2 flex-1 min-w-0"
                           data-tauri-drag-region={false}
                         >
-                          {createIcon(Folder, 'fill', isActive)}
+                          <span className="relative flex-shrink-0 w-5 h-5">
+                            <div className="w-full h-full flex items-center justify-center">
+                              {createIcon(Folder, 'fill', isActive)}
+                            </div>
+                            {pin.is_git_repo && (
+                              <GitRepoBadge size="sm" style={{ bottom: -2, right: -2 }} />
+                            )}
+                            {pin.is_symlink && (
+                              <SymlinkBadge size="sm" style={{ bottom: -2, left: -2 }} />
+                            )}
+                          </span>
                           <span className={`truncate ${isActive ? 'text-accent' : ''}`}>
                             {pin.name}
                           </span>

@@ -8,6 +8,7 @@ export interface FileItem {
   is_symlink: boolean; // Match Rust snake_case
   is_git_repo: boolean; // Match Rust snake_case
   extension?: string;
+  child_count?: number; // Shallow file count for directories
 }
 
 export interface LocationSummary {
@@ -89,6 +90,8 @@ export interface PinnedDirectory {
   name: string;
   path: string;
   pinned_at: string; // ISO 8601 string from Rust DateTime<Utc>
+  is_git_repo: boolean;
+  is_symlink: boolean;
 }
 
 export interface PersistedPreferences {

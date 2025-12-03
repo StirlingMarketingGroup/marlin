@@ -26,6 +26,9 @@ export function resolveVSCodeIcon(name: string, ext?: string): string | undefine
   if (filename === 'go.mod' || filename === 'go.sum') return 'vscode-icons:file-type-go';
   if (filename === '.env' || filename.startsWith('.env.')) return 'vscode-icons:file-type-dotenv';
 
+  // Windows system files - return undefined to use FileExtensionBadge (shows "INI", "DB" badge)
+  if (filename === 'desktop.ini' || filename === 'thumbs.db') return undefined;
+
   const map: Record<string, string> = {
     // Archives (use the standard VSCode zip icon for all)
     zip: 'vscode-icons:file-type-zip',
@@ -91,7 +94,6 @@ export function resolveVSCodeIcon(name: string, ext?: string): string | undefine
     yaml: 'vscode-icons:file-type-yaml',
     yml: 'vscode-icons:file-type-yaml',
     toml: 'vscode-icons:file-type-toml',
-    ini: 'vscode-icons:file-type-settings',
     xml: 'vscode-icons:file-type-xml',
     sql: 'vscode-icons:file-type-sql',
     env: 'vscode-icons:file-type-dotenv',
