@@ -48,6 +48,21 @@ const FOLDER_SIZE_INIT_EVENT: &str = "folder-size:init";
 const FOLDER_SIZE_WINDOW_LABEL: &str = "folder-size";
 const ARCHIVE_PROGRESS_EVENT: &str = "archive-progress:init";
 const ARCHIVE_PROGRESS_WINDOW_LABEL: &str = "archive-progress";
+
+// Error codes for structured error handling
+// These constants define the API contract with the frontend
+#[allow(dead_code)]
+pub mod error_codes {
+    pub const ENOENT: &str = "ENOENT"; // Path does not exist
+    pub const ENOTDIR: &str = "ENOTDIR"; // Path is not a directory
+    pub const EPERM: &str = "EPERM"; // Permission denied / Operation not permitted
+}
+
+/// Format an error with a code prefix for structured error handling
+/// Format: "[CODE] Human readable message"
+fn format_error(code: &str, message: &str) -> String {
+    format!("[{code}] {message}")
+}
 const ARCHIVE_PROGRESS_UPDATE_EVENT: &str = "archive-progress:update";
 
 static FOLDER_SIZE_WINDOW_READY: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
@@ -909,11 +924,11 @@ pub fn read_directory(path: String) -> Result<Vec<FileItem>, String> {
     let path = Path::new(&expanded_path);
 
     if !path.exists() {
-        return Err("Path does not exist".to_string());
+        return Err(format_error(error_codes::ENOENT, "Path does not exist"));
     }
 
     if !path.is_dir() {
-        return Err("Path is not a directory".to_string());
+        return Err(format_error(error_codes::ENOTDIR, "Path is not a directory"));
     }
 
     read_directory_contents(path)
