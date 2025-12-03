@@ -6,6 +6,8 @@ import {
   PinnedDirectory,
   DirectoryPreferencesMap,
   GitStatus,
+  DirectoryListingResponse,
+  LocationCapabilities,
 } from '../types';
 import { invoke } from '@tauri-apps/api/core';
 import { open as openShell } from '@tauri-apps/plugin-shell';
@@ -117,6 +119,17 @@ const normalizePath = (input: string): string => {
   return normalized;
 };
 
+const toFileUri = (path: string): string => {
+  const normalized = normalizePath(path);
+  if (normalized.startsWith('//')) {
+    return `file:${normalized}`;
+  }
+  if (normalized.startsWith('/')) {
+    return `file://${normalized}`;
+  }
+  return `file:///${normalized}`;
+};
+
 const isPathInsideRepo = (path: string, repoRoot: string): boolean => {
   if (!repoRoot) return false;
   const normalizeForCompare = (value: string) =>
@@ -140,6 +153,8 @@ const isPathInsideRepo = (path: string, repoRoot: string): boolean => {
 interface AppState {
   // Navigation
   currentPath: string;
+  currentLocationRaw: string;
+  currentProviderCapabilities?: LocationCapabilities;
   pathHistory: string[];
   historyIndex: number;
   homeDir?: string;
@@ -231,6 +246,8 @@ interface AppState {
 export const useAppStore = create<AppState>((set, get) => ({
   // Initial state
   currentPath: '/', // Will be replaced at init
+  currentLocationRaw: 'file:///',
+  currentProviderCapabilities: undefined,
   pathHistory: ['/'],
   historyIndex: 0,
   homeDir: undefined,
@@ -271,7 +288,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   // Actions
   setCurrentPath: (path) => {
     const norm = normalizePath(path);
-    set({ currentPath: norm });
+    set({ currentPath: norm, currentLocationRaw: toFileUri(norm) });
     void get().refreshGitStatus({ path: norm });
   },
   setHomeDir: (path) => set({ homeDir: path }),
@@ -347,6 +364,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     const newHistory = [...pathHistory.slice(0, historyIndex + 1), norm];
     set({
       currentPath: norm,
+      currentLocationRaw: toFileUri(norm),
       pathHistory: newHistory,
       historyIndex: newHistory.length - 1,
     });
@@ -359,6 +377,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       const newIndex = historyIndex - 1;
       set({
         currentPath: pathHistory[newIndex],
+        currentLocationRaw: toFileUri(pathHistory[newIndex]),
         historyIndex: newIndex,
       });
       void get().refreshGitStatus({ path: pathHistory[newIndex] });
@@ -371,6 +390,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       const newIndex = historyIndex + 1;
       set({
         currentPath: pathHistory[newIndex],
+        currentLocationRaw: toFileUri(pathHistory[newIndex]),
         historyIndex: newIndex,
       });
       void get().refreshGitStatus({ path: pathHistory[newIndex] });
@@ -477,13 +497,31 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   refreshCurrentDirectory: async () => {
-    const { currentPath, setFiles, setLoading, setError } = get();
+    const { currentPath, setLoading, setError } = get();
     try {
       setLoading(true);
       setError(undefined);
-      const files = await invoke<FileItem[]>('read_directory', { path: currentPath });
-      setFiles(files);
-      void get().refreshGitStatus({ path: currentPath, force: true });
+      const listing = await invoke<DirectoryListingResponse>('read_directory', {
+        path: currentPath,
+      });
+      const normalized = normalizePath(listing.location.displayPath || listing.location.path);
+
+      set((state) => {
+        const updatedHistory = [...state.pathHistory];
+        if (state.historyIndex >= 0 && state.historyIndex < updatedHistory.length) {
+          updatedHistory[state.historyIndex] = normalized;
+        }
+
+        return {
+          files: listing.entries,
+          currentPath: normalized,
+          currentLocationRaw: listing.location.raw,
+          currentProviderCapabilities: listing.capabilities,
+          pathHistory: updatedHistory,
+        };
+      });
+
+      void get().refreshGitStatus({ path: listing.location.path, force: true });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error('❌ refreshCurrentDirectory failed:', msg);

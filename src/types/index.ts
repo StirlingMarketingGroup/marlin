@@ -10,6 +10,34 @@ export interface FileItem {
   extension?: string;
 }
 
+export interface LocationSummary {
+  raw: string;
+  scheme: string;
+  authority?: string | null;
+  path: string;
+  displayPath: string;
+}
+
+export interface LocationCapabilities {
+  scheme: string;
+  displayName: string;
+  canRead: boolean;
+  canWrite: boolean;
+  canCreateDirectories: boolean;
+  canDelete: boolean;
+  canRename: boolean;
+  canCopy: boolean;
+  canMove: boolean;
+  supportsWatching: boolean;
+  requiresExplicitRefresh: boolean;
+}
+
+export interface DirectoryListingResponse {
+  location: LocationSummary;
+  capabilities: LocationCapabilities;
+  entries: FileItem[];
+}
+
 export interface ViewPreferences {
   viewMode: 'grid' | 'list' | 'details';
   sortBy: 'name' | 'size' | 'modified' | 'type';
