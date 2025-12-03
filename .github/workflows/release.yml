@@ -224,8 +224,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
-          profile: minimal
-          override: true
           targets: ${{ matrix.rust-targets }}
 
       - name: Cache Rust build artifacts
@@ -366,8 +364,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
-          profile: minimal
-          override: true
           targets: ${{ matrix.rust-targets }}
 
       - name: Cache Rust build artifacts
