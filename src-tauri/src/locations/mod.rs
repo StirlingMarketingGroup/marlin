@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -129,6 +130,16 @@ impl Location {
 
     pub fn authority(&self) -> Option<&str> {
         self.authority.as_deref()
+    }
+
+    #[allow(dead_code)] // Used in tests and by future providers
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    #[allow(dead_code)] // Used in tests and by future providers
+    pub fn raw(&self) -> &str {
+        &self.raw
     }
 
     pub fn to_path_string(&self) -> String {
@@ -265,26 +276,28 @@ pub struct ProviderDirectoryEntries {
     pub entries: Vec<FileItem>,
 }
 
+#[async_trait]
 pub trait LocationProvider: Send + Sync {
     fn scheme(&self) -> &'static str;
     fn capabilities(&self, location: &Location) -> LocationCapabilities;
 
-    fn read_directory(&self, location: &Location) -> Result<ProviderDirectoryEntries, String>;
-    fn get_file_metadata(&self, location: &Location) -> Result<FileItem, String>;
-    fn create_directory(&self, location: &Location) -> Result<(), String>;
-    fn delete(&self, location: &Location) -> Result<(), String>;
-    fn rename(&self, from: &Location, to: &Location) -> Result<(), String>;
-    fn copy(&self, from: &Location, to: &Location) -> Result<(), String>;
-    fn move_item(&self, from: &Location, to: &Location) -> Result<(), String> {
-        self.rename(from, to)
+    async fn read_directory(&self, location: &Location) -> Result<ProviderDirectoryEntries, String>;
+    async fn get_file_metadata(&self, location: &Location) -> Result<FileItem, String>;
+    async fn create_directory(&self, location: &Location) -> Result<(), String>;
+    async fn delete(&self, location: &Location) -> Result<(), String>;
+    async fn rename(&self, from: &Location, to: &Location) -> Result<(), String>;
+    async fn copy(&self, from: &Location, to: &Location) -> Result<(), String>;
+    async fn move_item(&self, from: &Location, to: &Location) -> Result<(), String> {
+        self.rename(from, to).await
     }
 }
 
 pub fn get_provider_for_scheme(scheme: &str) -> Option<ProviderRef> {
     REGISTRY
         .read()
-        .ok()
-        .and_then(|map| map.get(&scheme.to_ascii_lowercase()).cloned())
+        .expect("Provider registry lock poisoned")
+        .get(&scheme.to_ascii_lowercase())
+        .cloned()
 }
 
 pub fn ensure_provider(scheme: &str) -> Result<ProviderRef, String> {
@@ -320,5 +333,26 @@ mod tests {
         assert_eq!(loc.authority(), Some("bucket"));
         assert_eq!(loc.path(), "/path");
         assert_eq!(loc.raw(), "s3://bucket/path");
+    }
+
+    #[test]
+    fn sanitize_path_edge_cases() {
+        // Empty path becomes root
+        assert_eq!(sanitize_path(""), "/");
+
+        // Trailing slashes are removed
+        assert_eq!(sanitize_path("/foo/"), "/foo");
+
+        // Relative paths get leading slash
+        assert_eq!(sanitize_path("foo/bar"), "/foo/bar");
+
+        // Network paths with host are preserved
+        assert_eq!(sanitize_path("//host/share"), "//host/share");
+
+        // Double slash without host stays as network path prefix
+        assert_eq!(sanitize_path("//"), "//");
+
+        // Triple slash reduces to double (network path prefix)
+        assert_eq!(sanitize_path("///"), "//");
     }
 }

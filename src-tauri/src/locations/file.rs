@@ -1,12 +1,15 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use async_trait::async_trait;
+use tauri::async_runtime::spawn_blocking;
+
 use super::{
     Location, LocationCapabilities, LocationProvider, LocationSummary, ProviderDirectoryEntries,
 };
 use crate::fs_utils::{
     copy_file_or_directory, create_directory, delete_file_or_directory, expand_path, get_file_info,
-    read_directory_contents, rename_file_or_directory,
+    read_directory_contents, rename_file_or_directory, FileItem,
 };
 
 #[derive(Default)]
@@ -39,27 +42,14 @@ impl FileSystemProvider {
         Ok(path)
     }
 
-    fn two_stage_case_rename(&self, from: &Path, to: &Path) -> Result<(), String> {
+    fn two_stage_case_rename(from: &Path, to: &Path) -> Result<(), String> {
         let parent = from
             .parent()
             .ok_or_else(|| "Invalid source path".to_string())?;
 
-        let mut counter: u32 = 0;
-        let temp_path = loop {
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_else(|_| std::time::Duration::from_millis(0))
-                .as_millis();
-            let temp_name = format!(".__rename_tmp_{}_{}", ts, counter);
-            let candidate = parent.join(&temp_name);
-            if !candidate.exists() {
-                break candidate;
-            }
-            counter += 1;
-            if counter > 1_000 {
-                return Err("Failed to allocate temporary name for rename".to_string());
-            }
-        };
+        // Use UUID for guaranteed uniqueness
+        let temp_name = format!(".__rename_tmp_{}", uuid::Uuid::new_v4());
+        let temp_path = parent.join(&temp_name);
 
         fs::rename(from, &temp_path).map_err(|e| format!("Failed to rename (stage 1): {}", e))?;
         fs::rename(&temp_path, to).map_err(|e| format!("Failed to rename (stage 2): {}", e))?;
@@ -67,6 +57,7 @@ impl FileSystemProvider {
     }
 }
 
+#[async_trait]
 impl LocationProvider for FileSystemProvider {
     fn scheme(&self) -> &'static str {
         "file"
@@ -77,91 +68,124 @@ impl LocationProvider for FileSystemProvider {
             .with_supports_watching(true)
     }
 
-    fn read_directory(&self, location: &Location) -> Result<ProviderDirectoryEntries, String> {
+    async fn read_directory(&self, location: &Location) -> Result<ProviderDirectoryEntries, String> {
         let (path, summary) = self.resolve_path(location)?;
 
-        if !path.exists() {
-            return Err("Path does not exist".to_string());
-        }
-        if !path.is_dir() {
-            return Err("Path is not a directory".to_string());
-        }
+        spawn_blocking(move || {
+            if !path.exists() {
+                return Err("Path does not exist".to_string());
+            }
+            if !path.is_dir() {
+                return Err("Path is not a directory".to_string());
+            }
 
-        let entries = read_directory_contents(&path)?;
+            let entries = read_directory_contents(&path)?;
 
-        Ok(ProviderDirectoryEntries {
-            location: summary,
-            entries,
+            Ok(ProviderDirectoryEntries {
+                location: summary,
+                entries,
+            })
         })
+        .await
+        .map_err(|e| format!("Task join error: {}", e))?
     }
 
-    fn get_file_metadata(&self, location: &Location) -> Result<crate::fs_utils::FileItem, String> {
+    async fn get_file_metadata(&self, location: &Location) -> Result<FileItem, String> {
         let path = self.resolve_path_only(location)?;
-        if !path.exists() {
-            return Err("Path does not exist".to_string());
-        }
-        get_file_info(&path)
+
+        spawn_blocking(move || {
+            if !path.exists() {
+                return Err("Path does not exist".to_string());
+            }
+            get_file_info(&path)
+        })
+        .await
+        .map_err(|e| format!("Task join error: {}", e))?
     }
 
-    fn create_directory(&self, location: &Location) -> Result<(), String> {
+    async fn create_directory(&self, location: &Location) -> Result<(), String> {
         let path = self.resolve_path_only(location)?;
-        create_directory(&path)
+
+        spawn_blocking(move || create_directory(&path))
+            .await
+            .map_err(|e| format!("Task join error: {}", e))?
     }
 
-    fn delete(&self, location: &Location) -> Result<(), String> {
+    async fn delete(&self, location: &Location) -> Result<(), String> {
         let path = self.resolve_path_only(location)?;
-        if !path.exists() {
-            return Err("Path does not exist".to_string());
-        }
-        delete_file_or_directory(&path)
+
+        spawn_blocking(move || {
+            if !path.exists() {
+                return Err("Path does not exist".to_string());
+            }
+            delete_file_or_directory(&path)
+        })
+        .await
+        .map_err(|e| format!("Task join error: {}", e))?
     }
 
-    fn rename(&self, from: &Location, to: &Location) -> Result<(), String> {
+    async fn rename(&self, from: &Location, to: &Location) -> Result<(), String> {
         let from_path = self.resolve_path_only(from)?;
-        if !from_path.exists() {
-            return Err("Source path does not exist".to_string());
-        }
-
         let to_path = self.resolve_path_only(to)?;
 
-        let same_parent = from_path.parent() == to_path.parent();
-        let from_name = from_path.file_name().and_then(|s| s.to_str());
-        let to_name = to_path.file_name().and_then(|s| s.to_str());
-        let is_case_only = same_parent
-            && from_name.is_some()
-            && to_name.is_some()
-            && from_name.unwrap().ne(to_name.unwrap())
-            && from_name.unwrap().eq_ignore_ascii_case(to_name.unwrap());
+        spawn_blocking(move || {
+            if !from_path.exists() {
+                return Err("Source path does not exist".to_string());
+            }
 
-        if to_path.exists() && !is_case_only {
-            return Err("Destination path already exists".to_string());
-        }
+            let same_parent = from_path.parent() == to_path.parent();
+            let from_name = from_path.file_name().and_then(|s| s.to_str());
+            let to_name = to_path.file_name().and_then(|s| s.to_str());
 
-        if is_case_only {
-            return self.two_stage_case_rename(&from_path, &to_path);
-        }
+            // Use idiomatic match for is_case_only check
+            let is_case_only = same_parent
+                && match (from_name, to_name) {
+                    (Some(from), Some(to)) => from != to && from.eq_ignore_ascii_case(to),
+                    _ => false,
+                };
 
-        rename_file_or_directory(&from_path, &to_path)
+            if to_path.exists() && !is_case_only {
+                return Err("Destination path already exists".to_string());
+            }
+
+            if is_case_only {
+                return Self::two_stage_case_rename(&from_path, &to_path);
+            }
+
+            rename_file_or_directory(&from_path, &to_path)
+        })
+        .await
+        .map_err(|e| format!("Task join error: {}", e))?
     }
 
-    fn copy(&self, from: &Location, to: &Location) -> Result<(), String> {
+    async fn copy(&self, from: &Location, to: &Location) -> Result<(), String> {
         let from_path = self.resolve_path_only(from)?;
-        if !from_path.exists() {
-            return Err("Source path does not exist".to_string());
-        }
         let to_path = self.resolve_path_only(to)?;
-        copy_file_or_directory(&from_path, &to_path)
+
+        spawn_blocking(move || {
+            if !from_path.exists() {
+                return Err("Source path does not exist".to_string());
+            }
+            copy_file_or_directory(&from_path, &to_path)
+        })
+        .await
+        .map_err(|e| format!("Task join error: {}", e))?
     }
 
-    fn move_item(&self, from: &Location, to: &Location) -> Result<(), String> {
+    async fn move_item(&self, from: &Location, to: &Location) -> Result<(), String> {
         let from_path = self.resolve_path_only(from)?;
-        if !from_path.exists() {
-            return Err("Source path does not exist".to_string());
-        }
         let to_path = self.resolve_path_only(to)?;
-        if to_path.exists() {
-            return Err("Destination path already exists".to_string());
-        }
-        rename_file_or_directory(&from_path, &to_path)
+
+        spawn_blocking(move || {
+            if !from_path.exists() {
+                return Err("Source path does not exist".to_string());
+            }
+            if to_path.exists() {
+                return Err("Destination path already exists".to_string());
+            }
+            rename_file_or_directory(&from_path, &to_path)
+        })
+        .await
+        .map_err(|e| format!("Task join error: {}", e))?
     }
 }

@@ -59,6 +59,7 @@ pub mod error_codes {
 
 /// Format an error with a code prefix for structured error handling
 /// Format: "[CODE] Human readable message"
+#[allow(dead_code)] // Will be used by future location providers
 fn format_error(code: &str, message: &str) -> String {
     format!("[{code}] {message}")
 }
@@ -926,9 +927,9 @@ pub async fn get_git_status(path: String) -> Result<Option<GitStatusResponse>, S
 }
 
 #[command]
-pub fn read_directory(path: LocationInput) -> Result<DirectoryListingResponse, String> {
+pub async fn read_directory(path: LocationInput) -> Result<DirectoryListingResponse, String> {
     let (provider, location) = resolve_location(path)?;
-    let listing = provider.read_directory(&location)?;
+    let listing = provider.read_directory(&location).await?;
     let capabilities = provider.capabilities(&location);
 
     Ok(DirectoryListingResponse {
@@ -939,9 +940,9 @@ pub fn read_directory(path: LocationInput) -> Result<DirectoryListingResponse, S
 }
 
 #[command]
-pub fn get_file_metadata(path: LocationInput) -> Result<FileItem, String> {
+pub async fn get_file_metadata(path: LocationInput) -> Result<FileItem, String> {
     let (provider, location) = resolve_location(path)?;
-    provider.get_file_metadata(&location)
+    provider.get_file_metadata(&location).await
 }
 
 #[command]
@@ -953,27 +954,27 @@ pub fn resolve_symlink_parent_command(path: String) -> Result<SymlinkResolution,
 }
 
 #[command]
-pub fn create_directory_command(path: LocationInput) -> Result<(), String> {
+pub async fn create_directory_command(path: LocationInput) -> Result<(), String> {
     let (provider, location) = resolve_location(path)?;
     let capabilities = provider.capabilities(&location);
     if !capabilities.can_create_directories {
         return Err("Provider does not support creating directories".to_string());
     }
-    provider.create_directory(&location)
+    provider.create_directory(&location).await
 }
 
 #[command]
-pub fn delete_file(path: LocationInput) -> Result<(), String> {
+pub async fn delete_file(path: LocationInput) -> Result<(), String> {
     let (provider, location) = resolve_location(path)?;
     let capabilities = provider.capabilities(&location);
     if !capabilities.can_delete {
         return Err("Provider does not support deleting items".to_string());
     }
-    provider.delete(&location)
+    provider.delete(&location).await
 }
 
 #[command]
-pub fn rename_file(from_path: LocationInput, to_path: LocationInput) -> Result<(), String> {
+pub async fn rename_file(from_path: LocationInput, to_path: LocationInput) -> Result<(), String> {
     let (from_provider, from_location) = resolve_location(from_path)?;
     let (_, to_location) = resolve_location(to_path)?;
 
@@ -987,11 +988,11 @@ pub fn rename_file(from_path: LocationInput, to_path: LocationInput) -> Result<(
     }
 
     // When both locations share the same scheme we can rely on the source provider.
-    from_provider.rename(&from_location, &to_location)
+    from_provider.rename(&from_location, &to_location).await
 }
 
 #[command]
-pub fn copy_file(from_path: LocationInput, to_path: LocationInput) -> Result<(), String> {
+pub async fn copy_file(from_path: LocationInput, to_path: LocationInput) -> Result<(), String> {
     let (from_provider, from_location) = resolve_location(from_path)?;
     let (_, to_location) = resolve_location(to_path)?;
 
@@ -1004,11 +1005,11 @@ pub fn copy_file(from_path: LocationInput, to_path: LocationInput) -> Result<(),
         return Err("Provider does not support copy operations".to_string());
     }
 
-    from_provider.copy(&from_location, &to_location)
+    from_provider.copy(&from_location, &to_location).await
 }
 
 #[command]
-pub fn move_file(from_path: LocationInput, to_path: LocationInput) -> Result<(), String> {
+pub async fn move_file(from_path: LocationInput, to_path: LocationInput) -> Result<(), String> {
     let (from_provider, from_location) = resolve_location(from_path)?;
     let (_, to_location) = resolve_location(to_path)?;
 
@@ -1021,7 +1022,7 @@ pub fn move_file(from_path: LocationInput, to_path: LocationInput) -> Result<(),
         return Err("Provider does not support move operations".to_string());
     }
 
-    from_provider.move_item(&from_location, &to_location)
+    from_provider.move_item(&from_location, &to_location).await
 }
 
 fn allocate_destination_folder(destination_root: &Path, base_name: &str) -> Result<String, String> {

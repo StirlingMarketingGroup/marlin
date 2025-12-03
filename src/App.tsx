@@ -177,6 +177,27 @@ function App() {
     }
   };
 
+  // Helper to process a directory listing response and update app state
+  const handleDirectoryListing = async (
+    listing: DirectoryListingResponse,
+    options: { applyDefaults?: boolean } = {}
+  ): Promise<string> => {
+    const { applyDefaults = true } = options;
+    const resolvedPath = listing.location.displayPath || listing.location.path;
+
+    setFiles(listing.entries);
+    useAppStore.setState({
+      currentLocationRaw: listing.location.raw,
+      currentProviderCapabilities: listing.capabilities,
+    });
+
+    if (applyDefaults) {
+      await applySmartViewDefaults(listing.location.path, listing.entries);
+    }
+
+    return resolvedPath;
+  };
+
   // Only show the blocking loading overlay if loading lasts > 500ms
   useEffect(() => {
     let timer: number | undefined;
@@ -281,14 +302,7 @@ function App() {
           const listing = await invoke<DirectoryListingResponse>('read_directory', {
             path: startPath,
           });
-          const files = listing.entries;
-          setFiles(files);
-          useAppStore.setState({
-            currentLocationRaw: listing.location.raw,
-            currentProviderCapabilities: listing.capabilities,
-          });
-          await applySmartViewDefaults(listing.location.path, files);
-          const resolvedPath = listing.location.displayPath || listing.location.path;
+          const resolvedPath = await handleDirectoryListing(listing);
           setCurrentPath(resolvedPath);
           navigateTo(resolvedPath);
           loadSuccess = true;
@@ -301,14 +315,7 @@ function App() {
               const listing = await invoke<DirectoryListingResponse>('read_directory', {
                 path: homeDir,
               });
-              const files = listing.entries;
-              setFiles(files);
-              useAppStore.setState({
-                currentLocationRaw: listing.location.raw,
-                currentProviderCapabilities: listing.capabilities,
-              });
-              await applySmartViewDefaults(listing.location.path, files);
-              const resolvedPath = listing.location.displayPath || listing.location.path;
+              const resolvedPath = await handleDirectoryListing(listing);
               setCurrentPath(resolvedPath);
               navigateTo(resolvedPath);
               loadSuccess = true;
@@ -324,14 +331,7 @@ function App() {
               const listing = await invoke<DirectoryListingResponse>('read_directory', {
                 path: rootPath,
               });
-              const files = listing.entries;
-              setFiles(files);
-              useAppStore.setState({
-                currentLocationRaw: listing.location.raw,
-                currentProviderCapabilities: listing.capabilities,
-              });
-              await applySmartViewDefaults(listing.location.path, files);
-              const resolvedPath = listing.location.displayPath || listing.location.path;
+              const resolvedPath = await handleDirectoryListing(listing);
               setCurrentPath(resolvedPath);
               navigateTo(resolvedPath);
               loadSuccess = true;
@@ -432,13 +432,7 @@ function App() {
         const listing = await invoke<DirectoryListingResponse>('read_directory', {
           path: currentPath,
         });
-        const files = listing.entries;
-        setFiles(files);
-        useAppStore.setState({
-          currentLocationRaw: listing.location.raw,
-          currentProviderCapabilities: listing.capabilities,
-        });
-        await applySmartViewDefaults(listing.location.path, files);
+        await handleDirectoryListing(listing);
         setError(undefined); // Clear any previous errors on success
 
         // Check if we have a pending file selection (from navigating to a file path)
@@ -446,7 +440,7 @@ function App() {
           const fileToSelect = pendingFileSelectionRef.current;
           pendingFileSelectionRef.current = null;
           // Find the file in the loaded files and select it
-          const fileExists = files.some((f) => f.name === fileToSelect);
+          const fileExists = listing.entries.some((f: FileItem) => f.name === fileToSelect);
           if (fileExists) {
             const fullPath = currentPath.endsWith('/')
               ? `${currentPath}${fileToSelect}`
@@ -1111,18 +1105,14 @@ function App() {
       ) {
         e.preventDefault();
         (async () => {
-          const { currentPath, setFiles, setLoading, setError } = useAppStore.getState();
+          const { currentPath, setLoading, setError } = useAppStore.getState();
           try {
             setLoading(true);
             setError(undefined);
             const listing = await invoke<DirectoryListingResponse>('read_directory', {
               path: currentPath,
             });
-            setFiles(listing.entries);
-            useAppStore.setState({
-              currentLocationRaw: listing.location.raw,
-              currentProviderCapabilities: listing.capabilities,
-            });
+            await handleDirectoryListing(listing, { applyDefaults: false });
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
             const hint = msg.includes('Operation not permitted')
