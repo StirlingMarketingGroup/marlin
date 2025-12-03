@@ -44,6 +44,7 @@ function App() {
   const windowRef = useRef(getCurrentWindow());
   const thumbnailPrewarmRequestedRef = useRef(false);
   const currentDirectoryPreference = directoryPreferences[currentPath];
+  const pendingFileSelectionRef = useRef<string | null>(null);
   // Apply smart default view and sort preferences based on folder name or contents
   const applySmartViewDefaults = async (path: string, files?: FileItem[]) => {
     try {
@@ -393,11 +394,41 @@ function App() {
         setFiles(files);
         await applySmartViewDefaults(currentPath, files);
         setError(undefined); // Clear any previous errors on success
+
+        // Check if we have a pending file selection (from navigating to a file path)
+        if (pendingFileSelectionRef.current) {
+          const fileToSelect = pendingFileSelectionRef.current;
+          pendingFileSelectionRef.current = null;
+          // Find the file in the loaded files and select it
+          const fileExists = files.some((f) => f.name === fileToSelect);
+          if (fileExists) {
+            const fullPath = currentPath.endsWith('/')
+              ? `${currentPath}${fileToSelect}`
+              : `${currentPath}/${fileToSelect}`;
+            useAppStore.getState().setSelectedFiles([fullPath]);
+          }
+        }
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
         console.error('Failed to load directory:', currentPath, error);
 
-        // Show alert for all directory access errors
+        // Handle file path: navigate to parent directory and select the file
+        const isNotDirectory = errorMessage.includes('Path is not a directory');
+        if (isNotDirectory) {
+          // Extract parent directory and filename
+          const normalized = currentPath.replace(/\\/g, '/').replace(/\/+$/g, '');
+          const lastSlash = normalized.lastIndexOf('/');
+          if (lastSlash > 0) {
+            const parentDir = normalized.slice(0, lastSlash);
+            const fileName = normalized.slice(lastSlash + 1);
+            // Set pending file selection and navigate to parent
+            pendingFileSelectionRef.current = fileName;
+            navigateTo(parentDir);
+            return; // Exit early, don't show error dialog
+          }
+        }
+
+        // Show alert for all other directory access errors
         const isPermissionError = errorMessage.includes('Operation not permitted');
         const hint = isPermissionError
           ? '\n\nAllow Marlin under System Settings → Privacy & Security → Files and Folders.'
