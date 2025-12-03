@@ -20,6 +20,20 @@ import type {
   ViewPreferences,
 } from './types';
 
+// Error codes matching backend (src-tauri/src/commands.rs)
+const ErrorCodes = {
+  ENOENT: 'ENOENT', // Path does not exist
+  ENOTDIR: 'ENOTDIR', // Path is not a directory
+  EPERM: 'EPERM', // Permission denied / Operation not permitted
+} as const;
+
+/** Parse error code from structured error message format "[CODE] message" */
+function parseErrorCode(error: unknown): string | null {
+  const message = error instanceof Error ? error.message : String(error);
+  const match = message.match(/^\[([A-Z]+)\]/);
+  return match ? match[1] : null;
+}
+
 function App() {
   const {
     currentPath,
@@ -410,16 +424,17 @@ function App() {
         }
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
+        const errorCode = parseErrorCode(error);
         console.error('Failed to load directory:', currentPath, error);
 
         // Handle file path: navigate to parent directory and select the file
-        const isNotDirectory = errorMessage.includes('Path is not a directory');
-        if (isNotDirectory) {
+        if (errorCode === ErrorCodes.ENOTDIR) {
           // Extract parent directory and filename
           const normalized = currentPath.replace(/\\/g, '/').replace(/\/+$/g, '');
           const lastSlash = normalized.lastIndexOf('/');
-          if (lastSlash > 0) {
-            const parentDir = normalized.slice(0, lastSlash);
+          if (lastSlash >= 0) {
+            // Handle root directory case: /file.txt -> parent is "/"
+            const parentDir = lastSlash === 0 ? '/' : normalized.slice(0, lastSlash);
             const fileName = normalized.slice(lastSlash + 1);
             // Set pending file selection and navigate to parent
             pendingFileSelectionRef.current = fileName;
@@ -429,7 +444,8 @@ function App() {
         }
 
         // Show alert for all other directory access errors
-        const isPermissionError = errorMessage.includes('Operation not permitted');
+        const isPermissionError =
+          errorCode === ErrorCodes.EPERM || errorMessage.includes('Operation not permitted');
         const hint = isPermissionError
           ? '\n\nAllow Marlin under System Settings → Privacy & Security → Files and Folders.'
           : '';
