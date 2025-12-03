@@ -266,21 +266,12 @@ jobs:
             tauri-${{ runner.os }}-
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Configure compiler caching
         run: |
-          echo "SCCACHE_CACHE_SIZE=2G" >> "$GITHUB_ENV"
           echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
-          echo "SCCACHE_IGNORE_SERVER_IO_FAILURES=1" >> "$GITHUB_ENV"
-          echo "SCCACHE_DIR=$RUNNER_TEMP/sccache" >> "$GITHUB_ENV"
-          if sccache --start-server >/dev/null 2>&1; then
-            echo "Using sccache for rustc wrapper"
-            echo "RUSTC_WRAPPER=$(command -v sccache)" >> "$GITHUB_ENV"
-          else
-            echo "Sccache unavailable; falling back to rustc"
-            echo "RUSTC_WRAPPER=$(command -v rustc)" >> "$GITHUB_ENV"
-          fi
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
 
       - name: Install frontend dependencies
         run: npm ci
@@ -423,21 +414,12 @@ jobs:
             tauri-${{ runner.os }}-
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Configure compiler caching
         run: |
-          echo "SCCACHE_CACHE_SIZE=2G" >> "$GITHUB_ENV"
           echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
-          echo "SCCACHE_IGNORE_SERVER_IO_FAILURES=1" >> "$GITHUB_ENV"
-          echo "SCCACHE_DIR=$RUNNER_TEMP/sccache" >> "$GITHUB_ENV"
-          if sccache --start-server >/dev/null 2>&1; then
-            echo "Using sccache for rustc wrapper"
-            echo "RUSTC_WRAPPER=$(command -v sccache)" >> "$GITHUB_ENV"
-          else
-            echo "Sccache unavailable; falling back to rustc"
-            echo "RUSTC_WRAPPER=$(command -v rustc)" >> "$GITHUB_ENV"
-          fi
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
 
       - name: Install frontend dependencies
         run: npm ci
