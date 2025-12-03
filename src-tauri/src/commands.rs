@@ -2944,11 +2944,22 @@ pub fn get_watched_directories() -> Result<Vec<String>, String> {
     }
 }
 
+/// Internal representation stored in JSON (minimal fields for persistence)
 #[derive(Serialize, Deserialize, Clone)]
+struct StoredPinnedDirectory {
+    pub name: String,
+    pub path: String,
+    pub pinned_at: DateTime<Utc>,
+}
+
+/// Public representation with computed metadata (returned to frontend)
+#[derive(Serialize, Clone)]
 pub struct PinnedDirectory {
     pub name: String,
     pub path: String,
     pub pinned_at: DateTime<Utc>,
+    pub is_git_repo: bool,
+    pub is_symlink: bool,
 }
 
 fn pinned_directories_path() -> Result<PathBuf, String> {
@@ -2961,8 +2972,8 @@ fn pinned_directories_path() -> Result<PathBuf, String> {
     Ok(app_dir.join("pinned_directories.json"))
 }
 
-#[command]
-pub fn get_pinned_directories() -> Result<Vec<PinnedDirectory>, String> {
+/// Load stored pinned directories from JSON (internal use)
+fn load_stored_pinned_directories() -> Result<Vec<StoredPinnedDirectory>, String> {
     let path = pinned_directories_path()?;
     if !path.exists() {
         return Ok(vec![]);
@@ -2974,10 +2985,50 @@ pub fn get_pinned_directories() -> Result<Vec<PinnedDirectory>, String> {
     file.read_to_string(&mut contents)
         .map_err(|e| format!("Failed to read pinned directories: {}", e))?;
 
-    let pinned_dirs: Vec<PinnedDirectory> = serde_json::from_str(&contents)
+    let pinned_dirs: Vec<StoredPinnedDirectory> = serde_json::from_str(&contents)
         .map_err(|e| format!("Failed to parse pinned directories: {}", e))?;
 
     Ok(pinned_dirs)
+}
+
+/// Compute git repo and symlink status for a path
+fn compute_pin_metadata(path: &Path) -> (bool, bool) {
+    // Check if symlink using symlink_metadata (doesn't follow symlinks)
+    let is_symlink = fs::symlink_metadata(path)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false);
+
+    // Check if git repo (has .git dir or file)
+    let is_git_repo = {
+        let git_path = path.join(".git");
+        git_path.is_dir() || git_path.is_file()
+    };
+
+    (is_git_repo, is_symlink)
+}
+
+#[command]
+pub fn get_pinned_directories() -> Result<Vec<PinnedDirectory>, String> {
+    let stored = load_stored_pinned_directories()?;
+
+    // Enrich with computed metadata
+    let enriched: Vec<PinnedDirectory> = stored
+        .into_iter()
+        .map(|stored_pin| {
+            let path = Path::new(&stored_pin.path);
+            let (is_git_repo, is_symlink) = compute_pin_metadata(path);
+
+            PinnedDirectory {
+                name: stored_pin.name,
+                path: stored_pin.path,
+                pinned_at: stored_pin.pinned_at,
+                is_git_repo,
+                is_symlink,
+            }
+        })
+        .collect();
+
+    Ok(enriched)
 }
 
 #[command]
@@ -2994,15 +3045,15 @@ pub fn add_pinned_directory(path: String, name: Option<String>) -> Result<Pinned
     }
 
     let expanded_path_str = expanded_path.to_string_lossy().to_string();
-    let mut pinned_dirs = get_pinned_directories()?;
+    let mut stored_pins = load_stored_pinned_directories()?;
 
     // Check if already pinned
-    if pinned_dirs.iter().any(|p| p.path == expanded_path_str) {
+    if stored_pins.iter().any(|p| p.path == expanded_path_str) {
         return Err("Directory is already pinned".to_string());
     }
 
     // Limit to 20 pinned directories
-    if pinned_dirs.len() >= 20 {
+    if stored_pins.len() >= 20 {
         return Err("Maximum number of pinned directories reached (20)".to_string());
     }
 
@@ -3014,29 +3065,38 @@ pub fn add_pinned_directory(path: String, name: Option<String>) -> Result<Pinned
             .to_string()
     });
 
-    let new_pin = PinnedDirectory {
-        name: dir_name,
-        path: expanded_path_str,
+    let new_stored = StoredPinnedDirectory {
+        name: dir_name.clone(),
+        path: expanded_path_str.clone(),
         pinned_at: Utc::now(),
     };
 
-    pinned_dirs.push(new_pin.clone());
-    save_pinned_directories(&pinned_dirs)?;
+    stored_pins.push(new_stored.clone());
+    save_pinned_directories(&stored_pins)?;
 
-    Ok(new_pin)
+    // Compute metadata for the response
+    let (is_git_repo, is_symlink) = compute_pin_metadata(path_obj);
+
+    Ok(PinnedDirectory {
+        name: dir_name,
+        path: expanded_path_str,
+        pinned_at: new_stored.pinned_at,
+        is_git_repo,
+        is_symlink,
+    })
 }
 
 #[command]
 pub fn remove_pinned_directory(path: String) -> Result<bool, String> {
     let expanded_path = expand_path(&path)?;
     let expanded_path_str = expanded_path.to_string_lossy().to_string();
-    let mut pinned_dirs = get_pinned_directories()?;
+    let mut stored_pins = load_stored_pinned_directories()?;
 
-    let initial_len = pinned_dirs.len();
-    pinned_dirs.retain(|p| p.path != expanded_path_str);
+    let initial_len = stored_pins.len();
+    stored_pins.retain(|p| p.path != expanded_path_str);
 
-    if pinned_dirs.len() < initial_len {
-        save_pinned_directories(&pinned_dirs)?;
+    if stored_pins.len() < initial_len {
+        save_pinned_directories(&stored_pins)?;
         Ok(true)
     } else {
         Ok(false)
@@ -3045,7 +3105,7 @@ pub fn remove_pinned_directory(path: String) -> Result<bool, String> {
 
 #[command]
 pub fn reorder_pinned_directories(paths: Vec<String>) -> Result<(), String> {
-    let current_pins = get_pinned_directories()?;
+    let current_pins = load_stored_pinned_directories()?;
     let mut reordered = Vec::new();
 
     // Reorder based on the provided paths list
@@ -3065,7 +3125,7 @@ pub fn reorder_pinned_directories(paths: Vec<String>) -> Result<(), String> {
     save_pinned_directories(&reordered)
 }
 
-fn save_pinned_directories(pinned_dirs: &[PinnedDirectory]) -> Result<(), String> {
+fn save_pinned_directories(pinned_dirs: &[StoredPinnedDirectory]) -> Result<(), String> {
     let path = pinned_directories_path()?;
     let json = serde_json::to_string_pretty(pinned_dirs)
         .map_err(|e| format!("Failed to serialize pinned directories: {}", e))?;

@@ -307,6 +307,8 @@ describe('useAppStore', () => {
       name: 'Test Directory',
       path: '/test/directory',
       pinned_at: '2024-01-01T00:00:00.000Z',
+      is_git_repo: false,
+      is_symlink: false,
     };
 
     describe('loadPinnedDirectories', () => {
@@ -405,6 +407,8 @@ describe('useAppStore', () => {
         name: 'Another Directory',
         path: '/another/directory',
         pinned_at: '2024-01-02T00:00:00.000Z',
+        is_git_repo: false,
+        is_symlink: false,
       };
 
       it('should reorder pinned directories', async () => {

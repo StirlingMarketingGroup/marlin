@@ -254,9 +254,13 @@ function FileNameDisplayInner({
               </div>
             </div>
           )}
-          {!file.is_directory && showSize && (
+          {showSize && (
             <div className={`text-xs mt-1 ${isSelected ? 'text-white/80' : 'text-app-muted'}`}>
-              {formatFileSize(file.size)}
+              {file.is_directory
+                ? file.child_count != null
+                  ? `${file.child_count} item${file.child_count !== 1 ? 's' : ''}`
+                  : null
+                : formatFileSize(file.size)}
             </div>
           )}
         </div>

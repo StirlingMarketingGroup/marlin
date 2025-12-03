@@ -31,6 +31,7 @@ pub struct FileItem {
     pub is_symlink: bool,
     pub is_git_repo: bool,
     pub extension: Option<String>,
+    pub child_count: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,6 +109,16 @@ fn build_file_item(path: &Path) -> Result<FileItem, String> {
         false
     };
 
+    // Compute shallow child count for directories
+    let child_count = if is_directory {
+        match fs::read_dir(path) {
+            Ok(entries) => Some(entries.count() as u64),
+            Err(_) => None, // Can't read directory (permissions, etc.)
+        }
+    } else {
+        None
+    };
+
     let modified = metadata
         .modified()
         .map(|time| DateTime::from(time))
@@ -123,6 +134,7 @@ fn build_file_item(path: &Path) -> Result<FileItem, String> {
         is_symlink,
         is_git_repo,
         extension,
+        child_count,
     })
 }
 
