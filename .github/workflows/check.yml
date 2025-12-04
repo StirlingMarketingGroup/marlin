@@ -78,16 +78,6 @@ jobs:
           cache-all-crates: true
           cache-on-failure: true
 
-      - name: Setup sccache
-        if: steps.changes.outputs.check == 'true'
-        uses: mozilla-actions/sccache-action@v0.0.9
-
-      - name: Configure compiler caching
-        if: steps.changes.outputs.check == 'true'
-        run: |
-          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
-          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-
       - name: Install dependencies
         if: steps.changes.outputs.check == 'true'
         run: npm ci

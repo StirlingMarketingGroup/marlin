@@ -265,14 +265,6 @@ jobs:
             tauri-${{ runner.os }}-${{ matrix.target }}-
             tauri-${{ runner.os }}-
 
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
-
-      - name: Configure compiler caching
-        run: |
-          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
-          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-
       - name: Install frontend dependencies
         run: npm ci
 
@@ -412,14 +404,6 @@ jobs:
           restore-keys: |
             tauri-${{ runner.os }}-${{ matrix.target }}-
             tauri-${{ runner.os }}-
-
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
-
-      - name: Configure compiler caching
-        run: |
-          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
-          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
 
       - name: Install frontend dependencies
         run: npm ci
