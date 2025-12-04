@@ -1,6 +1,6 @@
 {
   "name": "marlin-file-browser",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "private": true,
   "type": "module",
   "description": "A modern, sleek file browser with native performance",
