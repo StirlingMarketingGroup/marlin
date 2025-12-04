@@ -263,6 +263,11 @@ function FileNameDisplayInner({
                 : formatFileSize(file.size)}
             </div>
           )}
+          {file.image_width != null && file.image_height != null && (
+            <div className={`text-[10px] ${isSelected ? 'text-blue-300/70' : 'text-blue-400/60'}`}>
+              {file.image_width}×{file.image_height}
+            </div>
+          )}
         </div>
       ) : needsTooltip ? (
         <QuickTooltip text={displayName}>

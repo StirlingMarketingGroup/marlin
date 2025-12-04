@@ -125,6 +125,7 @@ function App() {
       }
 
       const mediaExtensions = new Set([
+        // Images
         'jpg',
         'jpeg',
         'png',
@@ -134,6 +135,11 @@ function App() {
         'bmp',
         'heic',
         'raw',
+        'tiff',
+        'tif',
+        'tga',
+        'ico',
+        // Videos
         'mp4',
         'mkv',
         'avi',
@@ -141,6 +147,12 @@ function App() {
         'webm',
         'flv',
         'm4v',
+        // Documents with thumbnails
+        'pdf',
+        'ai',
+        'eps',
+        'psd',
+        'psb',
       ]);
       const mediaFiles = mediaRelevantFiles.filter((file) => {
         const ext = file.extension?.toLowerCase();
