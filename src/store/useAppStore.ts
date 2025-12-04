@@ -17,6 +17,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { open as openShell } from '@tauri-apps/plugin-shell';
 import { ask, message, open as openDialog } from '@tauri-apps/plugin-dialog';
 import { getExtractableArchiveFormat, isArchiveFile } from '@/utils/fileTypes';
+import { basename } from '@/utils/pathUtils';
 import { useToastStore } from './useToastStore';
 
 // Concurrency limiter for app icon generation requests (macOS)
@@ -152,13 +153,6 @@ const isPathInsideRepo = (path: string, repoRoot: string): boolean => {
 
   const rootWithSlash = normalizedRoot.endsWith('/') ? normalizedRoot : `${normalizedRoot}/`;
   return normalizedPath.startsWith(rootWithSlash);
-};
-
-const deriveNameFromPath = (path: string): string => {
-  if (!path) return '';
-  const normalized = path.replace(/\\+/g, '/');
-  const segments = normalized.split('/').filter(Boolean);
-  return segments.length ? segments[segments.length - 1] : normalized;
 };
 
 interface AppState {
@@ -562,9 +556,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (response.fallbackToPermanent) {
         const count = selectedPaths.length;
         const targetLabel =
-          count === 1
-            ? (selectedItems[0]?.name ?? deriveNameFromPath(selectedPaths[0]))
-            : `${count} items`;
+          count === 1 ? (selectedItems[0]?.name ?? basename(selectedPaths[0])) : `${count} items`;
 
         const confirmed = await ask(
           `Unable to move ${targetLabel} to the Trash.\nDelete permanently instead?`,
@@ -591,7 +583,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       const count = selectedPaths.length;
       const messageText =
         count === 1
-          ? `${selectedItems[0]?.name ?? deriveNameFromPath(selectedPaths[0])} moved to Trash.`
+          ? `${selectedItems[0]?.name ?? basename(selectedPaths[0])} moved to Trash.`
           : `${count} items moved to Trash.`;
 
       const undoToken = response.undoToken;
@@ -665,9 +657,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     const count = selectedPaths.length;
     const targetLabel =
-      count === 1
-        ? (selectedItems[0]?.name ?? deriveNameFromPath(selectedPaths[0]))
-        : `${count} items`;
+      count === 1 ? (selectedItems[0]?.name ?? basename(selectedPaths[0])) : `${count} items`;
 
     let confirmed = false;
     try {
@@ -689,7 +679,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       const item = fileMap.get(path);
       return {
         path,
-        name: item?.name ?? deriveNameFromPath(path),
+        name: item?.name ?? basename(path),
         isDirectory: item?.is_directory ?? false,
       };
     });
@@ -729,7 +719,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
       const messageText =
         count === 1
-          ? `${selectedItems[0]?.name ?? deriveNameFromPath(selectedPaths[0])} deleted permanently.`
+          ? `${selectedItems[0]?.name ?? basename(selectedPaths[0])} deleted permanently.`
           : `${count} items deleted permanently.`;
 
       toastStore.addToast({

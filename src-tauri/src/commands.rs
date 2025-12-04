@@ -30,7 +30,8 @@ use walkdir::WalkDir;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 use crate::fs_utils::{
-    self, expand_path, resolve_symlink_parent, DiskUsage, FileItem, SymlinkResolution,
+    self, delete_file_or_directory, expand_path, resolve_symlink_parent, DiskUsage, FileItem,
+    SymlinkResolution,
 };
 use crate::fs_watcher;
 use crate::locations::{resolve_location, LocationCapabilities, LocationInput, LocationSummary};

@@ -5,6 +5,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { CheckCircle, WarningCircle } from 'phosphor-react';
 import type { DeleteProgressPayload, DeleteProgressUpdatePayload } from '@/types';
 import { useDeleteProgressStore } from '@/store/useDeleteProgressStore';
+import { basename } from '@/utils/pathUtils';
 import QuickTooltip from '@/components/QuickTooltip';
 
 const CONTAINER_TOP_PAD = '3rem';
@@ -92,16 +93,10 @@ export default function DeleteProgressWindow() {
   }, [finished, windowRef]);
 
   const progressRatio = totalItems > 0 ? Math.min(completed / totalItems, 1) : 0;
-  const currentItem = useMemo(() => {
-    if (!currentPath) return undefined;
-    try {
-      const normalized = currentPath.replace(/\\+/g, '/');
-      const [, last] = normalized.match(/([^/]+)\/?$/) ?? [];
-      return last ?? currentPath;
-    } catch {
-      return currentPath;
-    }
-  }, [currentPath]);
+  const currentItem = useMemo(
+    () => (currentPath ? basename(currentPath) : undefined),
+    [currentPath]
+  );
 
   const statusLabel = error
     ? 'Delete failed'
