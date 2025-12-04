@@ -40,8 +40,8 @@ describe('useAppStore', () => {
 
     vi.clearAllMocks();
 
-    // Mock the read_directory command that refreshCurrentDirectory calls
-    mockInvoke.mockImplementation((cmd) => {
+    // Mock the directory commands
+    mockInvoke.mockImplementation((cmd, payload) => {
       if (cmd === 'read_directory') {
         return Promise.resolve({
           entries: [],
@@ -66,6 +66,37 @@ describe('useAppStore', () => {
             requiresExplicitRefresh: false,
           },
         });
+      }
+      // Mock streaming command - use the sessionId passed from frontend
+      if (cmd === 'read_directory_streaming_command') {
+        const args = payload as { path: string; sessionId: string };
+        return Promise.resolve({
+          sessionId: args.sessionId, // Return the same sessionId passed by frontend
+          location: {
+            raw: 'file:///test',
+            scheme: 'file',
+            authority: null,
+            path: '/test',
+            displayPath: '/test',
+          },
+          capabilities: {
+            scheme: 'file',
+            displayName: 'Local Filesystem',
+            canRead: true,
+            canWrite: true,
+            canCreateDirectories: true,
+            canDelete: true,
+            canRename: true,
+            canCopy: true,
+            canMove: true,
+            supportsWatching: true,
+            requiresExplicitRefresh: false,
+          },
+        });
+      }
+      // Mock git status
+      if (cmd === 'get_git_status') {
+        return Promise.resolve(null);
       }
       return Promise.resolve(undefined);
     });
@@ -123,10 +154,13 @@ describe('useAppStore', () => {
       });
     });
 
-    it('should call refreshCurrentDirectory after toggling', async () => {
+    it('should call refreshCurrentDirectoryStreaming after toggling', async () => {
       await useAppStore.getState().toggleHiddenFiles();
 
-      expect(mockInvoke).toHaveBeenCalledWith('read_directory', { path: '/test' });
+      expect(mockInvoke).toHaveBeenCalledWith(
+        'read_directory_streaming_command',
+        expect.objectContaining({ path: '/test', sessionId: expect.any(String) })
+      );
     });
 
     it('should use directory-specific preference over global', async () => {
@@ -612,6 +646,256 @@ describe('useAppStore', () => {
         'Permanently delete 2 items? This action cannot be undone.',
         expect.anything()
       );
+    });
+  });
+
+  describe('streaming', () => {
+    const mockFile1 = {
+      path: '/test/file1.txt',
+      name: 'file1.txt',
+      is_directory: false,
+      size: 100,
+      modified: '2024-01-01T00:00:00.000Z',
+      extension: 'txt',
+      is_hidden: false,
+      is_symlink: false,
+      is_git_repo: false,
+    };
+
+    const mockFile2 = {
+      path: '/test/file2.txt',
+      name: 'file2.txt',
+      is_directory: false,
+      size: 200,
+      modified: '2024-01-02T00:00:00.000Z',
+      extension: 'txt',
+      is_hidden: false,
+      is_symlink: false,
+      is_git_repo: false,
+    };
+
+    beforeEach(() => {
+      useAppStore.setState({
+        files: [],
+        streamingSessionId: null,
+        streamingTotalCount: null,
+        isStreamingComplete: true,
+        loading: false,
+      });
+    });
+
+    describe('appendStreamingBatch', () => {
+      it('should append files from a batch with matching session ID', () => {
+        useAppStore.setState({
+          streamingSessionId: 'session-1',
+          files: [mockFile1],
+          isStreamingComplete: false,
+        });
+
+        useAppStore.getState().appendStreamingBatch({
+          sessionId: 'session-1',
+          batchIndex: 1,
+          entries: [mockFile2],
+          isFinal: false,
+          totalCount: 100,
+        });
+
+        const state = useAppStore.getState();
+        expect(state.files).toHaveLength(2);
+        expect(state.files[1]).toEqual(mockFile2);
+        expect(state.streamingTotalCount).toBe(100);
+        expect(state.isStreamingComplete).toBe(false);
+      });
+
+      it('should ignore batches from different session IDs', () => {
+        useAppStore.setState({
+          streamingSessionId: 'session-1',
+          files: [mockFile1],
+          isStreamingComplete: false,
+        });
+
+        useAppStore.getState().appendStreamingBatch({
+          sessionId: 'session-2',
+          batchIndex: 0,
+          entries: [mockFile2],
+          isFinal: false,
+          totalCount: 50,
+        });
+
+        const state = useAppStore.getState();
+        expect(state.files).toHaveLength(1);
+        expect(state.files[0]).toEqual(mockFile1);
+      });
+
+      it('should set isStreamingComplete to true on final batch', () => {
+        useAppStore.setState({
+          streamingSessionId: 'session-1',
+          files: [mockFile1],
+          isStreamingComplete: false,
+          loading: true,
+        });
+
+        useAppStore.getState().appendStreamingBatch({
+          sessionId: 'session-1',
+          batchIndex: 1,
+          entries: [mockFile2],
+          isFinal: true,
+          totalCount: 2,
+        });
+
+        const state = useAppStore.getState();
+        expect(state.isStreamingComplete).toBe(true);
+        expect(state.loading).toBe(false);
+      });
+
+      it('should preserve existing totalCount if batch does not provide one', () => {
+        useAppStore.setState({
+          streamingSessionId: 'session-1',
+          files: [],
+          streamingTotalCount: 100,
+          isStreamingComplete: false,
+        });
+
+        useAppStore.getState().appendStreamingBatch({
+          sessionId: 'session-1',
+          batchIndex: 0,
+          entries: [mockFile1],
+          isFinal: false,
+          totalCount: null,
+        });
+
+        const state = useAppStore.getState();
+        expect(state.streamingTotalCount).toBe(100);
+      });
+    });
+
+    describe('cancelDirectoryStream', () => {
+      it('should cancel active streaming session', async () => {
+        useAppStore.setState({
+          streamingSessionId: 'session-1',
+          isStreamingComplete: false,
+        });
+
+        mockInvoke.mockResolvedValueOnce(undefined);
+
+        await useAppStore.getState().cancelDirectoryStream();
+
+        expect(mockInvoke).toHaveBeenCalledWith('cancel_directory_stream', {
+          sessionId: 'session-1',
+        });
+        expect(useAppStore.getState().streamingSessionId).toBeNull();
+        expect(useAppStore.getState().isStreamingComplete).toBe(true);
+      });
+
+      it('should do nothing when no active streaming session', async () => {
+        useAppStore.setState({
+          streamingSessionId: null,
+          isStreamingComplete: true,
+        });
+
+        await useAppStore.getState().cancelDirectoryStream();
+
+        expect(mockInvoke).not.toHaveBeenCalledWith('cancel_directory_stream', expect.anything());
+      });
+    });
+
+    describe('refreshCurrentDirectoryStreaming', () => {
+      it('should start streaming and set initial state', async () => {
+        mockInvoke.mockImplementation((cmd, payload) => {
+          if (cmd === 'read_directory_streaming_command') {
+            const args = payload as { path: string; sessionId: string };
+            return Promise.resolve({
+              sessionId: args.sessionId, // Return the frontend-generated sessionId
+              location: {
+                raw: 'file:///test',
+                scheme: 'file',
+                authority: null,
+                path: '/test',
+                displayPath: '/test',
+              },
+              capabilities: {
+                scheme: 'file',
+                displayName: 'Local Filesystem',
+                canRead: true,
+                canWrite: true,
+                canCreateDirectories: true,
+                canDelete: true,
+                canRename: true,
+                canCopy: true,
+                canMove: true,
+                supportsWatching: true,
+                requiresExplicitRefresh: false,
+              },
+            });
+          }
+          // Mock git status refresh
+          if (cmd === 'get_git_status') {
+            return Promise.resolve(null);
+          }
+          return Promise.resolve(undefined);
+        });
+
+        await useAppStore.getState().refreshCurrentDirectoryStreaming();
+
+        const state = useAppStore.getState();
+        expect(state.streamingSessionId).toBeTruthy(); // Frontend generates the sessionId
+        expect(state.files).toEqual([]);
+        expect(state.isStreamingComplete).toBe(false);
+      });
+
+      it('should cancel previous streaming session before starting new one', async () => {
+        useAppStore.setState({
+          streamingSessionId: 'old-session',
+          isStreamingComplete: false,
+        });
+
+        mockInvoke.mockImplementation((cmd, payload) => {
+          if (cmd === 'cancel_directory_stream') {
+            return Promise.resolve(undefined);
+          }
+          if (cmd === 'read_directory_streaming_command') {
+            const args = payload as { path: string; sessionId: string };
+            return Promise.resolve({
+              sessionId: args.sessionId, // Return the frontend-generated sessionId
+              location: {
+                raw: 'file:///test',
+                scheme: 'file',
+                authority: null,
+                path: '/test',
+                displayPath: '/test',
+              },
+              capabilities: {
+                scheme: 'file',
+                displayName: 'Local Filesystem',
+                canRead: true,
+                canWrite: true,
+                canCreateDirectories: true,
+                canDelete: true,
+                canRename: true,
+                canCopy: true,
+                canMove: true,
+                supportsWatching: true,
+                requiresExplicitRefresh: false,
+              },
+            });
+          }
+          // Mock git status refresh
+          if (cmd === 'get_git_status') {
+            return Promise.resolve(null);
+          }
+          return Promise.resolve(undefined);
+        });
+
+        await useAppStore.getState().refreshCurrentDirectoryStreaming();
+
+        expect(mockInvoke).toHaveBeenCalledWith('cancel_directory_stream', {
+          sessionId: 'old-session',
+        });
+        // Session ID is generated by frontend, just verify it changed
+        const newSessionId = useAppStore.getState().streamingSessionId;
+        expect(newSessionId).toBeTruthy();
+        expect(newSessionId).not.toBe('old-session');
+      });
     });
   });
 });

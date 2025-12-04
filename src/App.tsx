@@ -9,6 +9,7 @@ import StatusBar from './components/StatusBar';
 import { useAppStore } from './store/useAppStore';
 import { useToastStore } from './store/useToastStore';
 import { openFolderSizeWindow } from './store/useFolderSizeStore';
+import { useDirectoryStream } from './hooks/useDirectoryStream';
 import { message } from '@tauri-apps/plugin-dialog';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 
@@ -51,6 +52,10 @@ function App() {
     globalPreferences,
     loadPinnedDirectories,
   } = useAppStore();
+
+  // Set up directory streaming event listener
+  useDirectoryStream();
+
   const initializedRef = useRef(false);
   const [showLoadingOverlay, setShowLoadingOverlay] = useState(false);
   const prefsLoadedRef = useRef(false);
@@ -308,58 +313,35 @@ function App() {
           console.warn('Could not get system accent color:', e);
         }
 
-        // Now try to load the initial directory
+        // Now try to load the initial directory using streaming
         let loadSuccess = false;
-        try {
-          const listing = await invoke<DirectoryListingResponse>('read_directory', {
-            path: startPath,
+        const tryLoadPath = async (path: string): Promise<boolean> => {
+          try {
+            setCurrentPath(path);
+            navigateTo(path);
+            await useAppStore.getState().refreshCurrentDirectoryStreaming();
+            return true;
+          } catch (err) {
+            console.error('Failed to load directory:', path, err);
+            return false;
+          }
+        };
+
+        // Try paths in order: startPath -> homeDir -> root
+        loadSuccess = await tryLoadPath(startPath);
+        if (!loadSuccess && startPath !== homeDir) {
+          loadSuccess = await tryLoadPath(homeDir);
+        }
+        if (!loadSuccess) {
+          loadSuccess = await tryLoadPath('/');
+        }
+
+        if (!loadSuccess) {
+          await message('Unable to access any directory. Please check filesystem permissions.', {
+            title: 'Fatal Error',
+            okLabel: 'OK',
+            kind: 'error',
           });
-          const resolvedPath = await handleDirectoryListing(listing);
-          setCurrentPath(resolvedPath);
-          navigateTo(resolvedPath);
-          loadSuccess = true;
-        } catch (dirError) {
-          console.error('Failed to load initial directory:', startPath, dirError);
-
-          // Try fallback to home directory
-          if (startPath !== homeDir) {
-            try {
-              const listing = await invoke<DirectoryListingResponse>('read_directory', {
-                path: homeDir,
-              });
-              const resolvedPath = await handleDirectoryListing(listing);
-              setCurrentPath(resolvedPath);
-              navigateTo(resolvedPath);
-              loadSuccess = true;
-            } catch (homeError) {
-              console.error('Failed to load home directory:', homeError);
-            }
-          }
-
-          // Last resort: try root
-          if (!loadSuccess) {
-            try {
-              const rootPath = '/';
-              const listing = await invoke<DirectoryListingResponse>('read_directory', {
-                path: rootPath,
-              });
-              const resolvedPath = await handleDirectoryListing(listing);
-              setCurrentPath(resolvedPath);
-              navigateTo(resolvedPath);
-              loadSuccess = true;
-            } catch (rootError) {
-              console.error('Failed to load root directory:', rootError);
-              // Show error only if we can't load ANY directory
-              await message(
-                'Unable to access any directory. Please check filesystem permissions.',
-                {
-                  title: 'Fatal Error',
-                  okLabel: 'OK',
-                  kind: 'error',
-                }
-              );
-            }
-          }
         }
 
         // Mark initialization complete only if we successfully loaded something
@@ -440,25 +422,26 @@ function App() {
           console.warn('Failed to load directory preferences:', error);
         }
 
-        // Try to load the directory
-        const listing = await invoke<DirectoryListingResponse>('read_directory', {
-          path: currentPath,
-        });
-        await handleDirectoryListing(listing);
+        // Try to load the directory using streaming for better performance
+        await useAppStore.getState().refreshCurrentDirectoryStreaming();
         setError(undefined); // Clear any previous errors on success
 
         // Check if we have a pending file selection (from navigating to a file path)
+        // Note: With streaming, files may not be loaded yet, so we store it for later
         if (pendingFileSelectionRef.current) {
           const fileToSelect = pendingFileSelectionRef.current;
           pendingFileSelectionRef.current = null;
-          // Find the file in the loaded files and select it
-          const fileExists = listing.entries.some((f: FileItem) => f.name === fileToSelect);
-          if (fileExists) {
-            const fullPath = currentPath.endsWith('/')
-              ? `${currentPath}${fileToSelect}`
-              : `${currentPath}/${fileToSelect}`;
-            useAppStore.getState().setSelectedFiles([fullPath]);
-          }
+          // Wait a short time for first batch, then try to select
+          setTimeout(() => {
+            const files = useAppStore.getState().files;
+            const fileExists = files.some((f: FileItem) => f.name === fileToSelect);
+            if (fileExists) {
+              const fullPath = currentPath.endsWith('/')
+                ? `${currentPath}${fileToSelect}`
+                : `${currentPath}/${fileToSelect}`;
+              useAppStore.getState().setSelectedFiles([fullPath]);
+            }
+          }, 100);
         }
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
@@ -508,13 +491,12 @@ function App() {
             setCurrentPath(homeDir);
           }
         }
-      } finally {
-        setLoading(false);
       }
+      // Note: Don't set loading=false here - streaming handles loading state via appendStreamingBatch
     }
 
     loadDirectory();
-  }, [currentPath, setLoading, setError, setFiles, setCurrentPath]);
+  }, [currentPath, setError, setCurrentPath]);
 
   // File system watcher for auto-reload
   useEffect(() => {
@@ -541,8 +523,8 @@ function App() {
           if (!isActive || loading) return;
 
           try {
-            const { refreshCurrentDirectory, selectedFiles } = useAppStore.getState();
-            await refreshCurrentDirectory();
+            const { refreshCurrentDirectoryStreaming, selectedFiles } = useAppStore.getState();
+            await refreshCurrentDirectoryStreaming();
 
             // Preserve selection if possible after refresh
             if (selectedFiles.length > 0) {
@@ -809,8 +791,8 @@ function App() {
         try {
           await invoke('clear_thumbnail_cache');
           // Optionally refresh current view to show the effect
-          const { refreshCurrentDirectory } = useAppStore.getState();
-          await refreshCurrentDirectory();
+          const { refreshCurrentDirectoryStreaming } = useAppStore.getState();
+          await refreshCurrentDirectoryStreaming();
         } catch (err) {
           console.error('Failed to clear thumbnail cache:', err);
         }

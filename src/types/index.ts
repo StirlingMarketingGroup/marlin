@@ -41,6 +41,22 @@ export interface DirectoryListingResponse {
   entries: FileItem[];
 }
 
+/** Response from starting a streaming directory read */
+export interface StreamingDirectoryResponse {
+  sessionId: string;
+  location: LocationSummary;
+  capabilities: LocationCapabilities;
+}
+
+/** A batch of files emitted during streaming directory reads */
+export interface DirectoryBatch {
+  sessionId: string;
+  batchIndex: number;
+  entries: FileItem[];
+  isFinal: boolean;
+  totalCount?: number | null;
+}
+
 export interface ViewPreferences {
   viewMode: 'grid' | 'list' | 'details';
   sortBy: 'name' | 'size' | 'modified' | 'type';

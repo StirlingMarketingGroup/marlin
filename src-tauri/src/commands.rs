@@ -30,8 +30,8 @@ use walkdir::WalkDir;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 use crate::fs_utils::{
-    self, delete_file_or_directory, expand_path, resolve_symlink_parent, DiskUsage, FileItem,
-    SymlinkResolution,
+    self, delete_file_or_directory, expand_path, read_directory_streaming,
+    resolve_symlink_parent, DiskUsage, FileItem, SymlinkResolution,
 };
 use crate::fs_watcher;
 use crate::locations::{resolve_location, LocationCapabilities, LocationInput, LocationSummary};
@@ -39,7 +39,10 @@ use crate::locations::{resolve_location, LocationCapabilities, LocationInput, Lo
 use crate::macos_security;
 #[cfg(target_os = "macos")]
 use crate::state::MacTrashUndoItem;
-use crate::state::{FolderSizeState, FolderSizeTaskHandle, TrashUndoRecord, TrashUndoState};
+use crate::state::{
+    DirectoryStreamHandle, DirectoryStreamState, FolderSizeState, FolderSizeTaskHandle,
+    TrashUndoRecord, TrashUndoState,
+};
 use bzip2::read::BzDecoder;
 use flate2::read::GzDecoder;
 use tar::Archive as TarArchive;
@@ -1288,6 +1291,131 @@ pub async fn read_directory(path: LocationInput) -> Result<DirectoryListingRespo
         capabilities,
         entries: listing.entries,
     })
+}
+
+/// Event name for directory streaming batches
+const DIRECTORY_BATCH_EVENT: &str = "directory-batch";
+
+/// Response returned when starting a streaming directory read
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamingDirectoryResponse {
+    pub session_id: String,
+    pub location: LocationSummary,
+    pub capabilities: LocationCapabilities,
+}
+
+/// Start streaming directory contents. Returns immediately with session info,
+/// then emits batches via the "directory-batch" event.
+/// The session_id is provided by the frontend to avoid race conditions - the frontend
+/// sets up the session ID in state BEFORE calling this command, ensuring batches
+/// arriving via events will be accepted immediately.
+#[command]
+pub async fn read_directory_streaming_command(
+    app: AppHandle,
+    state: tauri::State<'_, DirectoryStreamState>,
+    path: LocationInput,
+    session_id: String,
+) -> Result<StreamingDirectoryResponse, String> {
+    let (provider, location) = resolve_location(path)?;
+    let capabilities = provider.capabilities(&location);
+
+    // Only support file:// locations for streaming for now
+    if location.scheme() != "file" {
+        return Err("Streaming only supported for local file system".to_string());
+    }
+
+    let raw_path = location.to_path_string();
+    let expanded_path = expand_path(&raw_path)?;
+
+    if !expanded_path.exists() {
+        return Err("Path does not exist".to_string());
+    }
+    if !expanded_path.is_dir() {
+        return Err("Path is not a directory".to_string());
+    }
+
+    // Use the session_id provided by the frontend
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+
+    // Register the session
+    {
+        let mut guard = state
+            .sessions
+            .lock()
+            .map_err(|e| format!("Failed to lock sessions: {}", e))?;
+
+        // If there's an existing session with the same ID (unlikely), cancel it
+        if let Some(existing) = guard.insert(
+            session_id.clone(),
+            DirectoryStreamHandle {
+                cancel_flag: cancel_flag.clone(),
+            },
+        ) {
+            existing.cancel_flag.store(true, Ordering::SeqCst);
+        }
+    }
+
+    let location_summary = LocationSummary::new(
+        "file",
+        location.authority().map(|s| s.to_string()),
+        expanded_path.to_string_lossy().to_string(),
+        expanded_path.to_string_lossy().to_string(),
+    );
+
+    // Clone values for the async task
+    let app_for_task = app.clone();
+    let session_for_task = session_id.clone();
+    let cancel_for_task = cancel_flag;
+    let path_for_task = expanded_path;
+
+    // Spawn background task for streaming
+    tauri::async_runtime::spawn(async move {
+        let session_for_blocking = session_for_task.clone();
+        let cancel_for_blocking = cancel_for_task.clone();
+
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            read_directory_streaming(
+                &path_for_task,
+                session_for_blocking,
+                cancel_for_blocking,
+                |batch| {
+                    if let Err(e) = app_for_task.emit(DIRECTORY_BATCH_EVENT, &batch) {
+                        warn!("Failed to emit directory batch: {}", e);
+                    }
+                },
+            )
+        })
+        .await;
+
+        if let Err(e) = result {
+            warn!("Directory streaming task failed: {}", e);
+        }
+    });
+
+    Ok(StreamingDirectoryResponse {
+        session_id,
+        location: location_summary,
+        capabilities,
+    })
+}
+
+/// Cancel an active directory streaming session
+#[command]
+pub fn cancel_directory_stream(
+    state: tauri::State<'_, DirectoryStreamState>,
+    session_id: String,
+) -> Result<(), String> {
+    let guard = state
+        .sessions
+        .lock()
+        .map_err(|e| format!("Failed to lock sessions: {}", e))?;
+
+    if let Some(handle) = guard.get(&session_id) {
+        handle.cancel_flag.store(true, Ordering::SeqCst);
+    }
+
+    Ok(())
 }
 
 #[command]

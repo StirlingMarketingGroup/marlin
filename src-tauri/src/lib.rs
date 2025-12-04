@@ -12,7 +12,7 @@ mod plugins;
 mod state;
 mod thumbnails;
 
-use state::{FolderSizeState, MenuState, TrashUndoState};
+use state::{DirectoryStreamState, FolderSizeState, MenuState, TrashUndoState};
 use std::sync::Mutex;
 #[cfg(target_os = "linux")]
 use std::sync::OnceLock;
@@ -80,6 +80,8 @@ pub fn run() {
             commands::get_disk_usage,
             commands::get_git_status,
             commands::read_directory,
+            commands::read_directory_streaming_command,
+            commands::cancel_directory_stream,
             commands::get_file_metadata,
             commands::resolve_symlink_parent_command,
             commands::create_directory_command,
@@ -212,6 +214,7 @@ pub fn run() {
 
             app.manage(FolderSizeState::default());
             app.manage(TrashUndoState::default());
+            app.manage(DirectoryStreamState::default());
 
             Ok(())
         })

@@ -1,4 +1,13 @@
-import { useState, useMemo, useEffect, useLayoutEffect, useRef, type ReactNode } from 'react';
+import {
+  useState,
+  useMemo,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useCallback,
+  type ReactNode,
+} from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import {
   Folder,
   ImageSquare,
@@ -247,6 +256,8 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     setPendingRevealTarget,
     extractArchive,
     openFile,
+    isStreamingComplete,
+    streamingTotalCount,
   } = useAppStore();
   const { renameTargetPath, setRenameTarget, renameFile } = useAppStore();
   const { startNativeDrag, endNativeDrag, isDraggedDirectory } = useDragStore();
@@ -266,6 +277,70 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
   // Tile width from preferences (default 120)
   // Allow full range up to 320 to match ZoomSlider
   const tile = Math.max(80, Math.min(320, preferences.gridSize ?? 120));
+
+  // Container dimensions for virtual scrolling
+  const parentRef = useRef<HTMLDivElement>(null);
+  const [containerWidth, setContainerWidth] = useState(0);
+
+  // Measure container width for column calculation
+  useLayoutEffect(() => {
+    const el = parentRef.current;
+    if (!el) return;
+
+    let rafId: number | undefined;
+
+    const measureWidth = () => {
+      if (el.clientWidth > 0) {
+        setContainerWidth(el.clientWidth);
+      } else {
+        // Element not yet laid out, retry on next frame
+        rafId = requestAnimationFrame(measureWidth);
+      }
+    };
+
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.contentRect.width > 0) {
+          setContainerWidth(entry.contentRect.width);
+        }
+      }
+    });
+
+    observer.observe(el);
+    // Initial measurement with retry for race conditions
+    measureWidth();
+
+    return () => {
+      observer.disconnect();
+      if (rafId !== undefined) {
+        cancelAnimationFrame(rafId);
+      }
+    };
+  }, []);
+
+  // Safety: re-measure if width is still 0 when files change (navigation)
+  useEffect(() => {
+    if (containerWidth === 0 && parentRef.current) {
+      const width = parentRef.current.clientWidth;
+      if (width > 0) {
+        setContainerWidth(width);
+      }
+    }
+  }, [containerWidth, files]);
+
+  // Calculate grid layout constants
+  const gap = 8; // gap-2 = 8px
+  const itemWidth = tile + 24 + gap; // tile + padding + gap
+  const columnCount = Math.max(1, Math.floor((containerWidth + gap) / itemWidth));
+
+  // Row height calculation - must be >= actual rendered height to prevent overlap
+  const previewPad = Math.max(3, Math.min(8, Math.round(tile * 0.03)));
+  const previewHeight = Math.max(48, Math.min(tile - previewPad * 2, 320));
+  // Text area: filename (2 lines ~40px) + size (~16px) + dimensions (~16px) + spacing
+  const textHeight = 80;
+  const rowPadding = 16; // py-2 = 8px top + 8px bottom
+  const verticalGap = gap; // Match horizontal gap (8px)
+  const rowHeight = previewHeight + textHeight + rowPadding + verticalGap;
 
   const isMac =
     typeof navigator !== 'undefined' && navigator.platform.toUpperCase().includes('MAC');
@@ -672,6 +747,24 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     ? sortedFiles
     : sortedFiles.filter((file) => !file.is_hidden);
 
+  // Group files into rows for virtual scrolling
+  const rows = useMemo(() => {
+    if (columnCount === 0) return [];
+    const result: FileItem[][] = [];
+    for (let i = 0; i < filteredFiles.length; i += columnCount) {
+      result.push(filteredFiles.slice(i, i + columnCount));
+    }
+    return result;
+  }, [filteredFiles, columnCount]);
+
+  // Virtual scrolling for rows
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: useCallback(() => rowHeight, [rowHeight]),
+    overscan: 3,
+  });
+
   useEffect(() => {
     if (!pendingRevealTarget) return;
     const targetPath = pendingRevealTarget;
@@ -800,139 +893,182 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     setSelectionLead(file.path);
   }
 
-  return (
-    <div className="p-2" ref={gridRef}>
-      <div
-        className="grid gap-2 file-grid"
-        style={{
-          gridTemplateColumns: `repeat(auto-fill, minmax(${tile + 24}px, 1fr))`,
-        }}
-      >
-        {filteredFiles.map((file) => {
-          const isSelected = selectedFiles.includes(file.path);
-          const isDragged =
-            (draggedFile !== null &&
-              (draggedFile === file.path || selectedFiles.includes(file.path))) ||
-            isDraggedDirectory(file.path);
-          const isRenaming = renameTargetPath === file.path;
+  // Render a single file item (extracted for reuse in virtual rows)
+  const renderFileItem = (file: FileItem) => {
+    const isSelected = selectedFiles.includes(file.path);
+    const isDragged =
+      (draggedFile !== null && (draggedFile === file.path || selectedFiles.includes(file.path))) ||
+      isDraggedDirectory(file.path);
+    const isRenaming = renameTargetPath === file.path;
 
-          return (
-            <div
-              key={file.path}
-              className={`relative flex flex-col items-center px-3 py-2 rounded-md cursor-pointer transition-all duration-75 ${
-                isSelected || isRenaming
-                  ? 'bg-accent-selected z-20 overflow-visible'
-                  : 'hover:bg-app-light/70'
-              } ${isDragged ? 'opacity-50' : ''} ${file.is_hidden ? 'opacity-60' : ''}`}
-              data-file-item="true"
-              data-file-path={file.path}
-              data-tauri-drag-region={false}
+    return (
+      <div
+        key={file.path}
+        className={`relative flex flex-col items-center px-3 py-2 rounded-md cursor-pointer transition-all duration-75 ${
+          isSelected || isRenaming
+            ? 'bg-accent-selected z-20 overflow-visible'
+            : 'hover:bg-app-light/70'
+        } ${isDragged ? 'opacity-50' : ''} ${file.is_hidden ? 'opacity-60' : ''}`}
+        data-file-item="true"
+        data-file-path={file.path}
+        data-tauri-drag-region={false}
+        onClick={(e) => {
+          e.stopPropagation();
+          handleFileClick(e, file);
+        }}
+        onDoubleClick={(e) => {
+          e.stopPropagation();
+          const now = Date.now();
+          const recentlyHandled =
+            lastHandledDoubleRef.current &&
+            lastHandledDoubleRef.current.path === file.path &&
+            now - lastHandledDoubleRef.current.time < 500;
+          if (recentlyHandled) {
+            return;
+          }
+          lastHandledDoubleRef.current = { path: file.path, time: now };
+          setSelectedFiles([file.path]);
+          setSelectionAnchor(file.path);
+          setSelectionLead(file.path);
+          void handleDoubleClick(file);
+        }}
+        onMouseDown={(e) => handleMouseDownForFile(e, file)}
+        draggable={false}
+      >
+        <div
+          className="mb-2 flex-shrink-0"
+          style={{
+            width: tile,
+            display: 'flex',
+            justifyContent: 'center',
+            height: Math.max(
+              48,
+              Math.min(tile - Math.max(3, Math.min(8, Math.round(tile * 0.03))) * 2, 320)
+            ),
+          }}
+        >
+          <GridFilePreview
+            file={file}
+            isMac={isMac}
+            fallbackIcon={getFileIcon(file)}
+            tile={tile}
+            isSymlink={file.is_symlink}
+            isGitRepo={file.is_git_repo}
+          />
+        </div>
+
+        {isRenaming ? (
+          <div
+            className="text-center w-full relative overflow-visible"
+            style={{ height: '1.25rem' }}
+          >
+            <input
+              ref={renameInputRef}
+              className={`text-sm font-medium bg-app-dark border border-app-border rounded px-2 py-[2px] ${isSelected ? 'text-white' : ''} whitespace-nowrap absolute left-1/2 text-center`}
+              style={{
+                minWidth: `${tile}px`,
+                width: renameInputWidth ? `${renameInputWidth}px` : `${tile}px`,
+                transform: `translateX(-50%) translateX(${renameInputOffset}px)`,
+                zIndex: 50,
+              }}
+              value={renameText}
+              onChange={(e) => setRenameText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  void commitRename();
+                }
+                if (e.key === 'Escape') {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  cancelRename();
+                }
+              }}
+              // Prevent grid item drag/open when interacting with the input
+              onMouseDown={(e) => {
+                e.stopPropagation();
+              }}
               onClick={(e) => {
                 e.stopPropagation();
-                handleFileClick(e, file);
               }}
               onDoubleClick={(e) => {
                 e.stopPropagation();
-                const now = Date.now();
-                const recentlyHandled =
-                  lastHandledDoubleRef.current &&
-                  lastHandledDoubleRef.current.path === file.path &&
-                  now - lastHandledDoubleRef.current.time < 500;
-                if (recentlyHandled) {
-                  return;
-                }
-                lastHandledDoubleRef.current = { path: file.path, time: now };
-                setSelectedFiles([file.path]);
-                setSelectionAnchor(file.path);
-                setSelectionLead(file.path);
-                void handleDoubleClick(file);
               }}
-              onMouseDown={(e) => handleMouseDownForFile(e, file)}
+              onDragStart={(e) => {
+                e.stopPropagation();
+              }}
+              onBlur={cancelRename}
+              data-tauri-drag-region={false}
               draggable={false}
-            >
+            />
+          </div>
+        ) : (
+          <div className="text-center w-full">
+            <FileNameDisplay
+              file={file}
+              maxWidth={tile - 16} // Account for padding
+              isSelected={isSelected}
+              variant="grid"
+              showSize={true}
+              style={{ margin: '0 auto' }}
+            />
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <div ref={parentRef} className="h-full overflow-auto p-2" data-grid-scroll-container="true">
+      <div ref={gridRef}>
+        {/* Virtual scroll container */}
+        <div
+          style={{
+            height: `${virtualizer.getTotalSize()}px`,
+            width: '100%',
+            position: 'relative',
+          }}
+        >
+          {virtualizer.getVirtualItems().map((virtualRow) => {
+            const rowFiles = rows[virtualRow.index];
+            return (
               <div
-                className="mb-2 flex-shrink-0"
+                key={virtualRow.key}
                 style={{
-                  width: tile,
-                  display: 'flex',
-                  justifyContent: 'center',
-                  height: Math.max(
-                    48,
-                    Math.min(tile - Math.max(3, Math.min(8, Math.round(tile * 0.03))) * 2, 320)
-                  ),
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  width: '100%',
+                  transform: `translateY(${virtualRow.start}px)`,
                 }}
               >
-                <GridFilePreview
-                  file={file}
-                  isMac={isMac}
-                  fallbackIcon={getFileIcon(file)}
-                  tile={tile}
-                  isSymlink={file.is_symlink}
-                  isGitRepo={file.is_git_repo}
-                />
-              </div>
-
-              {isRenaming ? (
                 <div
-                  className="text-center w-full relative overflow-visible"
-                  style={{ height: '1.25rem' }}
+                  className="grid gap-2 file-grid"
+                  style={{
+                    gridTemplateColumns:
+                      columnCount > 0
+                        ? `repeat(${columnCount}, 1fr)`
+                        : `repeat(auto-fill, minmax(${tile + 24}px, 1fr))`,
+                  }}
                 >
-                  <input
-                    ref={renameInputRef}
-                    className={`text-sm font-medium bg-app-dark border border-app-border rounded px-2 py-[2px] ${isSelected ? 'text-white' : ''} whitespace-nowrap absolute left-1/2 text-center`}
-                    style={{
-                      minWidth: `${tile}px`,
-                      width: renameInputWidth ? `${renameInputWidth}px` : `${tile}px`,
-                      transform: `translateX(-50%) translateX(${renameInputOffset}px)`,
-                      zIndex: 50,
-                    }}
-                    value={renameText}
-                    onChange={(e) => setRenameText(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        void commitRename();
-                      }
-                      if (e.key === 'Escape') {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        cancelRename();
-                      }
-                    }}
-                    // Prevent grid item drag/open when interacting with the input
-                    onMouseDown={(e) => {
-                      e.stopPropagation();
-                    }}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                    }}
-                    onDoubleClick={(e) => {
-                      e.stopPropagation();
-                    }}
-                    onDragStart={(e) => {
-                      e.stopPropagation();
-                    }}
-                    onBlur={cancelRename}
-                    data-tauri-drag-region={false}
-                    draggable={false}
-                  />
+                  {rowFiles.map((file) => renderFileItem(file))}
                 </div>
-              ) : (
-                <div className="text-center w-full">
-                  <FileNameDisplay
-                    file={file}
-                    maxWidth={tile - 16} // Account for padding
-                    isSelected={isSelected}
-                    variant="grid"
-                    showSize={true}
-                    style={{ margin: '0 auto' }}
-                  />
-                </div>
-              )}
-            </div>
-          );
-        })}
+              </div>
+            );
+          })}
+        </div>
+        {/* Streaming progress indicator */}
+        {!isStreamingComplete && (
+          <div className="flex items-center justify-center py-4 text-app-muted text-sm gap-2">
+            <div className="animate-spin w-4 h-4 border-2 border-accent border-t-transparent rounded-full" />
+            <span>
+              Loading files...
+              {streamingTotalCount != null &&
+                ` (${filteredFiles.length} of ~${streamingTotalCount})`}
+            </span>
+          </div>
+        )}
       </div>
     </div>
   );

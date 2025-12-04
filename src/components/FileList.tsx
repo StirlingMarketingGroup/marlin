@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, useCallback, type ReactNode } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import {
   Folder,
   ImageSquare,
@@ -187,6 +188,8 @@ export default function FileList({ files, preferences }: FileListProps) {
     setPendingRevealTarget,
     extractArchive,
     openFile,
+    isStreamingComplete,
+    streamingTotalCount,
   } = useAppStore();
   const { renameTargetPath, setRenameTarget, renameFile } = useAppStore();
   const { startNativeDrag, endNativeDrag, isDraggedDirectory } = useDragStore();
@@ -195,8 +198,12 @@ export default function FileList({ files, preferences }: FileListProps) {
   const { fetchAppIcon } = useAppStore();
   const [draggedFile, setDraggedFile] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
   const lastClickRef = useRef<{ path: string; time: number; x: number; y: number } | null>(null);
   const lastHandledDoubleRef = useRef<{ path: string; time: number } | null>(null);
+
+  // Row height for virtual scrolling (py-[2px] + leading-5 = ~24px)
+  const ROW_HEIGHT = 24;
 
   // Clean up dragged state when drag ends
   // No longer needed - native drag handles cleanup
@@ -573,6 +580,14 @@ export default function FileList({ files, preferences }: FileListProps) {
     ? sortedFiles
     : sortedFiles.filter((file) => !file.is_hidden);
 
+  // Virtual scrolling for file rows
+  const virtualizer = useVirtualizer({
+    count: filteredFiles.length,
+    getScrollElement: () => scrollContainerRef.current,
+    estimateSize: useCallback(() => ROW_HEIGHT, []),
+    overscan: 5,
+  });
+
   useEffect(() => {
     if (!pendingRevealTarget) return;
     const targetPath = pendingRevealTarget;
@@ -702,207 +717,247 @@ export default function FileList({ files, preferences }: FileListProps) {
     setSelectionLead(file.path);
   }
 
-  return (
-    <>
-      <div className="h-full" ref={listRef}>
-        {/* Header */}
-        <div className="grid grid-cols-12 gap-3 px-3 py-2 border-b border-app-border border-t-0 text-[12px] font-medium text-app-muted bg-transparent select-none mb-1">
-          <button
-            className={`col-span-5 text-left hover:text-app-text pl-2 ${sortBy === 'name' ? 'text-app-text' : ''}`}
-            onClick={() => toggleSort('name')}
-            data-tauri-drag-region={false}
-          >
-            <span className="inline-flex items-center gap-1">
-              Name{' '}
-              {sortBy === 'name' &&
-                (sortOrder === 'asc' ? (
-                  <CaretUp className="w-3 h-3" />
-                ) : (
-                  <CaretDown className="w-3 h-3" />
-                ))}
-            </span>
-          </button>
-          <button
-            className={`col-span-2 text-left hover:text-app-text ${sortBy === 'size' ? 'text-app-text' : ''}`}
-            onClick={() => toggleSort('size')}
-            data-tauri-drag-region={false}
-          >
-            <span className="inline-flex items-center gap-1">
-              Size{' '}
-              {sortBy === 'size' &&
-                (sortOrder === 'asc' ? (
-                  <CaretUp className="w-3 h-3" />
-                ) : (
-                  <CaretDown className="w-3 h-3" />
-                ))}
-            </span>
-          </button>
-          <button
-            className={`col-span-2 text-left hover:text-app-text ${sortBy === 'type' ? 'text-app-text' : ''}`}
-            onClick={() => toggleSort('type')}
-            data-tauri-drag-region={false}
-          >
-            <span className="inline-flex items-center gap-1">
-              Type{' '}
-              {sortBy === 'type' &&
-                (sortOrder === 'asc' ? (
-                  <CaretUp className="w-3 h-3" />
-                ) : (
-                  <CaretDown className="w-3 h-3" />
-                ))}
-            </span>
-          </button>
-          <button
-            className={`col-span-3 text-left hover:text-app-text ${sortBy === 'modified' ? 'text-app-text' : ''}`}
-            onClick={() => toggleSort('modified')}
-            data-tauri-drag-region={false}
-          >
-            <span className="inline-flex items-center gap-1">
-              Modified{' '}
-              {sortBy === 'modified' &&
-                (sortOrder === 'asc' ? (
-                  <CaretUp className="w-3 h-3" />
-                ) : (
-                  <CaretDown className="w-3 h-3" />
-                ))}
-            </span>
-          </button>
+  // Render a single file row (extracted for reuse in virtual rows)
+  const renderFileRow = (file: FileItem, virtualIndex: number) => {
+    const isSelected = selectedFiles.includes(file.path);
+    const isDragged =
+      (draggedFile !== null && (draggedFile === file.path || selectedFiles.includes(file.path))) ||
+      isDraggedDirectory(file.path);
+    // Use virtual index for alternating row colors since we're virtualizing
+    const isOdd = virtualIndex % 2 === 1;
+
+    return (
+      <div
+        key={file.path}
+        className={`relative grid grid-cols-12 gap-3 py-[2px] leading-5 text-[13px] cursor-pointer transition-colors duration-75 rounded-full ${
+          isSelected
+            ? 'bg-accent-selected text-white'
+            : isOdd
+              ? 'bg-app-gray hover:bg-app-light'
+              : 'hover:bg-app-light'
+        } ${isDragged ? 'opacity-50' : ''} ${file.is_hidden ? 'opacity-60' : ''}`}
+        data-file-item="true"
+        data-file-path={file.path}
+        data-tauri-drag-region={false}
+        onClick={(e) => {
+          e.stopPropagation();
+          handleFileClick(e, file);
+        }}
+        onDoubleClick={(e) => {
+          e.stopPropagation();
+          const now = Date.now();
+          const recentlyHandled =
+            lastHandledDoubleRef.current &&
+            lastHandledDoubleRef.current.path === file.path &&
+            now - lastHandledDoubleRef.current.time < 500;
+          if (recentlyHandled) {
+            return;
+          }
+          lastHandledDoubleRef.current = { path: file.path, time: now };
+          setSelectedFiles([file.path]);
+          setSelectionAnchor(file.path);
+          setSelectionLead(file.path);
+          void handleDoubleClick(file);
+        }}
+        onMouseDown={(e) => handleMouseDownForFile(e, file)}
+        draggable={false}
+      >
+        {/* Name column */}
+        <div className="col-span-5 flex items-center gap-2 min-w-0 pl-2 pr-2">
+          <span className="relative flex-shrink-0 w-5 h-5">
+            <div className="w-full h-full flex items-center justify-center">
+              <ListFilePreview file={file} isMac={isMac} fallbackIcon={getFileIcon(file)} />
+            </div>
+            {file.is_git_repo && <GitRepoBadge size="sm" style={{ bottom: -2, left: -2 }} />}
+            {file.is_symlink && <SymlinkBadge size="sm" style={{ bottom: -2, right: -2 }} />}
+          </span>
+          {renameTargetPath === file.path ? (
+            <input
+              ref={renameInputRef}
+              className={`block flex-1 min-w-0 text-sm font-medium leading-5 h-5 bg-transparent border-0 rounded-none px-0 py-0 m-0 outline-none appearance-none ${isSelected ? 'text-white' : 'text-app-text'} truncate`}
+              style={{ fontFamily: 'inherit', transform: 'translateY(-0.5px)' }}
+              value={renameText}
+              onChange={(e) => setRenameText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  void commitRename();
+                }
+                if (e.key === 'Escape') {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  cancelRename();
+                }
+              }}
+              // Prevent row drag/open when interacting with the input
+              onMouseDown={(e) => {
+                e.stopPropagation();
+              }}
+              onClick={(e) => {
+                e.stopPropagation();
+              }}
+              onDoubleClick={(e) => {
+                e.stopPropagation();
+              }}
+              onDragStart={(e) => {
+                e.stopPropagation();
+              }}
+              onBlur={cancelRename}
+              data-tauri-drag-region={false}
+              draggable={false}
+            />
+          ) : (
+            <div className="flex-1 min-w-0 overflow-hidden" data-name-cell="true">
+              <FileNameDisplay
+                file={file}
+                isSelected={isSelected}
+                variant="list"
+                className="block"
+              />
+            </div>
+          )}
         </div>
 
-        {/* File rows */}
-        <div className="space-y-[2px] px-3 py-1 mt-1">
-          {filteredFiles.map((file) => {
-            const isSelected = selectedFiles.includes(file.path);
-            const isDragged =
-              (draggedFile !== null &&
-                (draggedFile === file.path || selectedFiles.includes(file.path))) ||
-              isDraggedDirectory(file.path);
+        {/* Size column */}
+        <div
+          className={`col-span-2 flex items-center ${isSelected ? 'text-white' : 'text-app-muted'}`}
+        >
+          {file.is_directory
+            ? file.child_count != null
+              ? `${file.child_count} item${file.child_count !== 1 ? 's' : ''}`
+              : '—'
+            : formatFileSize(file.size)}
+        </div>
 
+        {/* Type column */}
+        <div
+          className={`col-span-2 flex items-center ${isSelected ? 'text-white' : 'text-app-muted'}`}
+        >
+          {getTypeLabel(file)}
+        </div>
+
+        {/* Modified column */}
+        <div
+          className={`col-span-3 flex items-center ${isSelected ? 'text-white' : 'text-app-muted'} whitespace-nowrap`}
+        >
+          {formatDateFull(file.modified)}
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div className="h-full flex flex-col" ref={listRef}>
+      {/* Header */}
+      <div className="grid grid-cols-12 gap-3 px-3 py-2 border-b border-app-border border-t-0 text-[12px] font-medium text-app-muted bg-transparent select-none flex-shrink-0">
+        <button
+          className={`col-span-5 text-left hover:text-app-text pl-2 ${sortBy === 'name' ? 'text-app-text' : ''}`}
+          onClick={() => toggleSort('name')}
+          data-tauri-drag-region={false}
+        >
+          <span className="inline-flex items-center gap-1">
+            Name{' '}
+            {sortBy === 'name' &&
+              (sortOrder === 'asc' ? (
+                <CaretUp className="w-3 h-3" />
+              ) : (
+                <CaretDown className="w-3 h-3" />
+              ))}
+          </span>
+        </button>
+        <button
+          className={`col-span-2 text-left hover:text-app-text ${sortBy === 'size' ? 'text-app-text' : ''}`}
+          onClick={() => toggleSort('size')}
+          data-tauri-drag-region={false}
+        >
+          <span className="inline-flex items-center gap-1">
+            Size{' '}
+            {sortBy === 'size' &&
+              (sortOrder === 'asc' ? (
+                <CaretUp className="w-3 h-3" />
+              ) : (
+                <CaretDown className="w-3 h-3" />
+              ))}
+          </span>
+        </button>
+        <button
+          className={`col-span-2 text-left hover:text-app-text ${sortBy === 'type' ? 'text-app-text' : ''}`}
+          onClick={() => toggleSort('type')}
+          data-tauri-drag-region={false}
+        >
+          <span className="inline-flex items-center gap-1">
+            Type{' '}
+            {sortBy === 'type' &&
+              (sortOrder === 'asc' ? (
+                <CaretUp className="w-3 h-3" />
+              ) : (
+                <CaretDown className="w-3 h-3" />
+              ))}
+          </span>
+        </button>
+        <button
+          className={`col-span-3 text-left hover:text-app-text ${sortBy === 'modified' ? 'text-app-text' : ''}`}
+          onClick={() => toggleSort('modified')}
+          data-tauri-drag-region={false}
+        >
+          <span className="inline-flex items-center gap-1">
+            Modified{' '}
+            {sortBy === 'modified' &&
+              (sortOrder === 'asc' ? (
+                <CaretUp className="w-3 h-3" />
+              ) : (
+                <CaretDown className="w-3 h-3" />
+              ))}
+          </span>
+        </button>
+      </div>
+
+      {/* Virtual scroll container for file rows */}
+      <div
+        ref={scrollContainerRef}
+        className="flex-1 overflow-auto px-3 py-1"
+        data-list-scroll-container="true"
+      >
+        <div
+          style={{
+            height: `${virtualizer.getTotalSize()}px`,
+            width: '100%',
+            position: 'relative',
+          }}
+        >
+          {virtualizer.getVirtualItems().map((virtualRow) => {
+            const file = filteredFiles[virtualRow.index];
             return (
               <div
-                key={file.path}
-                className={`relative grid grid-cols-12 gap-3 py-[2px] leading-5 text-[13px] cursor-pointer transition-colors duration-75 rounded-full ${
-                  isSelected
-                    ? 'bg-accent-selected text-white'
-                    : 'odd:bg-app-gray hover:bg-app-light'
-                } ${isDragged ? 'opacity-50' : ''} ${file.is_hidden ? 'opacity-60' : ''}`}
-                data-file-item="true"
-                data-file-path={file.path}
-                data-tauri-drag-region={false}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  handleFileClick(e, file);
+                key={virtualRow.key}
+                style={{
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  width: '100%',
+                  height: `${virtualRow.size}px`,
+                  transform: `translateY(${virtualRow.start}px)`,
                 }}
-                onDoubleClick={(e) => {
-                  e.stopPropagation();
-                  const now = Date.now();
-                  const recentlyHandled =
-                    lastHandledDoubleRef.current &&
-                    lastHandledDoubleRef.current.path === file.path &&
-                    now - lastHandledDoubleRef.current.time < 500;
-                  if (recentlyHandled) {
-                    return;
-                  }
-                  lastHandledDoubleRef.current = { path: file.path, time: now };
-                  setSelectedFiles([file.path]);
-                  setSelectionAnchor(file.path);
-                  setSelectionLead(file.path);
-                  void handleDoubleClick(file);
-                }}
-                onMouseDown={(e) => handleMouseDownForFile(e, file)}
-                draggable={false}
               >
-                {/* Name column */}
-                <div className="col-span-5 flex items-center gap-2 min-w-0 pl-2 pr-2">
-                  <span className="relative flex-shrink-0 w-5 h-5">
-                    <div className="w-full h-full flex items-center justify-center">
-                      <ListFilePreview file={file} isMac={isMac} fallbackIcon={getFileIcon(file)} />
-                    </div>
-                    {file.is_git_repo && (
-                      <GitRepoBadge size="sm" style={{ bottom: -2, left: -2 }} />
-                    )}
-                    {file.is_symlink && (
-                      <SymlinkBadge size="sm" style={{ bottom: -2, right: -2 }} />
-                    )}
-                  </span>
-                  {renameTargetPath === file.path ? (
-                    <input
-                      ref={renameInputRef}
-                      className={`block flex-1 min-w-0 text-sm font-medium leading-5 h-5 bg-transparent border-0 rounded-none px-0 py-0 m-0 outline-none appearance-none ${isSelected ? 'text-white' : 'text-app-text'} truncate`}
-                      style={{ fontFamily: 'inherit', transform: 'translateY(-0.5px)' }}
-                      value={renameText}
-                      onChange={(e) => setRenameText(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          void commitRename();
-                        }
-                        if (e.key === 'Escape') {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          cancelRename();
-                        }
-                      }}
-                      // Prevent row drag/open when interacting with the input
-                      onMouseDown={(e) => {
-                        e.stopPropagation();
-                      }}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                      }}
-                      onDoubleClick={(e) => {
-                        e.stopPropagation();
-                      }}
-                      onDragStart={(e) => {
-                        e.stopPropagation();
-                      }}
-                      onBlur={cancelRename}
-                      data-tauri-drag-region={false}
-                      draggable={false}
-                    />
-                  ) : (
-                    <div className="flex-1 min-w-0 overflow-hidden" data-name-cell="true">
-                      <FileNameDisplay
-                        file={file}
-                        isSelected={isSelected}
-                        variant="list"
-                        className="block"
-                      />
-                    </div>
-                  )}
-                </div>
-
-                {/* Size column */}
-                <div
-                  className={`col-span-2 flex items-center ${isSelected ? 'text-white' : 'text-app-muted'}`}
-                >
-                  {file.is_directory
-                    ? file.child_count != null
-                      ? `${file.child_count} item${file.child_count !== 1 ? 's' : ''}`
-                      : '—'
-                    : formatFileSize(file.size)}
-                </div>
-
-                {/* Type column */}
-                <div
-                  className={`col-span-2 flex items-center ${isSelected ? 'text-white' : 'text-app-muted'}`}
-                >
-                  {getTypeLabel(file)}
-                </div>
-
-                {/* Modified column */}
-                <div
-                  className={`col-span-3 flex items-center ${isSelected ? 'text-white' : 'text-app-muted'} whitespace-nowrap`}
-                >
-                  {formatDateFull(file.modified)}
-                </div>
+                {renderFileRow(file, virtualRow.index)}
               </div>
             );
           })}
         </div>
+        {/* Streaming progress indicator */}
+        {!isStreamingComplete && (
+          <div className="flex items-center justify-center py-4 text-app-muted text-sm gap-2">
+            <div className="animate-spin w-4 h-4 border-2 border-accent border-t-transparent rounded-full" />
+            <span>
+              Loading files...
+              {streamingTotalCount != null &&
+                ` (${filteredFiles.length} of ~${streamingTotalCount})`}
+            </span>
+          </div>
+        )}
       </div>
-    </>
+    </div>
   );
 }
 
