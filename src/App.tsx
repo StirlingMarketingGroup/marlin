@@ -427,19 +427,20 @@ function App() {
         setError(undefined); // Clear any previous errors on success
 
         // Check if we have a pending file selection (from navigating to a file path)
-        // Note: With streaming, files may not be loaded yet, so we store it for later
+        // Note: With streaming, files may not be loaded yet, so we poll until found
         if (pendingFileSelectionRef.current) {
           const fileToSelect = pendingFileSelectionRef.current;
           pendingFileSelectionRef.current = null;
-          // Wait a short time for first batch, then try to select
-          setTimeout(() => {
-            const files = useAppStore.getState().files;
-            const fileExists = files.some((f: FileItem) => f.name === fileToSelect);
-            if (fileExists) {
-              const fullPath = currentPath.endsWith('/')
-                ? `${currentPath}${fileToSelect}`
-                : `${currentPath}/${fileToSelect}`;
-              useAppStore.getState().setSelectedFiles([fullPath]);
+          // Poll for the file to appear as batches are loaded
+          const intervalId = setInterval(() => {
+            const { files, isStreamingComplete } = useAppStore.getState();
+            const file = files.find((f: FileItem) => f.name === fileToSelect);
+
+            if (file || isStreamingComplete) {
+              clearInterval(intervalId);
+              if (file) {
+                useAppStore.getState().setSelectedFiles([file.path]);
+              }
             }
           }, 100);
         }
