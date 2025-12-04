@@ -67,7 +67,7 @@ jobs:
           echo "TARGET_BRANCH=$DEFAULT_BRANCH" >> "$GITHUB_ENV"
 
       - name: Checkout target branch
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
           ref: ${{ steps.context.outputs.default_branch }}
@@ -167,7 +167,7 @@ jobs:
           fi
 
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
           ref: ${{ env.RELEASE_REF }}
@@ -224,8 +224,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
-          profile: minimal
-          override: true
           targets: ${{ matrix.rust-targets }}
 
       - name: Cache Rust build artifacts
@@ -310,7 +308,9 @@ jobs:
             rust-targets: aarch64-unknown-linux-gnu
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: Install dependencies (Ubuntu)
         if: startsWith(matrix.os, 'ubuntu')
@@ -364,8 +364,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
-          profile: minimal
-          override: true
           targets: ${{ matrix.rust-targets }}
 
       - name: Cache Rust build artifacts
