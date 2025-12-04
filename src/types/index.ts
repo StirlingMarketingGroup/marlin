@@ -9,6 +9,8 @@ export interface FileItem {
   is_git_repo: boolean; // Match Rust snake_case
   extension?: string;
   child_count?: number; // Shallow file count for directories
+  image_width?: number; // Image dimensions (width in pixels)
+  image_height?: number; // Image dimensions (height in pixels)
 }
 
 export interface LocationSummary {

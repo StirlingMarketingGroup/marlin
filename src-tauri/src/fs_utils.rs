@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use image::ImageReader;
 use serde::{Deserialize, Serialize};
 #[cfg(target_family = "unix")]
 use std::ffi::CString;
@@ -32,6 +33,8 @@ pub struct FileItem {
     pub is_git_repo: bool,
     pub extension: Option<String>,
     pub child_count: Option<u64>,
+    pub image_width: Option<u32>,
+    pub image_height: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,6 +122,26 @@ fn build_file_item(path: &Path) -> Result<FileItem, String> {
         None
     };
 
+    // Extract image dimensions for supported image formats
+    // This only reads file headers, not the full image data
+    let (image_width, image_height) = if !is_directory {
+        match extension.as_deref() {
+            Some(
+                "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "tiff" | "tif" | "tga" | "ico",
+            ) => {
+                // Use image crate to read dimensions from headers
+                ImageReader::open(path)
+                    .ok()
+                    .and_then(|reader| reader.into_dimensions().ok())
+                    .map(|(w, h)| (Some(w), Some(h)))
+                    .unwrap_or((None, None))
+            }
+            _ => (None, None),
+        }
+    } else {
+        (None, None)
+    };
+
     let modified = metadata
         .modified()
         .map(|time| DateTime::from(time))
@@ -135,6 +158,8 @@ fn build_file_item(path: &Path) -> Result<FileItem, String> {
         is_git_repo,
         extension,
         child_count,
+        image_width,
+        image_height,
     })
 }
 
