@@ -8,11 +8,16 @@ import {
   GitStatus,
   DirectoryListingResponse,
   LocationCapabilities,
+  TrashPathsResponse,
+  UndoTrashResponse,
+  DeletePathsResponse,
+  DeleteItemPayload,
 } from '../types';
 import { invoke } from '@tauri-apps/api/core';
 import { open as openShell } from '@tauri-apps/plugin-shell';
-import { message, open as openDialog } from '@tauri-apps/plugin-dialog';
+import { ask, message, open as openDialog } from '@tauri-apps/plugin-dialog';
 import { getExtractableArchiveFormat, isArchiveFile } from '@/utils/fileTypes';
+import { basename } from '@/utils/pathUtils';
 import { useToastStore } from './useToastStore';
 
 // Concurrency limiter for app icon generation requests (macOS)
@@ -225,6 +230,8 @@ interface AppState {
   refreshCurrentDirectory: () => Promise<void>;
   openFile: (file: FileItem) => Promise<void>;
   extractArchive: (file: FileItem) => Promise<boolean>;
+  trashSelected: () => Promise<void>;
+  deleteSelectedPermanently: () => Promise<void>;
   fetchAppIcon: (path: string, size?: number) => Promise<string | undefined>;
   resetDirectoryPreferences: () => void;
   refreshGitStatus: (options?: { force?: boolean; path?: string }) => Promise<void>;
@@ -528,6 +535,212 @@ export const useAppStore = create<AppState>((set, get) => ({
       setError(`Failed to refresh: ${msg}`);
     } finally {
       setLoading(false);
+    }
+  },
+
+  trashSelected: async () => {
+    const state = get();
+    const selectedPaths = state.selectedFiles.slice();
+    if (!selectedPaths.length) return;
+
+    const fileMap = new Map(state.files.map((file) => [file.path, file]));
+    const selectedItems = selectedPaths
+      .map((path) => fileMap.get(path))
+      .filter((file): file is FileItem => Boolean(file));
+
+    const toastStore = useToastStore.getState();
+
+    try {
+      const response = await invoke<TrashPathsResponse>('trash_paths', { paths: selectedPaths });
+
+      if (response.fallbackToPermanent) {
+        const count = selectedPaths.length;
+        const targetLabel =
+          count === 1 ? (selectedItems[0]?.name ?? basename(selectedPaths[0])) : `${count} items`;
+
+        const confirmed = await ask(
+          `Unable to move ${targetLabel} to the Trash.\nDelete permanently instead?`,
+          {
+            title: 'Delete Permanently',
+            kind: 'warning',
+            okLabel: 'Delete',
+            cancelLabel: 'Cancel',
+          }
+        ).catch((dialogErr) => {
+          console.warn('Failed to present permanent delete prompt:', dialogErr);
+          return false;
+        });
+
+        if (confirmed) {
+          await get().deleteSelectedPermanently();
+        }
+        return;
+      }
+
+      await state.refreshCurrentDirectory();
+      state.setSelectedFiles([]);
+
+      const count = selectedPaths.length;
+      const messageText =
+        count === 1
+          ? `${selectedItems[0]?.name ?? basename(selectedPaths[0])} moved to Trash.`
+          : `${count} items moved to Trash.`;
+
+      const undoToken = response.undoToken;
+      const isMacPlatform = typeof navigator !== 'undefined' && /mac/i.test(navigator.userAgent);
+      const infoMessage =
+        undoToken || !isMacPlatform ? messageText : `${messageText} Restore via Finder if needed.`;
+
+      if (undoToken) {
+        let toastId = '';
+        toastId = toastStore.addToast({
+          type: 'info',
+          message: infoMessage,
+          duration: 8000,
+          action: {
+            label: 'Undo',
+            onClick: () => {
+              toastStore.removeToast(toastId);
+              void (async () => {
+                try {
+                  const undoResult = await invoke<UndoTrashResponse>('undo_trash', {
+                    token: undoToken,
+                  });
+                  await state.refreshCurrentDirectory();
+                  if (Array.isArray(undoResult.restored) && undoResult.restored.length > 0) {
+                    state.setSelectedFiles(undoResult.restored);
+                  }
+                  toastStore.addToast({
+                    type: 'success',
+                    message:
+                      undoResult.restored.length <= 1
+                        ? 'Item restored from Trash.'
+                        : `${undoResult.restored.length} items restored from Trash.`,
+                    duration: 5000,
+                  });
+                } catch (undoErr) {
+                  const undoMessage = undoErr instanceof Error ? undoErr.message : String(undoErr);
+                  toastStore.addToast({
+                    type: 'error',
+                    message: `Undo failed: ${undoMessage}`,
+                    duration: 6000,
+                  });
+                }
+              })();
+            },
+          },
+        });
+      } else {
+        toastStore.addToast({
+          type: 'info',
+          message: infoMessage,
+          duration: 5000,
+        });
+      }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      toastStore.addToast({
+        type: 'error',
+        message: `Unable to move selection to Trash: ${errorMessage}`,
+        duration: 6000,
+      });
+    }
+  },
+
+  deleteSelectedPermanently: async () => {
+    const state = get();
+    const selectedPaths = state.selectedFiles.slice();
+    if (!selectedPaths.length) return;
+
+    const fileMap = new Map(state.files.map((file) => [file.path, file]));
+    const selectedItems = selectedPaths.map((path) => fileMap.get(path));
+
+    const count = selectedPaths.length;
+    const targetLabel =
+      count === 1 ? (selectedItems[0]?.name ?? basename(selectedPaths[0])) : `${count} items`;
+
+    let confirmed = false;
+    try {
+      confirmed = await ask(`Permanently delete ${targetLabel}? This action cannot be undone.`, {
+        title: 'Delete Permanently',
+        kind: 'warning',
+        okLabel: 'Delete',
+        cancelLabel: 'Cancel',
+      });
+    } catch (dialogErr) {
+      console.warn('Failed to display permanent delete confirmation:', dialogErr);
+    }
+
+    if (!confirmed) {
+      return;
+    }
+
+    const deleteItems: DeleteItemPayload[] = selectedPaths.map((path) => {
+      const item = fileMap.get(path);
+      return {
+        path,
+        name: item?.name ?? basename(path),
+        isDirectory: item?.is_directory ?? false,
+      };
+    });
+
+    const requestId =
+      typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `delete-${Date.now()}`;
+
+    let progressWindowShown = false;
+    const showWindow = async () => {
+      try {
+        await invoke('show_delete_progress_window', {
+          requestId,
+          items: deleteItems,
+        });
+        progressWindowShown = true;
+      } catch (windowErr) {
+        console.warn('Failed to show delete progress window:', windowErr);
+      }
+    };
+
+    const timerId = window.setTimeout(() => {
+      void showWindow();
+    }, 500);
+
+    const toastStore = useToastStore.getState();
+
+    try {
+      await invoke<DeletePathsResponse>('delete_paths_permanently', {
+        paths: selectedPaths,
+        requestId,
+      });
+
+      state.setSelectedFiles([]);
+      await state.refreshCurrentDirectory();
+
+      const messageText =
+        count === 1
+          ? `${selectedItems[0]?.name ?? basename(selectedPaths[0])} deleted permanently.`
+          : `${count} items deleted permanently.`;
+
+      toastStore.addToast({
+        type: 'success',
+        message: messageText,
+        duration: 5000,
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      toastStore.addToast({
+        type: 'error',
+        message: `Unable to delete selection: ${errorMessage}`,
+        duration: 6000,
+      });
+    } finally {
+      window.clearTimeout(timerId);
+      if (progressWindowShown) {
+        void invoke('hide_delete_progress_window').catch((hideErr) => {
+          console.warn('Failed to hide delete progress window:', hideErr);
+        });
+      }
     }
   },
 

@@ -1,11 +1,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { useAppStore } from '../../../store/useAppStore';
 import { invoke } from '@tauri-apps/api/core';
+import { ask } from '@tauri-apps/plugin-dialog';
 
 vi.mock('@tauri-apps/api/core');
 vi.mock('@tauri-apps/plugin-dialog');
 
 const mockInvoke = vi.mocked(invoke);
+const mockAsk = vi.mocked(ask);
 
 describe('useAppStore', () => {
   beforeEach(() => {
@@ -445,6 +447,171 @@ describe('useAppStore', () => {
           useAppStore.getState().reorderPinnedDirectories(['/test/path'])
         ).rejects.toThrow('Reorder failed');
       });
+    });
+  });
+
+  describe('trashSelected', () => {
+    const mockFile = {
+      path: '/test/file.txt',
+      name: 'file.txt',
+      is_directory: false,
+      size: 100,
+      modified: '2024-01-01T00:00:00.000Z',
+      extension: 'txt',
+      is_hidden: false,
+      is_symlink: false,
+      is_git_repo: false,
+    };
+
+    beforeEach(() => {
+      useAppStore.setState({
+        files: [mockFile],
+        selectedFiles: ['/test/file.txt'],
+      });
+    });
+
+    it('should trash selected files and clear selection', async () => {
+      mockInvoke.mockImplementation((cmd) => {
+        if (cmd === 'trash_paths') {
+          return Promise.resolve({
+            trashed: ['/test/file.txt'],
+            undoToken: 'test-token',
+            fallbackToPermanent: false,
+          });
+        }
+        if (cmd === 'read_directory') {
+          return Promise.resolve([]);
+        }
+        return Promise.resolve(undefined);
+      });
+
+      await useAppStore.getState().trashSelected();
+
+      expect(mockInvoke).toHaveBeenCalledWith('trash_paths', {
+        paths: ['/test/file.txt'],
+      });
+      expect(useAppStore.getState().selectedFiles).toEqual([]);
+    });
+
+    it('should do nothing when no files selected', async () => {
+      useAppStore.setState({ selectedFiles: [] });
+
+      await useAppStore.getState().trashSelected();
+
+      expect(mockInvoke).not.toHaveBeenCalledWith('trash_paths', expect.anything());
+    });
+
+    it('should prompt for permanent delete when trash fails with permission error', async () => {
+      mockInvoke.mockImplementation((cmd) => {
+        if (cmd === 'trash_paths') {
+          return Promise.resolve({
+            trashed: [],
+            undoToken: null,
+            fallbackToPermanent: true,
+          });
+        }
+        if (cmd === 'delete_paths_permanently') {
+          return Promise.resolve({ deleted: ['/test/file.txt'] });
+        }
+        if (cmd === 'read_directory') {
+          return Promise.resolve([]);
+        }
+        return Promise.resolve(undefined);
+      });
+      mockAsk.mockResolvedValue(true);
+
+      await useAppStore.getState().trashSelected();
+
+      expect(mockAsk).toHaveBeenCalled();
+      expect(mockInvoke).toHaveBeenCalledWith('delete_paths_permanently', expect.anything());
+    });
+  });
+
+  describe('deleteSelectedPermanently', () => {
+    const mockFile = {
+      path: '/test/file.txt',
+      name: 'file.txt',
+      is_directory: false,
+      size: 100,
+      modified: '2024-01-01T00:00:00.000Z',
+      extension: 'txt',
+      is_hidden: false,
+      is_symlink: false,
+      is_git_repo: false,
+    };
+
+    beforeEach(() => {
+      useAppStore.setState({
+        files: [mockFile],
+        selectedFiles: ['/test/file.txt'],
+      });
+      mockAsk.mockResolvedValue(true);
+    });
+
+    it('should delete selected files permanently after confirmation', async () => {
+      mockInvoke.mockImplementation((cmd) => {
+        if (cmd === 'delete_paths_permanently') {
+          return Promise.resolve({ deleted: ['/test/file.txt'] });
+        }
+        if (cmd === 'read_directory') {
+          return Promise.resolve([]);
+        }
+        return Promise.resolve(undefined);
+      });
+
+      await useAppStore.getState().deleteSelectedPermanently();
+
+      expect(mockAsk).toHaveBeenCalledWith(
+        'Permanently delete file.txt? This action cannot be undone.',
+        expect.objectContaining({
+          title: 'Delete Permanently',
+          kind: 'warning',
+        })
+      );
+      expect(mockInvoke).toHaveBeenCalledWith('delete_paths_permanently', expect.anything());
+      expect(useAppStore.getState().selectedFiles).toEqual([]);
+    });
+
+    it('should not delete when user cancels confirmation', async () => {
+      mockAsk.mockResolvedValue(false);
+
+      await useAppStore.getState().deleteSelectedPermanently();
+
+      expect(mockInvoke).not.toHaveBeenCalledWith('delete_paths_permanently', expect.anything());
+      expect(useAppStore.getState().selectedFiles).toEqual(['/test/file.txt']);
+    });
+
+    it('should do nothing when no files selected', async () => {
+      useAppStore.setState({ selectedFiles: [] });
+
+      await useAppStore.getState().deleteSelectedPermanently();
+
+      expect(mockAsk).not.toHaveBeenCalled();
+      expect(mockInvoke).not.toHaveBeenCalledWith('delete_paths_permanently', expect.anything());
+    });
+
+    it('should handle multiple files in confirmation message', async () => {
+      const mockFile2 = { ...mockFile, path: '/test/file2.txt', name: 'file2.txt' };
+      useAppStore.setState({
+        files: [mockFile, mockFile2],
+        selectedFiles: ['/test/file.txt', '/test/file2.txt'],
+      });
+      mockInvoke.mockImplementation((cmd) => {
+        if (cmd === 'delete_paths_permanently') {
+          return Promise.resolve({ deleted: ['/test/file.txt', '/test/file2.txt'] });
+        }
+        if (cmd === 'read_directory') {
+          return Promise.resolve([]);
+        }
+        return Promise.resolve(undefined);
+      });
+
+      await useAppStore.getState().deleteSelectedPermanently();
+
+      expect(mockAsk).toHaveBeenCalledWith(
+        'Permanently delete 2 items? This action cannot be undone.',
+        expect.anything()
+      );
     });
   });
 });

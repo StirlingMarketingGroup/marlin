@@ -142,3 +142,38 @@ export interface ArchiveProgressUpdatePayload {
   format?: string;
   finished?: boolean;
 }
+
+export interface TrashPathsResponse {
+  trashed: string[];
+  undoToken?: string;
+  fallbackToPermanent: boolean;
+}
+
+export interface UndoTrashResponse {
+  restored: string[];
+}
+
+export interface DeleteItemPayload {
+  path: string;
+  name: string;
+  isDirectory?: boolean;
+}
+
+export interface DeleteProgressPayload {
+  requestId: string;
+  totalItems: number;
+  items: DeleteItemPayload[];
+}
+
+export interface DeleteProgressUpdatePayload {
+  requestId: string;
+  currentPath?: string;
+  completed: number;
+  total: number;
+  finished: boolean;
+  error?: string;
+}
+
+export interface DeletePathsResponse {
+  deleted: string[];
+}
