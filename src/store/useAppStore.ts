@@ -7,6 +7,8 @@ import {
   DirectoryPreferencesMap,
   GitStatus,
   DirectoryListingResponse,
+  StreamingDirectoryResponse,
+  DirectoryBatch,
   LocationCapabilities,
   TrashPathsResponse,
   UndoTrashResponse,
@@ -172,6 +174,11 @@ interface AppState {
   shiftBaseSelection?: string[] | null;
   loading: boolean;
   error?: string;
+
+  // Streaming state
+  streamingSessionId: string | null;
+  streamingTotalCount: number | null;
+  isStreamingComplete: boolean;
   gitStatus: GitStatus | null;
   gitStatusLoading: boolean;
   gitStatusError?: string;
@@ -228,6 +235,9 @@ interface AppState {
   toggleHiddenFiles: (forceValue?: boolean) => Promise<void>;
   toggleFoldersFirst: () => Promise<void>;
   refreshCurrentDirectory: () => Promise<void>;
+  refreshCurrentDirectoryStreaming: () => Promise<void>;
+  appendStreamingBatch: (batch: DirectoryBatch) => void;
+  cancelDirectoryStream: () => Promise<void>;
   openFile: (file: FileItem) => Promise<void>;
   extractArchive: (file: FileItem) => Promise<boolean>;
   trashSelected: () => Promise<void>;
@@ -265,6 +275,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   shiftBaseSelection: null,
   loading: false,
   error: undefined,
+  streamingSessionId: null,
+  streamingTotalCount: null,
+  isStreamingComplete: true,
   gitStatus: null,
   gitStatusLoading: false,
   gitStatusError: undefined,
@@ -485,7 +498,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
 
     // Refresh directory to apply new filter
-    await get().refreshCurrentDirectory();
+    await get().refreshCurrentDirectoryStreaming();
   },
 
   toggleFoldersFirst: async () => {
@@ -538,6 +551,96 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
+  refreshCurrentDirectoryStreaming: async () => {
+    const { currentPath, setLoading, setError } = get();
+
+    // Cancel any existing streaming session
+    await get().cancelDirectoryStream();
+
+    // Generate session ID on frontend BEFORE calling backend
+    // This ensures we can set up the session ID in state before batches arrive
+    const sessionId = crypto.randomUUID();
+
+    try {
+      setLoading(true);
+      setError(undefined);
+
+      // Set the session ID in state BEFORE calling the backend
+      // This ensures any batches that arrive via events will be accepted immediately
+      set({
+        files: [],
+        streamingSessionId: sessionId,
+        streamingTotalCount: null,
+        isStreamingComplete: false,
+      });
+
+      // Start streaming - pass the session ID to the backend
+      const response = await invoke<StreamingDirectoryResponse>(
+        'read_directory_streaming_command',
+        { path: currentPath, sessionId }
+      );
+
+      const normalized = normalizePath(response.location.displayPath || response.location.path);
+
+      set((state) => {
+        const updatedHistory = [...state.pathHistory];
+        if (state.historyIndex >= 0 && state.historyIndex < updatedHistory.length) {
+          updatedHistory[state.historyIndex] = normalized;
+        }
+
+        return {
+          currentPath: normalized,
+          currentLocationRaw: response.location.raw,
+          currentProviderCapabilities: response.capabilities,
+          pathHistory: updatedHistory,
+        };
+      });
+
+      void get().refreshGitStatus({ path: response.location.path, force: true });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('❌ refreshCurrentDirectoryStreaming failed:', msg);
+      setError(`Failed to refresh: ${msg}`);
+      set({ isStreamingComplete: true, loading: false, streamingSessionId: null });
+    }
+    // Note: We don't set loading=false in finally because streaming continues in background
+    // It will be set to false when isStreamingComplete becomes true via appendStreamingBatch
+  },
+
+  appendStreamingBatch: (batch: DirectoryBatch) => {
+    set((state) => {
+      // Ignore batches from other sessions
+      if (state.streamingSessionId !== batch.sessionId) {
+        return {};
+      }
+
+      // Append new files
+      const newFiles = [...state.files, ...batch.entries];
+
+      return {
+        files: newFiles,
+        streamingTotalCount: batch.totalCount ?? state.streamingTotalCount,
+        isStreamingComplete: batch.isFinal,
+        loading: !batch.isFinal, // Stop loading when complete
+      };
+    });
+  },
+
+  cancelDirectoryStream: async () => {
+    const { streamingSessionId } = get();
+    if (streamingSessionId) {
+      try {
+        await invoke('cancel_directory_stream', { sessionId: streamingSessionId });
+      } catch (err) {
+        console.warn('Failed to cancel directory stream:', err);
+      }
+      set({
+        streamingSessionId: null,
+        isStreamingComplete: true,
+      });
+    }
+  },
+
   trashSelected: async () => {
     const state = get();
     const selectedPaths = state.selectedFiles.slice();
@@ -577,7 +680,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         return;
       }
 
-      await state.refreshCurrentDirectory();
+      await state.refreshCurrentDirectoryStreaming();
       state.setSelectedFiles([]);
 
       const count = selectedPaths.length;
@@ -606,7 +709,7 @@ export const useAppStore = create<AppState>((set, get) => ({
                   const undoResult = await invoke<UndoTrashResponse>('undo_trash', {
                     token: undoToken,
                   });
-                  await state.refreshCurrentDirectory();
+                  await state.refreshCurrentDirectoryStreaming();
                   if (Array.isArray(undoResult.restored) && undoResult.restored.length > 0) {
                     state.setSelectedFiles(undoResult.restored);
                   }
@@ -715,7 +818,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       });
 
       state.setSelectedFiles([]);
-      await state.refreshCurrentDirectory();
+      await state.refreshCurrentDirectoryStreaming();
 
       const messageText =
         count === 1
@@ -917,7 +1020,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         format: resolvedFormat,
       });
 
-      await state.refreshCurrentDirectory();
+      await state.refreshCurrentDirectoryStreaming();
       return true;
     } catch (error) {
       console.error('Failed to extract archive:', error);
@@ -1189,7 +1292,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       await invoke('rename_file', { fromPath: target, toPath });
       set({ renameTargetPath: undefined });
       state.setSelectedFiles([toPath]);
-      await state.refreshCurrentDirectory();
+      await state.refreshCurrentDirectoryStreaming();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       try {

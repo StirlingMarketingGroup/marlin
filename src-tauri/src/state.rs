@@ -42,6 +42,25 @@ impl Default for FolderSizeState {
     }
 }
 
+/// Handle for a streaming directory read task
+#[derive(Clone)]
+pub struct DirectoryStreamHandle {
+    pub cancel_flag: Arc<AtomicBool>,
+}
+
+/// State for tracking active directory streaming sessions
+pub struct DirectoryStreamState {
+    pub sessions: Mutex<HashMap<String, DirectoryStreamHandle>>,
+}
+
+impl Default for DirectoryStreamState {
+    fn default() -> Self {
+        Self {
+            sessions: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 #[derive(Clone)]
 pub struct MacTrashUndoItem {
