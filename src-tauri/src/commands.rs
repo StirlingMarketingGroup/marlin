@@ -100,143 +100,89 @@ pub struct DirectoryListingResponse {
     pub entries: Vec<FileItem>,
 }
 
-static FOLDER_SIZE_WINDOW_READY: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
-static PENDING_FOLDER_SIZE_PAYLOAD: Lazy<Mutex<Option<FolderSizeInitPayload>>> =
-    Lazy::new(|| Mutex::new(None));
-static ARCHIVE_PROGRESS_WINDOW_READY: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
-static PENDING_ARCHIVE_PROGRESS_PAYLOAD: Lazy<Mutex<Option<ArchiveProgressPayload>>> =
-    Lazy::new(|| Mutex::new(None));
-static DELETE_PROGRESS_WINDOW_READY: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
-static PENDING_DELETE_PROGRESS_PAYLOAD: Lazy<Mutex<Option<DeleteProgressPayload>>> =
-    Lazy::new(|| Mutex::new(None));
+/// Generic queue for window payloads that handles the ready/pending pattern.
+/// Replaces the duplicated queue_*_payload and try_emit_pending_*_payload functions.
+struct WindowPayloadQueue<T: Clone + Serialize> {
+    ready: AtomicBool,
+    pending: Mutex<Option<T>>,
+    window_label: &'static str,
+    event_name: &'static str,
+}
+
+impl<T: Clone + Serialize> WindowPayloadQueue<T> {
+    const fn new(window_label: &'static str, event_name: &'static str) -> Self {
+        Self {
+            ready: AtomicBool::new(false),
+            pending: Mutex::new(None),
+            window_label,
+            event_name,
+        }
+    }
+
+    fn queue(&self, app: &AppHandle, payload: T) {
+        {
+            let mut pending = self.pending.lock().expect("Failed to lock pending payload");
+            *pending = Some(payload);
+        }
+        self.try_emit(app);
+    }
+
+    fn try_emit(&self, app: &AppHandle) {
+        if !self.ready.load(Ordering::SeqCst) {
+            return;
+        }
+
+        let payload_opt = {
+            let mut pending = self.pending.lock().expect("Failed to lock pending payload");
+            pending.take()
+        };
+
+        if let Some(payload) = payload_opt {
+            let mut should_requeue = true;
+            if let Some(window) = app.get_webview_window(self.window_label) {
+                if let Err(err) = window.emit(self.event_name, &payload) {
+                    warn!("Failed to emit {} payload: {err}", self.event_name);
+                } else {
+                    should_requeue = false;
+                }
+            } else {
+                warn!(
+                    "Window '{}' not available for payload emission",
+                    self.window_label
+                );
+            }
+
+            if should_requeue {
+                let mut pending = self.pending.lock().expect("Failed to relock pending payload");
+                *pending = Some(payload);
+            }
+        }
+    }
+
+    fn set_ready(&self, ready: bool) {
+        self.ready.store(ready, Ordering::SeqCst);
+    }
+
+    fn is_ready(&self) -> bool {
+        self.ready.load(Ordering::SeqCst)
+    }
+
+    fn clear_pending(&self) {
+        let mut pending = self.pending.lock().expect("Failed to lock pending payload");
+        *pending = None;
+    }
+}
+
+static FOLDER_SIZE_QUEUE: Lazy<WindowPayloadQueue<FolderSizeInitPayload>> =
+    Lazy::new(|| WindowPayloadQueue::new(FOLDER_SIZE_WINDOW_LABEL, FOLDER_SIZE_INIT_EVENT));
+static ARCHIVE_PROGRESS_QUEUE: Lazy<WindowPayloadQueue<ArchiveProgressPayload>> =
+    Lazy::new(|| WindowPayloadQueue::new(ARCHIVE_PROGRESS_WINDOW_LABEL, ARCHIVE_PROGRESS_EVENT));
+static DELETE_PROGRESS_QUEUE: Lazy<WindowPayloadQueue<DeleteProgressPayload>> =
+    Lazy::new(|| WindowPayloadQueue::new(DELETE_PROGRESS_WINDOW_LABEL, DELETE_PROGRESS_EVENT));
 
 const FOLDER_SIZE_WINDOW_READY_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const FOLDER_SIZE_WINDOW_READY_POLL_ATTEMPTS: u32 = 40;
 const FOLDER_SIZE_WINDOW_READY_STABILIZE_DELAY: Duration = Duration::from_millis(25);
-
-fn queue_folder_size_payload(app: &AppHandle, payload: FolderSizeInitPayload) {
-    {
-        let mut pending = PENDING_FOLDER_SIZE_PAYLOAD
-            .lock()
-            .expect("Failed to lock pending folder size payload");
-        *pending = Some(payload);
-    }
-    try_emit_pending_folder_size_payload(app);
-}
-
-fn try_emit_pending_folder_size_payload(app: &AppHandle) {
-    if !FOLDER_SIZE_WINDOW_READY.load(Ordering::SeqCst) {
-        return;
-    }
-
-    let payload_opt = {
-        let mut pending = PENDING_FOLDER_SIZE_PAYLOAD
-            .lock()
-            .expect("Failed to lock pending folder size payload");
-        pending.take()
-    };
-
-    if let Some(payload) = payload_opt {
-        match app.get_webview_window(FOLDER_SIZE_WINDOW_LABEL) {
-            Some(window) => {
-                if let Err(err) = window.emit(FOLDER_SIZE_INIT_EVENT, &payload) {
-                    warn!("Failed to emit folder size init payload: {err}");
-                    let mut pending = PENDING_FOLDER_SIZE_PAYLOAD
-                        .lock()
-                        .expect("Failed to relock pending folder size payload");
-                    *pending = Some(payload);
-                } else {
-                    info!(
-                        "Emitted folder-size:init with {} targets",
-                        payload.targets.len()
-                    );
-                }
-            }
-            None => {
-                warn!("Folder size window not available for payload emission");
-                let mut pending = PENDING_FOLDER_SIZE_PAYLOAD
-                    .lock()
-                    .expect("Failed to relock pending folder size payload");
-                *pending = Some(payload);
-            }
-        }
-    }
-}
-
-fn queue_archive_progress_payload(app: &AppHandle, payload: ArchiveProgressPayload) {
-    {
-        let mut pending = PENDING_ARCHIVE_PROGRESS_PAYLOAD
-            .lock()
-            .expect("Failed to lock pending archive progress payload");
-        *pending = Some(payload);
-    }
-    try_emit_archive_progress_payload(app);
-}
-
-fn try_emit_archive_progress_payload(app: &AppHandle) {
-    if !ARCHIVE_PROGRESS_WINDOW_READY.load(Ordering::SeqCst) {
-        return;
-    }
-
-    let payload_opt = {
-        let mut pending = PENDING_ARCHIVE_PROGRESS_PAYLOAD
-            .lock()
-            .expect("Failed to lock pending archive progress payload");
-        pending.take()
-    };
-
-    if let Some(payload) = payload_opt {
-        if let Some(window) = app.get_webview_window(ARCHIVE_PROGRESS_WINDOW_LABEL) {
-            if let Err(err) = window.emit(ARCHIVE_PROGRESS_EVENT, &payload) {
-                warn!("Failed to emit archive progress payload: {err}");
-                let mut pending = PENDING_ARCHIVE_PROGRESS_PAYLOAD
-                    .lock()
-                    .expect("Failed to relock pending archive progress payload");
-                *pending = Some(payload);
-            }
-        }
-    }
-}
-
-fn queue_delete_progress_payload(app: &AppHandle, payload: DeleteProgressPayload) {
-    {
-        let mut pending = PENDING_DELETE_PROGRESS_PAYLOAD
-            .lock()
-            .expect("Failed to lock pending delete progress payload");
-        *pending = Some(payload);
-    }
-    try_emit_delete_progress_payload(app);
-}
-
-fn try_emit_delete_progress_payload(app: &AppHandle) {
-    if !DELETE_PROGRESS_WINDOW_READY.load(Ordering::SeqCst) {
-        return;
-    }
-
-    let payload_opt = {
-        let mut pending = PENDING_DELETE_PROGRESS_PAYLOAD
-            .lock()
-            .expect("Failed to lock pending delete progress payload");
-        pending.take()
-    };
-
-    if let Some(payload) = payload_opt {
-        if let Some(window) = app.get_webview_window(DELETE_PROGRESS_WINDOW_LABEL) {
-            if let Err(err) = window.emit(DELETE_PROGRESS_EVENT, &payload) {
-                warn!("Failed to emit delete progress payload: {err}");
-                let mut pending = PENDING_DELETE_PROGRESS_PAYLOAD
-                    .lock()
-                    .expect("Failed to relock pending delete progress payload");
-                *pending = Some(payload);
-            }
-        } else {
-            let mut pending = PENDING_DELETE_PROGRESS_PAYLOAD
-                .lock()
-                .expect("Failed to relock pending delete progress payload");
-            *pending = Some(payload);
-        }
-    }
-}
 
 fn emit_delete_progress_update(app: &AppHandle, payload: DeleteProgressUpdatePayload) {
     if let Err(err) = app.emit(DELETE_PROGRESS_UPDATE_EVENT, payload) {
@@ -484,7 +430,7 @@ fn schedule_folder_size_auto_start(app: &AppHandle, request_id: String, paths: V
         // Wait for the window to report readiness so we don't emit progress events
         // before its listeners are attached.
         for _ in 0..FOLDER_SIZE_WINDOW_READY_POLL_ATTEMPTS {
-            if FOLDER_SIZE_WINDOW_READY.load(Ordering::SeqCst) {
+            if FOLDER_SIZE_QUEUE.is_ready() {
                 break;
             }
             sleep(FOLDER_SIZE_WINDOW_READY_POLL_INTERVAL).await;
@@ -3026,7 +2972,7 @@ pub fn open_folder_size_window(
     };
 
     if let Some(existing) = app.get_webview_window(FOLDER_SIZE_WINDOW_LABEL) {
-        queue_folder_size_payload(&app, payload.clone());
+        FOLDER_SIZE_QUEUE.queue(&app, payload.clone());
         schedule_folder_size_auto_start(&app, request_id, path_args);
         let _ = existing.show();
         let _ = existing.set_focus();
@@ -3049,13 +2995,13 @@ pub fn open_folder_size_window(
         .hidden_title(true)
         .traffic_light_position(tauri::LogicalPosition::new(18.0, 18.0));
 
-    FOLDER_SIZE_WINDOW_READY.store(false, Ordering::SeqCst);
+    FOLDER_SIZE_QUEUE.set_ready(false);
 
     let _window = builder
         .build()
         .map_err(|e| format!("Failed to create folder size window: {}", e))?;
 
-    queue_folder_size_payload(&app, payload);
+    FOLDER_SIZE_QUEUE.queue(&app, payload);
     schedule_folder_size_auto_start(&app, request_id, path_args);
 
     Ok(())
@@ -3063,14 +3009,14 @@ pub fn open_folder_size_window(
 
 #[command]
 pub fn folder_size_window_ready(app: AppHandle) -> Result<(), String> {
-    FOLDER_SIZE_WINDOW_READY.store(true, Ordering::SeqCst);
-    try_emit_pending_folder_size_payload(&app);
+    FOLDER_SIZE_QUEUE.set_ready(true);
+    FOLDER_SIZE_QUEUE.try_emit(&app);
     Ok(())
 }
 
 #[command]
 pub fn folder_size_window_unready() -> Result<(), String> {
-    FOLDER_SIZE_WINDOW_READY.store(false, Ordering::SeqCst);
+    FOLDER_SIZE_QUEUE.set_ready(false);
     Ok(())
 }
 
@@ -3088,7 +3034,7 @@ pub fn show_archive_progress_window(
     };
 
     if let Some(existing) = app.get_webview_window(ARCHIVE_PROGRESS_WINDOW_LABEL) {
-        queue_archive_progress_payload(&app, payload);
+        ARCHIVE_PROGRESS_QUEUE.queue(&app, payload);
         let _ = existing.show();
         let _ = existing.set_focus();
         return Ok(());
@@ -3111,13 +3057,13 @@ pub fn show_archive_progress_window(
         .hidden_title(true)
         .traffic_light_position(tauri::LogicalPosition::new(14.0, 14.0));
 
-    ARCHIVE_PROGRESS_WINDOW_READY.store(false, Ordering::SeqCst);
+    ARCHIVE_PROGRESS_QUEUE.set_ready(false);
 
     builder
         .build()
         .map_err(|e| format!("Failed to create archive progress window: {}", e))?;
 
-    queue_archive_progress_payload(&app, payload);
+    ARCHIVE_PROGRESS_QUEUE.queue(&app, payload);
     Ok(())
 }
 
@@ -3129,24 +3075,21 @@ pub fn hide_archive_progress_window(app: AppHandle) -> Result<(), String> {
         }
     }
 
-    ARCHIVE_PROGRESS_WINDOW_READY.store(false, Ordering::SeqCst);
-    let mut pending = PENDING_ARCHIVE_PROGRESS_PAYLOAD
-        .lock()
-        .expect("Failed to clear pending archive payload");
-    *pending = None;
+    ARCHIVE_PROGRESS_QUEUE.set_ready(false);
+    ARCHIVE_PROGRESS_QUEUE.clear_pending();
     Ok(())
 }
 
 #[command]
 pub fn archive_progress_window_ready(app: AppHandle) -> Result<(), String> {
-    ARCHIVE_PROGRESS_WINDOW_READY.store(true, Ordering::SeqCst);
-    try_emit_archive_progress_payload(&app);
+    ARCHIVE_PROGRESS_QUEUE.set_ready(true);
+    ARCHIVE_PROGRESS_QUEUE.try_emit(&app);
     Ok(())
 }
 
 #[command]
 pub fn archive_progress_window_unready() -> Result<(), String> {
-    ARCHIVE_PROGRESS_WINDOW_READY.store(false, Ordering::SeqCst);
+    ARCHIVE_PROGRESS_QUEUE.set_ready(false);
     Ok(())
 }
 
@@ -3164,7 +3107,7 @@ pub fn show_delete_progress_window(
     };
 
     if let Some(existing) = app.get_webview_window(DELETE_PROGRESS_WINDOW_LABEL) {
-        queue_delete_progress_payload(&app, payload);
+        DELETE_PROGRESS_QUEUE.queue(&app, payload);
         let _ = existing.show();
         let _ = existing.set_focus();
         return Ok(());
@@ -3187,13 +3130,13 @@ pub fn show_delete_progress_window(
         .hidden_title(true)
         .traffic_light_position(tauri::LogicalPosition::new(14.0, 14.0));
 
-    DELETE_PROGRESS_WINDOW_READY.store(false, Ordering::SeqCst);
+    DELETE_PROGRESS_QUEUE.set_ready(false);
 
     builder
         .build()
         .map_err(|e| format!("Failed to create delete progress window: {}", e))?;
 
-    queue_delete_progress_payload(&app, payload);
+    DELETE_PROGRESS_QUEUE.queue(&app, payload);
     Ok(())
 }
 
@@ -3205,24 +3148,21 @@ pub fn hide_delete_progress_window(app: AppHandle) -> Result<(), String> {
         }
     }
 
-    DELETE_PROGRESS_WINDOW_READY.store(false, Ordering::SeqCst);
-    let mut pending = PENDING_DELETE_PROGRESS_PAYLOAD
-        .lock()
-        .expect("Failed to clear pending delete payload");
-    *pending = None;
+    DELETE_PROGRESS_QUEUE.set_ready(false);
+    DELETE_PROGRESS_QUEUE.clear_pending();
     Ok(())
 }
 
 #[command]
 pub fn delete_progress_window_ready(app: AppHandle) -> Result<(), String> {
-    DELETE_PROGRESS_WINDOW_READY.store(true, Ordering::SeqCst);
-    try_emit_delete_progress_payload(&app);
+    DELETE_PROGRESS_QUEUE.set_ready(true);
+    DELETE_PROGRESS_QUEUE.try_emit(&app);
     Ok(())
 }
 
 #[command]
 pub fn delete_progress_window_unready() -> Result<(), String> {
-    DELETE_PROGRESS_WINDOW_READY.store(false, Ordering::SeqCst);
+    DELETE_PROGRESS_QUEUE.set_ready(false);
     Ok(())
 }
 

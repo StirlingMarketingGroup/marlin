@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react';
 import { useThumbnail } from '@/hooks/useThumbnail';
+import { usePlatform } from '@/hooks/usePlatform';
 
 interface AppIconProps {
   path: string;
@@ -29,8 +30,7 @@ export default function AppIcon({
     format: 'png', // Use PNG for app icons to preserve transparency
   });
 
-  const isMac =
-    typeof navigator !== 'undefined' && navigator.platform.toUpperCase().includes('MAC');
+  const { isMac } = usePlatform();
   const shouldShowThumbnail =
     isMac && (path.toLowerCase().endsWith('.app') || path.toLowerCase().endsWith('.pkg'));
 

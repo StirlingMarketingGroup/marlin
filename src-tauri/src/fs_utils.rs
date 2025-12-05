@@ -439,107 +439,6 @@ pub fn expand_path(path: &str) -> Result<PathBuf, String> {
     }
 }
 
-/// Build a FileItem from a path, used by streaming directory reads.
-/// Includes child_count for directories and image dimensions for supported formats.
-fn build_file_item_fast(path: &Path) -> Result<FileItem, String> {
-    let symlink_metadata =
-        fs::symlink_metadata(path).map_err(|e| format!("Failed to get metadata: {}", e))?;
-
-    let is_symlink = symlink_metadata.file_type().is_symlink();
-    let target_metadata = if is_symlink {
-        fs::metadata(path).ok()
-    } else {
-        None
-    };
-
-    let mut is_directory = target_metadata
-        .as_ref()
-        .map(|m| m.is_dir())
-        .unwrap_or_else(|| symlink_metadata.is_dir());
-
-    if !is_directory && is_symlink {
-        if fs::read_dir(path).is_ok() {
-            is_directory = true;
-        }
-    }
-
-    let metadata = target_metadata.as_ref().unwrap_or(&symlink_metadata);
-
-    let file_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("Unknown")
-        .to_string();
-
-    let is_hidden = file_name.starts_with('.');
-
-    let extension = if metadata.is_file() {
-        path.extension()
-            .and_then(|ext| ext.to_str())
-            .map(|s| s.to_lowercase())
-    } else {
-        None
-    };
-
-    // Git repo detection is fast enough to keep
-    let is_git_repo = if is_directory {
-        let git_path = path.join(".git");
-        git_path.is_dir() || git_path.is_file()
-    } else {
-        false
-    };
-
-    // Compute shallow child count for directories
-    let child_count = if is_directory {
-        match fs::read_dir(path) {
-            Ok(entries) => Some(entries.count() as u64),
-            Err(_) => None, // Can't read directory (permissions, etc.)
-        }
-    } else {
-        None
-    };
-
-    // Extract image dimensions for supported image formats
-    // This only reads file headers, not the full image data
-    let (image_width, image_height) = if !is_directory {
-        match extension.as_deref() {
-            Some(
-                "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "tiff" | "tif" | "tga" | "ico",
-            ) => {
-                // Use image crate to read dimensions from headers
-                ImageReader::open(path)
-                    .ok()
-                    .and_then(|reader| reader.into_dimensions().ok())
-                    .map(|(w, h)| (Some(w), Some(h)))
-                    .unwrap_or((None, None))
-            }
-            _ => (None, None),
-        }
-    } else {
-        (None, None)
-    };
-
-    let modified = metadata
-        .modified()
-        .map(|time| DateTime::from(time))
-        .unwrap_or_else(|_| Utc::now());
-
-    Ok(FileItem {
-        name: file_name,
-        path: path.to_string_lossy().to_string(),
-        size: metadata.len(),
-        modified,
-        is_directory,
-        is_hidden,
-        is_symlink,
-        is_git_repo,
-        extension,
-        child_count,
-        image_width,
-        image_height,
-    })
-}
-
 /// Batch size for streaming directory reads
 const STREAMING_BATCH_SIZE: usize = 100;
 
@@ -592,7 +491,7 @@ where
             if cancel_flag.load(Ordering::Relaxed) {
                 return None;
             }
-            build_file_item_fast(entry_path).ok()
+            build_file_item(entry_path).ok()
         })
         .collect();
 
