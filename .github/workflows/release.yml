@@ -140,10 +140,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # macOS Apple Silicon (M1/M2/M3)
           - os: macos-14
-            target: universal-apple-darwin
-            arch: universal
-            rust-targets: x86_64-apple-darwin,aarch64-apple-darwin
+            target: aarch64-apple-darwin
+            arch: arm64
+            rust-targets: aarch64-apple-darwin
+          # macOS Intel
+          - os: macos-13
+            target: x86_64-apple-darwin
+            arch: x86_64
+            rust-targets: x86_64-apple-darwin
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             arch: x86_64
@@ -267,6 +273,32 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Import Apple Certificate
+        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE != ''
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          # Create temporary keychain
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+
+          # Create keychain
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # Import certificate
+          echo "$APPLE_CERTIFICATE" | base64 --decode > $RUNNER_TEMP/certificate.p12
+          security import $RUNNER_TEMP/certificate.p12 -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+
+          # Allow codesign to access keychain
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # Clean up certificate file
+          rm -f $RUNNER_TEMP/certificate.p12
+
       - name: Build and publish installers
         uses: tauri-apps/tauri-action@v0
         env:
@@ -278,11 +310,18 @@ jobs:
           TAURI_LOG: trace
           RUST_LOG: tauri_bundler=debug
           TAURI_BUNDLE_LINUX_APPIMAGE_ARGS: ${{ runner.os == 'Linux' && '--verbosity=2' || '' }}
+          # Apple code signing (only if secrets are configured)
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           tagName: ${{ env.RELEASE_TAG }}
           releaseName: Marlin ${{ env.RELEASE_TAG }}
           releaseBody: |
             Automated binaries for Marlin. Download the installer matching your platform.
+
+            **macOS users**: Choose `arm64` for Apple Silicon (M1/M2/M3) or `x86_64` for Intel Macs.
           releaseDraft: false
           prerelease: ${{ startsWith(env.RELEASE_TAG, 'v0.') }}
           args: --target ${{ matrix.target }} --verbose
@@ -295,10 +334,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # macOS Apple Silicon (M1/M2/M3)
           - os: macos-14
-            target: universal-apple-darwin
-            arch: universal
-            rust-targets: x86_64-apple-darwin,aarch64-apple-darwin
+            target: aarch64-apple-darwin
+            arch: arm64
+            rust-targets: aarch64-apple-darwin
+          # macOS Intel
+          - os: macos-13
+            target: x86_64-apple-darwin
+            arch: x86_64
+            rust-targets: x86_64-apple-darwin
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             arch: x86_64

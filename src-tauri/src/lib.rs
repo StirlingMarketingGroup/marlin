@@ -75,6 +75,17 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_decorum::init())
         .plugin(tauri_plugin_drag::init())
+        .plugin({
+            #[cfg(target_os = "macos")]
+            {
+                tauri_plugin_macos_permissions::init()
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                // No-op plugin for non-macOS platforms
+                tauri::plugin::Builder::<_, ()>::new("macos-permissions-noop").build()
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             commands::get_home_directory,
             commands::get_disk_usage,
