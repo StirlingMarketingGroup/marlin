@@ -50,7 +50,7 @@ Create the most intuitive, performant, and beautiful file browser that feels lik
 - **Open 50k-file folder**: First paint ≤ 120ms (names only), interactive ≤ 200ms
 - **Scroll 50k items**: ≥ 60fps, no long tasks > 16ms in renderer
 - **SMB 20k over 10ms RTT**: First 1k names ≤ 400ms, progressive fill thereafter
-- **Memory budget**: < 150MB with 50k entries, aggressive LRU eviction
+- **Memory budget**: < 150 MiB with 50k entries, aggressive LRU eviction
 - **Thumbnail budget**: ≤ 4 concurrent per spindle/host, never block UI
 
 ### 📁 Directory Read Pipeline
@@ -376,8 +376,8 @@ Create the most intuitive, performant, and beautiful file browser that feels lik
 - **Large Directories**: Open 50k files ≤ 120ms first paint, ≤ 200ms interactive
 - **SMB/NAS Performance**: 20k files over 10ms RTT, first 1k names ≤ 400ms
 - **Scroll Performance**: ≥ 60fps with 50k items, no long tasks > 16ms
-- **Memory Budget**: < 150MB with 50k entries, aggressive LRU eviction
-- **Bundle Size**: < 20MB installed (vs 200MB+ Electron apps)
+- **Memory Budget**: < 150 MiB with 50k entries, aggressive LRU eviction
+- **Bundle Size**: < 20 MiB installed (vs 200+ MiB Electron apps)
 - **Startup Time**: < 1 second cold start
 
 ### User Experience Goals
@@ -401,7 +401,7 @@ Create the most intuitive, performant, and beautiful file browser that feels lik
 **Goal**: Automated verification of core performance and functionality
 
 - [ ] **Performance Benchmarks**
-  - [ ] 50k local files: first paint ≤ 120ms; smooth scroll; memory < 150MB
+  - [ ] 50k local files: first paint ≤ 120ms; smooth scroll; memory < 150 MiB
   - [ ] 20k SMB files: progressive load; no UI stalls; degraded mode works
   - [ ] Thumbnail streaming without blocking; cancel on fast scroll
 
