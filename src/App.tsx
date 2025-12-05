@@ -14,6 +14,7 @@ import { message } from '@tauri-apps/plugin-dialog';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 
 import Toast from './components/Toast';
+import PermissionPrompt from './components/PermissionPrompt';
 import type {
   DirectoryChangeEventPayload,
   DirectoryListingResponse,
@@ -1302,6 +1303,9 @@ function App() {
 
       {/* Toast notifications */}
       <Toast />
+
+      {/* macOS Full Disk Access permission prompt */}
+      <PermissionPrompt />
     </div>
   );
 }
