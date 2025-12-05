@@ -26,7 +26,7 @@ _A modern, sleek file browser with native performance and beautiful UI_
 
 ### 🚀 **Lightning Fast Performance**
 
-- **10x smaller** than Electron alternatives (~10-20MB vs 200MB+)
+- **10x smaller** than Electron alternatives (~10-20 MiB vs 200+ MiB)
 - **Native performance** with Rust backend
 - **Memory efficient** - uses system WebView instead of Chromium
 - **Instant file operations** with async processing
@@ -66,8 +66,8 @@ Marlin uses **Tauri** instead of Electron for superior performance:
 
 | Feature          | Marlin (Tauri)   | Electron Apps   |
 | ---------------- | ---------------- | --------------- |
-| **Bundle Size**  | ~10-20 MB        | ~200+ MB        |
-| **Memory Usage** | ~50-80 MB        | ~200-400 MB     |
+| **Bundle Size**  | ~10-20 MiB       | ~200+ MiB       |
+| **Memory Usage** | ~50-80 MiB       | ~200-400 MiB    |
 | **Startup Time** | <1 second        | 2-5 seconds     |
 | **Security**     | Sandboxed + Rust | Node.js runtime |
 | **Native Feel**  | System WebView   | Chromium        |

@@ -77,8 +77,8 @@ impl ThumbnailCache {
                 total_misses: 0,
             })),
             max_memory_entries: 1000,
-            max_memory_size_bytes: 100 * 1024 * 1024, // 100MB
-            max_disk_size_bytes: 500 * 1024 * 1024,   // 500MB
+            max_memory_size_bytes: 100 * 1024 * 1024, // 100 MiB
+            max_disk_size_bytes: 500 * 1024 * 1024,   // 500 MiB
         };
 
         // Load disk cache index

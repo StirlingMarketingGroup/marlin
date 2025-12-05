@@ -19,7 +19,7 @@ function formatBytes(bytes: number): string {
     return '0 B';
   }
 
-  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB'];
   let value = bytes;
   let unitIndex = 0;
 
