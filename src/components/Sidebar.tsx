@@ -25,6 +25,7 @@ import { SystemDrive, PinnedDirectory } from '../types';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useToastStore } from '../store/useToastStore';
 import { useSidebarDropZone } from '../hooks/useDragDetector';
+import { usePlatform } from '@/hooks/usePlatform';
 import QuickTooltip from './QuickTooltip';
 
 type SidebarLink = {
@@ -243,6 +244,9 @@ export default function Sidebar() {
     }
   };
 
+  // Platform detection for special folders - must be before early return
+  const { isMac, isWindows } = usePlatform();
+
   if (!showSidebar) return null;
   // Safe join that returns null until base (home) is known
   const join = (base?: string, sub?: string): string | null => {
@@ -264,12 +268,6 @@ export default function Sidebar() {
     weight: 'fill' | 'regular' = 'fill',
     isActive: boolean
   ) => <IconComponent className={`w-5 h-5 ${isActive ? 'text-accent' : ''}`} weight={weight} />;
-
-  // Platform detection for special folders
-  const isMac =
-    typeof navigator !== 'undefined' && navigator.platform.toUpperCase().includes('MAC');
-  const isWindows =
-    typeof navigator !== 'undefined' && navigator.userAgent.toUpperCase().includes('WINDOWS');
   const trashPath = isMac
     ? join(home, '.Trash')
     : isWindows

@@ -1,45 +1,22 @@
 import { useEffect, useMemo, useRef, useState, useCallback, type ReactNode } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import {
-  Folder,
-  ImageSquare,
-  MusicNote,
-  VideoCamera,
-  FileText,
-  CaretUp,
-  CaretDown,
-  AppWindow,
-  Package,
-  FilePdf,
-  PaintBrush,
-  Palette,
-  Disc,
-  Cube,
-  Play,
-} from 'phosphor-react';
+import { CaretUp, CaretDown, Play, AppWindow, Folder, Package, Disc } from 'phosphor-react';
 import { FileItem, ViewPreferences } from '../types';
 import { useAppStore } from '../store/useAppStore';
 import { useDragStore } from '../store/useDragStore';
 import AppIcon from '@/components/AppIcon';
-import { FileTypeIcon, resolveVSCodeIcon } from '@/components/FileTypeIcon';
-import FileExtensionBadge from '@/components/FileExtensionBadge';
 import { createDragImageForSelection, createDragImageForSelectionAsync } from '@/utils/dragImage';
 import { invoke } from '@tauri-apps/api/core';
 // no direct invoke here; background opens the menu
 import { useThumbnail } from '@/hooks/useThumbnail';
+import { useFileIcon } from '@/hooks/useFileIcon';
+import { usePlatform } from '@/hooks/usePlatform';
 import { useVisibility } from '@/hooks/useVisibility';
 import FileNameDisplay from './FileNameDisplay';
 import SymlinkBadge from '@/components/SymlinkBadge';
 import GitRepoBadge from '@/components/GitRepoBadge';
 import { normalizePreviewIcon } from '@/utils/iconSizing';
-import {
-  getEffectiveExtension,
-  isArchiveExtension,
-  isArchiveFile,
-  isVideoExtension,
-  isMacOSBundle,
-  isAppBundle,
-} from '@/utils/fileTypes';
+import { isArchiveFile, isVideoExtension, isMacOSBundle } from '@/utils/fileTypes';
 
 interface FileListProps {
   files: FileItem[];
@@ -226,8 +203,7 @@ export default function FileList({ files, preferences }: FileListProps) {
     }
   };
 
-  const isMac =
-    typeof navigator !== 'undefined' && navigator.platform.toUpperCase().includes('MAC');
+  const { isMac } = usePlatform();
 
   // Optionally warm cache for a small first screenful
   useEffect(() => {
@@ -243,89 +219,7 @@ export default function FileList({ files, preferences }: FileListProps) {
     });
   }, [isMac, files, fetchAppIcon]);
 
-  const getFileIcon = (file: FileItem) => {
-    if (isMac) {
-      const fileName = file.name.toLowerCase();
-      if (file.is_directory && fileName.endsWith('.app')) {
-        return (
-          <AppIcon
-            path={file.path}
-            size={64}
-            className="w-5 h-5"
-            rounded={false}
-            priority="high"
-            fallback={<AppWindow className="w-5 h-5 text-accent" />}
-          />
-        );
-      }
-
-      // PKG files use a package icon
-      if (fileName.endsWith('.pkg')) {
-        return <Package className="w-5 h-5 text-blue-500" weight="fill" />;
-      }
-
-      // DMG files use a custom icon since they don't have embedded icons
-      if (fileName.endsWith('.dmg')) {
-        return <Disc className="w-5 h-5 text-app-muted" weight="fill" />;
-      }
-
-      // macOS bundles (non-app) get a package icon
-      if (isMacOSBundle(file) && !isAppBundle(file)) {
-        return <Package className="w-5 h-5 text-purple-400" weight="fill" />;
-      }
-    }
-    if (file.is_directory) {
-      return <Folder className="w-5 h-5 text-accent" weight="fill" />;
-    }
-
-    const effectiveExtension = getEffectiveExtension(file);
-    const ext = effectiveExtension?.toLowerCase();
-    if (!ext) {
-      const special = resolveVSCodeIcon(file.name);
-      if (special) return <FileTypeIcon name={file.name} size="small" />;
-      return <FileExtensionBadge extension={effectiveExtension} size="small" />;
-    }
-
-    // Same icon logic as FileGrid but smaller
-    if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp'].includes(ext)) {
-      return <ImageSquare className="w-5 h-5 text-app-green" />;
-    }
-    if (ext === 'pdf') {
-      return <FilePdf className="w-5 h-5 text-red-500" />;
-    }
-    if (ext === 'ai' || ext === 'eps') {
-      return <PaintBrush className="w-5 h-5 text-orange-500" />;
-    }
-    if (ext === 'psd' || ext === 'psb') {
-      return <Palette className="w-5 h-5 text-blue-500" />;
-    }
-    if (['mp3', 'wav', 'flac', 'aac', 'm4a', 'ogg'].includes(ext)) {
-      return <MusicNote className="w-5 h-5 text-app-yellow" />;
-    }
-    if (isVideoExtension(ext)) {
-      return <VideoCamera className="w-5 h-5 text-app-red" />;
-    }
-    if (isArchiveExtension(ext)) {
-      return <FileTypeIcon name={file.name} ext={ext} size="small" />;
-    }
-    // 3D model: STL
-    if (ext === 'stl') {
-      return <Cube className="w-5 h-5 text-app-green" />;
-    }
-    // VSCode-style file icons for code/config types
-    if (resolveVSCodeIcon(file.name, ext)) {
-      return <FileTypeIcon name={file.name} ext={ext} size="small" />;
-    }
-
-    if (['txt'].includes(ext)) {
-      return <FileText className="w-5 h-5 text-app-text" />;
-    }
-    if (['md', 'json', 'xml', 'yml', 'yaml', 'toml'].includes(ext)) {
-      return <FileText className="w-5 h-5 text-app-text" />;
-    }
-
-    return <FileExtensionBadge extension={effectiveExtension} size="small" />;
-  };
+  const getFileIcon = useFileIcon('small', isMac);
 
   const getTypeLabel = (file: FileItem) => {
     const name = file.name.toLowerCase();
