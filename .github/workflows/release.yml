@@ -141,7 +141,7 @@ jobs:
       matrix:
         include:
           # macOS Apple Silicon (M1/M2/M3)
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
             arch: arm64
             rust-targets: aarch64-apple-darwin
@@ -335,7 +335,7 @@ jobs:
       matrix:
         include:
           # macOS Apple Silicon (M1/M2/M3)
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
             arch: arm64
             rust-targets: aarch64-apple-darwin
