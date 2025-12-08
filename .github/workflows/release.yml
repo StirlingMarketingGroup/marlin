@@ -145,8 +145,8 @@ jobs:
             target: aarch64-apple-darwin
             arch: arm64
             rust-targets: aarch64-apple-darwin
-          # macOS Intel
-          - os: macos-13
+          # macOS Intel (cross-compile from arm64 runner)
+          - os: macos-15
             target: x86_64-apple-darwin
             arch: x86_64
             rust-targets: x86_64-apple-darwin
@@ -339,8 +339,8 @@ jobs:
             target: aarch64-apple-darwin
             arch: arm64
             rust-targets: aarch64-apple-darwin
-          # macOS Intel
-          - os: macos-13
+          # macOS Intel (cross-compile from arm64 runner)
+          - os: macos-15
             target: x86_64-apple-darwin
             arch: x86_64
             rust-targets: x86_64-apple-darwin
