@@ -248,7 +248,7 @@ jobs:
 
       - name: Cache Tauri downloads (Linux)
         if: runner.os == 'Linux'
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/tauri
           key: tauri-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('src-tauri/tauri.conf.json') }}
@@ -262,7 +262,7 @@ jobs:
 
       - name: Cache Tauri downloads (macOS)
         if: runner.os == 'macOS'
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/Library/Caches/tauri
           key: tauri-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('src-tauri/tauri.conf.json') }}
@@ -428,7 +428,7 @@ jobs:
 
       - name: Cache Tauri downloads (Linux)
         if: runner.os == 'Linux'
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/tauri
           key: tauri-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('src-tauri/tauri.conf.json') }}
@@ -442,7 +442,7 @@ jobs:
 
       - name: Cache Tauri downloads (macOS)
         if: runner.os == 'macOS'
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/Library/Caches/tauri
           key: tauri-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('src-tauri/tauri.conf.json') }}
