@@ -67,7 +67,7 @@ export const config: Options.Testrunner = {
     } as WebdriverIO.Capabilities,
   ],
 
-  logLevel: 'trace',
+  logLevel: 'info',
   bail: 0,
   waitforTimeout: 30000,
   connectionRetryTimeout: 120000,

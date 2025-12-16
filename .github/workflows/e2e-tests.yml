@@ -236,13 +236,35 @@ jobs:
             export PATH="$(dirname $TAURI_DRIVER_BIN):$PATH"
           fi
 
-          # Clean up stale Xvfb lock files from previous runs
+          # Aggressive cleanup of stale processes from previous runs
+          echo "Cleaning up stale processes..."
+
+          # Kill any existing Xvfb on display :99
+          pkill -f "Xvfb :99" 2>/dev/null || true
+          sleep 1
+
+          # Kill any existing tauri-driver
+          pkill -f tauri-driver 2>/dev/null || true
+
+          # Kill anything on port 4444
+          fuser -k 4444/tcp 2>/dev/null || true
+
+          # Clean up stale Xvfb lock files
           rm -f /tmp/.X99-lock /tmp/.X11-unix/X99 2>/dev/null || true
 
-          # Start Xvfb
+          # Wait for processes to die
+          sleep 2
+
+          # Start Xvfb with error checking
+          echo "Starting Xvfb..."
           Xvfb :99 -screen 0 1920x1080x24 &
           XVFB_PID=$!
           sleep 2
+
+          # Verify Xvfb started
+          if ! kill -0 $XVFB_PID 2>/dev/null; then
+            echo "WARNING: Xvfb may not have started properly"
+          fi
 
           # Start tauri-driver with output logging
           echo "Starting tauri-driver..."
