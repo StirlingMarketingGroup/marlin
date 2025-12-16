@@ -142,7 +142,11 @@ jobs:
 
           # Start tauri-driver with longer timeout
           echo "Starting tauri-driver..."
-          tauri-driver &
+          echo "PATH: $PATH"
+          echo "Checking tauri-driver location..."
+          ls -la "$HOME/.cargo/bin/tauri-driver" || echo "tauri-driver not found in cargo bin"
+          which tauri-driver || echo "tauri-driver not in PATH"
+          "$HOME/.cargo/bin/tauri-driver" &
           DRIVER_PID=$!
           sleep 5
 
