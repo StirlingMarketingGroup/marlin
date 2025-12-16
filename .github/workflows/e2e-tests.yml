@@ -302,15 +302,12 @@ jobs:
           echo "Checking tauri-driver status endpoint..."
           curl -s http://localhost:4444/status 2>&1 | head -5 || echo "Status endpoint check failed"
 
-          # Test session creation manually to see detailed error
-          echo "Testing session creation manually..."
-          CAPS_JSON="{\"capabilities\":{\"firstMatch\":[{}],\"alwaysMatch\":{\"browserName\":\"wry\",\"tauri:options\":{\"application\":\"${TAURI_APP_PATH}\"}}}}"
-          echo "Sending capabilities: $CAPS_JSON"
-          curl -v -X POST http://localhost:4444/session \
-            -H "Content-Type: application/json" \
-            -d "$CAPS_JSON" 2>&1 | tee /tmp/session-response.txt || true
-          echo "Session creation response:"
-          cat /tmp/session-response.txt
+          # Clean up any stale sessions before running tests
+          echo "Cleaning up any existing sessions..."
+          curl -s http://localhost:4444/sessions 2>/dev/null | grep -o '"sessionId":"[^"]*"' | grep -o '[^"]*"[^"]*"[^"]*$' | tr -d '"' | while read -r SID; do
+            echo "Deleting session: $SID"
+            curl -s -X DELETE "http://localhost:4444/session/$SID" || true
+          done
 
           # Run tests
           npm run test:e2e:tauri || TEST_EXIT=$?
