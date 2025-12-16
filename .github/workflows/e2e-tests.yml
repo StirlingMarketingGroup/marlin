@@ -134,7 +134,15 @@ jobs:
         env:
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
-        run: npm run tauri build -- --debug --no-bundle
+        run: |
+          # Ensure cargo is in PATH for the build
+          if [ -f "$HOME/.cargo/env" ]; then
+            source "$HOME/.cargo/env"
+          else
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+
+          npm run tauri build -- --debug --no-bundle
 
       - name: Find app binary
         id: find-binary
