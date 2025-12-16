@@ -1,6 +1,7 @@
 import type { Options } from '@wdio/types';
 import { spawn, ChildProcess } from 'child_process';
 import * as path from 'path';
+import * as fs from 'fs';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -8,7 +9,38 @@ const __dirname = path.dirname(__filename);
 
 let tauriDriver: ChildProcess | null = null;
 
-const APP_PATH = path.join(__dirname, 'src-tauri/target/debug/marlin');
+// Check if tauri-driver is already running externally (e.g., in CI)
+const TAURI_DRIVER_EXTERNAL = process.env.TAURI_DRIVER_EXTERNAL === 'true';
+
+// Find the app binary - check multiple possible locations
+function findAppBinary(): string {
+  const possiblePaths = [
+    // Local development (macOS)
+    path.join(__dirname, 'src-tauri/target/debug/marlin'),
+    // Local development (Linux)
+    path.join(__dirname, 'src-tauri/target/debug/marlin'),
+    // CI build output (Linux bundle)
+    path.join(__dirname, 'src-tauri/target/debug/bundle/appimage/marlin.AppImage'),
+    // CI build output (Linux deb extracted)
+    path.join(__dirname, 'src-tauri/target/debug/marlin'),
+    // Explicit override from environment
+    process.env.TAURI_APP_PATH || '',
+  ];
+
+  for (const appPath of possiblePaths) {
+    if (appPath && fs.existsSync(appPath)) {
+      console.log(`Found app binary at: ${appPath}`);
+      return appPath;
+    }
+  }
+
+  // Default fallback
+  const defaultPath = path.join(__dirname, 'src-tauri/target/debug/marlin');
+  console.log(`Using default app path: ${defaultPath}`);
+  return defaultPath;
+}
+
+const APP_PATH = findAppBinary();
 
 export const config: Options.Testrunner = {
   runner: 'local',
@@ -51,8 +83,13 @@ export const config: Options.Testrunner = {
     timeout: 120000,
   },
 
-  // Start tauri-driver before tests
+  // Start tauri-driver before tests (unless running externally in CI)
   onPrepare: async function () {
+    if (TAURI_DRIVER_EXTERNAL) {
+      console.log('Using external tauri-driver (TAURI_DRIVER_EXTERNAL=true)');
+      return;
+    }
+
     console.log('Starting tauri-driver...');
     tauriDriver = spawn('tauri-driver', [], {
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -73,6 +110,11 @@ export const config: Options.Testrunner = {
 
   // Stop tauri-driver after tests
   onComplete: async function () {
+    if (TAURI_DRIVER_EXTERNAL) {
+      console.log('External tauri-driver - not stopping');
+      return;
+    }
+
     console.log('Stopping tauri-driver...');
     if (tauriDriver) {
       tauriDriver.kill();

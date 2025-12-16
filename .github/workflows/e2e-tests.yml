@@ -8,6 +8,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
 
 jobs:
   # Rust integration tests - tests Google Drive API directly
@@ -24,7 +25,10 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          workspaces: src-tauri -> target
+          shared-key: e2e-ubuntu-22.04
+          cache-all-crates: true
+          cache-on-failure: true
 
       - name: Install Linux dependencies
         run: |
@@ -70,7 +74,17 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          workspaces: src-tauri -> target
+          shared-key: e2e-ubuntu-22.04
+          cache-all-crates: true
+          cache-on-failure: true
+
+      - name: Cache tauri-driver
+        id: cache-tauri-driver
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/tauri-driver
+          key: tauri-driver-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
 
       - name: Install Linux dependencies
         run: |
@@ -86,6 +100,7 @@ jobs:
             webkit2gtk-driver
 
       - name: Install tauri-driver
+        if: steps.cache-tauri-driver.outputs.cache-hit != 'true'
         run: cargo install tauri-driver
 
       - name: Install npm dependencies
@@ -97,6 +112,20 @@ jobs:
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
         run: npm run tauri build -- --debug
 
+      - name: Find app binary
+        id: find-binary
+        run: |
+          # Find the built binary
+          if [ -f "src-tauri/target/debug/marlin" ]; then
+            echo "app_path=src-tauri/target/debug/marlin" >> $GITHUB_OUTPUT
+            echo "Found binary at: src-tauri/target/debug/marlin"
+          else
+            echo "Looking for binary..."
+            find src-tauri/target -name "marlin" -type f -executable 2>/dev/null | head -5
+            # Default to expected location
+            echo "app_path=src-tauri/target/debug/marlin" >> $GITHUB_OUTPUT
+          fi
+
       - name: Setup service account
         env:
           GOOGLE_SERVICE_ACCOUNT_KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }}
@@ -107,9 +136,12 @@ jobs:
         env:
           GOOGLE_SERVICE_ACCOUNT_KEY_FILE: /tmp/service-account.json
           DISPLAY: ':99'
+          TAURI_DRIVER_EXTERNAL: 'true'
+          TAURI_APP_PATH: ${{ github.workspace }}/${{ steps.find-binary.outputs.app_path }}
         run: |
           # Start Xvfb
           Xvfb :99 -screen 0 1920x1080x24 &
+          XVFB_PID=$!
           sleep 2
 
           # Start tauri-driver
@@ -117,11 +149,18 @@ jobs:
           DRIVER_PID=$!
           sleep 2
 
+          # Verify tauri-driver is running
+          if ! kill -0 $DRIVER_PID 2>/dev/null; then
+            echo "tauri-driver failed to start"
+            exit 1
+          fi
+
           # Run tests
           npm run test:e2e:tauri || TEST_EXIT=$?
 
           # Cleanup
           kill $DRIVER_PID 2>/dev/null || true
+          kill $XVFB_PID 2>/dev/null || true
 
           exit ${TEST_EXIT:-0}
 
