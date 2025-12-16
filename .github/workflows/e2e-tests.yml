@@ -248,6 +248,11 @@ jobs:
           echo "Starting tauri-driver..."
           echo "PATH: $PATH"
           echo "TAURI_APP_PATH: $TAURI_APP_PATH"
+          echo "DISPLAY: $DISPLAY"
+
+          # Check tauri-driver version
+          echo "tauri-driver version:"
+          "$TAURI_DRIVER_BIN" --version || echo "Version command not supported"
 
           # Redirect tauri-driver output to log file for debugging
           echo "Using tauri-driver at: $TAURI_DRIVER_BIN"
@@ -263,6 +268,14 @@ jobs:
             exit 1
           fi
           echo "tauri-driver running on PID $DRIVER_PID"
+
+          # Verify tauri-driver is listening on port 4444
+          echo "Checking if port 4444 is listening..."
+          ss -tlnp | grep 4444 || echo "Port 4444 not found in ss output"
+
+          # Try to get status from tauri-driver
+          echo "Checking tauri-driver status endpoint..."
+          curl -s http://localhost:4444/status 2>&1 | head -5 || echo "Status endpoint check failed"
 
           # Run tests
           npm run test:e2e:tauri || TEST_EXIT=$?
