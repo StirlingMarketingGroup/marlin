@@ -82,18 +82,47 @@ jobs:
 
       - name: Install tauri-driver
         run: |
-          # Ensure cargo is in PATH
-          if [ -f "$HOME/.cargo/env" ]; then
-            source "$HOME/.cargo/env"
+          # Debug: Show PATH and cargo locations
+          echo "=== Debugging cargo availability ==="
+          echo "PATH: $PATH"
+          echo "HOME: $HOME"
+          echo "Checking ~/.cargo/bin:"
+          ls -la "$HOME/.cargo/bin/" 2>/dev/null || echo "~/.cargo/bin does not exist"
+          echo "Checking for cargo binary:"
+          which cargo 2>/dev/null || echo "cargo not in PATH"
+
+          # Find cargo - try multiple locations
+          CARGO_BIN=""
+          if command -v cargo &> /dev/null; then
+            CARGO_BIN="cargo"
+          elif [ -f "$HOME/.cargo/bin/cargo" ]; then
+            CARGO_BIN="$HOME/.cargo/bin/cargo"
+          elif [ -f "/usr/local/cargo/bin/cargo" ]; then
+            CARGO_BIN="/usr/local/cargo/bin/cargo"
           else
-            export PATH="$HOME/.cargo/bin:$PATH"
+            # Try to find it
+            FOUND_CARGO=$(find /home -name "cargo" -type f -executable 2>/dev/null | head -1)
+            if [ -n "$FOUND_CARGO" ]; then
+              CARGO_BIN="$FOUND_CARGO"
+            fi
           fi
+
+          if [ -z "$CARGO_BIN" ]; then
+            echo "ERROR: Could not find cargo binary anywhere"
+            echo "Attempting to install Rust..."
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+            source "$HOME/.cargo/env"
+            CARGO_BIN="cargo"
+          fi
+
+          echo "Using cargo at: $CARGO_BIN"
+          $CARGO_BIN --version
 
           # Install to workspace to avoid race conditions between runners sharing ~/.cargo
           DRIVER_ROOT="${GITHUB_WORKSPACE}/.local-cargo"
           mkdir -p "$DRIVER_ROOT"
 
-          cargo install --force --root "$DRIVER_ROOT" tauri-driver
+          $CARGO_BIN install --force --root "$DRIVER_ROOT" tauri-driver
           ls -la "$DRIVER_ROOT/bin/tauri-driver"
 
           echo "TAURI_DRIVER_BIN=$DRIVER_ROOT/bin/tauri-driver" >> $GITHUB_ENV
