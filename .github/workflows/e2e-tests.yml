@@ -75,24 +75,21 @@ jobs:
           cache-all-crates: true
           cache-on-failure: true
 
-      - name: Cache tauri-driver
-        id: cache-tauri-driver
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/bin/tauri-driver
-          key: tauri-driver-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
-
       # System dependencies pre-installed on self-hosted runner
 
       - name: Install tauri-driver
-        if: steps.cache-tauri-driver.outputs.cache-hit != 'true'
         run: |
           # Source cargo env to ensure cargo is in PATH
           source "$HOME/.cargo/env"
 
-          # Force reinstall in case cargo metadata is stale but binary was deleted
-          cargo install --force tauri-driver
-          ls -la "$HOME/.cargo/bin/tauri-driver"
+          # Install to workspace to avoid race conditions between runners sharing ~/.cargo
+          DRIVER_ROOT="${GITHUB_WORKSPACE}/.local-cargo"
+          mkdir -p "$DRIVER_ROOT"
+
+          cargo install --force --root "$DRIVER_ROOT" tauri-driver
+          ls -la "$DRIVER_ROOT/bin/tauri-driver"
+
+          echo "TAURI_DRIVER_BIN=$DRIVER_ROOT/bin/tauri-driver" >> $GITHUB_ENV
 
       - name: Install npm dependencies
         run: npm ci
@@ -155,7 +152,8 @@ jobs:
           echo "TAURI_APP_PATH: $TAURI_APP_PATH"
 
           # Redirect tauri-driver output to log file for debugging
-          "$HOME/.cargo/bin/tauri-driver" > tauri-driver.log 2>&1 &
+          echo "Using tauri-driver at: $TAURI_DRIVER_BIN"
+          "$TAURI_DRIVER_BIN" > tauri-driver.log 2>&1 &
           DRIVER_PID=$!
           sleep 5
 
