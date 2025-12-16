@@ -324,12 +324,24 @@ jobs:
           echo "Checking tauri-driver status endpoint..."
           curl -s http://localhost:4444/status 2>&1 | head -5 || echo "Status endpoint check failed"
 
-          # Clean up any stale sessions before running tests
-          echo "Cleaning up any existing sessions..."
-          curl -s http://localhost:4444/sessions 2>/dev/null | grep -o '"sessionId":"[^"]*"' | grep -o '[^"]*"[^"]*"[^"]*$' | tr -d '"' | while read -r SID; do
-            echo "Deleting session: $SID"
-            curl -s -X DELETE "http://localhost:4444/session/$SID" || true
-          done
+          # Test session creation with curl to verify tauri-driver works
+          echo "Testing session creation with curl..."
+          CAPS_JSON="{\"capabilities\":{\"firstMatch\":[{}],\"alwaysMatch\":{\"browserName\":\"wry\",\"tauri:options\":{\"application\":\"${TAURI_APP_PATH}\"}}}}"
+          SESSION_RESPONSE=$(curl -s -X POST http://localhost:4444/session \
+            -H "Content-Type: application/json" \
+            -d "$CAPS_JSON" 2>&1)
+          echo "Session response: $SESSION_RESPONSE"
+
+          # Extract session ID and delete it if created
+          if echo "$SESSION_RESPONSE" | grep -q "sessionId"; then
+            SESSION_ID=$(echo "$SESSION_RESPONSE" | grep -o '"sessionId":"[^"]*"' | cut -d'"' -f4)
+            echo "Session created successfully: $SESSION_ID"
+            echo "Deleting test session..."
+            curl -s -X DELETE "http://localhost:4444/session/$SESSION_ID" || true
+            echo "Test session deleted"
+          else
+            echo "WARNING: Session creation failed. Response: $SESSION_RESPONSE"
+          fi
 
           # Run tests
           npm run test:e2e:tauri || TEST_EXIT=$?
