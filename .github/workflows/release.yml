@@ -19,7 +19,7 @@ jobs:
   sync-version:
     name: Sync Version Metadata
     if: ${{ (github.ref_type == 'tag' && startsWith(github.ref_name, 'v')) || (github.event.inputs.tag && startsWith(github.event.inputs.tag, 'v')) }}
-    runs-on: [self-hosted, linux, X64]
+    runs-on: [self-hosted, Linux, X64]
     permissions:
       contents: write
     outputs:
@@ -154,7 +154,7 @@ jobs:
             rust-targets: x86_64-apple-darwin
           # Linux x86_64 (self-hosted)
           - platform: linux
-            runner: [self-hosted, linux, X64]
+            runner: [self-hosted, Linux, X64]
             target: x86_64-unknown-linux-gnu
             arch: x86_64
             rust-targets: x86_64-unknown-linux-gnu
@@ -357,7 +357,7 @@ jobs:
             rust-targets: x86_64-apple-darwin
           # Linux x86_64 (self-hosted)
           - platform: linux
-            runner: [self-hosted, linux, X64]
+            runner: [self-hosted, Linux, X64]
             target: x86_64-unknown-linux-gnu
             arch: x86_64
             rust-targets: x86_64-unknown-linux-gnu
