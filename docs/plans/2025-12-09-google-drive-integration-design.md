@@ -11,6 +11,7 @@ gdrive://<account-email>/<virtual-path>
 ```
 
 Examples:
+
 - `gdrive://brian@gmail.com/My Drive`
 - `gdrive://brian@gmail.com/My Drive/Projects/design.fig`
 - `gdrive://brian@work.com/Shared with me/Team Docs`
@@ -22,6 +23,7 @@ Examples:
 New `GoogleDriveProvider` in `src-tauri/src/locations/gdrive/` implementing the `LocationProvider` trait. Registers under the `gdrive` scheme.
 
 **Virtual root folders** (shown at `gdrive://account@email.com/`):
+
 - My Drive
 - Shared with me
 - Starred
@@ -68,6 +70,7 @@ Location: `~/.config/marlin/gdrive-accounts.json` (or platform equivalent)
 ### Multiple Accounts
 
 Full support for multiple Google accounts:
+
 - Each appears as separate sidebar entry
 - URIs namespaced by email
 - Independent auth state per account
@@ -130,6 +133,7 @@ New section in sidebar (below Favorites, above Locations):
 ### Virtual Root View
 
 When navigating to an account root:
+
 - My Drive
 - Shared with me
 - Starred
@@ -155,26 +159,28 @@ LocationCapabilities {
 
 ### API Mappings
 
-| Operation | Google Drive API |
-|-----------|------------------|
-| List directory | `files.list` with parent query |
-| Get metadata | `files.get` |
-| Create folder | `files.create` (folder mimeType) |
-| Delete | `files.update` (trash) |
-| Rename | `files.update` (name field) |
-| Copy | `files.copy` |
-| Move | `files.update` (parent field) |
-| Download | `files.get` with `alt=media` |
-| Upload | `files.create` with content |
+| Operation      | Google Drive API                 |
+| -------------- | -------------------------------- |
+| List directory | `files.list` with parent query   |
+| Get metadata   | `files.get`                      |
+| Create folder  | `files.create` (folder mimeType) |
+| Delete         | `files.update` (trash)           |
+| Rename         | `files.update` (name field)      |
+| Copy           | `files.copy`                     |
+| Move           | `files.update` (parent field)    |
+| Download       | `files.get` with `alt=media`     |
+| Upload         | `files.create` with content      |
 
 ### Drag Operations
 
 **Drag OUT:**
+
 1. Download file to temp directory
 2. Initiate native drag with temp file
 3. Clean up temp files periodically
 
 **Drag IN:**
+
 1. Upload via `files.create`
 2. Show progress for large files
 
@@ -212,24 +218,24 @@ LocationCapabilities {
 
 ### Backend (Rust)
 
-| File | Purpose |
-|------|---------|
-| `src-tauri/src/locations/gdrive/mod.rs` | Provider implementation |
-| `src-tauri/src/locations/gdrive/auth.rs` | OAuth flow, token storage |
-| `src-tauri/src/locations/gdrive/api.rs` | Drive API wrapper |
-| `src-tauri/src/locations/gdrive/cache.rs` | Listing and path caches |
-| `src-tauri/src/locations/gdrive/url.rs` | Google Drive URL parsing |
-| `src-tauri/src/locations/mod.rs` | Register gdrive provider |
-| `src-tauri/src/commands.rs` | Account management commands |
+| File                                      | Purpose                     |
+| ----------------------------------------- | --------------------------- |
+| `src-tauri/src/locations/gdrive/mod.rs`   | Provider implementation     |
+| `src-tauri/src/locations/gdrive/auth.rs`  | OAuth flow, token storage   |
+| `src-tauri/src/locations/gdrive/api.rs`   | Drive API wrapper           |
+| `src-tauri/src/locations/gdrive/cache.rs` | Listing and path caches     |
+| `src-tauri/src/locations/gdrive/url.rs`   | Google Drive URL parsing    |
+| `src-tauri/src/locations/mod.rs`          | Register gdrive provider    |
+| `src-tauri/src/commands.rs`               | Account management commands |
 
 ### Frontend (TypeScript)
 
-| File | Purpose |
-|------|---------|
-| `src/components/Sidebar.tsx` | Cloud Storage section |
-| `src/components/PathBar.tsx` | Google Drive URL detection |
-| `src/store/useAppStore.ts` | Connected accounts state |
-| `src/components/GoogleAuthPrompt.tsx` | Auth error/prompt UI |
+| File                                  | Purpose                    |
+| ------------------------------------- | -------------------------- |
+| `src/components/Sidebar.tsx`          | Cloud Storage section      |
+| `src/components/PathBar.tsx`          | Google Drive URL detection |
+| `src/store/useAppStore.ts`            | Connected accounts state   |
+| `src/components/GoogleAuthPrompt.tsx` | Auth error/prompt UI       |
 
 ## Google Cloud Setup
 

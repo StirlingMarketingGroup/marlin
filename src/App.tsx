@@ -58,7 +58,7 @@ function App() {
   useDirectoryStream();
 
   const initializedRef = useRef(false);
-  const [showLoadingOverlay, setShowLoadingOverlay] = useState(false);
+  const [showLoadingOverlay, _setShowLoadingOverlay] = useState(false);
   const prefsLoadedRef = useRef(false);
   const firstLoadRef = useRef(true);
   const altTogglePendingRef = useRef(false);
@@ -216,18 +216,19 @@ function App() {
     return resolvedPath;
   };
 
-  // Only show the blocking loading overlay if loading lasts > 500ms
-  useEffect(() => {
-    let timer: number | undefined;
-    if (loading) {
-      timer = window.setTimeout(() => setShowLoadingOverlay(true), 500);
-    } else {
-      setShowLoadingOverlay(false);
-    }
-    return () => {
-      if (timer) window.clearTimeout(timer);
-    };
-  }, [loading]);
+  // Disabled: blocking loading overlay was jarring during Google Drive navigation
+  // The normal loading spinner in the UI is sufficient
+  // useEffect(() => {
+  //   let timer: number | undefined;
+  //   if (loading) {
+  //     timer = window.setTimeout(() => setShowLoadingOverlay(true), 500);
+  //   } else {
+  //     setShowLoadingOverlay(false);
+  //   }
+  //   return () => {
+  //     if (timer) window.clearTimeout(timer);
+  //   };
+  // }, [loading]);
 
   // Remove global subscriptions that write the entire file to avoid clobbering across windows
 

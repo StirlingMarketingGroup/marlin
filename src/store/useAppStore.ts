@@ -14,6 +14,8 @@ import {
   UndoTrashResponse,
   DeletePathsResponse,
   DeleteItemPayload,
+  GoogleAccountInfo,
+  ResolveGoogleDriveUrlResult,
 } from '../types';
 import { invoke } from '@tauri-apps/api/core';
 import { open as openShell } from '@tauri-apps/plugin-shell';
@@ -62,6 +64,12 @@ interface GitStatusCacheEntry {
 const normalizePath = (input: string): string => {
   const raw = (input ?? '').trim();
   if (!raw) return '/';
+
+  // Don't normalize URLs or custom URI schemes - return them as-is
+  // Matches http://, https://, gdrive://, etc.
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) {
+    return raw;
+  }
 
   let path = raw.replace(/\\/g, '/');
   let drivePrefix = '';
@@ -198,6 +206,10 @@ interface AppState {
   // Pinned directories
   pinnedDirectories: PinnedDirectory[];
 
+  // Cloud storage / Google accounts
+  googleAccounts: GoogleAccountInfo[];
+  googleAccountsLoading: boolean;
+
   // UI State
   sidebarWidth: number;
   showSidebar: boolean;
@@ -251,6 +263,11 @@ interface AppState {
   addPinnedDirectory: (path: string, name?: string) => Promise<PinnedDirectory>;
   removePinnedDirectory: (path: string) => Promise<boolean>;
   reorderPinnedDirectories: (paths: string[]) => Promise<void>;
+  // Google accounts
+  loadGoogleAccounts: () => Promise<void>;
+  addGoogleAccount: () => Promise<GoogleAccountInfo | null>;
+  removeGoogleAccount: (email: string) => Promise<boolean>;
+  resolveGoogleDriveUrl: (url: string) => Promise<ResolveGoogleDriveUrlResult | null>;
   // Rename UX
   renameTargetPath?: string;
   setRenameTarget: (path?: string) => void;
@@ -298,6 +315,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   theme: 'system',
   appIconCache: {},
   pinnedDirectories: [],
+  googleAccounts: [],
+  googleAccountsLoading: false,
 
   sidebarWidth: 240,
   showSidebar: true,
@@ -379,12 +398,120 @@ export const useAppStore = create<AppState>((set, get) => ({
     }),
 
   navigateTo: (path) => {
+    // Check if this looks like a Google Drive URL and resolve it first
+    const trimmed = path.trim();
+    if (
+      trimmed.startsWith('https://drive.google.com/') ||
+      trimmed.startsWith('https://docs.google.com/')
+    ) {
+      // Handle Google Drive URL asynchronously
+      void (async () => {
+        const { addToast } = useToastStore.getState();
+        try {
+          const result = await invoke<ResolveGoogleDriveUrlResult>('resolve_google_drive_url', {
+            url: trimmed,
+          });
+          if (result) {
+            // Navigate to the resolved gdrive:// path
+            get().navigateTo(result.path);
+          }
+        } catch (error) {
+          console.error('Failed to resolve Google Drive URL:', error);
+          const errorMsg = error instanceof Error ? error.message : String(error);
+          // Check if error suggests user should sign in - auto-start OAuth if no accounts
+          const needsAuth =
+            errorMsg.includes('No Google accounts connected') ||
+            errorMsg.includes('No connected account') ||
+            errorMsg.includes('not accessible');
+
+          // Check if we already have accounts - if so, don't auto-prompt
+          const { googleAccounts } = get();
+          if (needsAuth && googleAccounts.length === 0) {
+            // Auto-start OAuth flow only if no accounts exist
+            addToast({
+              type: 'info',
+              message: 'Connecting to Google Drive...',
+              duration: 3000,
+            });
+            try {
+              const account = await get().addGoogleAccount();
+              if (account) {
+                // Reload accounts list
+                await get().loadGoogleAccounts();
+                // Retry navigation after successful sign-in
+                addToast({
+                  type: 'success',
+                  message: `Connected as ${account.displayName || account.email}. Opening link...`,
+                  duration: 3000,
+                });
+                // Retry the URL resolution once
+                try {
+                  const retryResult = await invoke<ResolveGoogleDriveUrlResult>(
+                    'resolve_google_drive_url',
+                    { url: trimmed }
+                  );
+                  if (retryResult) {
+                    get().navigateTo(retryResult.path);
+                  }
+                } catch (retryError) {
+                  console.error('Retry failed:', retryError);
+                  addToast({
+                    type: 'error',
+                    message:
+                      'Could not access this Google Drive file. You may not have permission.',
+                    duration: 5000,
+                  });
+                }
+              }
+            } catch (authError) {
+              console.error('Failed to add Google account:', authError);
+              addToast({
+                type: 'error',
+                message: 'Failed to connect Google account. Please try again.',
+                duration: 5000,
+              });
+            }
+          } else if (needsAuth) {
+            // We have accounts but still can't access - permission issue
+            addToast({
+              type: 'error',
+              message:
+                'Could not access this Google Drive file. You may not have permission or need to sign in with a different account.',
+              duration: 8000,
+              action: {
+                label: 'Add Account',
+                onClick: () => {
+                  void get().addGoogleAccount();
+                },
+              },
+            });
+          } else {
+            addToast({
+              type: 'error',
+              message: `Failed to open Google Drive link: ${errorMsg}`,
+              duration: 5000,
+            });
+          }
+        }
+      })();
+      return;
+    }
+
     const { pathHistory, historyIndex } = get();
-    const norm = normalizePath(path);
+    // Handle gdrive:// URIs - don't use normalizePath for these
+    let norm: string;
+    let locationRaw: string;
+    if (trimmed.startsWith('gdrive://')) {
+      norm = trimmed;
+      locationRaw = trimmed;
+    } else {
+      norm = normalizePath(path);
+      locationRaw = toFileUri(norm);
+    }
     const newHistory = [...pathHistory.slice(0, historyIndex + 1), norm];
     set({
       currentPath: norm,
-      currentLocationRaw: toFileUri(norm),
+      currentLocationRaw: locationRaw,
       pathHistory: newHistory,
       historyIndex: newHistory.length - 1,
     });
@@ -395,12 +522,14 @@ export const useAppStore = create<AppState>((set, get) => ({
     const { pathHistory, historyIndex } = get();
     if (historyIndex > 0) {
       const newIndex = historyIndex - 1;
+      const newPath = pathHistory[newIndex];
+      const locationRaw = newPath.startsWith('gdrive://') ? newPath : toFileUri(newPath);
       set({
-        currentPath: pathHistory[newIndex],
-        currentLocationRaw: toFileUri(pathHistory[newIndex]),
+        currentPath: newPath,
+        currentLocationRaw: locationRaw,
         historyIndex: newIndex,
       });
-      void get().refreshGitStatus({ path: pathHistory[newIndex] });
+      void get().refreshGitStatus({ path: newPath });
     }
   },
 
@@ -408,12 +537,14 @@ export const useAppStore = create<AppState>((set, get) => ({
     const { pathHistory, historyIndex } = get();
     if (historyIndex < pathHistory.length - 1) {
       const newIndex = historyIndex + 1;
+      const newPath = pathHistory[newIndex];
+      const locationRaw = newPath.startsWith('gdrive://') ? newPath : toFileUri(newPath);
       set({
-        currentPath: pathHistory[newIndex],
-        currentLocationRaw: toFileUri(pathHistory[newIndex]),
+        currentPath: newPath,
+        currentLocationRaw: locationRaw,
         historyIndex: newIndex,
       });
-      void get().refreshGitStatus({ path: pathHistory[newIndex] });
+      void get().refreshGitStatus({ path: newPath });
     }
   },
 
@@ -431,6 +562,29 @@ export const useAppStore = create<AppState>((set, get) => ({
     const { currentPath, navigateTo } = get();
     // Handle POSIX and basic Windows paths
     if (!currentPath || currentPath === '/') return;
+
+    // Handle gdrive:// paths
+    if (currentPath.startsWith('gdrive://')) {
+      // gdrive://email@example.com/path/to/folder
+      const withoutScheme = currentPath.slice('gdrive://'.length);
+      const firstSlash = withoutScheme.indexOf('/');
+      if (firstSlash === -1) return; // At root (just gdrive://email)
+      const pathPart = withoutScheme.slice(firstSlash + 1);
+      if (!pathPart || pathPart === '/') return; // At root
+      const pathNormalized = pathPart.replace(/\/+$/g, '');
+      if (!pathNormalized) return;
+      const lastSlash = pathNormalized.lastIndexOf('/');
+      if (lastSlash === -1) {
+        // Going up to root of this drive
+        navigateTo(`gdrive://${withoutScheme.slice(0, firstSlash)}/`);
+      } else {
+        navigateTo(
+          `gdrive://${withoutScheme.slice(0, firstSlash)}/${pathNormalized.slice(0, lastSlash)}/`
+        );
+      }
+      return;
+    }
+
     // Normalize backslashes to slashes for finding parent
     const normalized = currentPath.replace(/\\/g, '/').replace(/\/+$/g, '') || '/';
     // If after trimming it's root, nothing to do
@@ -446,6 +600,18 @@ export const useAppStore = create<AppState>((set, get) => ({
   canGoUp: () => {
     const { currentPath } = get();
     if (!currentPath || currentPath === '/') return false;
+
+    // Handle gdrive:// paths
+    if (currentPath.startsWith('gdrive://')) {
+      const withoutScheme = currentPath.slice('gdrive://'.length);
+      const firstSlash = withoutScheme.indexOf('/');
+      if (firstSlash === -1) return false; // At root
+      const pathPart = withoutScheme.slice(firstSlash + 1);
+      if (!pathPart || pathPart === '/') return false; // At root
+      const pathNormalized = pathPart.replace(/\/+$/g, '');
+      return pathNormalized.length > 0;
+    }
+
     const normalized = currentPath.replace(/\\/g, '/').replace(/\/+$/g, '') || '/';
     if (normalized === '/') return false;
     const driveRootMatch = normalized.match(/^([A-Za-z]:)(\/$)?$/);
@@ -524,7 +690,12 @@ export const useAppStore = create<AppState>((set, get) => ({
       const listing = await invoke<DirectoryListingResponse>('read_directory', {
         path: currentPath,
       });
-      const normalized = normalizePath(listing.location.displayPath || listing.location.path);
+      // For non-file schemes (like gdrive://), use the raw URI as the path
+      // For file:// scheme, use displayPath or path
+      const isCustomScheme = listing.location.scheme !== 'file';
+      const normalized = isCustomScheme
+        ? listing.location.raw
+        : normalizePath(listing.location.displayPath || listing.location.path);
 
       set((state) => {
         const updatedHistory = [...state.pathHistory];
@@ -541,7 +712,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         };
       });
 
-      void get().refreshGitStatus({ path: listing.location.path, force: true });
+      // Skip git status for non-file schemes
+      if (!isCustomScheme) {
+        void get().refreshGitStatus({ path: listing.location.path, force: true });
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error('❌ refreshCurrentDirectory failed:', msg);
@@ -553,6 +727,13 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   refreshCurrentDirectoryStreaming: async () => {
     const { currentPath, setLoading, setError } = get();
+
+    // For non-file:// schemes (like gdrive://), use the non-streaming read_directory
+    // since streaming is only supported for local file system
+    if (currentPath.startsWith('gdrive://')) {
+      await get().refreshCurrentDirectory();
+      return;
+    }
 
     // Cancel any existing streaming session
     await get().cancelDirectoryStream();
@@ -1248,6 +1429,57 @@ export const useAppStore = create<AppState>((set, get) => ({
     } catch (error) {
       console.error('Failed to reorder pinned directories:', error);
       throw error;
+    }
+  },
+
+  // Google accounts
+  loadGoogleAccounts: async () => {
+    set({ googleAccountsLoading: true });
+    try {
+      const accounts = await invoke<GoogleAccountInfo[]>('get_google_accounts');
+      set({ googleAccounts: accounts, googleAccountsLoading: false });
+    } catch (error) {
+      console.error('Failed to load Google accounts:', error);
+      set({ googleAccounts: [], googleAccountsLoading: false });
+    }
+  },
+
+  addGoogleAccount: async () => {
+    set({ googleAccountsLoading: true });
+    try {
+      const account = await invoke<GoogleAccountInfo>('add_google_account');
+      set((state) => ({
+        googleAccounts: [...state.googleAccounts.filter((a) => a.email !== account.email), account],
+        googleAccountsLoading: false,
+      }));
+      return account;
+    } catch (error) {
+      console.error('Failed to add Google account:', error);
+      set({ googleAccountsLoading: false });
+      return null;
+    }
+  },
+
+  removeGoogleAccount: async (email: string) => {
+    try {
+      await invoke('remove_google_account', { email });
+      set((state) => ({
+        googleAccounts: state.googleAccounts.filter((a) => a.email !== email),
+      }));
+      return true;
+    } catch (error) {
+      console.error('Failed to remove Google account:', error);
+      return false;
+    }
+  },
+
+  resolveGoogleDriveUrl: async (url: string) => {
+    try {
+      const result = await invoke<ResolveGoogleDriveUrlResult>('resolve_google_drive_url', { url });
+      return result;
+    } catch (error) {
+      console.error('Failed to resolve Google Drive URL:', error);
+      return null;
     }
   },
 
