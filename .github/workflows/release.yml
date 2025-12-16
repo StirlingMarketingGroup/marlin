@@ -234,6 +234,12 @@ jobs:
           cache: 'npm'
           cache-dependency-path: package-lock.ci.json
 
+      # Add cargo to PATH BEFORE Install Rust to fix timing issue
+      # where dtolnay/rust-toolchain installs but can't find rustc in same step
+      - name: Add cargo to PATH
+        if: runner.os == 'Linux'
+        run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -423,6 +429,12 @@ jobs:
           node-version: 20
           cache: 'npm'
           cache-dependency-path: package-lock.ci.json
+
+      # Add cargo to PATH BEFORE Install Rust to fix timing issue
+      # where dtolnay/rust-toolchain installs but can't find rustc in same step
+      - name: Add cargo to PATH
+        if: runner.os == 'Linux'
+        run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
