@@ -92,7 +92,9 @@ jobs:
         env:
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
-        run: npm run tauri build -- --debug --no-bundle
+        run: |
+          source "$HOME/.cargo/env"
+          npm run tauri build -- --debug --no-bundle
 
       - name: Find app binary
         id: find-binary
