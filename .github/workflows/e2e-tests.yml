@@ -140,27 +140,33 @@ jobs:
           XVFB_PID=$!
           sleep 2
 
-          # Start tauri-driver with longer timeout
+          # Start tauri-driver with output logging
           echo "Starting tauri-driver..."
           echo "PATH: $PATH"
-          echo "Checking tauri-driver location..."
-          ls -la "$HOME/.cargo/bin/tauri-driver" || echo "tauri-driver not found in cargo bin"
-          which tauri-driver || echo "tauri-driver not in PATH"
-          "$HOME/.cargo/bin/tauri-driver" &
+          echo "TAURI_APP_PATH: $TAURI_APP_PATH"
+
+          # Redirect tauri-driver output to log file for debugging
+          "$HOME/.cargo/bin/tauri-driver" > tauri-driver.log 2>&1 &
           DRIVER_PID=$!
           sleep 5
 
           # Verify tauri-driver is running
           if ! kill -0 $DRIVER_PID 2>/dev/null; then
             echo "tauri-driver failed to start (PID: $DRIVER_PID)"
-            echo "Checking if port 4444 is in use..."
-            ss -tlnp | grep 4444 || echo "Port 4444 not in use"
+            echo "tauri-driver log:"
+            cat tauri-driver.log
             exit 1
           fi
           echo "tauri-driver running on PID $DRIVER_PID"
 
           # Run tests
           npm run test:e2e:tauri || TEST_EXIT=$?
+
+          # Show tauri-driver logs on failure
+          if [ "${TEST_EXIT:-0}" != "0" ]; then
+            echo "=== tauri-driver log ==="
+            cat tauri-driver.log
+          fi
 
           # Cleanup
           kill $DRIVER_PID 2>/dev/null || true
