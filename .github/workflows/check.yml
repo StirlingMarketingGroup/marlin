@@ -85,4 +85,7 @@ jobs:
 
       - name: Run checks
         if: steps.changes.outputs.check == 'true'
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
         run: npm run check

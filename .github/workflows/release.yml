@@ -315,6 +315,9 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Google Drive OAuth credentials
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
         with:
           tagName: ${{ env.RELEASE_TAG }}
           releaseName: Marlin ${{ env.RELEASE_TAG }}
@@ -463,6 +466,9 @@ jobs:
           TAURI_LOG: trace
           RUST_LOG: tauri_bundler=debug
           TAURI_BUNDLE_LINUX_APPIMAGE_ARGS: ${{ runner.os == 'Linux' && '--verbosity=2' || '' }}
+          # Google Drive OAuth credentials
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
 
       - name: Dump linuxdeploy diagnostics
         if: failure() && runner.os == 'Linux'

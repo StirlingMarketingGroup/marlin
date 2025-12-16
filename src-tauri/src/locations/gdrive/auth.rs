@@ -15,8 +15,15 @@ use tokio::sync::Mutex;
 /// These are for a desktop application and are safe to embed
 /// Users must still authenticate with their own Google account
 /// Set via GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET environment variables at build time
-const CLIENT_ID: &str = env!("GOOGLE_CLIENT_ID");
-const CLIENT_SECRET: &str = env!("GOOGLE_CLIENT_SECRET");
+/// If not set at build time, OAuth features will be disabled
+const CLIENT_ID: &str = match option_env!("GOOGLE_CLIENT_ID") {
+    Some(id) => id,
+    None => "",
+};
+const CLIENT_SECRET: &str = match option_env!("GOOGLE_CLIENT_SECRET") {
+    Some(secret) => secret,
+    None => "",
+};
 
 /// Scopes needed for Google Drive access
 const SCOPES: &[&str] = &[
@@ -61,6 +68,11 @@ pub fn get_service_account_email() -> Option<String> {
 /// Check if the given email is the service account
 pub fn is_service_account_email(email: &str) -> bool {
     get_service_account_email().map_or(false, |sa_email| sa_email == email)
+}
+
+/// Check if OAuth credentials are configured at build time
+fn is_oauth_configured() -> bool {
+    !CLIENT_ID.is_empty() && !CLIENT_SECRET.is_empty()
 }
 
 /// Information about a connected Google account
@@ -277,6 +289,11 @@ impl InstalledFlowDelegate for BrowserFlowDelegate {
 
 /// Add a new Google account via OAuth flow
 pub async fn add_google_account() -> Result<GoogleAccountInfo, String> {
+    // Check if OAuth credentials are configured
+    if !is_oauth_configured() {
+        return Err("Google OAuth credentials not configured. Build with GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET environment variables.".to_string());
+    }
+
     // Prevent concurrent auth flows
     let _guard = AUTH_MUTEX.lock().await;
 
@@ -498,7 +515,12 @@ pub async fn ensure_valid_token(email: &str) -> Result<String, String> {
         return Ok(accounts[account_index].access_token.clone());
     }
 
-    // Need to refresh - clone the refresh token before the async operation
+    // Need to refresh - check if OAuth credentials are configured
+    if !is_oauth_configured() {
+        return Err("Google OAuth credentials not configured. Cannot refresh token.".to_string());
+    }
+
+    // Clone the refresh token before the async operation
     let refresh_token = accounts[account_index].refresh_token.clone();
     let client = reqwest::Client::new();
 
