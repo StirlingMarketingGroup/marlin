@@ -11,7 +11,7 @@ concurrency:
 
 jobs:
   lint-typecheck-rust:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, X64]
     steps:
       - uses: actions/checkout@v6
         with:

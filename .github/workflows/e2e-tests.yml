@@ -13,7 +13,7 @@ env:
 jobs:
   # Rust integration tests - tests Google Drive API directly
   rust-integration:
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, linux, X64]
     steps:
       - uses: actions/checkout@v4
 
@@ -55,7 +55,7 @@ jobs:
 
   # UI E2E tests using tauri-driver (Linux only)
   e2e-linux:
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, linux, X64]
     needs: rust-integration
     steps:
       - uses: actions/checkout@v4
