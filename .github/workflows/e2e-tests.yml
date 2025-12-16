@@ -250,13 +250,38 @@ jobs:
           echo "TAURI_APP_PATH: $TAURI_APP_PATH"
           echo "DISPLAY: $DISPLAY"
 
-          # Check tauri-driver version
-          echo "tauri-driver version:"
-          "$TAURI_DRIVER_BIN" --version || echo "Version command not supported"
+          # Find WebKitWebDriver (required on Linux)
+          echo "Looking for WebKitWebDriver..."
+          WEBKIT_DRIVER=""
+          for path in /usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/WebKitWebDriver \
+                      /usr/lib/webkit2gtk-4.1/WebKitWebDriver \
+                      /usr/lib64/webkit2gtk-4.1/WebKitWebDriver \
+                      /usr/libexec/webkit2gtk-4.1/WebKitWebDriver; do
+            if [ -x "$path" ]; then
+              WEBKIT_DRIVER="$path"
+              echo "Found WebKitWebDriver at: $path"
+              break
+            fi
+          done
+
+          if [ -z "$WEBKIT_DRIVER" ]; then
+            echo "WebKitWebDriver not found, trying to locate..."
+            WEBKIT_DRIVER=$(find /usr -name "WebKitWebDriver" -type f -executable 2>/dev/null | head -1)
+            if [ -n "$WEBKIT_DRIVER" ]; then
+              echo "Found WebKitWebDriver via find: $WEBKIT_DRIVER"
+            else
+              echo "WARNING: WebKitWebDriver not found. Tests will likely fail."
+            fi
+          fi
 
           # Redirect tauri-driver output to log file for debugging
           echo "Using tauri-driver at: $TAURI_DRIVER_BIN"
-          "$TAURI_DRIVER_BIN" > tauri-driver.log 2>&1 &
+          if [ -n "$WEBKIT_DRIVER" ]; then
+            echo "Starting tauri-driver with --native-driver $WEBKIT_DRIVER"
+            "$TAURI_DRIVER_BIN" --native-driver "$WEBKIT_DRIVER" > tauri-driver.log 2>&1 &
+          else
+            "$TAURI_DRIVER_BIN" > tauri-driver.log 2>&1 &
+          fi
           DRIVER_PID=$!
           sleep 5
 
