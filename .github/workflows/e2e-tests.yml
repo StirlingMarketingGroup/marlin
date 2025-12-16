@@ -126,6 +126,11 @@ jobs:
           # Force software rendering (no GPU access on self-hosted runner)
           LIBGL_ALWAYS_SOFTWARE: '1'
           WEBKIT_DISABLE_COMPOSITING_MODE: '1'
+          WEBKIT_DISABLE_DMABUF_RENDERER: '1'
+          GDK_RENDERING: 'image'
+          GSK_RENDERER: 'cairo'
+          # Disable GPU sandbox to avoid permission issues
+          WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS: '1'
         run: |
           # Add cargo to PATH for this shell session
           export PATH="$HOME/.cargo/bin:$PATH"
@@ -135,16 +140,20 @@ jobs:
           XVFB_PID=$!
           sleep 2
 
-          # Start tauri-driver
+          # Start tauri-driver with longer timeout
+          echo "Starting tauri-driver..."
           tauri-driver &
           DRIVER_PID=$!
-          sleep 2
+          sleep 5
 
           # Verify tauri-driver is running
           if ! kill -0 $DRIVER_PID 2>/dev/null; then
-            echo "tauri-driver failed to start"
+            echo "tauri-driver failed to start (PID: $DRIVER_PID)"
+            echo "Checking if port 4444 is in use..."
+            ss -tlnp | grep 4444 || echo "Port 4444 not in use"
             exit 1
           fi
+          echo "tauri-driver running on PID $DRIVER_PID"
 
           # Run tests
           npm run test:e2e:tauri || TEST_EXIT=$?
