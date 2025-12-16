@@ -133,28 +133,6 @@ pub fn get_google_accounts() -> Result<Vec<GoogleAccountInfo>, String> {
     }).collect())
 }
 
-/// Get a specific account by email (internal use)
-pub fn get_account_by_email(email: &str) -> Result<Option<GoogleAccount>, String> {
-    // Check cache first
-    {
-        let cache = ACCOUNTS_CACHE.read().map_err(|e| e.to_string())?;
-        if let Some(accounts) = &*cache {
-            return Ok(accounts.iter().find(|a| a.email == email).cloned());
-        }
-    }
-
-    // Load from disk
-    let accounts = load_accounts_from_disk()?;
-
-    // Update cache
-    {
-        let mut cache = ACCOUNTS_CACHE.write().map_err(|e| e.to_string())?;
-        *cache = Some(accounts.clone());
-    }
-
-    Ok(accounts.into_iter().find(|a| a.email == email))
-}
-
 /// Get all accounts (internal use for iterating)
 pub fn get_all_accounts() -> Result<Vec<GoogleAccount>, String> {
     // Check cache first
@@ -177,31 +155,6 @@ pub fn get_all_accounts() -> Result<Vec<GoogleAccount>, String> {
     Ok(accounts)
 }
 
-/// Update an account's tokens
-pub fn update_account_tokens(
-    email: &str,
-    access_token: &str,
-    refresh_token: Option<&str>,
-    expires_at: DateTime<Utc>,
-) -> Result<(), String> {
-    let mut accounts = load_accounts_from_disk()?;
-
-    if let Some(account) = accounts.iter_mut().find(|a| a.email == email) {
-        account.access_token = access_token.to_string();
-        if let Some(rt) = refresh_token {
-            account.refresh_token = rt.to_string();
-        }
-        account.expires_at = expires_at;
-
-        save_accounts_to_disk(&accounts)?;
-
-        // Update cache
-        let mut cache = ACCOUNTS_CACHE.write().map_err(|e| e.to_string())?;
-        *cache = Some(accounts);
-    }
-
-    Ok(())
-}
 
 /// Custom flow delegate that opens the browser
 struct BrowserFlowDelegate;
@@ -434,15 +387,20 @@ pub fn remove_google_account(email: &str) -> Result<(), String> {
 
 /// Refresh an access token if needed
 pub async fn ensure_valid_token(email: &str) -> Result<String, String> {
-    let account = get_account_by_email(email)?
+    // Load accounts once for the entire operation to avoid race conditions
+    let mut accounts = load_accounts_from_disk()?;
+    let account_index = accounts
+        .iter()
+        .position(|a| a.email == email)
         .ok_or_else(|| format!("Account not found: {}", email))?;
 
     // Check if token is still valid (with 5 minute buffer)
-    if account.expires_at > Utc::now() + Duration::minutes(5) {
-        return Ok(account.access_token);
+    if accounts[account_index].expires_at > Utc::now() + Duration::minutes(5) {
+        return Ok(accounts[account_index].access_token.clone());
     }
 
-    // Need to refresh
+    // Need to refresh - clone the refresh token before the async operation
+    let refresh_token = accounts[account_index].refresh_token.clone();
     let client = reqwest::Client::new();
 
     let response = client
@@ -450,7 +408,7 @@ pub async fn ensure_valid_token(email: &str) -> Result<String, String> {
         .form(&[
             ("client_id", CLIENT_ID),
             ("client_secret", CLIENT_SECRET),
-            ("refresh_token", &account.refresh_token),
+            ("refresh_token", &refresh_token),
             ("grant_type", "refresh_token"),
         ])
         .send()
@@ -477,12 +435,20 @@ pub async fn ensure_valid_token(email: &str) -> Result<String, String> {
 
     let expires_at = Utc::now() + Duration::seconds(token_response.expires_in);
 
-    update_account_tokens(
-        email,
-        &token_response.access_token,
-        token_response.refresh_token.as_deref(),
-        expires_at,
-    )?;
+    // Update account in the vector atomically
+    let account = &mut accounts[account_index];
+    account.access_token = token_response.access_token.clone();
+    if let Some(rt) = token_response.refresh_token.as_deref() {
+        account.refresh_token = rt.to_string();
+    }
+    account.expires_at = expires_at;
+
+    // Save all accounts and update cache in one operation
+    save_accounts_to_disk(&accounts)?;
+    {
+        let mut cache = ACCOUNTS_CACHE.write().map_err(|e| e.to_string())?;
+        *cache = Some(accounts);
+    }
 
     Ok(token_response.access_token)
 }

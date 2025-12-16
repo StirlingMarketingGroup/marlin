@@ -4,9 +4,31 @@ test.describe('Google Drive Integration', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
     await page.waitForLoadState('networkidle');
-    // Wait for the app to fully initialize - Tauri needs time
-    await page.waitForTimeout(5000);
+    // Wait for the app to fully initialize by checking for the path input
+    await expect(page.locator('input.input-field').first()).toBeVisible({ timeout: 15000 });
   });
+
+  /**
+   * Helper to wait for navigation to complete by checking that the path input
+   * has been updated and is stable (no longer changing)
+   */
+  async function waitForNavigation(
+    page: import('@playwright/test').Page,
+    pathInput: import('@playwright/test').Locator
+  ) {
+    // Wait for any loading indicators to disappear and path to stabilize
+    await page.waitForLoadState('networkidle');
+    // Give the path input a moment to update, then verify it's stable
+    let previousPath = '';
+    let currentPath = await pathInput.inputValue();
+    let attempts = 0;
+    while (previousPath !== currentPath && attempts < 10) {
+      previousPath = currentPath;
+      await page.waitForTimeout(300); // Small polling interval
+      currentPath = await pathInput.inputValue();
+      attempts++;
+    }
+  }
 
   test('should preserve gdrive:// scheme with double slashes', async ({ page }) => {
     // Find the path input - it's the text input in the path bar area
@@ -18,7 +40,7 @@ test.describe('Google Drive Integration', () => {
     await pathInput.fill('gdrive://brian@smg.gg/');
     await pathInput.press('Enter');
 
-    await page.waitForTimeout(4000);
+    await waitForNavigation(page, pathInput);
 
     // Check the path bar still shows gdrive:// with double slashes
     const displayedPath = await pathInput.inputValue();
@@ -36,7 +58,7 @@ test.describe('Google Drive Integration', () => {
     await pathInput.fill('gdrive://brian@smg.gg/');
     await pathInput.press('Enter');
 
-    await page.waitForTimeout(4000);
+    await waitForNavigation(page, pathInput);
 
     // Store the path before reload
     const pathBeforeReload = await pathInput.inputValue();
@@ -45,11 +67,13 @@ test.describe('Google Drive Integration', () => {
     // Reload the page
     await page.reload();
     await page.waitForLoadState('networkidle');
-    await page.waitForTimeout(5000);
 
-    // Check the path after reload
+    // Wait for app to reinitialize after reload
     const pathInputAfter = page.locator('input.input-field').first();
     await expect(pathInputAfter).toBeVisible({ timeout: 15000 });
+    await waitForNavigation(page, pathInputAfter);
+
+    // Check the path after reload
     const pathAfterReload = await pathInputAfter.inputValue();
     console.log('Path after reload:', pathAfterReload);
 
@@ -66,7 +90,7 @@ test.describe('Google Drive Integration', () => {
     await pathInput.fill('https://drive.google.com/open?id=test123');
     await pathInput.press('Enter');
 
-    await page.waitForTimeout(4000);
+    await waitForNavigation(page, pathInput);
 
     // The URL should be preserved or converted to gdrive://
     // Either way, it should have proper double slashes
@@ -89,10 +113,12 @@ test.describe('Google Drive Integration', () => {
 
     if (await googleAccountButton.isVisible({ timeout: 5000 }).catch(() => false)) {
       await googleAccountButton.click();
-      await page.waitForTimeout(4000);
+
+      // Wait for navigation to complete
+      const pathInput = page.locator('input.input-field').first();
+      await waitForNavigation(page, pathInput);
 
       // Check path bar shows gdrive://
-      const pathInput = page.locator('input.input-field').first();
       const path = await pathInput.inputValue();
 
       console.log('Path after clicking account:', path);
@@ -113,14 +139,14 @@ test.describe('Google Drive Integration', () => {
     await pathInput.fill('gdrive://brian@smg.gg/');
     await pathInput.press('Enter');
 
-    await page.waitForTimeout(5000);
+    await waitForNavigation(page, pathInput);
 
     // Try to click on a folder (like "My Drive") - look for folder icons or directory items
     const folder = page.locator('[data-directory="true"]').first();
 
     if (await folder.isVisible({ timeout: 5000 }).catch(() => false)) {
       await folder.dblclick();
-      await page.waitForTimeout(4000);
+      await waitForNavigation(page, pathInput);
 
       // Check path still has gdrive://
       const newPath = await pathInput.inputValue();
