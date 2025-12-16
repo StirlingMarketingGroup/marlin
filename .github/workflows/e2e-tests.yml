@@ -64,6 +64,9 @@ jobs:
         with:
           toolchain: stable
 
+      - name: Add cargo to PATH
+        run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
@@ -92,9 +95,7 @@ jobs:
         env:
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
-        run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
-          npm run tauri build -- --debug --no-bundle
+        run: npm run tauri build -- --debug --no-bundle
 
       - name: Find app binary
         id: find-binary
