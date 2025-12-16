@@ -127,6 +127,9 @@ jobs:
           LIBGL_ALWAYS_SOFTWARE: '1'
           WEBKIT_DISABLE_COMPOSITING_MODE: '1'
         run: |
+          # Add cargo to PATH for this shell session
+          export PATH="$HOME/.cargo/bin:$PATH"
+
           # Start Xvfb
           Xvfb :99 -screen 0 1920x1080x24 &
           XVFB_PID=$!
