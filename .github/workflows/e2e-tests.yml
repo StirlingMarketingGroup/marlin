@@ -82,8 +82,12 @@ jobs:
 
       - name: Install tauri-driver
         run: |
-          # Source cargo env to ensure cargo is in PATH
-          source "$HOME/.cargo/env"
+          # Ensure cargo is in PATH
+          if [ -f "$HOME/.cargo/env" ]; then
+            source "$HOME/.cargo/env"
+          else
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
 
           # Install to workspace to avoid race conditions between runners sharing ~/.cargo
           DRIVER_ROOT="${GITHUB_WORKSPACE}/.local-cargo"
@@ -138,8 +142,17 @@ jobs:
           # Disable GPU sandbox to avoid permission issues
           WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS: '1'
         run: |
-          # Source cargo env to ensure cargo/tauri-driver is in PATH
-          source "$HOME/.cargo/env"
+          # Ensure cargo/tauri-driver is in PATH
+          if [ -f "$HOME/.cargo/env" ]; then
+            source "$HOME/.cargo/env"
+          else
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+
+          # Use workspace-local tauri-driver if available
+          if [ -n "$TAURI_DRIVER_BIN" ] && [ -f "$TAURI_DRIVER_BIN" ]; then
+            export PATH="$(dirname $TAURI_DRIVER_BIN):$PATH"
+          fi
 
           # Clean up stale Xvfb lock files from previous runs
           rm -f /tmp/.X99-lock /tmp/.X11-unix/X99 2>/dev/null || true
