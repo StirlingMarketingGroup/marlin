@@ -122,6 +122,9 @@ jobs:
           DISPLAY: ':99'
           TAURI_DRIVER_EXTERNAL: 'true'
           TAURI_APP_PATH: ${{ github.workspace }}/${{ steps.find-binary.outputs.app_path }}
+          # Force software rendering (no GPU access on self-hosted runner)
+          LIBGL_ALWAYS_SOFTWARE: '1'
+          WEBKIT_DISABLE_COMPOSITING_MODE: '1'
         run: |
           # Start Xvfb
           Xvfb :99 -screen 0 1920x1080x24 &
