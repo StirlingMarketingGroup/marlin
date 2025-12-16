@@ -17,13 +17,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Add cargo to PATH BEFORE Install Rust action to fix timing issue
+      # where the action installs rustup but can't find rustc in same step
+      - name: Add cargo to PATH
+        run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
-
-      - name: Add cargo to PATH
-        run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
@@ -62,13 +64,15 @@ jobs:
           node-version: '20'
           cache: 'npm'
 
+      # Add cargo to PATH BEFORE Install Rust action to fix timing issue
+      # where the action installs rustup but can't find rustc in same step
+      - name: Add cargo to PATH
+        run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
-
-      - name: Add cargo to PATH
-        run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
