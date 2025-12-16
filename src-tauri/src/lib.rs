@@ -1,7 +1,7 @@
 mod commands;
 mod fs_utils;
 mod fs_watcher;
-mod locations;
+pub mod locations;
 #[cfg(target_os = "macos")]
 mod macos_icons;
 mod macos_security;

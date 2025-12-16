@@ -128,6 +128,11 @@ pub struct Location {
 }
 
 impl Location {
+    /// Parse a raw URI string into a Location
+    pub fn parse(raw: &str) -> Result<Location, String> {
+        parse_raw_location(raw.to_string())
+    }
+
     pub fn scheme(&self) -> &str {
         &self.scheme
     }

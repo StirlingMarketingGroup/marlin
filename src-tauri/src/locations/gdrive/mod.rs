@@ -1,4 +1,4 @@
-mod auth;
+pub mod auth;
 pub mod provider;
 pub mod url_parser;
 

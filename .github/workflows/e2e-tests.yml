@@ -1,0 +1,135 @@
+name: E2E Tests
+
+on:
+  push:
+    branches: [master, main, 'feat/**']
+  pull_request:
+    branches: [master, main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Rust integration tests - tests Google Drive API directly
+  rust-integration:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+        with:
+          toolchain: stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev
+
+      - name: Setup service account
+        env:
+          GOOGLE_SERVICE_ACCOUNT_KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }}
+        run: |
+          echo "$GOOGLE_SERVICE_ACCOUNT_KEY" > /tmp/service-account.json
+
+      - name: Run Google Drive integration tests
+        env:
+          GOOGLE_SERVICE_ACCOUNT_KEY_FILE: /tmp/service-account.json
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+        working-directory: src-tauri
+        run: cargo test --test gdrive_integration_test -- --nocapture
+
+  # UI E2E tests using tauri-driver (Linux only)
+  e2e-linux:
+    runs-on: ubuntu-22.04
+    needs: rust-integration
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+        with:
+          toolchain: stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libxdo-dev \
+            xvfb \
+            webkit2gtk-driver
+
+      - name: Install tauri-driver
+        run: cargo install tauri-driver
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Build Tauri app (debug)
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+        run: npm run tauri build -- --debug
+
+      - name: Setup service account
+        env:
+          GOOGLE_SERVICE_ACCOUNT_KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }}
+        run: |
+          echo "$GOOGLE_SERVICE_ACCOUNT_KEY" > /tmp/service-account.json
+
+      - name: Run E2E tests with tauri-driver
+        env:
+          GOOGLE_SERVICE_ACCOUNT_KEY_FILE: /tmp/service-account.json
+          DISPLAY: ':99'
+        run: |
+          # Start Xvfb
+          Xvfb :99 -screen 0 1920x1080x24 &
+          sleep 2
+
+          # Start tauri-driver
+          tauri-driver &
+          DRIVER_PID=$!
+          sleep 2
+
+          # Run tests
+          npm run test:e2e:tauri || TEST_EXIT=$?
+
+          # Cleanup
+          kill $DRIVER_PID 2>/dev/null || true
+
+          exit ${TEST_EXIT:-0}
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-results
+          path: |
+            test-results/
+            playwright-report/

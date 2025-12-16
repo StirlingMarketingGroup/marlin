@@ -1,6 +1,9 @@
 use chrono::{DateTime, Duration, Utc};
 use google_drive3::oauth2::authenticator_delegate::InstalledFlowDelegate;
-use google_drive3::oauth2::{ApplicationSecret, InstalledFlowAuthenticator, InstalledFlowReturnMethod};
+use google_drive3::oauth2::{
+    ApplicationSecret, InstalledFlowAuthenticator, InstalledFlowReturnMethod,
+    ServiceAccountAuthenticator, ServiceAccountKey,
+};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -20,6 +23,45 @@ const SCOPES: &[&str] = &[
     "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/userinfo.email",
 ];
+
+/// Environment variable for service account key file path
+const SERVICE_ACCOUNT_KEY_FILE_ENV: &str = "GOOGLE_SERVICE_ACCOUNT_KEY_FILE";
+
+/// Cached service account key (loaded once from environment)
+static SERVICE_ACCOUNT_KEY: Lazy<Option<ServiceAccountKey>> = Lazy::new(|| {
+    load_service_account_key().ok()
+});
+
+/// Load service account key from environment variable
+fn load_service_account_key() -> Result<ServiceAccountKey, String> {
+    let key_path = std::env::var(SERVICE_ACCOUNT_KEY_FILE_ENV)
+        .map_err(|_| format!("{} not set", SERVICE_ACCOUNT_KEY_FILE_ENV))?;
+
+    let key_json = fs::read_to_string(&key_path)
+        .map_err(|e| format!("Failed to read service account key file: {}", e))?;
+
+    let key: ServiceAccountKey = serde_json::from_str(&key_json)
+        .map_err(|e| format!("Failed to parse service account key: {}", e))?;
+
+    log::info!("Loaded service account: {:?}", key.client_email);
+
+    Ok(key)
+}
+
+/// Check if a service account is configured
+pub fn is_service_account_configured() -> bool {
+    SERVICE_ACCOUNT_KEY.is_some()
+}
+
+/// Get the service account email if configured
+pub fn get_service_account_email() -> Option<String> {
+    SERVICE_ACCOUNT_KEY.as_ref().map(|k| k.client_email.clone())
+}
+
+/// Check if the given email is the service account
+pub fn is_service_account_email(email: &str) -> bool {
+    get_service_account_email().map_or(false, |sa_email| sa_email == email)
+}
 
 /// Information about a connected Google account
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,15 +147,27 @@ fn save_accounts_to_disk(accounts: &[GoogleAccount]) -> Result<(), String> {
 
 /// Get all connected Google accounts
 pub fn get_google_accounts() -> Result<Vec<GoogleAccountInfo>, String> {
-    // Check cache first
+    let mut result = Vec::new();
+
+    // Include service account if configured
+    if let Some(sa_email) = get_service_account_email() {
+        result.push(GoogleAccountInfo {
+            email: sa_email,
+            display_name: Some("Service Account".to_string()),
+            photo_url: None,
+        });
+    }
+
+    // Check cache first for user accounts
     {
         let cache = ACCOUNTS_CACHE.read().map_err(|e| e.to_string())?;
         if let Some(accounts) = &*cache {
-            return Ok(accounts.iter().map(|a| GoogleAccountInfo {
+            result.extend(accounts.iter().map(|a| GoogleAccountInfo {
                 email: a.email.clone(),
                 display_name: a.display_name.clone(),
                 photo_url: a.photo_url.clone(),
-            }).collect());
+            }));
+            return Ok(result);
         }
     }
 
@@ -126,20 +180,37 @@ pub fn get_google_accounts() -> Result<Vec<GoogleAccountInfo>, String> {
         *cache = Some(accounts.clone());
     }
 
-    Ok(accounts.iter().map(|a| GoogleAccountInfo {
+    result.extend(accounts.iter().map(|a| GoogleAccountInfo {
         email: a.email.clone(),
         display_name: a.display_name.clone(),
         photo_url: a.photo_url.clone(),
-    }).collect())
+    }));
+
+    Ok(result)
 }
 
 /// Get all accounts (internal use for iterating)
 pub fn get_all_accounts() -> Result<Vec<GoogleAccount>, String> {
-    // Check cache first
+    let mut result = Vec::new();
+
+    // Include service account if configured (with placeholder tokens - real token fetched on demand)
+    if let Some(sa_email) = get_service_account_email() {
+        result.push(GoogleAccount {
+            email: sa_email,
+            display_name: Some("Service Account".to_string()),
+            photo_url: None,
+            access_token: String::new(), // Will be fetched on demand
+            refresh_token: String::new(), // Service accounts use JWT, not refresh tokens
+            expires_at: Utc::now(), // Force refresh on first use
+        });
+    }
+
+    // Check cache first for user accounts
     {
         let cache = ACCOUNTS_CACHE.read().map_err(|e| e.to_string())?;
         if let Some(accounts) = &*cache {
-            return Ok(accounts.clone());
+            result.extend(accounts.clone());
+            return Ok(result);
         }
     }
 
@@ -152,7 +223,29 @@ pub fn get_all_accounts() -> Result<Vec<GoogleAccount>, String> {
         *cache = Some(accounts.clone());
     }
 
-    Ok(accounts)
+    result.extend(accounts);
+    Ok(result)
+}
+
+/// Get an access token for the service account
+async fn get_service_account_token() -> Result<String, String> {
+    let key = SERVICE_ACCOUNT_KEY.as_ref()
+        .ok_or_else(|| "Service account not configured".to_string())?;
+
+    let auth = ServiceAccountAuthenticator::builder(key.clone())
+        .build()
+        .await
+        .map_err(|e| format!("Failed to build service account authenticator: {}", e))?;
+
+    let token = auth
+        .token(SCOPES)
+        .await
+        .map_err(|e| format!("Failed to get service account token: {}", e))?;
+
+    token
+        .token()
+        .map(|t| t.to_string())
+        .ok_or_else(|| "No access token in service account response".to_string())
 }
 
 
@@ -387,6 +480,12 @@ pub fn remove_google_account(email: &str) -> Result<(), String> {
 
 /// Refresh an access token if needed
 pub async fn ensure_valid_token(email: &str) -> Result<String, String> {
+    // Check if this is a service account - use JWT-based auth
+    if is_service_account_email(email) {
+        log::info!("Using service account authentication for {}", email);
+        return get_service_account_token().await;
+    }
+
     // Load accounts once for the entire operation to avoid race conditions
     let mut accounts = load_accounts_from_disk()?;
     let account_index = accounts
