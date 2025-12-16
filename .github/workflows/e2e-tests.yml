@@ -87,8 +87,8 @@ jobs:
       - name: Install tauri-driver
         if: steps.cache-tauri-driver.outputs.cache-hit != 'true'
         run: |
-          # Add cargo to PATH for this shell session
-          export PATH="$HOME/.cargo/bin:$PATH"
+          # Source cargo env to ensure cargo is in PATH
+          source "$HOME/.cargo/env"
 
           # Force reinstall in case cargo metadata is stale but binary was deleted
           cargo install --force tauri-driver
@@ -138,8 +138,8 @@ jobs:
           # Disable GPU sandbox to avoid permission issues
           WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS: '1'
         run: |
-          # Add cargo to PATH for this shell session
-          export PATH="$HOME/.cargo/bin:$PATH"
+          # Source cargo env to ensure cargo/tauri-driver is in PATH
+          source "$HOME/.cargo/env"
 
           # Clean up stale Xvfb lock files from previous runs
           rm -f /tmp/.X99-lock /tmp/.X11-unix/X99 2>/dev/null || true
