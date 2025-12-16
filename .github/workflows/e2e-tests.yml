@@ -86,7 +86,10 @@ jobs:
 
       - name: Install tauri-driver
         if: steps.cache-tauri-driver.outputs.cache-hit != 'true'
-        run: cargo install tauri-driver
+        run: |
+          # Force reinstall in case cargo metadata is stale but binary was deleted
+          cargo install --force tauri-driver
+          ls -la "$HOME/.cargo/bin/tauri-driver"
 
       - name: Install npm dependencies
         run: npm ci
@@ -134,6 +137,9 @@ jobs:
         run: |
           # Add cargo to PATH for this shell session
           export PATH="$HOME/.cargo/bin:$PATH"
+
+          # Clean up stale Xvfb lock files from previous runs
+          rm -f /tmp/.X99-lock /tmp/.X11-unix/X99 2>/dev/null || true
 
           # Start Xvfb
           Xvfb :99 -screen 0 1920x1080x24 &
