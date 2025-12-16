@@ -59,8 +59,8 @@ export const config: Options.Testrunner = {
 
   capabilities: [
     {
-      // Use tauri-driver as WebDriver server
-      browserName: 'wry',
+      // Use tauri-driver as WebDriver server (no browserName per Tauri docs)
+      maxInstances: 1,
       'tauri:options': {
         application: APP_PATH,
       },
