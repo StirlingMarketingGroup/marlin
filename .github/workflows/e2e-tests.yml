@@ -87,6 +87,9 @@ jobs:
       - name: Install tauri-driver
         if: steps.cache-tauri-driver.outputs.cache-hit != 'true'
         run: |
+          # Add cargo to PATH for this shell session
+          export PATH="$HOME/.cargo/bin:$PATH"
+
           # Force reinstall in case cargo metadata is stale but binary was deleted
           cargo install --force tauri-driver
           ls -la "$HOME/.cargo/bin/tauri-driver"
