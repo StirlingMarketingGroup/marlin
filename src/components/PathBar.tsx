@@ -496,7 +496,7 @@ export default function PathBar() {
       </div>
 
       {/* Path input */}
-      <div className="flex-1 flex items-center gap-2 relative">
+      <div className="flex-1 flex items-center gap-2 relative" data-testid="path-bar">
         <input
           ref={inputRef}
           type="text"
@@ -509,6 +509,7 @@ export default function PathBar() {
           placeholder="Enter path..."
           data-tauri-drag-region={false}
           autoComplete="off"
+          data-testid="path-input"
         />
         {showSuggestions && suggestions.length > 0 && (
           <div className="absolute left-0 right-0 top-full mt-1 rounded-md border border-app-border bg-app-gray shadow-lg z-30 overflow-hidden">

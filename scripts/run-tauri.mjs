@@ -140,15 +140,22 @@ async function ensureLinuxdeployPlugin() {
   }
 }
 
-if (process.platform === 'linux') {
-  await ensureLinuxdeployBinary();
-  await ensureLinuxdeployPlugin();
+// Skip linuxdeploy setup if --no-bundle is passed (not needed for binary-only builds)
+const isNoBundleBuild = args.includes('--no-bundle');
 
-  if (!env.APPIMAGE_EXTRACT_AND_RUN) {
-    env.APPIMAGE_EXTRACT_AND_RUN = '1';
-    console.info('[marlin] Enabled AppImage extract-and-run mode to avoid FUSE requirements.');
+if (process.platform === 'linux') {
+  // Only download linuxdeploy for bundle builds
+  if (!isNoBundleBuild) {
+    await ensureLinuxdeployBinary();
+    await ensureLinuxdeployPlugin();
+
+    if (!env.APPIMAGE_EXTRACT_AND_RUN) {
+      env.APPIMAGE_EXTRACT_AND_RUN = '1';
+      console.info('[marlin] Enabled AppImage extract-and-run mode to avoid FUSE requirements.');
+    }
   }
 
+  // Environment sanitization for all Linux builds
   if (env.LD_LIBRARY_PATH) {
     const filtered = env.LD_LIBRARY_PATH.split(':').filter(
       (part) => part && !part.includes('/snap/')

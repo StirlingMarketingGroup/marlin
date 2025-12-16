@@ -1,0 +1,349 @@
+name: E2E Tests
+
+on:
+  push:
+    branches: [master, main, 'feat/**']
+  pull_request:
+    branches: [master, main]
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  # Rust integration tests - tests Google Drive API directly
+  rust-integration:
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - uses: actions/checkout@v4
+
+      # Add cargo to PATH BEFORE Install Rust action to fix timing issue
+      # where the action installs rustup but can't find rustc in same step
+      - name: Add cargo to PATH
+        run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          shared-key: e2e-ubuntu-22.04
+          cache-all-crates: true
+          cache-on-failure: true
+
+      # System dependencies pre-installed on self-hosted runner
+
+      - name: Setup service account
+        env:
+          GOOGLE_SERVICE_ACCOUNT_KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }}
+        run: |
+          echo "$GOOGLE_SERVICE_ACCOUNT_KEY" > /tmp/service-account.json
+
+      - name: Run Google Drive integration tests
+        env:
+          GOOGLE_SERVICE_ACCOUNT_KEY_FILE: /tmp/service-account.json
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+        working-directory: src-tauri
+        run: cargo test --test gdrive_integration_test -- --nocapture
+
+  # UI E2E tests using tauri-driver (Linux only)
+  e2e-linux:
+    runs-on: [self-hosted, Linux, X64]
+    needs: rust-integration
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      # Add cargo to PATH BEFORE Install Rust action to fix timing issue
+      # where the action installs rustup but can't find rustc in same step
+      - name: Add cargo to PATH
+        run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          shared-key: e2e-ubuntu-22.04
+          cache-all-crates: true
+          cache-on-failure: true
+
+      # System dependencies pre-installed on self-hosted runner
+
+      - name: Install tauri-driver
+        run: |
+          # Debug: Show PATH and cargo locations
+          echo "=== Debugging cargo availability ==="
+          echo "PATH: $PATH"
+          echo "HOME: $HOME"
+          echo "Checking ~/.cargo/bin:"
+          ls -la "$HOME/.cargo/bin/" 2>/dev/null || echo "~/.cargo/bin does not exist"
+          echo "Checking for cargo binary:"
+          which cargo 2>/dev/null || echo "cargo not in PATH"
+
+          # Find cargo - try multiple locations
+          CARGO_BIN=""
+          if command -v cargo &> /dev/null; then
+            CARGO_BIN="cargo"
+          elif [ -f "$HOME/.cargo/bin/cargo" ]; then
+            CARGO_BIN="$HOME/.cargo/bin/cargo"
+          elif [ -f "/usr/local/cargo/bin/cargo" ]; then
+            CARGO_BIN="/usr/local/cargo/bin/cargo"
+          else
+            # Try to find it
+            FOUND_CARGO=$(find /home -name "cargo" -type f -executable 2>/dev/null | head -1)
+            if [ -n "$FOUND_CARGO" ]; then
+              CARGO_BIN="$FOUND_CARGO"
+            fi
+          fi
+
+          if [ -z "$CARGO_BIN" ]; then
+            echo "ERROR: Could not find cargo binary anywhere"
+            echo "Attempting to install Rust..."
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+            source "$HOME/.cargo/env"
+            CARGO_BIN="cargo"
+          fi
+
+          echo "Using cargo at: $CARGO_BIN"
+          $CARGO_BIN --version
+
+          # Install to workspace to avoid race conditions between runners sharing ~/.cargo
+          DRIVER_ROOT="${GITHUB_WORKSPACE}/.local-cargo"
+          mkdir -p "$DRIVER_ROOT"
+
+          $CARGO_BIN install --force --root "$DRIVER_ROOT" tauri-driver
+          ls -la "$DRIVER_ROOT/bin/tauri-driver"
+
+          echo "TAURI_DRIVER_BIN=$DRIVER_ROOT/bin/tauri-driver" >> $GITHUB_ENV
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Build Tauri app (debug)
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+        run: |
+          # Ensure cargo is in PATH for the build
+          if [ -f "$HOME/.cargo/env" ]; then
+            source "$HOME/.cargo/env"
+          else
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+
+          npm run tauri build -- --debug --no-bundle
+
+      - name: Find app binary
+        id: find-binary
+        run: |
+          # Find the built binary
+          if [ -f "src-tauri/target/debug/marlin" ]; then
+            echo "app_path=src-tauri/target/debug/marlin" >> $GITHUB_OUTPUT
+            echo "Found binary at: src-tauri/target/debug/marlin"
+            ls -la "src-tauri/target/debug/marlin"
+            file "src-tauri/target/debug/marlin"
+          else
+            echo "Looking for binary..."
+            find src-tauri/target -name "marlin" -type f -executable 2>/dev/null | head -5
+            # Default to expected location
+            echo "app_path=src-tauri/target/debug/marlin" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Test app binary can launch
+        env:
+          DISPLAY: ':99'
+          LIBGL_ALWAYS_SOFTWARE: '1'
+          WEBKIT_DISABLE_COMPOSITING_MODE: '1'
+          WEBKIT_DISABLE_DMABUF_RENDERER: '1'
+          GDK_RENDERING: 'image'
+          GSK_RENDERER: 'cairo'
+          WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS: '1'
+        run: |
+          # Clean up stale Xvfb lock files
+          rm -f /tmp/.X99-lock /tmp/.X11-unix/X99 2>/dev/null || true
+
+          # Start Xvfb for this test
+          Xvfb :99 -screen 0 1920x1080x24 &
+          XVFB_PID=$!
+          sleep 2
+
+          # Check required libraries
+          echo "=== Checking library dependencies ==="
+          ldd "${{ github.workspace }}/${{ steps.find-binary.outputs.app_path }}" | head -30
+
+          # Try to start the app briefly
+          echo "=== Testing app startup ==="
+          timeout 10 "${{ github.workspace }}/${{ steps.find-binary.outputs.app_path }}" 2>&1 || EXIT_CODE=$?
+
+          # Exit code 124 means timeout (expected - app started successfully)
+          # Other exit codes might indicate startup issues
+          if [ "${EXIT_CODE:-0}" = "124" ]; then
+            echo "App started successfully (terminated by timeout)"
+          elif [ "${EXIT_CODE:-0}" = "0" ]; then
+            echo "App exited cleanly"
+          else
+            echo "App exited with code ${EXIT_CODE:-0}"
+          fi
+
+          # Cleanup
+          kill $XVFB_PID 2>/dev/null || true
+
+      - name: Setup service account
+        env:
+          GOOGLE_SERVICE_ACCOUNT_KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }}
+        run: |
+          echo "$GOOGLE_SERVICE_ACCOUNT_KEY" > /tmp/service-account.json
+
+      - name: Run E2E tests with tauri-driver
+        env:
+          GOOGLE_SERVICE_ACCOUNT_KEY_FILE: /tmp/service-account.json
+          DISPLAY: ':99'
+          TAURI_DRIVER_EXTERNAL: 'true'
+          TAURI_APP_PATH: ${{ github.workspace }}/${{ steps.find-binary.outputs.app_path }}
+          # Force software rendering (no GPU access on self-hosted runner)
+          LIBGL_ALWAYS_SOFTWARE: '1'
+          WEBKIT_DISABLE_COMPOSITING_MODE: '1'
+          WEBKIT_DISABLE_DMABUF_RENDERER: '1'
+          GDK_RENDERING: 'image'
+          GSK_RENDERER: 'cairo'
+          # Disable GPU sandbox to avoid permission issues
+          WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS: '1'
+        run: |
+          # Ensure cargo/tauri-driver is in PATH
+          if [ -f "$HOME/.cargo/env" ]; then
+            source "$HOME/.cargo/env"
+          else
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+
+          # Use workspace-local tauri-driver if available
+          if [ -n "$TAURI_DRIVER_BIN" ] && [ -f "$TAURI_DRIVER_BIN" ]; then
+            export PATH="$(dirname $TAURI_DRIVER_BIN):$PATH"
+          fi
+
+          # Aggressive cleanup of stale processes from previous runs
+          echo "Cleaning up stale processes..."
+
+          # Kill any existing Xvfb on display :99
+          pkill -f "Xvfb :99" 2>/dev/null || true
+          sleep 1
+
+          # Kill any existing tauri-driver
+          pkill -f tauri-driver 2>/dev/null || true
+
+          # Kill anything on port 4444
+          fuser -k 4444/tcp 2>/dev/null || true
+
+          # Clean up stale Xvfb lock files
+          rm -f /tmp/.X99-lock /tmp/.X11-unix/X99 2>/dev/null || true
+
+          # Wait for processes to die
+          sleep 2
+
+          # Start Xvfb with error checking
+          echo "Starting Xvfb..."
+          Xvfb :99 -screen 0 1920x1080x24 &
+          XVFB_PID=$!
+          sleep 2
+
+          # Verify Xvfb started
+          if ! kill -0 $XVFB_PID 2>/dev/null; then
+            echo "WARNING: Xvfb may not have started properly"
+          fi
+
+          # Start tauri-driver with output logging
+          echo "Starting tauri-driver..."
+          echo "PATH: $PATH"
+          echo "TAURI_APP_PATH: $TAURI_APP_PATH"
+          echo "DISPLAY: $DISPLAY"
+
+          # Find WebKitWebDriver (required on Linux)
+          echo "Looking for WebKitWebDriver..."
+          WEBKIT_DRIVER=""
+          for path in /usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/WebKitWebDriver \
+                      /usr/lib/webkit2gtk-4.1/WebKitWebDriver \
+                      /usr/lib64/webkit2gtk-4.1/WebKitWebDriver \
+                      /usr/libexec/webkit2gtk-4.1/WebKitWebDriver; do
+            if [ -x "$path" ]; then
+              WEBKIT_DRIVER="$path"
+              echo "Found WebKitWebDriver at: $path"
+              break
+            fi
+          done
+
+          if [ -z "$WEBKIT_DRIVER" ]; then
+            echo "WebKitWebDriver not found, trying to locate..."
+            WEBKIT_DRIVER=$(find /usr -name "WebKitWebDriver" -type f -executable 2>/dev/null | head -1)
+            if [ -n "$WEBKIT_DRIVER" ]; then
+              echo "Found WebKitWebDriver via find: $WEBKIT_DRIVER"
+            else
+              echo "WARNING: WebKitWebDriver not found. Tests will likely fail."
+            fi
+          fi
+
+          # Redirect tauri-driver output to log file for debugging
+          echo "Using tauri-driver at: $TAURI_DRIVER_BIN"
+          if [ -n "$WEBKIT_DRIVER" ]; then
+            echo "Starting tauri-driver with --native-driver $WEBKIT_DRIVER"
+            "$TAURI_DRIVER_BIN" --native-driver "$WEBKIT_DRIVER" > tauri-driver.log 2>&1 &
+          else
+            "$TAURI_DRIVER_BIN" > tauri-driver.log 2>&1 &
+          fi
+          DRIVER_PID=$!
+          sleep 5
+
+          # Verify tauri-driver is running
+          if ! kill -0 $DRIVER_PID 2>/dev/null; then
+            echo "tauri-driver failed to start (PID: $DRIVER_PID)"
+            echo "tauri-driver log:"
+            cat tauri-driver.log
+            exit 1
+          fi
+          echo "tauri-driver running on PID $DRIVER_PID"
+
+          # Verify tauri-driver is listening on port 4444
+          echo "Checking if port 4444 is listening..."
+          ss -tlnp | grep 4444 || echo "Port 4444 not found in ss output"
+
+          # Try to get status from tauri-driver
+          echo "Checking tauri-driver status endpoint..."
+          curl -s http://localhost:4444/status 2>&1 | head -5 || echo "Status endpoint check failed"
+
+          # Run tests
+          npm run test:e2e:tauri || TEST_EXIT=$?
+
+          # Show tauri-driver logs on failure
+          if [ "${TEST_EXIT:-0}" != "0" ]; then
+            echo "=== tauri-driver log ==="
+            cat tauri-driver.log
+          fi
+
+          # Cleanup
+          kill $DRIVER_PID 2>/dev/null || true
+          kill $XVFB_PID 2>/dev/null || true
+
+          exit ${TEST_EXIT:-0}
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-results
+          path: |
+            test-results/
+            playwright-report/

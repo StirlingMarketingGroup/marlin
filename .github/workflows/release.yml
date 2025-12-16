@@ -19,7 +19,7 @@ jobs:
   sync-version:
     name: Sync Version Metadata
     if: ${{ (github.ref_type == 'tag' && startsWith(github.ref_name, 'v')) || (github.event.inputs.tag && startsWith(github.event.inputs.tag, 'v')) }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     permissions:
       contents: write
     outputs:
@@ -132,29 +132,35 @@ jobs:
           fi
 
   release:
-    name: Release (${{ matrix.os }} • ${{ matrix.arch }})
+    name: Release (${{ matrix.platform }} • ${{ matrix.arch }})
     needs: sync-version
     if: ${{ github.event_name != 'pull_request' && needs.sync-version.result == 'success' }}
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
           # macOS Apple Silicon (M1/M2/M3)
-          - os: macos-15
+          - platform: macos
+            runner: macos-15
             target: aarch64-apple-darwin
             arch: arm64
             rust-targets: aarch64-apple-darwin
           # macOS Intel (cross-compile from arm64 runner)
-          - os: macos-15
+          - platform: macos
+            runner: macos-15
             target: x86_64-apple-darwin
             arch: x86_64
             rust-targets: x86_64-apple-darwin
-          - os: ubuntu-latest
+          # Linux x86_64 (self-hosted)
+          - platform: linux
+            runner: [self-hosted, Linux, X64]
             target: x86_64-unknown-linux-gnu
             arch: x86_64
             rust-targets: x86_64-unknown-linux-gnu
-          - os: ubuntu-24.04-arm
+          # Linux arm64 (GitHub-hosted, no self-hosted arm runner)
+          - platform: linux
+            runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             arch: arm64
             rust-targets: aarch64-unknown-linux-gnu
@@ -178,8 +184,9 @@ jobs:
           fetch-depth: 0
           ref: ${{ env.RELEASE_REF }}
 
-      - name: Install dependencies (Ubuntu)
-        if: startsWith(matrix.os, 'ubuntu')
+      # System dependencies pre-installed on self-hosted x86_64 runner
+      - name: Install dependencies (Linux arm64 GitHub-hosted)
+        if: matrix.platform == 'linux' && matrix.arch == 'arm64'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -226,6 +233,12 @@ jobs:
           node-version: 20
           cache: 'npm'
           cache-dependency-path: package-lock.ci.json
+
+      # Add cargo to PATH BEFORE Install Rust to fix timing issue
+      # where dtolnay/rust-toolchain installs but can't find rustc in same step
+      - name: Add cargo to PATH
+        if: runner.os == 'Linux'
+        run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -315,6 +328,9 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Google Drive OAuth credentials
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
         with:
           tagName: ${{ env.RELEASE_TAG }}
           releaseName: Marlin ${{ env.RELEASE_TAG }}
@@ -327,28 +343,34 @@ jobs:
           args: --target ${{ matrix.target }} --verbose
 
   release-dry-run:
-    name: Dry Run (${{ matrix.os }} • ${{ matrix.arch }})
+    name: Dry Run (${{ matrix.platform }} • ${{ matrix.arch }})
     if: ${{ github.event_name == 'pull_request' }}
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
           # macOS Apple Silicon (M1/M2/M3)
-          - os: macos-15
+          - platform: macos
+            runner: macos-15
             target: aarch64-apple-darwin
             arch: arm64
             rust-targets: aarch64-apple-darwin
           # macOS Intel (cross-compile from arm64 runner)
-          - os: macos-15
+          - platform: macos
+            runner: macos-15
             target: x86_64-apple-darwin
             arch: x86_64
             rust-targets: x86_64-apple-darwin
-          - os: ubuntu-latest
+          # Linux x86_64 (self-hosted)
+          - platform: linux
+            runner: [self-hosted, Linux, X64]
             target: x86_64-unknown-linux-gnu
             arch: x86_64
             rust-targets: x86_64-unknown-linux-gnu
-          - os: ubuntu-24.04-arm
+          # Linux arm64 (GitHub-hosted, no self-hosted arm runner)
+          - platform: linux
+            runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             arch: arm64
             rust-targets: aarch64-unknown-linux-gnu
@@ -358,8 +380,9 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install dependencies (Ubuntu)
-        if: startsWith(matrix.os, 'ubuntu')
+      # System dependencies pre-installed on self-hosted x86_64 runner
+      - name: Install dependencies (Linux arm64 GitHub-hosted)
+        if: matrix.platform == 'linux' && matrix.arch == 'arm64'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -406,6 +429,12 @@ jobs:
           node-version: 20
           cache: 'npm'
           cache-dependency-path: package-lock.ci.json
+
+      # Add cargo to PATH BEFORE Install Rust to fix timing issue
+      # where dtolnay/rust-toolchain installs but can't find rustc in same step
+      - name: Add cargo to PATH
+        if: runner.os == 'Linux'
+        run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -456,6 +485,7 @@ jobs:
       - name: Build Tauri bundle
         run: |
           set -euxo pipefail
+          export PATH="$HOME/.cargo/bin:$PATH"
           npm run tauri build -- --ci --target ${{ matrix.target }} --verbose
         env:
           APPIMAGE_EXTRACT_AND_RUN: ${{ runner.os == 'Linux' && '1' || '0' }}
@@ -463,6 +493,9 @@ jobs:
           TAURI_LOG: trace
           RUST_LOG: tauri_bundler=debug
           TAURI_BUNDLE_LINUX_APPIMAGE_ARGS: ${{ runner.os == 'Linux' && '--verbosity=2' || '' }}
+          # Google Drive OAuth credentials
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
 
       - name: Dump linuxdeploy diagnostics
         if: failure() && runner.os == 'Linux'

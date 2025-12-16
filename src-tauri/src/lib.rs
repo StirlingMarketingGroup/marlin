@@ -1,7 +1,7 @@
 mod commands;
 mod fs_utils;
 mod fs_watcher;
-mod locations;
+pub mod locations;
 #[cfg(target_os = "macos")]
 mod macos_icons;
 mod macos_security;
@@ -152,6 +152,10 @@ pub fn run() {
             commands::add_pinned_directory,
             commands::remove_pinned_directory,
             commands::reorder_pinned_directories,
+            commands::get_google_accounts,
+            commands::add_google_account,
+            commands::remove_google_account,
+            commands::resolve_google_drive_url,
             plugins::drag_detector::enable_drag_detection,
             plugins::drag_detector::set_drop_zone,
             plugins::drag_detector::simulate_drop,
