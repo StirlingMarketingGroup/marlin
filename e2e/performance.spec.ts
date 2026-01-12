@@ -487,7 +487,7 @@ test.describe('Performance Profiling', () => {
 
     // Wait for list view header to be visible (sorting is in list view)
     // First switch to list view if in grid
-    await page.keyboard.press('Meta+2'); // Switch to list view
+    await page.keyboard.press('ControlOrMeta+2'); // Switch to list view (cross-platform)
     await page.waitForTimeout(200);
 
     // Click on Size header to sort
