@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type React from 'react';
 import { useAppStore } from '../store/useAppStore';
 import FileGrid from './FileGrid';
@@ -18,15 +18,15 @@ const arraysEqual = (a: string[], b: string[]) => {
 };
 
 export default function MainPanel() {
-  const {
-    files,
-    error,
-    globalPreferences,
-    currentPath,
-    directoryPreferences,
-    setSelectedFiles,
-    loading,
-  } = useAppStore();
+  // Use selectors to only subscribe to state we actually use
+  // This prevents re-renders when unrelated state (like selectedFiles) changes
+  const files = useAppStore((state) => state.files);
+  const error = useAppStore((state) => state.error);
+  const globalPreferences = useAppStore((state) => state.globalPreferences);
+  const currentPath = useAppStore((state) => state.currentPath);
+  const directoryPreferences = useAppStore((state) => state.directoryPreferences);
+  const setSelectedFiles = useAppStore((state) => state.setSelectedFiles);
+  const loading = useAppStore((state) => state.loading);
 
   // Debounce spinner to avoid flash on fast directory loads
   const [debouncedLoading, setDebouncedLoading] = useState(false);
@@ -82,10 +82,14 @@ export default function MainPanel() {
     target: HTMLDivElement;
   } | null>(null);
 
-  const currentPrefs = {
-    ...globalPreferences,
-    ...directoryPreferences[currentPath],
-  };
+  // Memoize to prevent FileGrid/FileList re-renders when unrelated store state changes
+  const currentPrefs = useMemo(
+    () => ({
+      ...globalPreferences,
+      ...directoryPreferences[currentPath],
+    }),
+    [globalPreferences, directoryPreferences, currentPath]
+  );
 
   const handleContextMenuCapture = (e: React.MouseEvent) => {
     const target = e.target as Element | null;
