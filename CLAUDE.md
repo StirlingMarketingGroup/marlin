@@ -54,6 +54,34 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Production builds may catch issues not visible in dev mode
 - Clean builds ensure code quality and maintainability
 
+## Refactoring Philosophy
+
+**Be eager to rewrite and refactor. This is encouraged and expected.**
+
+Code naturally accumulates awkwardness as requirements evolve. What started as a clean implementation becomes patched and gnarly as features are added. This is normal—but we don't accept it as the final state.
+
+### When to Refactor
+
+- **Slight awkwardness?** Consider refactoring.
+- **Code feels patched together?** Rewrite it cleanly.
+- **Adding a feature requires contortions?** Step back and redesign first.
+- **Something smells off?** Trust that instinct and fix it.
+
+### Refactoring Mindset
+
+- Refactoring is fun, not a chore
+- Clean code is worth the investment
+- Don't patch on top of patches—cut out and reimplement
+- A small rewrite now prevents a painful rewrite later
+- If you're fighting the code, the code is wrong
+
+### What This Means in Practice
+
+- Don't hesitate to propose significant rewrites when the current approach is limiting
+- Extract, rename, restructure freely when it improves clarity
+- Delete code aggressively—less code is better code
+- When in doubt, lean toward the cleaner solution even if it's more work upfront
+
 ## Architecture Overview
 
 ### Technology Stack
