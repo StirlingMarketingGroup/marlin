@@ -1169,8 +1169,14 @@ function App() {
         return;
       }
 
-      // Select all: Cmd/Ctrl+A
-      if (!inEditable && (e.key === 'a' || e.key === 'A')) {
+      // Select all: Cmd+A on macOS, Ctrl+A on Windows/Linux
+      if (
+        !inEditable &&
+        ((isMac && e.metaKey) || (!isMac && e.ctrlKey)) &&
+        !e.altKey &&
+        !e.shiftKey &&
+        e.key.toLowerCase() === 'a'
+      ) {
         e.preventDefault();
         const state = useAppStore.getState();
         const currentDirPrefs = state.directoryPreferences[state.currentPath] || {};
