@@ -81,4 +81,37 @@ test.describe('Type-to-Filter', () => {
     // Should show empty state message
     await expect(page.getByText(/No files match/)).toBeVisible();
   });
+
+  test('should select first file on ArrowDown from filter', async ({ page }) => {
+    // Type to filter
+    await page.keyboard.type('Do');
+    await expect(page.locator('[data-testid="filter-input"]')).toBeVisible();
+
+    // Press ArrowDown to jump to file list
+    await page.keyboard.press('ArrowDown');
+
+    // First matching file should be selected (Documents comes before Downloads alphabetically)
+    // Selection is indicated by bg-accent-selected class
+    await expect(page.locator('[data-testid="file-item"][data-name="Documents"]')).toHaveClass(
+      /bg-accent-selected/
+    );
+
+    // Filter input should lose focus (blur)
+    await expect(page.locator('[data-testid="filter-input"]')).not.toBeFocused();
+  });
+
+  test('should select last file on ArrowUp from filter', async ({ page }) => {
+    // Type to filter
+    await page.keyboard.type('Do');
+    await expect(page.locator('[data-testid="filter-input"]')).toBeVisible();
+
+    // Press ArrowUp to jump to last file
+    await page.keyboard.press('ArrowUp');
+
+    // Last matching file should be selected (Downloads)
+    // Selection is indicated by bg-accent-selected class
+    await expect(page.locator('[data-testid="file-item"][data-name="Downloads"]')).toHaveClass(
+      /bg-accent-selected/
+    );
+  });
 });

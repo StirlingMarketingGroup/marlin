@@ -7,14 +7,22 @@ import type { FileItem } from '@/types';
 const EMPTY_FILES: FileItem[] = [];
 
 export default function FilterInput() {
-  const { filterText, showFilterInput, setFilterText, clearFilter } = useAppStore();
+  const {
+    filterText,
+    showFilterInput,
+    setFilterText,
+    clearFilter,
+    setSelectedFiles,
+    setSelectionAnchor,
+  } = useAppStore();
   // Only subscribe to files when we have a filter to avoid re-renders during streaming
   const files = useAppStore((state) => (state.filterText ? state.files : EMPTY_FILES));
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const matchCount = files.filter((f) =>
+  const filteredFiles = files.filter((f) =>
     f.name.toLowerCase().includes(filterText.toLowerCase())
-  ).length;
+  );
+  const matchCount = filteredFiles.length;
 
   useEffect(() => {
     if (showFilterInput && inputRef.current) {
@@ -30,6 +38,24 @@ export default function FilterInput() {
       e.preventDefault();
       e.stopPropagation();
       clearFilter();
+      return;
+    }
+
+    // Arrow keys jump to file list
+    if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && filteredFiles.length > 0) {
+      e.preventDefault();
+      e.stopPropagation();
+
+      // Select first or last filtered file
+      const targetFile =
+        e.key === 'ArrowDown' ? filteredFiles[0] : filteredFiles[filteredFiles.length - 1];
+      setSelectedFiles([targetFile.path]);
+      setSelectionAnchor(targetFile.path);
+
+      // Blur input and focus the file container so arrow keys continue working
+      inputRef.current?.blur();
+      const fileContainer = document.querySelector('.file-grid, .file-list') as HTMLElement;
+      fileContainer?.focus();
     }
   };
 

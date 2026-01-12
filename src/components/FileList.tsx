@@ -759,7 +759,7 @@ export default function FileList({ files, preferences }: FileListProps) {
   };
 
   return (
-    <div className="h-full flex flex-col" ref={listRef} data-testid="file-list">
+    <div className="h-full flex flex-col file-list" ref={listRef} data-testid="file-list">
       {/* Header */}
       <div className="grid grid-cols-12 gap-3 px-3 py-2 border-b border-app-border border-t-0 text-[12px] font-medium text-app-muted bg-transparent select-none flex-shrink-0">
         <button
