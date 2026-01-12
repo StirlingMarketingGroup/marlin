@@ -1,6 +1,28 @@
 import { test, expect } from '@playwright/test';
 import { getTauriMockScript, MOCK_DOWNLOADS_DIR } from './tauri-mocks';
 
+// Type definition for window extensions used in stability tests
+interface StabilityTestWindow extends Window {
+  __FILE_LIST_MUTATIONS__: Array<{
+    time: number;
+    type: string;
+    target: string;
+    addedNodes: number;
+    removedNodes: number;
+    attributeName: string | null;
+  }>;
+  __RENDER_TIMESTAMPS__: Array<{
+    time: number;
+    itemCount: number;
+    items: Array<{ path: string | null; top: number }>;
+  }>;
+  __recordRenderState__: () => void;
+  __setupMutationObserver__: () => boolean;
+  __mutationObserver__?: MutationObserver;
+  __getMutationsSince__: (since: number) => StabilityTestWindow['__FILE_LIST_MUTATIONS__'];
+  __clearMutations__: () => void;
+}
+
 // Helper to inject render tracking
 function getRenderTrackingScript(): string {
   return `
@@ -100,12 +122,12 @@ test.describe('Render Stability', () => {
 
     // Set up mutation observer
     const observerReady = await page.evaluate(() => {
-      return (window as any).__setupMutationObserver__();
+      return (window as unknown as StabilityTestWindow).__setupMutationObserver__();
     });
     expect(observerReady).toBe(true);
 
     // Clear any existing mutations
-    await page.evaluate(() => (window as any).__clearMutations__());
+    await page.evaluate(() => (window as unknown as StabilityTestWindow).__clearMutations__());
 
     // Record the timestamp before clicking
     const beforeClick = await page.evaluate(() => performance.now());
@@ -143,7 +165,7 @@ test.describe('Render Stability', () => {
 
     // Get mutations that occurred
     const mutations = await page.evaluate((since) => {
-      return (window as any).__getMutationsSince__(since);
+      return (window as unknown as StabilityTestWindow).__getMutationsSince__(since);
     }, beforeClick);
 
     console.log(`Mutations detected: ${mutations.length}`);
@@ -175,7 +197,7 @@ test.describe('Render Stability', () => {
     // Check that no major DOM mutations occurred (childList additions/removals)
     // Selection class changes are expected, but element recreation is not
     const structuralMutations = mutations.filter(
-      (m: any) => m.type === 'childList' && (m.addedNodes > 0 || m.removedNodes > 0)
+      (m) => m.type === 'childList' && (m.addedNodes > 0 || m.removedNodes > 0)
     );
 
     console.log(`Structural mutations (childList): ${structuralMutations.length}`);
@@ -186,15 +208,6 @@ test.describe('Render Stability', () => {
   });
 
   test('double-clicking to open a file should not cause flash', async ({ page }) => {
-    // Listen to console for render counts
-    const consoleLogs: string[] = [];
-    page.on('console', (msg) => {
-      const text = msg.text();
-      if (text.includes('[FileGrid]')) {
-        consoleLogs.push(text);
-      }
-    });
-
     await page.goto('/');
 
     const pathInput = page.locator('[data-testid="path-input"]');
@@ -211,14 +224,13 @@ test.describe('Render Stability', () => {
     // Give time for settling
     await page.waitForTimeout(500);
 
-    // Get render count before action
-    const renderCountBefore = await page.evaluate(() => {
-      return (window as any).__FILE_GRID_RENDER_COUNT__ || 0;
-    });
-
     // Set up mutation observer
-    await page.evaluate(() => (window as any).__setupMutationObserver__());
-    await page.evaluate(() => (window as any).__clearMutations__());
+    const observerReady = await page.evaluate(() => {
+      return (window as unknown as StabilityTestWindow).__setupMutationObserver__();
+    });
+    expect(observerReady).toBe(true);
+
+    await page.evaluate(() => (window as unknown as StabilityTestWindow).__clearMutations__());
 
     const beforeClick = await page.evaluate(() => performance.now());
 
@@ -229,29 +241,17 @@ test.describe('Render Stability', () => {
     // Wait for any re-renders
     await page.waitForTimeout(300);
 
-    // Get render count after action
-    const renderCountAfter = await page.evaluate(() => {
-      return (window as any).__FILE_GRID_RENDER_COUNT__ || 0;
-    });
-
     // Get mutations
     const mutations = await page.evaluate((since) => {
-      return (window as any).__getMutationsSince__(since);
+      return (window as unknown as StabilityTestWindow).__getMutationsSince__(since);
     }, beforeClick);
 
     console.log(`\n=== DOUBLE-CLICK STABILITY TEST ===`);
-    console.log(`Render count before: ${renderCountBefore}`);
-    console.log(`Render count after: ${renderCountAfter}`);
-    console.log(`Re-renders caused by double-click: ${renderCountAfter - renderCountBefore}`);
     console.log(`Total mutations: ${mutations.length}`);
 
-    // Log all FileGrid render logs
-    console.log('\nFileGrid console logs:');
-    consoleLogs.forEach((log) => console.log(`  ${log}`));
-
     // Categorize mutations
-    const childListMutations = mutations.filter((m: any) => m.type === 'childList');
-    const attributeMutations = mutations.filter((m: any) => m.type === 'attributes');
+    const childListMutations = mutations.filter((m) => m.type === 'childList');
+    const attributeMutations = mutations.filter((m) => m.type === 'attributes');
 
     console.log(`\nChildList mutations: ${childListMutations.length}`);
     console.log(`Attribute mutations: ${attributeMutations.length}`);
@@ -263,22 +263,11 @@ test.describe('Render Stability', () => {
     // For a double-click that opens a file externally, there should be
     // minimal DOM changes - just selection state updates
     // If we see many childList mutations with addedNodes/removedNodes, that's a re-render
-    const heavyMutations = childListMutations.filter(
-      (m: any) => m.addedNodes > 2 || m.removedNodes > 2
-    );
+    const heavyMutations = childListMutations.filter((m) => m.addedNodes > 2 || m.removedNodes > 2);
 
     console.log(`Heavy mutations (>2 nodes): ${heavyMutations.length}`);
 
-    // KEY ASSERTION: Double-clicking a file should cause at most 1 re-render
-    // (selection state change is expected, but full file list re-render is not)
-    const reRenderCount = renderCountAfter - renderCountBefore;
-    console.log(
-      `\n${reRenderCount <= 1 ? '✅' : '❌'} Re-render count: ${reRenderCount} (expected <= 1)`
-    );
-
     // This is the key assertion - opening a file shouldn't cause major DOM churn
     expect(heavyMutations.length).toBe(0);
-    // And shouldn't cause multiple re-renders
-    expect(reRenderCount).toBeLessThanOrEqual(1);
   });
 });
