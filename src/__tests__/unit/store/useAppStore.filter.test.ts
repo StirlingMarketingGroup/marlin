@@ -93,4 +93,13 @@ describe('useAppStore filter state', () => {
     expect(useAppStore.getState().filterText).toBe('');
     expect(useAppStore.getState().showFilterInput).toBe(false);
   });
+
+  it('should append character to filter text via appendToFilter', () => {
+    const { appendToFilter } = useAppStore.getState();
+    appendToFilter('a');
+    expect(useAppStore.getState().filterText).toBe('a');
+    appendToFilter('b');
+    expect(useAppStore.getState().filterText).toBe('ab');
+    expect(useAppStore.getState().showFilterInput).toBe(true);
+  });
 });
