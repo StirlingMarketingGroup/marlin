@@ -3,8 +3,12 @@ import { X, MagnifyingGlass } from 'phosphor-react';
 import { useAppStore } from '@/store/useAppStore';
 
 export default function FilterInput() {
-  const { filterText, showFilterInput, setFilterText, clearFilter } = useAppStore();
+  const { filterText, showFilterInput, setFilterText, clearFilter, files } = useAppStore();
   const inputRef = useRef<HTMLInputElement>(null);
+
+  const matchCount = filterText
+    ? files.filter((f) => f.name.toLowerCase().includes(filterText.toLowerCase())).length
+    : 0;
 
   useEffect(() => {
     if (showFilterInput && inputRef.current) {
@@ -40,6 +44,11 @@ export default function FilterInput() {
           data-testid="filter-input"
           className="bg-transparent border-none outline-none text-sm w-40 text-white placeholder-app-muted"
         />
+        {filterText && (
+          <span className="text-xs text-app-muted whitespace-nowrap">
+            {matchCount} {matchCount === 1 ? 'match' : 'matches'}
+          </span>
+        )}
         <button
           className="p-0.5 rounded hover:bg-app-light"
           onClick={clearFilter}
