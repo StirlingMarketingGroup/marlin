@@ -828,15 +828,14 @@ function App() {
         return;
       }
 
-      // Backspace removes last char from filter if active
+      // Backspace removes last char from filter if active (keeps filter visible even when empty)
       if (e.key === 'Backspace' && !inEditable && useAppStore.getState().showFilterInput) {
         e.preventDefault();
         const current = useAppStore.getState().filterText;
-        if (current.length > 1) {
+        if (current.length > 0) {
           useAppStore.getState().setFilterText(current.slice(0, -1));
-        } else {
-          useAppStore.getState().clearFilter();
         }
+        // When empty, do nothing - filter stays visible, only Escape dismisses
         return;
       }
 

@@ -27,7 +27,7 @@ export default function FilterInput() {
   useEffect(() => {
     if (showFilterInput && inputRef.current) {
       inputRef.current.focus();
-      inputRef.current.select();
+      // Don't select - user is typing char by char via appendToFilter
     }
   }, [showFilterInput]);
 
