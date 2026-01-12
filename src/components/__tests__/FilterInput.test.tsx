@@ -22,6 +22,7 @@ describe('FilterInput', () => {
       showFilterInput: false,
       setFilterText: mockSetFilterText,
       clearFilter: mockClearFilter,
+      files: [],
     });
 
     const { container } = render(<FilterInput />);
@@ -34,6 +35,7 @@ describe('FilterInput', () => {
       showFilterInput: true,
       setFilterText: mockSetFilterText,
       clearFilter: mockClearFilter,
+      files: [],
     });
 
     render(<FilterInput />);
@@ -46,6 +48,7 @@ describe('FilterInput', () => {
       showFilterInput: true,
       setFilterText: mockSetFilterText,
       clearFilter: mockClearFilter,
+      files: [],
     });
 
     render(<FilterInput />);
@@ -59,6 +62,7 @@ describe('FilterInput', () => {
       showFilterInput: true,
       setFilterText: mockSetFilterText,
       clearFilter: mockClearFilter,
+      files: [],
     });
 
     render(<FilterInput />);
@@ -73,6 +77,7 @@ describe('FilterInput', () => {
       showFilterInput: true,
       setFilterText: mockSetFilterText,
       clearFilter: mockClearFilter,
+      files: [],
     });
 
     render(<FilterInput />);
@@ -87,6 +92,7 @@ describe('FilterInput', () => {
       showFilterInput: true,
       setFilterText: mockSetFilterText,
       clearFilter: mockClearFilter,
+      files: [],
     });
 
     render(<FilterInput />);
