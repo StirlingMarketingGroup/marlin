@@ -13,6 +13,34 @@ interface FileNameDisplayProps {
   showSize?: boolean;
   className?: string;
   style?: React.CSSProperties;
+  highlightText?: string;
+}
+
+function highlightMatch(text: string, highlight: string): React.ReactNode {
+  if (!highlight) return text;
+
+  const lowerText = text.toLowerCase();
+  const lowerHighlight = highlight.toLowerCase();
+  const index = lowerText.indexOf(lowerHighlight);
+
+  if (index === -1) return text;
+
+  const before = text.slice(0, index);
+  const match = text.slice(index, index + highlight.length);
+  const after = text.slice(index + highlight.length);
+
+  return (
+    <>
+      {before}
+      <span
+        data-testid="highlight-match"
+        className="bg-yellow-500/40 text-yellow-200 rounded-sm px-0.5 -mx-0.5"
+      >
+        {match}
+      </span>
+      {after}
+    </>
+  );
 }
 
 function FileNameDisplayInner({
@@ -23,6 +51,7 @@ function FileNameDisplayInner({
   showSize = false,
   className = '',
   style,
+  highlightText = '',
 }: FileNameDisplayProps) {
   const isMac =
     typeof navigator !== 'undefined' && navigator.userAgent.toUpperCase().includes('MAC');
@@ -210,7 +239,7 @@ function FileNameDisplayInner({
                       paddingRight: isSelected && hadOverflow ? X_PAD : undefined,
                     }}
                   >
-                    {renderText}
+                    {highlightMatch(renderText, highlightText)}
                   </div>
                 </div>
               )}
@@ -250,7 +279,7 @@ function FileNameDisplayInner({
                   paddingRight: isSelected && hadOverflow ? X_PAD : undefined,
                 }}
               >
-                {renderText}
+                {highlightMatch(renderText, highlightText)}
               </div>
             </div>
           )}
@@ -289,7 +318,7 @@ function FileNameDisplayInner({
                 whiteSpace: 'nowrap',
               }}
             >
-              {renderText}
+              {highlightMatch(renderText, highlightText)}
             </span>
           )}
         </QuickTooltip>
@@ -306,7 +335,7 @@ function FileNameDisplayInner({
             whiteSpace: 'nowrap',
           }}
         >
-          {renderText}
+          {highlightMatch(renderText, highlightText)}
         </span>
       )}
     </div>
