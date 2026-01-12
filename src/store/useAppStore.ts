@@ -206,6 +206,10 @@ interface AppState {
   showZoomSlider: boolean;
   _zoomSliderHideTimer?: number;
 
+  // Filter state
+  filterText: string;
+  showFilterInput: boolean;
+
   // Actions
   setCurrentPath: (path: string) => void;
   setHomeDir: (path: string) => void;
@@ -225,6 +229,8 @@ interface AppState {
   showZoomSliderNow: () => void;
   hideZoomSliderNow: () => void;
   scheduleHideZoomSlider: (delayMs?: number) => void;
+  setFilterText: (text: string) => void;
+  clearFilter: () => void;
   navigateTo: (path: string) => void;
   goBack: () => void;
   goForward: () => void;
@@ -305,6 +311,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   showZoomSlider: false,
   _zoomSliderHideTimer: undefined,
 
+  filterText: '',
+  showFilterInput: false,
+
   // Actions
   setCurrentPath: (path) => {
     const norm = normalizePath(path);
@@ -378,6 +387,18 @@ export const useAppStore = create<AppState>((set, get) => ({
       return { _zoomSliderHideTimer: id };
     }),
 
+  setFilterText: (text: string) =>
+    set({
+      filterText: text,
+      showFilterInput: text.length > 0,
+    }),
+
+  clearFilter: () =>
+    set({
+      filterText: '',
+      showFilterInput: false,
+    }),
+
   navigateTo: (path) => {
     const { pathHistory, historyIndex } = get();
     const norm = normalizePath(path);
@@ -387,6 +408,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       currentLocationRaw: toFileUri(norm),
       pathHistory: newHistory,
       historyIndex: newHistory.length - 1,
+      filterText: '',
+      showFilterInput: false,
     });
     void get().refreshGitStatus({ path: norm });
   },
