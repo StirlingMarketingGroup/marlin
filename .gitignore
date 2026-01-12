@@ -50,6 +50,9 @@ coverage/
 playwright-report/
 test-results/
 
+# Claude Code local settings (user-specific permissions)
+.claude/settings.local.json
+
 # Temporary folders
 tmp/
 temp/
