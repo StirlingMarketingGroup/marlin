@@ -28,10 +28,7 @@ export default function FilterInput() {
   };
 
   return (
-    <div
-      className="fixed bottom-4 right-4 z-50 select-none"
-      data-tauri-drag-region={false}
-    >
+    <div className="fixed bottom-4 right-4 z-50 select-none" data-tauri-drag-region={false}>
       <div className="flex items-center gap-2 bg-app-gray/95 border border-app-border rounded-md px-2 py-1.5 shadow-lg backdrop-blur-sm">
         <MagnifyingGlass className="w-4 h-4 text-app-muted flex-shrink-0" />
         <input
