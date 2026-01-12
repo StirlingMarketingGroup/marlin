@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, useCallback, type ReactNode } from 'react';
+import { useEffect, useRef, useState, useCallback, type ReactNode } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { CaretUp, CaretDown, Play, AppWindow, Folder, Package, Disc } from 'phosphor-react';
 import { FileItem, ViewPreferences } from '../types';
@@ -18,6 +18,7 @@ import GitRepoBadge from '@/components/GitRepoBadge';
 import { normalizePreviewIcon } from '@/utils/iconSizing';
 import { isArchiveFile, isVideoExtension, isMacOSBundle } from '@/utils/fileTypes';
 import { useScrollContainerRef } from '@/contexts/ScrollContext';
+import { useSortedFiles } from '@/hooks/useSortedFiles';
 
 interface FileListProps {
   files: FileItem[];
@@ -436,55 +437,8 @@ export default function FileList({ files, preferences }: FileListProps) {
     }
   };
 
-  const nameCollator = useMemo(
-    () => new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' }),
-    []
-  );
-
-  // During streaming: sort by name only (stable order as files arrive)
-  // After streaming: apply user's full sort preferences
-  const sortedFiles = useMemo(() => {
-    const effectiveSortBy = isStreamingComplete ? preferences.sortBy : 'name';
-
-    return [...files].sort((a, b) => {
-      // Treat macOS bundles (.app, .photoslibrary, etc.) as files for sorting purposes
-      const aIsBundle = isMacOSBundle(a);
-      const bIsBundle = isMacOSBundle(b);
-      const aIsFolder = a.is_directory && !aIsBundle;
-      const bIsFolder = b.is_directory && !bIsBundle;
-
-      // Optionally sort directories first (but not bundles)
-      if (preferences.foldersFirst) {
-        if (aIsFolder && !bIsFolder) return -1;
-        if (!aIsFolder && bIsFolder) return 1;
-      }
-
-      let compareValue = 0;
-      switch (effectiveSortBy) {
-        case 'name':
-          compareValue = nameCollator.compare(a.name, b.name);
-          break;
-        case 'size':
-          compareValue = a.size - b.size;
-          break;
-        case 'modified':
-          compareValue = new Date(a.modified).getTime() - new Date(b.modified).getTime();
-          break;
-        case 'type':
-          compareValue = (a.extension || '').localeCompare(b.extension || '');
-          break;
-      }
-
-      return preferences.sortOrder === 'asc' ? compareValue : -compareValue;
-    });
-  }, [
-    files,
-    preferences.sortBy,
-    preferences.sortOrder,
-    preferences.foldersFirst,
-    isStreamingComplete,
-    nameCollator,
-  ]);
+  // Use shared hook for streaming-aware sorting
+  const sortedFiles = useSortedFiles(files, preferences);
 
   const hiddenFiltered = preferences.showHidden
     ? sortedFiles
