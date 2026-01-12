@@ -8,12 +8,16 @@ test.beforeEach(async ({ page }) => {
 });
 
 test.describe('Smoke Tests', () => {
-  test('should navigate to Downloads folder', async ({ page }) => {
+  test.beforeEach(async ({ page }) => {
     await page.goto('/');
 
     // Wait for app to initialize
     const pathInput = page.locator('input[placeholder="Enter path..."]');
     await expect(pathInput).toBeVisible({ timeout: 15000 });
+  });
+
+  test('should navigate to Downloads folder', async ({ page }) => {
+    const pathInput = page.locator('input[placeholder="Enter path..."]');
 
     // Navigate to Downloads
     await pathInput.click();
@@ -29,12 +33,6 @@ test.describe('Smoke Tests', () => {
   });
 
   test('should display files in home directory', async ({ page }) => {
-    await page.goto('/');
-
-    // Wait for app to initialize
-    const pathInput = page.locator('input[placeholder="Enter path..."]');
-    await expect(pathInput).toBeVisible({ timeout: 15000 });
-
     // Should start in home directory with mock files
     await expect(page.getByText('Documents')).toBeVisible({ timeout: 5000 });
     await expect(page.getByText('Downloads')).toBeVisible({ timeout: 5000 });
