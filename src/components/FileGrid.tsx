@@ -237,6 +237,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     openFile,
     isStreamingComplete,
     streamingTotalCount,
+    filterText,
   } = useAppStore();
   const { renameTargetPath, setRenameTarget, renameFile } = useAppStore();
   const { startNativeDrag, endNativeDrag, isDraggedDirectory } = useDragStore();
@@ -627,9 +628,15 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     return preferences.sortOrder === 'asc' ? compareValue : -compareValue;
   });
 
-  const filteredFiles = preferences.showHidden
+  const hiddenFiltered = preferences.showHidden
     ? sortedFiles
     : sortedFiles.filter((file) => !file.is_hidden);
+
+  const filteredFiles = filterText
+    ? hiddenFiltered.filter((file) =>
+        file.name.toLowerCase().includes(filterText.toLowerCase())
+      )
+    : hiddenFiltered;
 
   // Group files into rows for virtual scrolling
   const rows = useMemo(() => {
