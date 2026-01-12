@@ -476,9 +476,7 @@ export default function FileList({ files, preferences }: FileListProps) {
     : sortedFiles.filter((file) => !file.is_hidden);
 
   const filteredFiles = filterText
-    ? hiddenFiltered.filter((file) =>
-        file.name.toLowerCase().includes(filterText.toLowerCase())
-      )
+    ? hiddenFiltered.filter((file) => file.name.toLowerCase().includes(filterText.toLowerCase()))
     : hiddenFiltered;
 
   // Virtual scrolling for file rows
@@ -531,7 +529,7 @@ export default function FileList({ files, preferences }: FileListProps) {
           <Folder className="w-16 h-16 mx-auto mb-4 opacity-50" />
           {filterText ? (
             <>
-              <p className="text-sm">No files match "{filterText}"</p>
+              <p className="text-sm">No files match &ldquo;{filterText}&rdquo;</p>
               <p className="text-xs mt-1">Press Escape to clear filter</p>
             </>
           ) : (

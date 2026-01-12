@@ -8,19 +8,15 @@ const mockFile: FileItem = {
   path: '/test/TestDocument.pdf',
   is_directory: false,
   is_hidden: false,
+  is_symlink: false,
+  is_git_repo: false,
   size: 1024,
-  modified: Date.now(),
+  modified: new Date().toISOString(),
 };
 
 describe('FileNameDisplay highlight', () => {
   it('should highlight matching text case-insensitively', () => {
-    render(
-      <FileNameDisplay
-        file={mockFile}
-        variant="list"
-        highlightText="doc"
-      />
-    );
+    render(<FileNameDisplay file={mockFile} variant="list" highlightText="doc" />);
 
     const highlight = screen.getByTestId('highlight-match');
     expect(highlight).toBeInTheDocument();
@@ -28,25 +24,13 @@ describe('FileNameDisplay highlight', () => {
   });
 
   it('should not render highlight when no match', () => {
-    render(
-      <FileNameDisplay
-        file={mockFile}
-        variant="list"
-        highlightText="xyz"
-      />
-    );
+    render(<FileNameDisplay file={mockFile} variant="list" highlightText="xyz" />);
 
     expect(screen.queryByTestId('highlight-match')).not.toBeInTheDocument();
   });
 
   it('should not render highlight when highlightText is empty', () => {
-    render(
-      <FileNameDisplay
-        file={mockFile}
-        variant="list"
-        highlightText=""
-      />
-    );
+    render(<FileNameDisplay file={mockFile} variant="list" highlightText="" />);
 
     expect(screen.queryByTestId('highlight-match')).not.toBeInTheDocument();
   });
