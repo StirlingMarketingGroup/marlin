@@ -57,6 +57,26 @@ export interface DirectoryBatch {
   totalCount?: number | null;
 }
 
+/** Metadata update for a single file (sent after skeleton batch) */
+export interface FileMetadataUpdate {
+  path: string;
+  size: number;
+  modified: string; // ISO 8601 string
+  isDirectory: boolean;
+  isSymlink: boolean;
+  isGitRepo: boolean;
+  childCount?: number | null;
+  imageWidth?: number | null;
+  imageHeight?: number | null;
+}
+
+/** A batch of metadata updates for files already in the list */
+export interface MetadataBatch {
+  sessionId: string;
+  updates: FileMetadataUpdate[];
+  isFinal: boolean;
+}
+
 export interface ViewPreferences {
   viewMode: 'grid' | 'list' | 'details';
   sortBy: 'name' | 'size' | 'modified' | 'type';

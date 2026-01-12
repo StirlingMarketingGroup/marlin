@@ -28,6 +28,19 @@ export default function MainPanel() {
     loading,
   } = useAppStore();
 
+  // Debounce spinner to avoid flash on fast directory loads
+  const [debouncedLoading, setDebouncedLoading] = useState(false);
+  useEffect(() => {
+    if (loading) {
+      // Only show spinner after 500ms of loading
+      const timer = setTimeout(() => setDebouncedLoading(true), 500);
+      return () => clearTimeout(timer);
+    } else {
+      // Clear immediately when loading finishes
+      setDebouncedLoading(false);
+    }
+  }, [loading]);
+
   // We rely solely on the native OS context menu now
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileCtxCaptureRef = useRef<boolean>(false);
@@ -527,7 +540,7 @@ export default function MainPanel() {
           />
         )}
 
-        {loading && (
+        {debouncedLoading && (
           <div className="absolute inset-0 flex items-center justify-center bg-app-dark">
             <div className="animate-spin w-6 h-6 border-2 border-[var(--accent)] border-t-transparent rounded-full" />
           </div>

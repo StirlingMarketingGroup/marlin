@@ -923,12 +923,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
   };
 
   return (
-    <div
-      ref={parentRef}
-      className="p-2"
-      data-testid="file-grid"
-      data-grid-scroll-container="true"
-    >
+    <div ref={parentRef} className="p-2" data-testid="file-grid" data-grid-scroll-container="true">
       <div ref={gridRef}>
         {/* Virtual scroll container */}
         <div

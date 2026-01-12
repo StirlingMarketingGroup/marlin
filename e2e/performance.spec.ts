@@ -303,10 +303,9 @@ test.describe('Performance Profiling', () => {
     const timeToFirstFile = performance.now() - navigationStart;
 
     // Wait for streaming to complete
-    await page.waitForFunction(
-      () => (window as any).__PERF_BATCH_COMPLETE__ === true,
-      { timeout: 60000 }
-    );
+    await page.waitForFunction(() => (window as any).__PERF_BATCH_COMPLETE__ === true, {
+      timeout: 60000,
+    });
 
     // Stop tracing
     const tracingData = await cdpSession.send('Tracing.end');
@@ -346,20 +345,30 @@ test.describe('Performance Profiling', () => {
     console.log(`   Files rendered (visible):    ${renderedCount}`);
     console.log(`   Total files in directory:    ${FILE_COUNT}`);
     console.log(`\n🔧 V8 METRICS:`);
-    console.log(`   JS Heap Size:                ${((metricsMap.get('JSHeapUsedSize') as number || 0) / 1024 / 1024).toFixed(1)}MB`);
+    console.log(
+      `   JS Heap Size:                ${(((metricsMap.get('JSHeapUsedSize') as number) || 0) / 1024 / 1024).toFixed(1)}MB`
+    );
     console.log(`   DOM Nodes:                   ${metricsMap.get('Nodes') || 'N/A'}`);
     console.log(`   Layout Count:                ${metricsMap.get('LayoutCount') || 'N/A'}`);
-    console.log(`   Layout Duration:             ${((metricsMap.get('LayoutDuration') as number || 0) * 1000).toFixed(0)}ms`);
-    console.log(`   Script Duration:             ${((metricsMap.get('ScriptDuration') as number || 0) * 1000).toFixed(0)}ms`);
-    console.log(`   Task Duration:               ${((metricsMap.get('TaskDuration') as number || 0) * 1000).toFixed(0)}ms`);
+    console.log(
+      `   Layout Duration:             ${(((metricsMap.get('LayoutDuration') as number) || 0) * 1000).toFixed(0)}ms`
+    );
+    console.log(
+      `   Script Duration:             ${(((metricsMap.get('ScriptDuration') as number) || 0) * 1000).toFixed(0)}ms`
+    );
+    console.log(
+      `   Task Duration:               ${(((metricsMap.get('TaskDuration') as number) || 0) * 1000).toFixed(0)}ms`
+    );
     console.log(`${'='.repeat(60)}\n`);
 
     // Diagnostic: Check virtualization
     const virtualInfo = await page.evaluate(() => {
       // Check if virtualizer is limiting rendered items
-      const scrollContainer = document.querySelector('[data-list-scroll-container="true"], [data-grid-scroll-container="true"]');
+      const scrollContainer = document.querySelector(
+        '[data-list-scroll-container="true"], [data-grid-scroll-container="true"]'
+      );
       const allItems = document.querySelectorAll('[data-testid="file-item"]');
-      const visibleItems = Array.from(allItems).filter(el => {
+      const visibleItems = Array.from(allItems).filter((el) => {
         const rect = el.getBoundingClientRect();
         return rect.top < window.innerHeight && rect.bottom > 0;
       });
@@ -384,7 +393,9 @@ test.describe('Performance Profiling', () => {
     // Virtualization should limit DOM items to ~50-100 (visible + overscan)
     const expectedMaxItems = 150; // generous buffer for overscan
     if (virtualInfo.totalItemsInDOM > expectedMaxItems) {
-      console.log(`\n   ❌ VIRTUALIZATION BROKEN: ${virtualInfo.totalItemsInDOM} items in DOM (expected <${expectedMaxItems})`);
+      console.log(
+        `\n   ❌ VIRTUALIZATION BROKEN: ${virtualInfo.totalItemsInDOM} items in DOM (expected <${expectedMaxItems})`
+      );
     } else {
       console.log(`\n   ✅ Virtualization working correctly`);
     }
@@ -412,13 +423,14 @@ test.describe('Performance Profiling', () => {
     await pathInput.press('Enter');
 
     // Wait for load
-    await page.waitForFunction(
-      () => (window as any).__PERF_BATCH_COMPLETE__ === true,
-      { timeout: 60000 }
-    );
+    await page.waitForFunction(() => (window as any).__PERF_BATCH_COMPLETE__ === true, {
+      timeout: 60000,
+    });
 
     // Find scroll container
-    const scrollContainer = page.locator('[data-list-scroll-container="true"], [data-grid-scroll-container="true"]').first();
+    const scrollContainer = page
+      .locator('[data-list-scroll-container="true"], [data-grid-scroll-container="true"]')
+      .first();
     await expect(scrollContainer).toBeVisible();
 
     // Measure scroll performance
@@ -443,8 +455,12 @@ test.describe('Performance Profiling', () => {
     console.log(`📊 SCROLL PERFORMANCE REPORT`);
     console.log(`${'='.repeat(60)}`);
     console.log(`   Scroll test duration:        ${scrollDuration.toFixed(0)}ms`);
-    console.log(`   Layout Duration (total):     ${((metricsMap.get('LayoutDuration') as number || 0) * 1000).toFixed(0)}ms`);
-    console.log(`   Recalc Style Duration:       ${((metricsMap.get('RecalcStyleDuration') as number || 0) * 1000).toFixed(0)}ms`);
+    console.log(
+      `   Layout Duration (total):     ${(((metricsMap.get('LayoutDuration') as number) || 0) * 1000).toFixed(0)}ms`
+    );
+    console.log(
+      `   Recalc Style Duration:       ${(((metricsMap.get('RecalcStyleDuration') as number) || 0) * 1000).toFixed(0)}ms`
+    );
     console.log(`${'='.repeat(60)}\n`);
 
     // Scrolling should be smooth - 10 scroll operations in under 2s
@@ -465,10 +481,9 @@ test.describe('Performance Profiling', () => {
     await pathInput.fill(MOCK_LARGE_DIR);
     await pathInput.press('Enter');
 
-    await page.waitForFunction(
-      () => (window as any).__PERF_BATCH_COMPLETE__ === true,
-      { timeout: 60000 }
-    );
+    await page.waitForFunction(() => (window as any).__PERF_BATCH_COMPLETE__ === true, {
+      timeout: 60000,
+    });
 
     // Wait for list view header to be visible (sorting is in list view)
     // First switch to list view if in grid

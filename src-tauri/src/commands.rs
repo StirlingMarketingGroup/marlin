@@ -1239,8 +1239,10 @@ pub async fn read_directory(path: LocationInput) -> Result<DirectoryListingRespo
     })
 }
 
-/// Event name for directory streaming batches
+/// Event name for directory streaming batches (skeleton files)
 const DIRECTORY_BATCH_EVENT: &str = "directory-batch";
+/// Event name for file metadata updates (size, dates, etc.)
+const METADATA_BATCH_EVENT: &str = "metadata-batch";
 
 /// Response returned when starting a streaming directory read
 #[derive(Debug, Serialize)]
@@ -1319,6 +1321,8 @@ pub async fn read_directory_streaming_command(
     tauri::async_runtime::spawn(async move {
         let session_for_blocking = session_for_task.clone();
         let cancel_for_blocking = cancel_for_task.clone();
+        let app_for_batches = app_for_task.clone();
+        let app_for_metadata = app_for_task;
 
         let result = tauri::async_runtime::spawn_blocking(move || {
             read_directory_streaming(
@@ -1326,8 +1330,15 @@ pub async fn read_directory_streaming_command(
                 session_for_blocking,
                 cancel_for_blocking,
                 |batch| {
-                    if let Err(e) = app_for_task.emit(DIRECTORY_BATCH_EVENT, &batch) {
+                    // Emit skeleton file batches (instant UI)
+                    if let Err(e) = app_for_batches.emit(DIRECTORY_BATCH_EVENT, &batch) {
                         warn!("Failed to emit directory batch: {}", e);
+                    }
+                },
+                |metadata_batch| {
+                    // Emit metadata updates (fills in size, dates, etc.)
+                    if let Err(e) = app_for_metadata.emit(METADATA_BATCH_EVENT, &metadata_batch) {
+                        warn!("Failed to emit metadata batch: {}", e);
                     }
                 },
             )

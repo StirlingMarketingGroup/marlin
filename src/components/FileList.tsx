@@ -826,10 +826,7 @@ export default function FileList({ files, preferences }: FileListProps) {
       </div>
 
       {/* Virtual scroll content - parent (MainPanel) handles scrolling */}
-      <div
-        className="px-3 py-1"
-        data-list-scroll-container="true"
-      >
+      <div className="px-3 py-1" data-list-scroll-container="true">
         <div
           style={{
             height: `${virtualizer.getTotalSize()}px`,

@@ -9,6 +9,7 @@ import {
   DirectoryListingResponse,
   StreamingDirectoryResponse,
   DirectoryBatch,
+  MetadataBatch,
   LocationCapabilities,
   TrashPathsResponse,
   UndoTrashResponse,
@@ -244,6 +245,7 @@ interface AppState {
   refreshCurrentDirectory: () => Promise<void>;
   refreshCurrentDirectoryStreaming: () => Promise<void>;
   appendStreamingBatch: (batch: DirectoryBatch) => void;
+  applyMetadataUpdates: (batch: MetadataBatch) => void;
   cancelDirectoryStream: () => Promise<void>;
   openFile: (file: FileItem) => Promise<void>;
   extractArchive: (file: FileItem) => Promise<boolean>;
@@ -656,6 +658,38 @@ export const useAppStore = create<AppState>((set, get) => ({
         // The "loading more..." indicator uses isStreamingComplete instead
         loading: false,
       };
+    });
+  },
+
+  applyMetadataUpdates: (batch: MetadataBatch) => {
+    set((state) => {
+      // Ignore metadata for other sessions
+      if (state.streamingSessionId !== batch.sessionId) {
+        return {};
+      }
+
+      // Create a map of updates by path for efficient lookup
+      const updateMap = new Map(batch.updates.map((u) => [u.path, u]));
+
+      // Update files with metadata
+      const updatedFiles = state.files.map((file) => {
+        const update = updateMap.get(file.path);
+        if (!update) return file;
+
+        return {
+          ...file,
+          size: update.size,
+          modified: update.modified,
+          is_directory: update.isDirectory,
+          is_symlink: update.isSymlink,
+          is_git_repo: update.isGitRepo,
+          child_count: update.childCount ?? undefined,
+          image_width: update.imageWidth ?? undefined,
+          image_height: update.imageHeight ?? undefined,
+        };
+      });
+
+      return { files: updatedFiles };
     });
   },
 

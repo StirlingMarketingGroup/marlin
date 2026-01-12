@@ -57,6 +57,132 @@ pub struct DirectoryBatch {
     pub total_count: Option<u32>,
 }
 
+/// Metadata updates for files (sent after initial skeleton batch)
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileMetadataUpdate {
+    pub path: String,
+    pub size: u64,
+    pub modified: DateTime<Utc>,
+    pub is_directory: bool,
+    pub is_symlink: bool,
+    pub is_git_repo: bool,
+    pub child_count: Option<u64>,
+    pub image_width: Option<u32>,
+    pub image_height: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MetadataBatch {
+    pub session_id: String,
+    pub updates: Vec<FileMetadataUpdate>,
+    pub is_final: bool,
+}
+
+/// Build a skeleton FileItem from a DirEntry without any stat() calls.
+/// Uses only information available from readdir (name, file_type via d_type on Unix).
+fn build_file_item_skeleton(entry: &std::fs::DirEntry) -> Option<FileItem> {
+    let path = entry.path();
+    let file_name = entry.file_name().to_string_lossy().to_string();
+
+    // file_type() uses d_type on Unix (no syscall) but may need stat on some filesystems
+    // It's still much faster than full metadata as it's often cached
+    let file_type = entry.file_type().ok()?;
+    let is_directory = file_type.is_dir();
+    let is_hidden = file_name.starts_with('.');
+
+    let extension = if !is_directory {
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .map(|s| s.to_lowercase())
+    } else {
+        None
+    };
+
+    Some(FileItem {
+        name: file_name,
+        path: path.to_string_lossy().to_string(),
+        size: 0, // Filled in by metadata update
+        modified: Utc::now(), // Placeholder, filled in by metadata update
+        is_directory,
+        is_hidden,
+        is_symlink: file_type.is_symlink(),
+        is_git_repo: false, // Filled in by metadata update
+        extension,
+        child_count: None, // Filled in by metadata update
+        image_width: None, // Filled in by metadata update
+        image_height: None, // Filled in by metadata update
+    })
+}
+
+/// Build full metadata for a file (called in background after skeleton is displayed)
+fn build_file_metadata(path: &Path) -> Option<FileMetadataUpdate> {
+    let symlink_metadata = fs::symlink_metadata(path).ok()?;
+    let is_symlink = symlink_metadata.file_type().is_symlink();
+
+    let target_metadata = if is_symlink {
+        fs::metadata(path).ok()
+    } else {
+        None
+    };
+
+    let metadata = target_metadata.as_ref().unwrap_or(&symlink_metadata);
+    let is_directory = metadata.is_dir();
+
+    let is_git_repo = if is_directory {
+        let git_path = path.join(".git");
+        git_path.is_dir() || git_path.is_file()
+    } else {
+        false
+    };
+
+    // Compute shallow child count for directories
+    let child_count = if is_directory {
+        fs::read_dir(path).ok().map(|entries| entries.count() as u64)
+    } else {
+        None
+    };
+
+    // Extract image dimensions for supported image formats
+    let extension = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|s| s.to_lowercase());
+
+    let (image_width, image_height) = if !is_directory {
+        match extension.as_deref() {
+            Some(
+                "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "tiff" | "tif" | "tga" | "ico",
+            ) => ImageReader::open(path)
+                .ok()
+                .and_then(|reader| reader.into_dimensions().ok())
+                .map(|(w, h)| (Some(w), Some(h)))
+                .unwrap_or((None, None)),
+            _ => (None, None),
+        }
+    } else {
+        (None, None)
+    };
+
+    let modified = metadata
+        .modified()
+        .map(|time| DateTime::from(time))
+        .unwrap_or_else(|_| Utc::now());
+
+    Some(FileMetadataUpdate {
+        path: path.to_string_lossy().to_string(),
+        size: metadata.len(),
+        modified,
+        is_directory,
+        is_symlink,
+        is_git_repo,
+        child_count,
+        image_width,
+        image_height,
+    })
+}
+
 pub fn resolve_symlink_parent(path: &Path) -> Result<SymlinkResolution, String> {
     let metadata =
         fs::symlink_metadata(path).map_err(|e| format!("Failed to get metadata: {}", e))?;
@@ -441,29 +567,37 @@ pub fn expand_path(path: &str) -> Result<PathBuf, String> {
 
 /// Batch size for streaming directory reads
 const STREAMING_BATCH_SIZE: usize = 100;
+/// Batch size for metadata updates (smaller for more responsive updates)
+const METADATA_BATCH_SIZE: usize = 50;
 
-/// Read directory contents in streaming fashion using parallel processing.
-/// Returns batches via the callback, which should emit events to the frontend.
+/// Read directory contents in streaming fashion with instant UI display.
+///
+/// Phase 1: Emits skeleton FileItems immediately (just names, no stat calls)
+/// Phase 2: Processes metadata in parallel and emits updates via emit_metadata
+///
 /// Returns the total number of files processed.
-pub fn read_directory_streaming<F>(
+pub fn read_directory_streaming<F, M>(
     path: &Path,
     session_id: String,
     cancel_flag: Arc<AtomicBool>,
     mut emit_batch: F,
+    mut emit_metadata: M,
 ) -> Result<u32, String>
 where
     F: FnMut(DirectoryBatch) + Send,
+    M: FnMut(MetadataBatch) + Send,
 {
     #[cfg(target_os = "macos")]
     let _scope_guard = crate::macos_security::retain_access(path)?;
 
-    // First pass: collect all entry paths (fast - just readdir, no stat)
-    let entries: Vec<PathBuf> = fs::read_dir(path)
+    // Phase 1: Read directory entries and emit skeleton items IMMEDIATELY
+    // This uses readdir which is very fast - just reads directory entries without stat
+    let dir_entries: Vec<std::fs::DirEntry> = fs::read_dir(path)
         .map_err(|e| format!("Failed to read directory: {}", e))?
-        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter_map(|entry| entry.ok())
         .collect();
 
-    let total_count = entries.len() as u32;
+    let total_count = dir_entries.len() as u32;
 
     // Check for cancellation
     if cancel_flag.load(Ordering::Relaxed) {
@@ -471,43 +605,40 @@ where
     }
 
     // If empty directory, emit a single empty final batch
-    if entries.is_empty() {
+    if dir_entries.is_empty() {
         emit_batch(DirectoryBatch {
-            session_id,
+            session_id: session_id.clone(),
             batch_index: 0,
             entries: vec![],
             is_final: true,
             total_count: Some(0),
         });
+        emit_metadata(MetadataBatch {
+            session_id,
+            updates: vec![],
+            is_final: true,
+        });
         return Ok(0);
     }
 
-    // Process entries in parallel using rayon
-    // We'll collect results and emit in batches
-    let file_items: Vec<FileItem> = entries
-        .par_iter()
-        .filter_map(|entry_path| {
-            // Check cancellation periodically
-            if cancel_flag.load(Ordering::Relaxed) {
-                return None;
-            }
-            build_file_item(entry_path).ok()
-        })
+    // Build skeleton items (very fast - no stat calls, just uses DirEntry info)
+    let skeleton_items: Vec<FileItem> = dir_entries
+        .iter()
+        .filter_map(build_file_item_skeleton)
         .collect();
 
-    // Check for cancellation after processing
-    if cancel_flag.load(Ordering::Relaxed) {
-        return Ok(0);
-    }
+    // Collect paths for metadata processing
+    let entry_paths: Vec<PathBuf> = dir_entries.iter().map(|e| e.path()).collect();
 
-    // Emit results in batches
+    // Emit skeleton batches IMMEDIATELY - this is what makes the UI instant
     let mut batch_index = 0u32;
-    for chunk in file_items.chunks(STREAMING_BATCH_SIZE) {
+    for chunk in skeleton_items.chunks(STREAMING_BATCH_SIZE) {
         if cancel_flag.load(Ordering::Relaxed) {
             return Ok(0);
         }
 
-        let is_final = batch_index as usize * STREAMING_BATCH_SIZE + chunk.len() >= file_items.len();
+        let is_final =
+            batch_index as usize * STREAMING_BATCH_SIZE + chunk.len() >= skeleton_items.len();
 
         emit_batch(DirectoryBatch {
             session_id: session_id.clone(),
@@ -522,6 +653,42 @@ where
         });
 
         batch_index += 1;
+    }
+
+    // Check for cancellation before metadata phase
+    if cancel_flag.load(Ordering::Relaxed) {
+        return Ok(total_count);
+    }
+
+    // Phase 2: Process metadata in parallel and emit updates
+    // This runs after skeletons are displayed, so UI is already responsive
+    let metadata_updates: Vec<FileMetadataUpdate> = entry_paths
+        .par_iter()
+        .filter_map(|entry_path| {
+            if cancel_flag.load(Ordering::Relaxed) {
+                return None;
+            }
+            build_file_metadata(entry_path)
+        })
+        .collect();
+
+    // Emit metadata updates in batches
+    let mut meta_batch_index = 0;
+    for chunk in metadata_updates.chunks(METADATA_BATCH_SIZE) {
+        if cancel_flag.load(Ordering::Relaxed) {
+            return Ok(total_count);
+        }
+
+        let is_final =
+            meta_batch_index * METADATA_BATCH_SIZE + chunk.len() >= metadata_updates.len();
+
+        emit_metadata(MetadataBatch {
+            session_id: session_id.clone(),
+            updates: chunk.to_vec(),
+            is_final,
+        });
+
+        meta_batch_index += 1;
     }
 
     #[cfg(target_os = "macos")]
