@@ -906,6 +906,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
               isSelected={isSelected}
               variant="grid"
               showSize={true}
+              highlightText={filterText}
               style={{ margin: '0 auto' }}
             />
           </div>
