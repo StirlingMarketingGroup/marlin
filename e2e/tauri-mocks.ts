@@ -81,7 +81,8 @@ export function getTauriMockScript(): string {
         if (normalizedPath === mockHomeDir || normalizedPath === '~' || normalizedPath === '/') {
           return mockFiles;
         }
-        return mockFiles;
+        console.warn('[Tauri Mock] Unhandled path in getFilesForPath, returning empty array:', path);
+        return [];
       }
 
       // Event listeners registry (based on @tauri-apps/api/mocks pattern)
