@@ -696,7 +696,14 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
       <div className="flex-1 flex items-center justify-center text-app-muted">
         <div className="text-center">
           <Folder className="w-16 h-16 mx-auto mb-4 opacity-50" />
-          <p>This folder is empty</p>
+          {filterText ? (
+            <>
+              <p className="text-sm">No files match "{filterText}"</p>
+              <p className="text-xs mt-1">Press Escape to clear filter</p>
+            </>
+          ) : (
+            <p>This folder is empty</p>
+          )}
         </div>
       </div>
     );
