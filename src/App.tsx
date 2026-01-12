@@ -15,6 +15,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 
 import Toast from './components/Toast';
 import PermissionPrompt from './components/PermissionPrompt';
+import FilterInput from './components/FilterInput';
 import type {
   DirectoryChangeEventPayload,
   DirectoryListingResponse,
@@ -1323,6 +1324,9 @@ function App() {
           <StatusBar />
         </div>
       </div>
+
+      {/* Type-to-filter input */}
+      <FilterInput />
 
       {/* Toast notifications */}
       <Toast />
