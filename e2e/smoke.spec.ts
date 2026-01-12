@@ -34,7 +34,12 @@ test.describe('Smoke Tests', () => {
 
   test('should display files in home directory', async ({ page }) => {
     // Should start in home directory with mock files
-    await expect(page.getByText('Documents')).toBeVisible({ timeout: 5000 });
-    await expect(page.getByText('Downloads')).toBeVisible({ timeout: 5000 });
+    // Use data-testid selectors to avoid matching sidebar items
+    await expect(page.locator('[data-testid="file-item"][data-name="Documents"]')).toBeVisible({
+      timeout: 5000,
+    });
+    await expect(page.locator('[data-testid="file-item"][data-name="Downloads"]')).toBeVisible({
+      timeout: 5000,
+    });
   });
 });
