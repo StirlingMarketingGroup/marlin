@@ -23,7 +23,7 @@ test.describe('File Manager Preferences', () => {
     expect(initialHiddenFiles).toBe(0);
 
     // Toggle hidden files via keyboard shortcut
-    await page.keyboard.press('Meta+Shift+.');
+    await page.keyboard.press('ControlOrMeta+Shift+.');
     await page.waitForTimeout(500);
 
     // Should now see hidden files (mock has .hidden file)
@@ -31,7 +31,7 @@ test.describe('File Manager Preferences', () => {
     expect(visibleHiddenFiles).toBeGreaterThan(0);
 
     // Toggle again to hide
-    await page.keyboard.press('Meta+Shift+.');
+    await page.keyboard.press('ControlOrMeta+Shift+.');
     await page.waitForTimeout(500);
 
     // Should be hidden again
@@ -43,7 +43,7 @@ test.describe('File Manager Preferences', () => {
     const hiddenFileLocator = page.locator(hiddenFileSelector);
 
     // Enable hidden files
-    await page.keyboard.press('Meta+Shift+.');
+    await page.keyboard.press('ControlOrMeta+Shift+.');
     await page.waitForTimeout(500);
 
     // Verify hidden files are visible (mock has .hidden file)
@@ -55,7 +55,7 @@ test.describe('File Manager Preferences', () => {
     await expect(hiddenFile).toBeVisible();
 
     // Disable hidden files
-    await page.keyboard.press('Meta+Shift+.');
+    await page.keyboard.press('ControlOrMeta+Shift+.');
     await page.waitForTimeout(500);
 
     // Hidden file should no longer be visible
@@ -70,13 +70,13 @@ test.describe('File Manager Preferences', () => {
     await expect(fileList).toBeVisible({ timeout: 5000 });
 
     // Switch to grid view with Cmd+1
-    await page.keyboard.press('Meta+1');
+    await page.keyboard.press('ControlOrMeta+1');
     await page.waitForTimeout(300);
 
     await expect(fileGrid).toBeVisible({ timeout: 5000 });
 
     // Switch back to list view with Cmd+2
-    await page.keyboard.press('Meta+2');
+    await page.keyboard.press('ControlOrMeta+2');
     await page.waitForTimeout(300);
 
     await expect(fileList).toBeVisible({ timeout: 5000 });
@@ -88,7 +88,7 @@ test.describe('File Manager Preferences', () => {
     const fileGrid = page.locator('[data-testid="file-grid"]');
 
     // Switch to list view
-    await page.keyboard.press('Meta+2');
+    await page.keyboard.press('ControlOrMeta+2');
     await page.waitForTimeout(300);
     await expect(fileList).toBeVisible({ timeout: 5000 });
 
@@ -99,7 +99,7 @@ test.describe('File Manager Preferences', () => {
     await expect(page.getByText('sample.pdf')).toBeVisible({ timeout: 5000 });
 
     // Navigate back
-    await page.keyboard.press('Meta+ArrowLeft');
+    await page.keyboard.press('ControlOrMeta+ArrowLeft');
     await page.waitForTimeout(500);
 
     // View mode might reset or persist depending on implementation
@@ -114,7 +114,7 @@ test.describe('File Manager Preferences', () => {
 
     // Rapidly toggle hidden files multiple times
     for (let i = 0; i < 5; i++) {
-      await page.keyboard.press('Meta+Shift+.');
+      await page.keyboard.press('ControlOrMeta+Shift+.');
       await page.waitForTimeout(100);
     }
 
@@ -124,7 +124,7 @@ test.describe('File Manager Preferences', () => {
     const hiddenFiles = await hiddenFileLocator.count();
 
     // Toggle once more and verify it works correctly
-    await page.keyboard.press('Meta+Shift+.');
+    await page.keyboard.press('ControlOrMeta+Shift+.');
     await page.waitForTimeout(500);
 
     const newHiddenCount = await hiddenFileLocator.count();
@@ -142,7 +142,7 @@ test.describe('File Manager Preferences', () => {
     await expect(page.locator('[data-testid="file-item"][data-name="Downloads"]')).toBeVisible();
 
     // Switch to grid mode
-    await page.keyboard.press('Meta+1');
+    await page.keyboard.press('ControlOrMeta+1');
     await page.waitForTimeout(300);
 
     // Files should still be visible in grid mode

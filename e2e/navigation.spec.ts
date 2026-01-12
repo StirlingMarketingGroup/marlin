@@ -137,7 +137,7 @@ test.describe('File Manager Navigation', () => {
       await pathInput.press('Enter');
       await page.waitForTimeout(200);
 
-      await page.keyboard.press('Meta+ArrowLeft');
+      await page.keyboard.press('ControlOrMeta+ArrowLeft');
       await page.waitForTimeout(200);
     }
 
@@ -168,9 +168,9 @@ test.describe('File Manager Navigation', () => {
   test('should handle keyboard shortcuts for navigation', async ({ page }) => {
     // Test various keyboard shortcuts - use correct Playwright key names
     const shortcuts = [
-      { key: 'Meta+ArrowUp', description: 'go up' },
-      { key: 'Meta+ArrowLeft', description: 'go back' },
-      { key: 'Meta+ArrowRight', description: 'go forward' },
+      { key: 'ControlOrMeta+ArrowUp', description: 'go up' },
+      { key: 'ControlOrMeta+ArrowLeft', description: 'go back' },
+      { key: 'ControlOrMeta+ArrowRight', description: 'go forward' },
     ];
 
     for (const shortcut of shortcuts) {
