@@ -39,21 +39,21 @@ function parseErrorCode(error: unknown): string | null {
 }
 
 function App() {
-  const {
-    currentPath,
-    setCurrentPath,
-    navigateTo,
-    setLoading,
-    setError,
-    setFiles,
-    loading,
-    setHomeDir,
-    toggleHiddenFiles,
-    toggleFoldersFirst,
-    directoryPreferences,
-    globalPreferences,
-    loadPinnedDirectories,
-  } = useAppStore();
+  // Use selectors to only subscribe to state App actually uses
+  // This prevents re-renders when unrelated state (like selectedFiles) changes
+  const currentPath = useAppStore((state) => state.currentPath);
+  const setCurrentPath = useAppStore((state) => state.setCurrentPath);
+  const navigateTo = useAppStore((state) => state.navigateTo);
+  const setLoading = useAppStore((state) => state.setLoading);
+  const setError = useAppStore((state) => state.setError);
+  const setFiles = useAppStore((state) => state.setFiles);
+  const loading = useAppStore((state) => state.loading);
+  const setHomeDir = useAppStore((state) => state.setHomeDir);
+  const toggleHiddenFiles = useAppStore((state) => state.toggleHiddenFiles);
+  const toggleFoldersFirst = useAppStore((state) => state.toggleFoldersFirst);
+  const directoryPreferences = useAppStore((state) => state.directoryPreferences);
+  const globalPreferences = useAppStore((state) => state.globalPreferences);
+  const loadPinnedDirectories = useAppStore((state) => state.loadPinnedDirectories);
 
   // Set up directory streaming event listener
   useDirectoryStream();
@@ -515,7 +515,20 @@ function App() {
       if (!isActive) return;
 
       const payload = event.payload;
-      if (payload && payload.path === currentPath) {
+      console.log('[FileWatcher] Directory changed:', payload?.changeType, payload?.affectedFiles);
+
+      // Skip access-only changes (e.g., opening a file updates atime)
+      // Only refresh for actual content changes: create, delete, rename, write
+      const changeType = payload?.changeType?.toLowerCase() || '';
+      const isContentChange =
+        changeType.includes('create') ||
+        changeType.includes('delete') ||
+        changeType.includes('remove') ||
+        changeType.includes('rename') ||
+        changeType.includes('write') ||
+        changeType.includes('modify');
+
+      if (payload && payload.path === currentPath && isContentChange) {
         // Clear any existing debounce timer
         if (debounceTimer) {
           window.clearTimeout(debounceTimer);

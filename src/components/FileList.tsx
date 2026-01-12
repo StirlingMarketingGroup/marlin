@@ -440,37 +440,51 @@ export default function FileList({ files, preferences }: FileListProps) {
     () => new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' }),
     []
   );
-  const sortedFiles = [...files].sort((a, b) => {
-    // Treat macOS bundles (.app, .photoslibrary, etc.) as files for sorting purposes
-    const aIsBundle = isMacOSBundle(a);
-    const bIsBundle = isMacOSBundle(b);
-    const aIsFolder = a.is_directory && !aIsBundle;
-    const bIsFolder = b.is_directory && !bIsBundle;
 
-    // Optionally sort directories first (but not bundles)
-    if (preferences.foldersFirst) {
-      if (aIsFolder && !bIsFolder) return -1;
-      if (!aIsFolder && bIsFolder) return 1;
-    }
+  // During streaming: sort by name only (stable order as files arrive)
+  // After streaming: apply user's full sort preferences
+  const sortedFiles = useMemo(() => {
+    const effectiveSortBy = isStreamingComplete ? preferences.sortBy : 'name';
 
-    let compareValue = 0;
-    switch (preferences.sortBy) {
-      case 'name':
-        compareValue = nameCollator.compare(a.name, b.name);
-        break;
-      case 'size':
-        compareValue = a.size - b.size;
-        break;
-      case 'modified':
-        compareValue = new Date(a.modified).getTime() - new Date(b.modified).getTime();
-        break;
-      case 'type':
-        compareValue = (a.extension || '').localeCompare(b.extension || '');
-        break;
-    }
+    return [...files].sort((a, b) => {
+      // Treat macOS bundles (.app, .photoslibrary, etc.) as files for sorting purposes
+      const aIsBundle = isMacOSBundle(a);
+      const bIsBundle = isMacOSBundle(b);
+      const aIsFolder = a.is_directory && !aIsBundle;
+      const bIsFolder = b.is_directory && !bIsBundle;
 
-    return preferences.sortOrder === 'asc' ? compareValue : -compareValue;
-  });
+      // Optionally sort directories first (but not bundles)
+      if (preferences.foldersFirst) {
+        if (aIsFolder && !bIsFolder) return -1;
+        if (!aIsFolder && bIsFolder) return 1;
+      }
+
+      let compareValue = 0;
+      switch (effectiveSortBy) {
+        case 'name':
+          compareValue = nameCollator.compare(a.name, b.name);
+          break;
+        case 'size':
+          compareValue = a.size - b.size;
+          break;
+        case 'modified':
+          compareValue = new Date(a.modified).getTime() - new Date(b.modified).getTime();
+          break;
+        case 'type':
+          compareValue = (a.extension || '').localeCompare(b.extension || '');
+          break;
+      }
+
+      return preferences.sortOrder === 'asc' ? compareValue : -compareValue;
+    });
+  }, [
+    files,
+    preferences.sortBy,
+    preferences.sortOrder,
+    preferences.foldersFirst,
+    isStreamingComplete,
+    nameCollator,
+  ]);
 
   const hiddenFiltered = preferences.showHidden
     ? sortedFiles
@@ -480,10 +494,16 @@ export default function FileList({ files, preferences }: FileListProps) {
     ? hiddenFiltered.filter((file) => file.name.toLowerCase().includes(filterText.toLowerCase()))
     : hiddenFiltered;
 
+  // Stable callback for scroll element to prevent virtualizer resets on re-render
+  const getScrollElement = useCallback(
+    () => scrollContainerRef?.current ?? null,
+    [scrollContainerRef]
+  );
+
   // Virtual scrolling for file rows - use shared scroll container from MainPanel
   const virtualizer = useVirtualizer({
     count: filteredFiles.length,
-    getScrollElement: () => scrollContainerRef?.current ?? null,
+    getScrollElement,
     estimateSize: useCallback(() => ROW_HEIGHT, []),
     overscan: 5,
   });
