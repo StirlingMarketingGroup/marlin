@@ -19,8 +19,10 @@ export default defineConfig({
     },
   ],
 
+  // Use Vite dev server only (not full Tauri) for browser-based e2e testing
+  // The tests inject Tauri API mocks via addInitScript
   webServer: {
-    command: 'npm run tauri dev',
+    command: 'npm run dev -- --port 1420',
     port: 1420,
     reuseExistingServer: !process.env.CI,
   },
