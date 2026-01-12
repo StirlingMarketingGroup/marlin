@@ -12,12 +12,12 @@ test.describe('Smoke Tests', () => {
     await page.goto('/');
 
     // Wait for app to initialize
-    const pathInput = page.locator('input[placeholder="Enter path..."]');
+    const pathInput = page.locator('[data-testid="path-input"]');
     await expect(pathInput).toBeVisible({ timeout: 15000 });
   });
 
   test('should navigate to Downloads folder', async ({ page }) => {
-    const pathInput = page.locator('input[placeholder="Enter path..."]');
+    const pathInput = page.locator('[data-testid="path-input"]');
 
     // Navigate to Downloads
     await pathInput.click();

@@ -630,8 +630,12 @@ export default function FileList({ files, preferences }: FileListProps) {
               ? 'bg-app-gray hover:bg-app-light'
               : 'hover:bg-app-light'
         } ${isDragged ? 'opacity-50' : ''} ${file.is_hidden ? 'opacity-60' : ''}`}
+        data-testid="file-item"
         data-file-item="true"
         data-file-path={file.path}
+        data-directory={file.is_directory ? 'true' : undefined}
+        data-hidden={file.is_hidden ? 'true' : undefined}
+        data-name={file.name}
         data-tauri-drag-region={false}
         onClick={(e) => {
           e.stopPropagation();
@@ -742,7 +746,7 @@ export default function FileList({ files, preferences }: FileListProps) {
   };
 
   return (
-    <div className="h-full flex flex-col" ref={listRef}>
+    <div className="h-full flex flex-col" ref={listRef} data-testid="file-list">
       {/* Header */}
       <div className="grid grid-cols-12 gap-3 px-3 py-2 border-b border-app-border border-t-0 text-[12px] font-medium text-app-muted bg-transparent select-none flex-shrink-0">
         <button
