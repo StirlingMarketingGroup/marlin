@@ -167,6 +167,7 @@ export default function FileList({ files, preferences }: FileListProps) {
     openFile,
     isStreamingComplete,
     streamingTotalCount,
+    filterText,
   } = useAppStore();
   const { renameTargetPath, setRenameTarget, renameFile } = useAppStore();
   const { startNativeDrag, endNativeDrag, isDraggedDirectory } = useDragStore();
@@ -470,9 +471,15 @@ export default function FileList({ files, preferences }: FileListProps) {
     return preferences.sortOrder === 'asc' ? compareValue : -compareValue;
   });
 
-  const filteredFiles = preferences.showHidden
+  const hiddenFiltered = preferences.showHidden
     ? sortedFiles
     : sortedFiles.filter((file) => !file.is_hidden);
+
+  const filteredFiles = filterText
+    ? hiddenFiltered.filter((file) =>
+        file.name.toLowerCase().includes(filterText.toLowerCase())
+      )
+    : hiddenFiltered;
 
   // Virtual scrolling for file rows
   const virtualizer = useVirtualizer({
