@@ -230,6 +230,7 @@ interface AppState {
   hideZoomSliderNow: () => void;
   scheduleHideZoomSlider: (delayMs?: number) => void;
   setFilterText: (text: string) => void;
+  appendToFilter: (char: string) => void;
   clearFilter: () => void;
   navigateTo: (path: string) => void;
   goBack: () => void;
@@ -392,6 +393,12 @@ export const useAppStore = create<AppState>((set, get) => ({
       filterText: text,
       showFilterInput: text.length > 0,
     }),
+
+  appendToFilter: (char: string) =>
+    set((state) => ({
+      filterText: state.filterText + char,
+      showFilterInput: true,
+    })),
 
   clearFilter: () =>
     set({
