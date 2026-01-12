@@ -812,6 +812,39 @@ function App() {
         !!active &&
         (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable);
 
+      // Type-to-filter: single printable characters start/append to filter
+      if (
+        !inEditable &&
+        e.key.length === 1 &&
+        !e.metaKey &&
+        !e.ctrlKey &&
+        !e.altKey &&
+        /^[a-zA-Z0-9\s._-]$/.test(e.key)
+      ) {
+        e.preventDefault();
+        useAppStore.getState().appendToFilter(e.key);
+        return;
+      }
+
+      // Escape clears filter if active
+      if (e.key === 'Escape' && useAppStore.getState().showFilterInput) {
+        e.preventDefault();
+        useAppStore.getState().clearFilter();
+        return;
+      }
+
+      // Backspace removes last char from filter if active
+      if (e.key === 'Backspace' && !inEditable && useAppStore.getState().showFilterInput) {
+        e.preventDefault();
+        const current = useAppStore.getState().filterText;
+        if (current.length > 1) {
+          useAppStore.getState().setFilterText(current.slice(0, -1));
+        } else {
+          useAppStore.getState().clearFilter();
+        }
+        return;
+      }
+
       if (!isMac && isLinux) {
         if (e.key === 'Alt') {
           if (!e.repeat) {
