@@ -719,6 +719,7 @@ export default function FileList({ files, preferences }: FileListProps) {
                 isSelected={isSelected}
                 variant="list"
                 className="block"
+                highlightText={filterText}
               />
             </div>
           )}
