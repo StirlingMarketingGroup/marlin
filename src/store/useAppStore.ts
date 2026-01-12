@@ -391,7 +391,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   setFilterText: (text: string) =>
     set({
       filterText: text,
-      showFilterInput: text.length > 0,
+      // Don't change showFilterInput here - only clearFilter should hide the filter
+      // This allows the filter to stay visible when empty (user can backspace to clear)
     }),
 
   appendToFilter: (char: string) =>

@@ -72,15 +72,23 @@ describe('useAppStore filter state', () => {
     expect(useAppStore.getState().filterText).toBe('test');
   });
 
-  it('should show filter input when filter text is set', () => {
+  it('should not change showFilterInput when using setFilterText', () => {
+    // setFilterText only sets the text, doesn't control visibility
+    // This allows the filter to stay visible when backspacing to empty
     const { setFilterText } = useAppStore.getState();
     setFilterText('abc');
-    expect(useAppStore.getState().showFilterInput).toBe(true);
+    expect(useAppStore.getState().filterText).toBe('abc');
+    expect(useAppStore.getState().showFilterInput).toBe(false); // unchanged from initial state
   });
 
   it('should hide filter input when filter text is cleared', () => {
-    const { setFilterText, clearFilter } = useAppStore.getState();
-    setFilterText('test');
+    const { appendToFilter, clearFilter } = useAppStore.getState();
+    // Use appendToFilter to show the filter (setFilterText doesn't change visibility)
+    appendToFilter('t');
+    appendToFilter('e');
+    appendToFilter('s');
+    appendToFilter('t');
+    expect(useAppStore.getState().showFilterInput).toBe(true);
     clearFilter();
     expect(useAppStore.getState().filterText).toBe('');
     expect(useAppStore.getState().showFilterInput).toBe(false);
