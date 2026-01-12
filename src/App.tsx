@@ -1169,6 +1169,23 @@ function App() {
         return;
       }
 
+      // Select all: Cmd/Ctrl+A
+      if (!inEditable && (e.key === 'a' || e.key === 'A')) {
+        e.preventDefault();
+        const state = useAppStore.getState();
+        const currentDirPrefs = state.directoryPreferences[state.currentPath] || {};
+        const effectivePrefs = { ...state.globalPreferences, ...currentDirPrefs };
+        const filteredFiles = effectivePrefs.showHidden
+          ? state.files
+          : state.files.filter((f) => !f.is_hidden);
+        if (filteredFiles.length > 0) {
+          state.setSelectedFiles(filteredFiles.map((f) => f.path));
+          state.setSelectionAnchor(filteredFiles[0].path);
+          state.setSelectionLead(filteredFiles[filteredFiles.length - 1].path);
+        }
+        return;
+      }
+
       if (e.key === '1') {
         e.preventDefault();
         setView('grid');
