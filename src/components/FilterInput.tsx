@@ -74,7 +74,7 @@ export default function FilterInput() {
           className="bg-transparent border-none outline-none text-sm w-40 text-white placeholder-app-muted"
         />
         {filterText && (
-          <span className="text-xs text-app-muted whitespace-nowrap">
+          <span className="text-xs text-app-muted whitespace-nowrap w-20 text-right">
             {matchCount} {matchCount === 1 ? 'match' : 'matches'}
           </span>
         )}
