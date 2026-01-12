@@ -507,6 +507,7 @@ export default function PathBar() {
           onBlur={handleBlur}
           className="flex-1 input-field"
           placeholder="Enter path..."
+          data-testid="path-input"
           data-tauri-drag-region={false}
           autoComplete="off"
         />

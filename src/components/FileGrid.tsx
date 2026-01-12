@@ -793,8 +793,12 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
             ? 'bg-accent-selected z-20 overflow-visible'
             : 'hover:bg-app-light/70'
         } ${isDragged ? 'opacity-50' : ''} ${file.is_hidden ? 'opacity-60' : ''}`}
+        data-testid="file-item"
         data-file-item="true"
         data-file-path={file.path}
+        data-directory={file.is_directory ? 'true' : undefined}
+        data-hidden={file.is_hidden ? 'true' : undefined}
+        data-name={file.name}
         data-tauri-drag-region={false}
         onClick={(e) => {
           e.stopPropagation();
@@ -904,7 +908,12 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
   };
 
   return (
-    <div ref={parentRef} className="h-full overflow-auto p-2" data-grid-scroll-container="true">
+    <div
+      ref={parentRef}
+      className="h-full overflow-auto p-2"
+      data-testid="file-grid"
+      data-grid-scroll-container="true"
+    >
       <div ref={gridRef}>
         {/* Virtual scroll container */}
         <div
