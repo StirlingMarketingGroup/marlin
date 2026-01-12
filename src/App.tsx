@@ -812,15 +812,10 @@ function App() {
         !!active &&
         (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable);
 
-      // Type-to-filter: single printable characters start/append to filter
-      if (
-        !inEditable &&
-        e.key.length === 1 &&
-        !e.metaKey &&
-        !e.ctrlKey &&
-        !e.altKey &&
-        /^[a-zA-Z0-9\s._-]$/.test(e.key)
-      ) {
+      // Type-to-filter: any single printable character starts/appends to filter
+      // We check length === 1 to exclude special keys (Escape, Enter, etc.)
+      // and exclude modifier combos to avoid capturing shortcuts
+      if (!inEditable && e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey) {
         e.preventDefault();
         useAppStore.getState().appendToFilter(e.key);
         return;
