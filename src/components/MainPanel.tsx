@@ -6,6 +6,7 @@ import FileList from './FileList';
 import ContextMenu from './ContextMenu';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { invoke } from '@tauri-apps/api/core';
+import { ScrollContext } from '../contexts/ScrollContext';
 
 const arraysEqual = (a: string[], b: string[]) => {
   if (a === b) return true;
@@ -500,13 +501,15 @@ export default function MainPanel() {
         onPointerDown={startMarquee}
       >
         {/* Mask old content while loading to avoid layout flicker during view changes */}
-        <div className={`${loading ? 'invisible' : 'visible'}`}>
-          {currentPrefs.viewMode === 'grid' ? (
-            <FileGrid files={files} preferences={currentPrefs} />
-          ) : (
-            <FileList files={files} preferences={currentPrefs} />
-          )}
-        </div>
+        <ScrollContext.Provider value={scrollRef}>
+          <div className={`${loading ? 'invisible' : 'visible'}`}>
+            {currentPrefs.viewMode === 'grid' ? (
+              <FileGrid files={files} preferences={currentPrefs} />
+            ) : (
+              <FileList files={files} preferences={currentPrefs} />
+            )}
+          </div>
+        </ScrollContext.Provider>
 
         {/* In-app drag ghost removed; rely on setDragImage */}
 

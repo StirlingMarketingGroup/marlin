@@ -25,6 +25,7 @@ import SymlinkBadge from '@/components/SymlinkBadge';
 import GitRepoBadge from '@/components/GitRepoBadge';
 import { normalizePreviewIcon } from '@/utils/iconSizing';
 import { isArchiveFile, isVideoExtension, isMacOSBundle } from '@/utils/fileTypes';
+import { useScrollContainerRef } from '@/contexts/ScrollContext';
 
 interface FileGridProps {
   files: FileItem[];
@@ -260,6 +261,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
 
   // Container dimensions for virtual scrolling
   const parentRef = useRef<HTMLDivElement>(null);
+  const scrollContainerRef = useScrollContainerRef();
   const [containerWidth, setContainerWidth] = useState(0);
 
   // Measure container width for column calculation
@@ -646,10 +648,10 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     return result;
   }, [filteredFiles, columnCount]);
 
-  // Virtual scrolling for rows
+  // Virtual scrolling for rows - use shared scroll container from MainPanel
   const virtualizer = useVirtualizer({
     count: rows.length,
-    getScrollElement: () => parentRef.current,
+    getScrollElement: () => scrollContainerRef?.current ?? null,
     estimateSize: useCallback(() => rowHeight, [rowHeight]),
     overscan: 3,
   });
@@ -923,7 +925,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
   return (
     <div
       ref={parentRef}
-      className="h-full overflow-auto p-2"
+      className="p-2"
       data-testid="file-grid"
       data-grid-scroll-container="true"
     >

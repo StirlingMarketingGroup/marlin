@@ -652,7 +652,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         files: newFiles,
         streamingTotalCount: batch.totalCount ?? state.streamingTotalCount,
         isStreamingComplete: batch.isFinal,
-        loading: !batch.isFinal, // Stop loading when complete
+        // Show content as soon as first batch arrives (loading=false)
+        // The "loading more..." indicator uses isStreamingComplete instead
+        loading: false,
       };
     });
   },

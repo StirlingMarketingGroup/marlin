@@ -17,6 +17,7 @@ import SymlinkBadge from '@/components/SymlinkBadge';
 import GitRepoBadge from '@/components/GitRepoBadge';
 import { normalizePreviewIcon } from '@/utils/iconSizing';
 import { isArchiveFile, isVideoExtension, isMacOSBundle } from '@/utils/fileTypes';
+import { useScrollContainerRef } from '@/contexts/ScrollContext';
 
 interface FileListProps {
   files: FileItem[];
@@ -176,7 +177,7 @@ export default function FileList({ files, preferences }: FileListProps) {
   const { fetchAppIcon } = useAppStore();
   const [draggedFile, setDraggedFile] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
-  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const scrollContainerRef = useScrollContainerRef();
   const lastClickRef = useRef<{ path: string; time: number; x: number; y: number } | null>(null);
   const lastHandledDoubleRef = useRef<{ path: string; time: number } | null>(null);
 
@@ -479,10 +480,10 @@ export default function FileList({ files, preferences }: FileListProps) {
     ? hiddenFiltered.filter((file) => file.name.toLowerCase().includes(filterText.toLowerCase()))
     : hiddenFiltered;
 
-  // Virtual scrolling for file rows
+  // Virtual scrolling for file rows - use shared scroll container from MainPanel
   const virtualizer = useVirtualizer({
     count: filteredFiles.length,
-    getScrollElement: () => scrollContainerRef.current,
+    getScrollElement: () => scrollContainerRef?.current ?? null,
     estimateSize: useCallback(() => ROW_HEIGHT, []),
     overscan: 5,
   });
@@ -824,10 +825,9 @@ export default function FileList({ files, preferences }: FileListProps) {
         </button>
       </div>
 
-      {/* Virtual scroll container for file rows */}
+      {/* Virtual scroll content - parent (MainPanel) handles scrolling */}
       <div
-        ref={scrollContainerRef}
-        className="flex-1 overflow-auto px-3 py-1"
+        className="px-3 py-1"
         data-list-scroll-container="true"
       >
         <div
