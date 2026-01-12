@@ -1,11 +1,15 @@
 import { useRef, useEffect } from 'react';
 import { X, MagnifyingGlass } from 'phosphor-react';
 import { useAppStore } from '@/store/useAppStore';
+import type { FileItem } from '@/types';
+
+// Stable empty array to avoid infinite re-render loop in Zustand selector
+const EMPTY_FILES: FileItem[] = [];
 
 export default function FilterInput() {
   const { filterText, showFilterInput, setFilterText, clearFilter } = useAppStore();
   // Only subscribe to files when we have a filter to avoid re-renders during streaming
-  const files = useAppStore((state) => (state.filterText ? state.files : []));
+  const files = useAppStore((state) => (state.filterText ? state.files : EMPTY_FILES));
   const inputRef = useRef<HTMLInputElement>(null);
 
   const matchCount = files.filter((f) =>
