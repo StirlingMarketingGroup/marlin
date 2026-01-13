@@ -71,6 +71,7 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ steps.context.outputs.default_branch }}
+          token: ${{ secrets.SMG_TOKEN }}
 
       - uses: actions/setup-node@v6
         with:
