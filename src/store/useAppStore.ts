@@ -420,11 +420,23 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   navigateTo: (path) => {
     const { pathHistory, historyIndex } = get();
-    const norm = normalizePath(path);
+    const trimmed = path.trim();
+
+    // Handle gdrive:// URIs - don't use normalizePath for these
+    let norm: string;
+    let locationRaw: string;
+    if (trimmed.startsWith('gdrive://')) {
+      norm = trimmed;
+      locationRaw = trimmed;
+    } else {
+      norm = normalizePath(path);
+      locationRaw = toFileUri(norm);
+    }
+
     const newHistory = [...pathHistory.slice(0, historyIndex + 1), norm];
     set({
       currentPath: norm,
-      currentLocationRaw: toFileUri(norm),
+      currentLocationRaw: locationRaw,
       pathHistory: newHistory,
       historyIndex: newHistory.length - 1,
       filterText: '',
@@ -437,12 +449,14 @@ export const useAppStore = create<AppState>((set, get) => ({
     const { pathHistory, historyIndex } = get();
     if (historyIndex > 0) {
       const newIndex = historyIndex - 1;
+      const newPath = pathHistory[newIndex];
+      const locationRaw = newPath.startsWith('gdrive://') ? newPath : toFileUri(newPath);
       set({
-        currentPath: pathHistory[newIndex],
-        currentLocationRaw: toFileUri(pathHistory[newIndex]),
+        currentPath: newPath,
+        currentLocationRaw: locationRaw,
         historyIndex: newIndex,
       });
-      void get().refreshGitStatus({ path: pathHistory[newIndex] });
+      void get().refreshGitStatus({ path: newPath });
     }
   },
 
@@ -450,12 +464,14 @@ export const useAppStore = create<AppState>((set, get) => ({
     const { pathHistory, historyIndex } = get();
     if (historyIndex < pathHistory.length - 1) {
       const newIndex = historyIndex + 1;
+      const newPath = pathHistory[newIndex];
+      const locationRaw = newPath.startsWith('gdrive://') ? newPath : toFileUri(newPath);
       set({
-        currentPath: pathHistory[newIndex],
-        currentLocationRaw: toFileUri(pathHistory[newIndex]),
+        currentPath: newPath,
+        currentLocationRaw: locationRaw,
         historyIndex: newIndex,
       });
-      void get().refreshGitStatus({ path: pathHistory[newIndex] });
+      void get().refreshGitStatus({ path: newPath });
     }
   },
 
