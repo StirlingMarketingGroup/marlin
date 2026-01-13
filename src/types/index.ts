@@ -215,3 +215,16 @@ export interface DeleteProgressUpdatePayload {
 export interface DeletePathsResponse {
   deleted: string[];
 }
+
+// Google Drive Integration Types
+export interface GoogleAccountInfo {
+  email: string;
+  displayName?: string | null;
+  photoUrl?: string | null;
+}
+
+export interface ResolveGoogleDriveUrlResult {
+  email: string;
+  path: string;
+  isFolder: boolean;
+}
