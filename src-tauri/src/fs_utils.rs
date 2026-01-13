@@ -80,6 +80,16 @@ pub struct MetadataBatch {
     pub is_final: bool,
 }
 
+/// Files that should be treated as hidden regardless of their name starting with a dot.
+/// These are typically system-generated files that users don't want to see.
+const HIDDEN_SYSTEM_FILES: &[&str] = &["Thumbs.db", "desktop.ini"];
+
+/// Check if a file should be considered hidden.
+/// Returns true for dotfiles and known system files.
+fn is_hidden_file(name: &str) -> bool {
+    name.starts_with('.') || HIDDEN_SYSTEM_FILES.iter().any(|&f| name.eq_ignore_ascii_case(f))
+}
+
 /// Build a skeleton FileItem from a DirEntry without any stat() calls.
 /// Uses only information available from readdir (name, file_type via d_type on Unix).
 fn build_file_item_skeleton(entry: &std::fs::DirEntry) -> Option<FileItem> {
@@ -90,7 +100,7 @@ fn build_file_item_skeleton(entry: &std::fs::DirEntry) -> Option<FileItem> {
     // It's still much faster than full metadata as it's often cached
     let file_type = entry.file_type().ok()?;
     let is_directory = file_type.is_dir();
-    let is_hidden = file_name.starts_with('.');
+    let is_hidden = is_hidden_file(&file_name);
 
     let extension = if !is_directory {
         path.extension()
@@ -235,7 +245,7 @@ fn build_file_item(path: &Path) -> Result<FileItem, String> {
         .unwrap_or("Unknown")
         .to_string();
 
-    let is_hidden = file_name.starts_with('.');
+    let is_hidden = is_hidden_file(&file_name);
 
     let extension = if metadata.is_file() {
         path.extension()
