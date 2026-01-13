@@ -14,6 +14,9 @@ import {
   Recycle,
   Folder,
   MusicNotes,
+  GoogleLogo,
+  Plus,
+  SignOut,
 } from 'phosphor-react';
 import GitRepoBadge from './GitRepoBadge';
 import SymlinkBadge from './SymlinkBadge';
@@ -21,7 +24,7 @@ import type { IconProps } from 'phosphor-react';
 import { useAppStore } from '../store/useAppStore';
 import { useCallback, useEffect, useState, MouseEvent, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { SystemDrive, PinnedDirectory } from '../types';
+import { SystemDrive, PinnedDirectory, GoogleAccountInfo } from '../types';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useToastStore } from '../store/useToastStore';
 import { useSidebarDropZone } from '../hooks/useDragDetector';
@@ -45,11 +48,17 @@ export default function Sidebar() {
     pinnedDirectories,
     removePinnedDirectory,
     addPinnedDirectory,
+    googleAccounts,
+    loadGoogleAccounts,
+    addGoogleAccount,
+    removeGoogleAccount,
   } = useAppStore();
 
   const [systemDrives, setSystemDrives] = useState<SystemDrive[]>([]);
   const [ejectingDrives, setEjectingDrives] = useState<Set<string>>(new Set());
   const [isDragOver, setIsDragOver] = useState(false);
+  const [addingGoogleAccount, setAddingGoogleAccount] = useState(false);
+  const [disconnectingAccounts, setDisconnectingAccounts] = useState<Set<string>>(new Set());
   const sidebarRef = useRef<HTMLDivElement>(null);
   const isProcessingDropRef = useRef(false);
   const windowRef = useRef(getCurrentWindow());
@@ -166,10 +175,11 @@ export default function Sidebar() {
     }
   );
 
-  // Fetch system drives on component mount
+  // Fetch system drives and Google accounts on component mount
   useEffect(() => {
     fetchSystemDrives();
-  }, []);
+    loadGoogleAccounts();
+  }, [loadGoogleAccounts]);
 
   const fetchSystemDrives = async () => {
     try {
@@ -196,6 +206,64 @@ export default function Sidebar() {
       setEjectingDrives((prev) => {
         const newSet = new Set(prev);
         newSet.delete(drive.path);
+        return newSet;
+      });
+    }
+  };
+
+  const handleAddGoogleAccount = async () => {
+    if (addingGoogleAccount) return;
+    setAddingGoogleAccount(true);
+    const { addToast } = useToastStore.getState();
+
+    try {
+      const account = await addGoogleAccount();
+      if (account) {
+        addToast({
+          type: 'success',
+          message: `Connected ${account.displayName || account.email}`,
+          duration: 3000,
+        });
+      }
+    } catch (error) {
+      console.error('Failed to add Google account:', error);
+      addToast({
+        type: 'error',
+        message: 'Failed to connect Google account',
+        duration: 5000,
+      });
+    } finally {
+      setAddingGoogleAccount(false);
+    }
+  };
+
+  const handleDisconnectGoogleAccount = async (
+    account: GoogleAccountInfo,
+    event: React.MouseEvent
+  ) => {
+    event.stopPropagation();
+    const { addToast } = useToastStore.getState();
+
+    setDisconnectingAccounts((prev) => new Set(prev).add(account.email));
+
+    try {
+      await removeGoogleAccount(account.email);
+      addToast({
+        type: 'success',
+        message: `Disconnected ${account.displayName || account.email}`,
+        duration: 3000,
+      });
+    } catch (error) {
+      console.error('Failed to disconnect Google account:', error);
+      addToast({
+        type: 'error',
+        message: 'Failed to disconnect Google account',
+        duration: 5000,
+      });
+    } finally {
+      setDisconnectingAccounts((prev) => {
+        const newSet = new Set(prev);
+        newSet.delete(account.email);
         return newSet;
       });
     }
@@ -423,6 +491,75 @@ export default function Sidebar() {
               })}
           </>
         )}
+
+        {/* Cloud Storage section */}
+        <div className="px-1 pt-3 pb-1 text-xs text-app-muted select-none">Cloud Storage</div>
+        {googleAccounts.map((account) => {
+          const gdrivePath = `gdrive://${account.email}/`;
+          const isActive = currentPath.startsWith(`gdrive://${account.email}`);
+          const isDisconnecting = disconnectingAccounts.has(account.email);
+          return (
+            <QuickTooltip key={account.email} text={account.email}>
+              {({ onBlur, onFocus, onMouseEnter, onMouseLeave, ref }) => (
+                <div
+                  ref={ref}
+                  onMouseEnter={onMouseEnter}
+                  onMouseLeave={onMouseLeave}
+                  onFocus={onFocus}
+                  onBlur={onBlur}
+                  className={`w-full flex items-center gap-2 px-1.5 py-1 rounded-md text-left leading-5 text-[13px] group ${
+                    isActive ? 'bg-app-light' : 'hover:bg-app-light/70'
+                  }`}
+                >
+                  <button
+                    onClick={() => navigateTo(gdrivePath)}
+                    className="flex items-center gap-2 flex-1 min-w-0"
+                    data-tauri-drag-region={false}
+                  >
+                    <GoogleLogo
+                      className={`w-5 h-5 flex-shrink-0 ${isActive ? 'text-accent' : ''}`}
+                      weight="fill"
+                    />
+                    <span className={`truncate ${isActive ? 'text-accent' : ''}`}>
+                      {account.displayName || account.email}
+                    </span>
+                  </button>
+
+                  <button
+                    onClick={(e) => handleDisconnectGoogleAccount(account, e)}
+                    disabled={isDisconnecting}
+                    className="ml-auto p-0.5 rounded hover:bg-app-light/50 text-app-muted hover:text-accent transition-colors cursor-pointer opacity-0 group-hover:opacity-100"
+                    title={isDisconnecting ? 'Disconnecting...' : 'Disconnect account'}
+                    data-tauri-drag-region={false}
+                  >
+                    {isDisconnecting ? (
+                      <CircleNotch className="w-3.5 h-3.5 animate-spin" weight="regular" />
+                    ) : (
+                      <SignOut className="w-3.5 h-3.5" weight="regular" />
+                    )}
+                  </button>
+                </div>
+              )}
+            </QuickTooltip>
+          );
+        })}
+
+        {/* Add Google Account button */}
+        <button
+          onClick={handleAddGoogleAccount}
+          disabled={addingGoogleAccount}
+          className="w-full flex items-center gap-2 px-1.5 py-1 rounded-md text-left leading-5 text-[13px] text-app-muted hover:bg-app-light/70 hover:text-app-text transition-colors"
+          data-tauri-drag-region={false}
+        >
+          {addingGoogleAccount ? (
+            <CircleNotch className="w-5 h-5 animate-spin" weight="regular" />
+          ) : (
+            <Plus className="w-5 h-5" weight="regular" />
+          )}
+          <span className="truncate">
+            {addingGoogleAccount ? 'Connecting...' : 'Add Google Account...'}
+          </span>
+        </button>
 
         {/* Locations section */}
         <div className="px-1 pt-3 pb-1 text-xs text-app-muted select-none">System</div>

@@ -35,6 +35,12 @@ use crate::fs_utils::{
 };
 use crate::fs_watcher;
 use crate::locations::{resolve_location, LocationCapabilities, LocationInput, LocationSummary};
+use crate::locations::gdrive::{
+    add_google_account as add_gdrive_account, get_google_accounts as get_gdrive_accounts,
+    remove_google_account as remove_gdrive_account, GoogleAccountInfo,
+};
+use crate::locations::gdrive::provider::resolve_file_id_to_path;
+use crate::locations::gdrive::url_parser::{is_google_drive_url, parse_google_drive_url};
 #[cfg(target_os = "macos")]
 use crate::macos_security;
 #[cfg(target_os = "macos")]
@@ -3939,4 +3945,58 @@ fn save_pinned_directories(pinned_dirs: &[StoredPinnedDirectory]) -> Result<(), 
         .map_err(|e| format!("Failed to write pinned directories: {}", e))?;
 
     Ok(())
+}
+
+// ============================================================================
+// Google Drive Integration Commands
+// ============================================================================
+
+/// Get all connected Google accounts
+#[command]
+pub fn get_google_accounts() -> Result<Vec<GoogleAccountInfo>, String> {
+    get_gdrive_accounts()
+}
+
+/// Add a new Google account via OAuth flow
+#[command]
+pub async fn add_google_account() -> Result<GoogleAccountInfo, String> {
+    add_gdrive_account().await
+}
+
+/// Remove a Google account
+#[command]
+pub fn remove_google_account(email: String) -> Result<(), String> {
+    remove_gdrive_account(&email)
+}
+
+/// Result of resolving a Google Drive URL
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveGoogleDriveUrlResult {
+    pub email: String,
+    pub path: String,
+    pub is_folder: bool,
+}
+
+/// Resolve a Google Drive URL to a gdrive:// path
+/// Tries all connected accounts until one works
+#[command]
+pub async fn resolve_google_drive_url(url: String) -> Result<ResolveGoogleDriveUrlResult, String> {
+    // Check if it's a Google Drive URL
+    if !is_google_drive_url(&url) {
+        return Err("Not a Google Drive URL".to_string());
+    }
+
+    // Parse the URL to get the file/folder ID
+    let url_info = parse_google_drive_url(&url)
+        .ok_or_else(|| "Could not parse Google Drive URL".to_string())?;
+
+    // Try to resolve the file ID to a path using connected accounts
+    let (email, path) = resolve_file_id_to_path(&url_info.id).await?;
+
+    Ok(ResolveGoogleDriveUrlResult {
+        email,
+        path,
+        is_folder: url_info.is_folder,
+    })
 }

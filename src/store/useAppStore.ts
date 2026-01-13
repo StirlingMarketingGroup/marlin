@@ -15,6 +15,7 @@ import {
   UndoTrashResponse,
   DeletePathsResponse,
   DeleteItemPayload,
+  GoogleAccountInfo,
 } from '../types';
 import { invoke } from '@tauri-apps/api/core';
 import { open as openShell } from '@tauri-apps/plugin-shell';
@@ -199,6 +200,9 @@ interface AppState {
   // Pinned directories
   pinnedDirectories: PinnedDirectory[];
 
+  // Google Drive accounts
+  googleAccounts: GoogleAccountInfo[];
+
   // UI State
   sidebarWidth: number;
   showSidebar: boolean;
@@ -260,6 +264,10 @@ interface AppState {
   addPinnedDirectory: (path: string, name?: string) => Promise<PinnedDirectory>;
   removePinnedDirectory: (path: string) => Promise<boolean>;
   reorderPinnedDirectories: (paths: string[]) => Promise<void>;
+  // Google Drive accounts
+  loadGoogleAccounts: () => Promise<void>;
+  addGoogleAccount: () => Promise<GoogleAccountInfo>;
+  removeGoogleAccount: (email: string) => Promise<void>;
   // Rename UX
   renameTargetPath?: string;
   setRenameTarget: (path?: string) => void;
@@ -307,6 +315,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   theme: 'system',
   appIconCache: {},
   pinnedDirectories: [],
+  googleAccounts: [],
 
   sidebarWidth: 240,
   showSidebar: true,
@@ -1314,6 +1323,42 @@ export const useAppStore = create<AppState>((set, get) => ({
       });
     } catch (error) {
       console.error('Failed to reorder pinned directories:', error);
+      throw error;
+    }
+  },
+
+  // Google Drive accounts
+  loadGoogleAccounts: async () => {
+    try {
+      const accounts = await invoke<GoogleAccountInfo[]>('get_google_accounts');
+      set({ googleAccounts: accounts });
+    } catch (error) {
+      console.error('Failed to load Google accounts:', error);
+      set({ googleAccounts: [] });
+    }
+  },
+
+  addGoogleAccount: async () => {
+    try {
+      const newAccount = await invoke<GoogleAccountInfo>('add_google_account');
+      set((state) => ({
+        googleAccounts: [...state.googleAccounts, newAccount],
+      }));
+      return newAccount;
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      throw new Error(errorMessage);
+    }
+  },
+
+  removeGoogleAccount: async (email: string) => {
+    try {
+      await invoke('remove_google_account', { email });
+      set((state) => ({
+        googleAccounts: state.googleAccounts.filter((a) => a.email !== email),
+      }));
+    } catch (error) {
+      console.error('Failed to remove Google account:', error);
       throw error;
     }
   },
