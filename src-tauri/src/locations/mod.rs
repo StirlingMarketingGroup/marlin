@@ -8,8 +8,10 @@ use std::sync::{Arc, RwLock};
 use crate::fs_utils::FileItem;
 
 mod file;
+pub mod gdrive;
 
 pub use file::FileSystemProvider;
+pub use gdrive::GoogleDriveProvider;
 
 pub type ProviderRef = Arc<dyn LocationProvider + Send + Sync>;
 
@@ -19,6 +21,8 @@ static REGISTRY: Lazy<RwLock<ProviderMap>> = Lazy::new(|| {
     let mut map = HashMap::new();
     let file_provider: ProviderRef = Arc::new(FileSystemProvider::default());
     map.insert(file_provider.scheme().to_string(), file_provider);
+    let gdrive_provider: ProviderRef = Arc::new(GoogleDriveProvider::default());
+    map.insert(gdrive_provider.scheme().to_string(), gdrive_provider);
     RwLock::new(map)
 });
 
@@ -124,6 +128,11 @@ pub struct Location {
 }
 
 impl Location {
+    /// Parse a raw URI string into a Location
+    pub fn parse(raw: &str) -> Result<Location, String> {
+        parse_raw_location(raw.to_string())
+    }
+
     pub fn scheme(&self) -> &str {
         &self.scheme
     }
