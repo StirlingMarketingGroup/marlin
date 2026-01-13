@@ -29,6 +29,13 @@ jobs:
       default_branch: ${{ steps.context.outputs.default_branch }}
       changes_detected: ${{ steps.diff.outputs.changed }}
     steps:
+      - name: Generate GitHub App token
+        id: smg-actions
+        uses: getsentry/action-github-app-token@v3
+        with:
+          app_id: ${{ secrets.APP_ID }}
+          private_key: ${{ secrets.APP_PRIVATE_KEY }}
+
       - name: Resolve release context
         id: context
         shell: bash
@@ -71,7 +78,7 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ steps.context.outputs.default_branch }}
-          token: ${{ secrets.SMG_TOKEN }}
+          token: ${{ steps.smg-actions.outputs.token }}
 
       - uses: actions/setup-node@v6
         with:
