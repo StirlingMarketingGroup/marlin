@@ -157,6 +157,7 @@ pub fn run() {
             commands::add_google_account,
             commands::remove_google_account,
             commands::resolve_google_drive_url,
+            commands::download_gdrive_file,
             plugins::drag_detector::enable_drag_detection,
             plugins::drag_detector::set_drop_zone,
             plugins::drag_detector::simulate_drop,

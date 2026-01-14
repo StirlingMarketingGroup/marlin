@@ -953,6 +953,41 @@ export const useAppStore = create<AppState>((set, get) => ({
   openFile: async (file) => {
     const toastStore = useToastStore.getState();
 
+    // Handle Google Drive files - need to download first
+    if (file.path.startsWith('gdrive://') && file.remote_id) {
+      try {
+        // Extract email from path: gdrive://email/path
+        const pathWithoutScheme = file.path.slice('gdrive://'.length);
+        const slashIndex = pathWithoutScheme.indexOf('/');
+        const email = slashIndex >= 0 ? pathWithoutScheme.slice(0, slashIndex) : pathWithoutScheme;
+
+        // Download file to temp location
+        const tempPath = await invoke<string>('download_gdrive_file', {
+          email,
+          fileId: file.remote_id,
+          fileName: file.name,
+        });
+
+        // Open the downloaded file
+        try {
+          await openShell(tempPath);
+          return;
+        } catch {
+          await invoke('open_path', { path: tempPath });
+          return;
+        }
+      } catch (downloadError) {
+        console.error('Failed to download Google Drive file:', downloadError);
+        const errorMessage = downloadError instanceof Error ? downloadError.message : String(downloadError);
+        toastStore.addToast({
+          type: 'error',
+          message: `Unable to open ${file.name}: ${errorMessage}`,
+          duration: 6000,
+        });
+        return;
+      }
+    }
+
     try {
       await openShell(file.path);
       return;
