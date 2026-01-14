@@ -1115,7 +1115,7 @@ async fn build_path_from_parents(
     // Traverse up to 20 levels (safety limit)
     for _ in 0..20 {
         let url = format!(
-            "https://www.googleapis.com/drive/v3/files/{}?fields=id,name,parents&supportsAllDrives=true",
+            "https://www.googleapis.com/drive/v3/files/{}?fields=id,name,parents,driveId&supportsAllDrives=true",
             current_id
         );
 
@@ -1135,14 +1135,18 @@ async fn build_path_from_parents(
             .await
             .map_err(|e| format!("Failed to parse: {}", e))?;
 
+        // Check if this item is in a Shared Drive - if so, we can't build a My Drive path
+        if metadata["driveId"].as_str().is_some() {
+            return Err("Item is in a Shared Drive, not My Drive".to_string());
+        }
+
         let name = metadata["name"].as_str().unwrap_or("Unknown");
 
         // Check if this is the root "My Drive"
         if let Some(parents) = metadata["parents"].as_array() {
             if parents.is_empty() {
-                // This is a root
-                path_parts.reverse();
-                return Ok(format!("/{}/{}", name, path_parts.join("/")));
+                // This is a root - but not My Drive (would have hit "root" check below)
+                return Err("Reached non-My-Drive root".to_string());
             }
 
             path_parts.push(name.to_string());
@@ -1158,9 +1162,8 @@ async fn build_path_from_parents(
                 return Err("Invalid parent ID".to_string());
             }
         } else {
-            // No parents - this is root
-            path_parts.reverse();
-            return Ok(format!("/{}/{}", name, path_parts.join("/")));
+            // No parents - this is root but not My Drive
+            return Err("Reached root without finding My Drive".to_string());
         }
     }
 
