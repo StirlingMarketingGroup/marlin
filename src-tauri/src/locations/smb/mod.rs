@@ -13,7 +13,7 @@ pub use auth::{
     SmbServerInfo,
 };
 #[cfg(feature = "smb")]
-pub use auth::{get_server_credentials, SmbServer};
+pub use auth::get_server_credentials;
 
 #[derive(Default)]
 pub struct SmbProvider;
@@ -101,29 +101,28 @@ impl LocationProvider for SmbProvider {
                 format!("{}/{}", dir_path, name)
             };
 
-            let (is_dir, size, modified) = match client.stat(&entry_path) {
+            let (is_directory, size, modified) = match client.stat(&entry_path) {
                 Ok(stat) => {
-                    let is_directory = stat.is_dir();
-                    let file_size = stat.size();
-                    let mtime =
-                        DateTime::<Utc>::from_timestamp(stat.mtime() as i64, 0).unwrap_or_else(Utc::now);
-                    (is_directory, file_size as u64, mtime)
+                    let is_dir = stat.mode.is_dir();
+                    let file_size = stat.size;
+                    let mtime: DateTime<Utc> = stat.modified.into();
+                    (is_dir, file_size, mtime)
                 }
                 Err(_) => {
                     // Fallback: try to detect directory by listing it
-                    let is_directory = client.list_dir(&entry_path).is_ok();
-                    (is_directory, 0, Utc::now())
+                    let is_dir = client.list_dir(&entry_path).is_ok();
+                    (is_dir, 0, Utc::now())
                 }
             };
 
             items.push(FileItem {
                 name: name.to_string(),
                 path: full_path,
-                is_dir,
+                is_directory,
                 is_hidden: name.starts_with('.'),
                 size,
-                modified: modified.to_rfc3339(),
-                extension: if is_dir {
+                modified,
+                extension: if is_directory {
                     None
                 } else {
                     std::path::Path::new(name)
@@ -132,7 +131,10 @@ impl LocationProvider for SmbProvider {
                         .map(|e| e.to_lowercase())
                 },
                 is_symlink: false,
-                symlink_target: None,
+                is_git_repo: false,
+                child_count: None,
+                image_width: None,
+                image_height: None,
                 remote_id: None,
                 thumbnail_url: None,
                 download_url: None,
@@ -140,7 +142,7 @@ impl LocationProvider for SmbProvider {
         }
 
         // Sort: directories first, then by name
-        items.sort_by(|a, b| match (a.is_dir, b.is_dir) {
+        items.sort_by(|a, b| match (a.is_directory, b.is_directory) {
             (true, false) => std::cmp::Ordering::Less,
             (false, true) => std::cmp::Ordering::Greater,
             _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
@@ -209,18 +211,17 @@ impl LocationProvider for SmbProvider {
             .unwrap_or(&path)
             .to_string();
 
-        let is_dir = stat.is_dir();
-        let modified =
-            DateTime::<Utc>::from_timestamp(stat.mtime() as i64, 0).unwrap_or_else(Utc::now);
+        let is_directory = stat.mode.is_dir();
+        let modified: DateTime<Utc> = stat.modified.into();
 
         Ok(FileItem {
             name: name.clone(),
             path: location.raw().to_string(),
-            is_dir,
+            is_directory,
             is_hidden: name.starts_with('.'),
-            size: stat.size() as u64,
-            modified: modified.to_rfc3339(),
-            extension: if is_dir {
+            size: stat.size,
+            modified,
+            extension: if is_directory {
                 None
             } else {
                 std::path::Path::new(&name)
@@ -229,7 +230,10 @@ impl LocationProvider for SmbProvider {
                     .map(|e| e.to_lowercase())
             },
             is_symlink: false,
-            symlink_target: None,
+            is_git_repo: false,
+            child_count: None,
+            image_width: None,
+            image_height: None,
             remote_id: None,
             thumbnail_url: None,
             download_url: None,
@@ -318,7 +322,7 @@ impl LocationProvider for SmbProvider {
             .stat(&path)
             .map_err(|e| format!("Failed to stat path: {}", e))?;
 
-        if stat.is_dir() {
+        if stat.mode.is_dir() {
             client
                 .rmdir(&path)
                 .map_err(|e| format!("Failed to delete directory: {}", e))
@@ -423,6 +427,7 @@ impl SmbProvider {
             .map_err(|e| format!("Failed to enumerate shares: {}", e))?;
 
         let items: Vec<FileItem> = entries
+            .into_iter()
             .filter_map(|entry| {
                 let name = entry.name();
                 // Skip hidden shares (ending in $) and special entries
@@ -433,13 +438,16 @@ impl SmbProvider {
                 Some(FileItem {
                     name: name.to_string(),
                     path: format!("smb://{}/{}", hostname, name),
-                    is_dir: true,
+                    is_directory: true,
                     is_hidden: false,
                     size: 0,
-                    modified: Utc::now().to_rfc3339(),
+                    modified: Utc::now(),
                     extension: None,
                     is_symlink: false,
-                    symlink_target: None,
+                    is_git_repo: false,
+                    child_count: None,
+                    image_width: None,
+                    image_height: None,
                     remote_id: None,
                     thumbnail_url: None,
                     download_url: None,
