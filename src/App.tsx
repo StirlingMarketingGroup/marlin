@@ -438,6 +438,9 @@ function App() {
         // Note: gdrive:// paths don't support streaming, use non-streaming method
         if (currentPath.startsWith('gdrive://')) {
           await useAppStore.getState().refreshCurrentDirectory();
+          // Apply smart view defaults after loading gdrive directory
+          const { files } = useAppStore.getState();
+          await applySmartViewDefaults(currentPath, files);
         } else {
           await useAppStore.getState().refreshCurrentDirectoryStreaming();
         }
