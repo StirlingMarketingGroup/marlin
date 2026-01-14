@@ -17,6 +17,7 @@ use crate::locations::{
 
 /// Virtual root folder names
 const VIRTUAL_MY_DRIVE: &str = "My Drive";
+const VIRTUAL_SHARED_DRIVES: &str = "Shared drives";
 const VIRTUAL_SHARED: &str = "Shared with me";
 const VIRTUAL_STARRED: &str = "Starred";
 const VIRTUAL_RECENT: &str = "Recent";
@@ -129,6 +130,23 @@ impl GoogleDriveProvider {
             FileItem {
                 name: VIRTUAL_MY_DRIVE.to_string(),
                 path: format!("gdrive://{}/{}", email, VIRTUAL_MY_DRIVE),
+                size: 0,
+                modified: now,
+                is_directory: true,
+                is_hidden: false,
+                is_symlink: false,
+                is_git_repo: false,
+                extension: None,
+                child_count: None,
+                image_width: None,
+                image_height: None,
+                remote_id: None,
+                thumbnail_url: None,
+                download_url: None,
+            },
+            FileItem {
+                name: VIRTUAL_SHARED_DRIVES.to_string(),
+                path: format!("gdrive://{}/{}", email, VIRTUAL_SHARED_DRIVES),
                 size: 0,
                 modified: now,
                 is_directory: true,
@@ -388,6 +406,147 @@ impl GoogleDriveProvider {
             .iter()
             .map(|f| self.drive_file_to_file_item(f, email, &parent_path))
             .collect())
+    }
+
+    /// List all shared drives the user has access to
+    async fn list_shared_drives(&self, hub: &DriveHubType, email: &str) -> Result<Vec<FileItem>, String> {
+        let result = hub
+            .drives()
+            .list()
+            .page_size(100)
+            .add_scope(google_drive3::api::Scope::Full)
+            .doit()
+            .await
+            .map_err(|e| format!("Failed to list shared drives: {}", e))?;
+
+        let drives = result.1.drives.unwrap_or_default();
+        let parent_path = format!("/{}", VIRTUAL_SHARED_DRIVES);
+        let now = Utc::now();
+
+        Ok(drives
+            .iter()
+            .map(|d| {
+                let name = d.name.clone().unwrap_or_else(|| "Unnamed Drive".to_string());
+                let drive_id = d.id.clone().unwrap_or_default();
+                FileItem {
+                    name: name.clone(),
+                    path: format!("gdrive://{}{}/{}", email, parent_path, name),
+                    size: 0,
+                    modified: now,
+                    is_directory: true,
+                    is_hidden: false,
+                    is_symlink: false,
+                    is_git_repo: false,
+                    extension: None,
+                    child_count: None,
+                    image_width: None,
+                    image_height: None,
+                    remote_id: Some(drive_id),
+                    thumbnail_url: None,
+                    download_url: None,
+                }
+            })
+            .collect())
+    }
+
+    /// Find a shared drive by name
+    async fn find_shared_drive_by_name(&self, hub: &DriveHubType, name: &str) -> Result<Option<String>, String> {
+        let result = hub
+            .drives()
+            .list()
+            .page_size(100)
+            .add_scope(google_drive3::api::Scope::Full)
+            .doit()
+            .await
+            .map_err(|e| format!("Failed to list shared drives: {}", e))?;
+
+        let drives = result.1.drives.unwrap_or_default();
+
+        for drive in drives {
+            if let Some(drive_name) = &drive.name {
+                if drive_name == name {
+                    return Ok(drive.id);
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// List the root contents of a shared drive
+    async fn list_shared_drive_root(
+        &self,
+        hub: &DriveHubType,
+        drive_id: &str,
+        email: &str,
+        path: &str,
+    ) -> Result<Vec<FileItem>, String> {
+        let result = hub
+            .files()
+            .list()
+            .q(&format!("'{}' in parents and trashed = false", drive_id))
+            .corpora("drive")
+            .drive_id(drive_id)
+            .include_items_from_all_drives(true)
+            .supports_all_drives(true)
+            .page_size(1000)
+            .add_scope(google_drive3::api::Scope::Full)
+            .param("fields", "files(id,name,mimeType,size,modifiedTime,parents,thumbnailLink,webContentLink)")
+            .doit()
+            .await
+            .map_err(|e| format!("Failed to list shared drive contents: {}", e))?;
+
+        let files = result.1.files.unwrap_or_default();
+
+        Ok(files
+            .iter()
+            .map(|f| self.drive_file_to_file_item(f, email, path))
+            .collect())
+    }
+
+    /// Find a file within a shared drive by path
+    async fn find_file_in_shared_drive(
+        &self,
+        hub: &DriveHubType,
+        drive_id: &str,
+        path_parts: &[&str],
+    ) -> Result<Option<String>, String> {
+        if path_parts.is_empty() {
+            return Ok(Some(drive_id.to_string()));
+        }
+
+        let mut current_parent = drive_id.to_string();
+
+        for part in path_parts {
+            let query = format!(
+                "name = '{}' and '{}' in parents and trashed = false",
+                part.replace("'", "\\'"),
+                current_parent
+            );
+
+            let result = hub
+                .files()
+                .list()
+                .q(&query)
+                .corpora("drive")
+                .drive_id(drive_id)
+                .include_items_from_all_drives(true)
+                .supports_all_drives(true)
+                .add_scope(google_drive3::api::Scope::Full)
+                .param("fields", "files(id,name)")
+                .doit()
+                .await
+                .map_err(|e| format!("Failed to search in shared drive: {}", e))?;
+
+            let files = result.1.files.unwrap_or_default();
+            if files.is_empty() {
+                return Ok(None);
+            }
+
+            current_parent = files[0].id.clone().unwrap_or_default();
+        }
+
+        Ok(Some(current_parent))
     }
 
     /// Find a file by path within My Drive
@@ -658,6 +817,31 @@ impl LocationProvider for GoogleDriveProvider {
             }
             VIRTUAL_STARRED => self.list_starred(&hub, &email).await?,
             VIRTUAL_RECENT => self.list_recent(&hub, &email).await?,
+            VIRTUAL_SHARED_DRIVES => {
+                if subpath.is_empty() {
+                    log::info!("  -> listing shared drives root");
+                    self.list_shared_drives(&hub, &email).await?
+                } else {
+                    // First part is the drive name, rest is the path within
+                    let drive_name = subpath[0];
+                    log::info!("  -> listing shared drive: {}", drive_name);
+
+                    // Find the drive ID by name
+                    let drive_id = self.find_shared_drive_by_name(&hub, drive_name).await?
+                        .ok_or_else(|| format!("Shared drive not found: {}", drive_name))?;
+
+                    if subpath.len() == 1 {
+                        // List root of shared drive
+                        self.list_shared_drive_root(&hub, &drive_id, &email, path).await?
+                    } else {
+                        // Navigate within shared drive
+                        let inner_path = &subpath[1..];
+                        let folder_id = self.find_file_in_shared_drive(&hub, &drive_id, inner_path).await?
+                            .ok_or_else(|| format!("Folder not found in shared drive: {}", inner_path.join("/")))?;
+                        self.list_folder_by_id(&hub, &folder_id, &email, path).await?
+                    }
+                }
+            }
             VIRTUAL_BY_ID => {
                 // Direct ID-based navigation: /id/<file_id>
                 if subpath.is_empty() {
@@ -1055,9 +1239,9 @@ async fn try_resolve_folder_id(email: &str, folder_id: &str) -> Result<(String, 
     let access_token = ensure_valid_token(email).await?;
     let client = reqwest::Client::new();
 
-    // Get folder metadata
+    // Get folder metadata including driveId for shared drives
     let url = format!(
-        "https://www.googleapis.com/drive/v3/files/{}?fields=id,name,parents,mimeType&supportsAllDrives=true",
+        "https://www.googleapis.com/drive/v3/files/{}?fields=id,name,parents,mimeType,driveId&supportsAllDrives=true",
         folder_id
     );
 
@@ -1086,7 +1270,29 @@ async fn try_resolve_folder_id(email: &str, folder_id: &str) -> Result<(String, 
     let name = metadata["name"].as_str().unwrap_or("Unknown").to_string();
     let file_id = metadata["id"].as_str().unwrap_or(folder_id);
 
-    // Try to build full path by traversing parents
+    // Check if this is in a Shared Drive
+    if let Some(drive_id) = metadata["driveId"].as_str() {
+        log::info!("  Folder is in shared drive: {}", drive_id);
+        // Get the shared drive name
+        match get_shared_drive_name(&access_token, drive_id).await {
+            Ok(drive_name) => {
+                // Build path within the shared drive
+                match build_shared_drive_path(file_id, drive_id, &drive_name, &access_token).await {
+                    Ok(path) => return Ok((path, name)),
+                    Err(e) => {
+                        log::info!("  Can't build shared drive path, using id notation: {}", e);
+                        return Ok((format!("/id/{}", folder_id), name));
+                    }
+                }
+            }
+            Err(e) => {
+                log::info!("  Can't get shared drive name, using id notation: {}", e);
+                return Ok((format!("/id/{}", folder_id), name));
+            }
+        }
+    }
+
+    // Try to build full path by traversing parents (for My Drive items)
     if let Some(parents) = metadata["parents"].as_array() {
         if !parents.is_empty() {
             match build_path_from_parents(file_id, &access_token).await {
@@ -1102,6 +1308,96 @@ async fn try_resolve_folder_id(email: &str, folder_id: &str) -> Result<(String, 
 
     // No parents means it's a root or shared item
     Ok((format!("/id/{}", folder_id), name))
+}
+
+async fn get_shared_drive_name(access_token: &str, drive_id: &str) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let url = format!("https://www.googleapis.com/drive/v3/drives/{}", drive_id);
+
+    let response = client
+        .get(&url)
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("API error: {}", response.status()));
+    }
+
+    let data: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse: {}", e))?;
+
+    data["name"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| "Drive has no name".to_string())
+}
+
+async fn build_shared_drive_path(
+    folder_id: &str,
+    drive_id: &str,
+    drive_name: &str,
+    access_token: &str,
+) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let mut path_parts: Vec<String> = Vec::new();
+    let mut current_id = folder_id.to_string();
+
+    // Traverse up to 20 levels
+    for _ in 0..20 {
+        let url = format!(
+            "https://www.googleapis.com/drive/v3/files/{}?fields=id,name,parents&supportsAllDrives=true",
+            current_id
+        );
+
+        let response = client
+            .get(&url)
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|e| format!("Request failed: {}", e))?;
+
+        if !response.status().is_success() {
+            return Err("Cannot access parent".to_string());
+        }
+
+        let metadata: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse: {}", e))?;
+
+        let name = metadata["name"].as_str().unwrap_or("Unknown");
+
+        if let Some(parents) = metadata["parents"].as_array() {
+            if parents.is_empty() {
+                // Reached root
+                path_parts.reverse();
+                return Ok(format!("/{}/{}/{}", VIRTUAL_SHARED_DRIVES, drive_name, path_parts.join("/")));
+            }
+
+            if let Some(parent_id) = parents.first().and_then(|p| p.as_str()) {
+                // Check if parent is the shared drive root
+                if parent_id == drive_id {
+                    path_parts.push(name.to_string());
+                    path_parts.reverse();
+                    return Ok(format!("/{}/{}/{}", VIRTUAL_SHARED_DRIVES, drive_name, path_parts.join("/")));
+                }
+                path_parts.push(name.to_string());
+                current_id = parent_id.to_string();
+            } else {
+                return Err("Invalid parent ID".to_string());
+            }
+        } else {
+            // No parents - reached some root
+            path_parts.reverse();
+            return Ok(format!("/{}/{}/{}", VIRTUAL_SHARED_DRIVES, drive_name, path_parts.join("/")));
+        }
+    }
+
+    Err("Path too deep".to_string())
 }
 
 async fn build_path_from_parents(
