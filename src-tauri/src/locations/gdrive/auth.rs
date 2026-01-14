@@ -306,7 +306,6 @@ pub async fn add_google_account() -> Result<GoogleAccountInfo, String> {
         auth_uri: "https://accounts.google.com/o/oauth2/auth".to_string(),
         token_uri: "https://oauth2.googleapis.com/token".to_string(),
         redirect_uris: vec![
-            "http://127.0.0.1:52836".to_string(),
             "http://127.0.0.1".to_string(),
             "http://localhost".to_string(),
         ],
@@ -325,12 +324,12 @@ pub async fn add_google_account() -> Result<GoogleAccountInfo, String> {
     let token_cache_path = token_cache_dir.join(format!("token_{}.json", uuid::Uuid::new_v4()));
     log::info!("Token cache path: {:?}", token_cache_path);
 
-    // Build the authenticator with a specific port to avoid conflicts
+    // Build the authenticator
     log::info!("Building authenticator...");
-    // Use HTTPRedirect with a specific port (8085) to avoid conflicts with other local servers
+    // Use HTTPRedirect which automatically finds an available port
     let auth = InstalledFlowAuthenticator::builder(
         secret,
-        InstalledFlowReturnMethod::HTTPPortRedirect(52836),
+        InstalledFlowReturnMethod::HTTPRedirect,
     )
     .persist_tokens_to_disk(&token_cache_path)
     .flow_delegate(Box::new(BrowserFlowDelegate))
