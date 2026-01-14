@@ -1092,7 +1092,7 @@ async fn try_resolve_folder_id(email: &str, folder_id: &str) -> Result<(String, 
             match build_path_from_parents(file_id, &access_token).await {
                 Ok(path) => return Ok((path, name)),
                 Err(e) => {
-                    log::info!("  Can't build path, using @id notation: {}", e);
+                    log::info!("  Can't build path, using id notation: {}", e);
                     // Can't build path, use id notation
                     return Ok((format!("/id/{}", folder_id), name));
                 }
