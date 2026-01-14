@@ -211,9 +211,38 @@ export function useThumbnail(path: string | undefined, options: ThumbnailOptions
     currentPathRef.current = null;
   }, []);
 
-  // If we have a remote thumbnail URL (e.g., from Google Drive), use it directly
+  // If we have a remote thumbnail URL (e.g., from Google Drive), fetch it through the backend
+  // Google Drive thumbnail URLs require authentication, so we need to proxy through Tauri
   useEffect(() => {
-    if (thumbnailUrl && path) {
+    if (!thumbnailUrl || !path) {
+      return;
+    }
+
+    // Check if this is a gdrive path that needs authenticated fetch
+    if (path.startsWith('gdrive://')) {
+      // Extract email from gdrive://email/path
+      const pathWithoutScheme = path.slice('gdrive://'.length);
+      const slashIndex = pathWithoutScheme.indexOf('/');
+      const email = slashIndex >= 0 ? pathWithoutScheme.slice(0, slashIndex) : pathWithoutScheme;
+
+      setLoading(true);
+      setError(undefined);
+
+      invoke<string>('fetch_gdrive_url', { email, url: thumbnailUrl })
+        .then((dataUrlResult) => {
+          setDataUrl(dataUrlResult);
+          setCached(true);
+          setGenerationTimeMs(0);
+          setHasTransparency(false);
+          setLoading(false);
+        })
+        .catch((err) => {
+          console.error('Failed to fetch gdrive thumbnail:', err);
+          setError(err.toString());
+          setLoading(false);
+        });
+    } else {
+      // For non-gdrive URLs, use directly (if they work without auth)
       setDataUrl(thumbnailUrl);
       setCached(true);
       setGenerationTimeMs(0);

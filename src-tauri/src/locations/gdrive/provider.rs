@@ -1020,6 +1020,45 @@ pub async fn resolve_file_id_to_path(file_id: &str) -> Result<(String, String), 
     Err("File not accessible with any connected account".to_string())
 }
 
+/// Fetch a URL with Google Drive authentication and return as data URL
+/// This is used for thumbnail URLs that require authentication
+pub async fn fetch_url_with_auth(email: &str, url: &str) -> Result<String, String> {
+    use base64::Engine;
+
+    log::info!("fetch_url_with_auth: email={}, url={}", email, url);
+
+    let access_token = ensure_valid_token(email).await?;
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(url)
+        .bearer_auth(&access_token)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch URL: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        return Err(format!("Fetch failed with status {}", status));
+    }
+
+    let content_type = response.headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("image/jpeg")
+        .to_string();
+
+    let bytes = response.bytes()
+        .await
+        .map_err(|e| format!("Failed to read response: {}", e))?;
+
+    let base64_data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+
+    log::info!("fetch_url_with_auth: got {} bytes, content_type={}", bytes.len(), content_type);
+
+    Ok(format!("data:{};base64,{}", content_type, base64_data))
+}
+
 /// Download a Google Drive file to a temporary location and return the path
 /// This is used for opening files that need to be downloaded first
 pub async fn download_file_to_temp(email: &str, file_id: &str, file_name: &str) -> Result<String, String> {
@@ -1073,6 +1112,306 @@ pub async fn download_file_to_temp(email: &str, file_id: &str, file_name: &str) 
     log::info!("Downloaded {} bytes to {}", bytes.len(), temp_path_str);
 
     Ok(temp_path_str)
+}
+
+/// Upload a local file to Google Drive
+/// Returns the file ID of the uploaded file
+pub async fn upload_file_to_gdrive(
+    email: &str,
+    local_path: &std::path::Path,
+    parent_folder_id: &str,
+    file_name: &str,
+) -> Result<String, String> {
+    log::info!(
+        "upload_file_to_gdrive: email={}, local_path={:?}, parent={}, name={}",
+        email, local_path, parent_folder_id, file_name
+    );
+
+    let access_token = ensure_valid_token(email).await?;
+
+    // Read the file content
+    let file_content = std::fs::read(local_path)
+        .map_err(|e| format!("Failed to read file: {}", e))?;
+
+    // Determine MIME type based on extension
+    let mime_type = mime_guess::from_path(local_path)
+        .first_or_octet_stream()
+        .to_string();
+
+    // Create the file metadata
+    let metadata = serde_json::json!({
+        "name": file_name,
+        "parents": [parent_folder_id]
+    });
+
+    // Use multipart upload
+    let client = reqwest::Client::new();
+    let boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW";
+
+    let mut body = Vec::new();
+
+    // Metadata part
+    body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
+    body.extend_from_slice(b"Content-Type: application/json; charset=UTF-8\r\n\r\n");
+    body.extend_from_slice(metadata.to_string().as_bytes());
+    body.extend_from_slice(b"\r\n");
+
+    // File content part
+    body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
+    body.extend_from_slice(format!("Content-Type: {}\r\n\r\n", mime_type).as_bytes());
+    body.extend_from_slice(&file_content);
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(format!("--{}--", boundary).as_bytes());
+
+    let response = client
+        .post("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true")
+        .bearer_auth(&access_token)
+        .header("Content-Type", format!("multipart/related; boundary={}", boundary))
+        .body(body)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to upload file: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("Upload failed with status {}: {}", status, body));
+    }
+
+    let result: serde_json::Value = response.json().await
+        .map_err(|e| format!("Failed to parse upload response: {}", e))?;
+
+    let file_id = result["id"].as_str()
+        .ok_or_else(|| "No file ID in upload response".to_string())?
+        .to_string();
+
+    log::info!("Uploaded file, got ID: {}", file_id);
+    Ok(file_id)
+}
+
+/// Create a folder in Google Drive
+/// Returns the folder ID
+pub async fn create_gdrive_folder(
+    email: &str,
+    parent_folder_id: &str,
+    folder_name: &str,
+) -> Result<String, String> {
+    log::info!(
+        "create_gdrive_folder: email={}, parent={}, name={}",
+        email, parent_folder_id, folder_name
+    );
+
+    let access_token = ensure_valid_token(email).await?;
+
+    let metadata = serde_json::json!({
+        "name": folder_name,
+        "mimeType": "application/vnd.google-apps.folder",
+        "parents": [parent_folder_id]
+    });
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post("https://www.googleapis.com/drive/v3/files?supportsAllDrives=true")
+        .bearer_auth(&access_token)
+        .header("Content-Type", "application/json")
+        .body(metadata.to_string())
+        .send()
+        .await
+        .map_err(|e| format!("Failed to create folder: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("Create folder failed with status {}: {}", status, body));
+    }
+
+    let result: serde_json::Value = response.json().await
+        .map_err(|e| format!("Failed to parse create folder response: {}", e))?;
+
+    let folder_id = result["id"].as_str()
+        .ok_or_else(|| "No folder ID in response".to_string())?
+        .to_string();
+
+    log::info!("Created folder, got ID: {}", folder_id);
+    Ok(folder_id)
+}
+
+/// Recursively upload a directory to Google Drive
+pub async fn upload_directory_to_gdrive(
+    email: &str,
+    local_dir: &std::path::Path,
+    parent_folder_id: &str,
+) -> Result<String, String> {
+    let dir_name = local_dir.file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| "Invalid directory name".to_string())?;
+
+    log::info!("upload_directory_to_gdrive: dir={:?}, parent={}", local_dir, parent_folder_id);
+
+    // Create the folder in Google Drive
+    let folder_id = create_gdrive_folder(email, parent_folder_id, dir_name).await?;
+
+    // Upload all contents
+    let entries = std::fs::read_dir(local_dir)
+        .map_err(|e| format!("Failed to read directory: {}", e))?;
+
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
+        let path = entry.path();
+        let name = path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown");
+
+        // Skip hidden files (starting with .)
+        if name.starts_with('.') {
+            continue;
+        }
+
+        if path.is_dir() {
+            Box::pin(upload_directory_to_gdrive(email, &path, &folder_id)).await?;
+        } else {
+            upload_file_to_gdrive(email, &path, &folder_id, name).await?;
+        }
+    }
+
+    Ok(folder_id)
+}
+
+/// Extract a zip file from Google Drive and upload the contents back to Google Drive
+pub async fn extract_gdrive_zip(
+    email: &str,
+    file_id: &str,
+    file_name: &str,
+    destination_folder_id: &str,
+) -> Result<String, String> {
+    log::info!(
+        "extract_gdrive_zip: email={}, file_id={}, name={}, dest={}",
+        email, file_id, file_name, destination_folder_id
+    );
+
+    // Download the zip file to temp
+    let temp_zip_path = download_file_to_temp(email, file_id, file_name).await?;
+    let temp_zip = std::path::Path::new(&temp_zip_path);
+
+    // Create a temp directory for extraction
+    let extract_dir = std::env::temp_dir()
+        .join("marlin-gdrive-extract")
+        .join(format!("{}_{}", file_id, chrono::Utc::now().timestamp()));
+
+    std::fs::create_dir_all(&extract_dir)
+        .map_err(|e| format!("Failed to create extraction directory: {}", e))?;
+
+    log::info!("Extracting to temp dir: {:?}", extract_dir);
+
+    // Extract the zip file
+    let zip_file = std::fs::File::open(temp_zip)
+        .map_err(|e| format!("Failed to open zip file: {}", e))?;
+
+    let mut archive = zip::ZipArchive::new(zip_file)
+        .map_err(|e| format!("Failed to read zip archive: {}", e))?;
+
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i)
+            .map_err(|e| format!("Failed to read zip entry: {}", e))?;
+
+        let outpath = match file.enclosed_name() {
+            Some(path) => extract_dir.join(path),
+            None => continue,
+        };
+
+        if file.name().ends_with('/') {
+            std::fs::create_dir_all(&outpath)
+                .map_err(|e| format!("Failed to create directory: {}", e))?;
+        } else {
+            if let Some(p) = outpath.parent() {
+                if !p.exists() {
+                    std::fs::create_dir_all(p)
+                        .map_err(|e| format!("Failed to create parent directory: {}", e))?;
+                }
+            }
+            let mut outfile = std::fs::File::create(&outpath)
+                .map_err(|e| format!("Failed to create file: {}", e))?;
+            std::io::copy(&mut file, &mut outfile)
+                .map_err(|e| format!("Failed to write file: {}", e))?;
+        }
+    }
+
+    // Determine folder name for upload (zip name without extension)
+    let folder_name = file_name.trim_end_matches(".zip")
+        .trim_end_matches(".ZIP");
+
+    // Create the destination folder in Google Drive
+    let dest_folder_id = create_gdrive_folder(email, destination_folder_id, folder_name).await?;
+
+    // Upload all extracted contents to Google Drive
+    let entries = std::fs::read_dir(&extract_dir)
+        .map_err(|e| format!("Failed to read extraction directory: {}", e))?;
+
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
+        let path = entry.path();
+        let name = path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown");
+
+        // Skip hidden files
+        if name.starts_with('.') {
+            continue;
+        }
+
+        if path.is_dir() {
+            upload_directory_to_gdrive(email, &path, &dest_folder_id).await?;
+        } else {
+            upload_file_to_gdrive(email, &path, &dest_folder_id, name).await?;
+        }
+    }
+
+    // Clean up temp files
+    let _ = std::fs::remove_file(temp_zip);
+    let _ = std::fs::remove_dir_all(&extract_dir);
+
+    log::info!("Extraction and upload complete, folder ID: {}", dest_folder_id);
+    Ok(dest_folder_id)
+}
+
+/// Look up the folder ID for a given Google Drive path
+/// Path format: /My Drive/folder1/folder2 or /Shared with me/folder1
+pub async fn get_folder_id_by_path(email: &str, path: &str) -> Result<String, String> {
+    log::info!("get_folder_id_by_path: email={}, path={}", email, path);
+
+    let provider = GoogleDriveProvider::default();
+    let hub = provider.create_hub(email).await?;
+
+    let (root_folder, subpath) = provider.parse_virtual_path(path);
+
+    match root_folder {
+        Some(VIRTUAL_MY_DRIVE) => {
+            if subpath.is_empty() {
+                Ok("root".to_string())
+            } else {
+                provider.find_file_by_path(&hub, &subpath).await?
+                    .ok_or_else(|| format!("Folder not found: {}", path))
+            }
+        }
+        Some(VIRTUAL_SHARED) => {
+            if subpath.is_empty() {
+                // Shared root doesn't have a single folder ID
+                Err("Cannot get folder ID for Shared with me root".to_string())
+            } else {
+                provider.find_shared_file_by_path(&hub, &subpath).await?
+                    .ok_or_else(|| format!("Folder not found: {}", path))
+            }
+        }
+        Some(VIRTUAL_BY_ID) => {
+            // Direct ID navigation - the ID is in the path
+            if subpath.is_empty() {
+                Err("Missing folder ID in path".to_string())
+            } else {
+                Ok(subpath[0].to_string())
+            }
+        }
+        _ => Err(format!("Unsupported path type: {}", path)),
+    }
 }
 
 // Suppress warnings for unused cache variables (will be used for optimization)

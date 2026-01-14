@@ -171,7 +171,7 @@ export default function FileList({ files, preferences }: FileListProps) {
     streamingTotalCount,
     filterText,
   } = useAppStore();
-  const { renameTargetPath, setRenameTarget, renameFile } = useAppStore();
+  const { renameTargetPath, renameLoading, setRenameTarget, renameFile } = useAppStore();
   const { startNativeDrag, endNativeDrag, isDraggedDirectory } = useDragStore();
   const [renameText, setRenameText] = useState<string>('');
   const renameInputRef = useRef<HTMLInputElement>(null);
@@ -657,41 +657,48 @@ export default function FileList({ files, preferences }: FileListProps) {
             {file.is_symlink && <SymlinkBadge size="sm" style={{ bottom: -2, right: -2 }} />}
           </span>
           {renameTargetPath === file.path ? (
-            <input
-              ref={renameInputRef}
-              className={`block flex-1 min-w-0 text-sm font-medium leading-5 h-5 bg-transparent border-0 rounded-none px-0 py-0 m-0 outline-none appearance-none ${isSelected ? 'text-white' : 'text-app-text'} truncate`}
-              style={{ fontFamily: 'inherit', transform: 'translateY(-0.5px)' }}
-              value={renameText}
-              onChange={(e) => setRenameText(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  e.preventDefault();
+            <div className="flex-1 min-w-0 flex items-center gap-1">
+              <input
+                ref={renameInputRef}
+                className={`block flex-1 min-w-0 text-sm font-medium leading-5 h-5 bg-transparent border-0 rounded-none px-0 py-0 m-0 outline-none appearance-none ${isSelected ? 'text-white' : 'text-app-text'} ${renameLoading ? 'opacity-60' : ''} truncate`}
+                style={{ fontFamily: 'inherit', transform: 'translateY(-0.5px)' }}
+                value={renameText}
+                onChange={(e) => !renameLoading && setRenameText(e.target.value)}
+                onKeyDown={(e) => {
+                  if (renameLoading) return;
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    void commitRename();
+                  }
+                  if (e.key === 'Escape') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    cancelRename();
+                  }
+                }}
+                // Prevent row drag/open when interacting with the input
+                onMouseDown={(e) => {
                   e.stopPropagation();
-                  void commitRename();
-                }
-                if (e.key === 'Escape') {
-                  e.preventDefault();
+                }}
+                onClick={(e) => {
                   e.stopPropagation();
-                  cancelRename();
-                }
-              }}
-              // Prevent row drag/open when interacting with the input
-              onMouseDown={(e) => {
-                e.stopPropagation();
-              }}
-              onClick={(e) => {
-                e.stopPropagation();
-              }}
-              onDoubleClick={(e) => {
-                e.stopPropagation();
-              }}
-              onDragStart={(e) => {
-                e.stopPropagation();
-              }}
-              onBlur={cancelRename}
-              data-tauri-drag-region={false}
-              draggable={false}
-            />
+                }}
+                onDoubleClick={(e) => {
+                  e.stopPropagation();
+                }}
+                onDragStart={(e) => {
+                  e.stopPropagation();
+                }}
+                onBlur={() => !renameLoading && cancelRename()}
+                disabled={renameLoading}
+                data-tauri-drag-region={false}
+                draggable={false}
+              />
+              {renameLoading && (
+                <div className="animate-spin h-3 w-3 border-2 border-app-muted border-t-white rounded-full flex-shrink-0" />
+              )}
+            </div>
           ) : (
             <div className="flex-1 min-w-0 overflow-hidden" data-name-cell="true">
               <FileNameDisplay

@@ -246,7 +246,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     streamingTotalCount,
     filterText,
   } = useAppStore();
-  const { renameTargetPath, setRenameTarget, renameFile } = useAppStore();
+  const { renameTargetPath, renameLoading, setRenameTarget, renameFile } = useAppStore();
   const { startNativeDrag, endNativeDrag, isDraggedDirectory } = useDragStore();
   const [renameText, setRenameText] = useState<string>('');
   const [draggedFile, setDraggedFile] = useState<string | null>(null);
@@ -843,46 +843,57 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
             className="text-center w-full relative overflow-visible"
             style={{ height: '1.25rem' }}
           >
-            <input
-              ref={renameInputRef}
-              className={`text-sm font-medium bg-app-dark border border-app-border rounded px-2 py-[2px] ${isSelected ? 'text-white' : ''} whitespace-nowrap absolute left-1/2 text-center`}
+            <div
+              className="absolute left-1/2 flex items-center gap-1"
               style={{
-                minWidth: `${tile}px`,
-                width: renameInputWidth ? `${renameInputWidth}px` : `${tile}px`,
                 transform: `translateX(-50%) translateX(${renameInputOffset}px)`,
                 zIndex: 50,
               }}
-              value={renameText}
-              onChange={(e) => setRenameText(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  e.preventDefault();
+            >
+              <input
+                ref={renameInputRef}
+                className={`text-sm font-medium bg-app-dark border border-app-border rounded px-2 py-[2px] ${isSelected ? 'text-white' : ''} ${renameLoading ? 'opacity-60' : ''} whitespace-nowrap text-center`}
+                style={{
+                  minWidth: `${tile}px`,
+                  width: renameInputWidth ? `${renameInputWidth}px` : `${tile}px`,
+                }}
+                value={renameText}
+                onChange={(e) => !renameLoading && setRenameText(e.target.value)}
+                onKeyDown={(e) => {
+                  if (renameLoading) return;
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    void commitRename();
+                  }
+                  if (e.key === 'Escape') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    cancelRename();
+                  }
+                }}
+                // Prevent grid item drag/open when interacting with the input
+                onMouseDown={(e) => {
                   e.stopPropagation();
-                  void commitRename();
-                }
-                if (e.key === 'Escape') {
-                  e.preventDefault();
+                }}
+                onClick={(e) => {
                   e.stopPropagation();
-                  cancelRename();
-                }
-              }}
-              // Prevent grid item drag/open when interacting with the input
-              onMouseDown={(e) => {
-                e.stopPropagation();
-              }}
-              onClick={(e) => {
-                e.stopPropagation();
-              }}
-              onDoubleClick={(e) => {
-                e.stopPropagation();
-              }}
-              onDragStart={(e) => {
-                e.stopPropagation();
-              }}
-              onBlur={cancelRename}
-              data-tauri-drag-region={false}
-              draggable={false}
-            />
+                }}
+                onDoubleClick={(e) => {
+                  e.stopPropagation();
+                }}
+                onDragStart={(e) => {
+                  e.stopPropagation();
+                }}
+                onBlur={() => !renameLoading && cancelRename()}
+                disabled={renameLoading}
+                data-tauri-drag-region={false}
+                draggable={false}
+              />
+              {renameLoading && (
+                <div className="animate-spin h-4 w-4 border-2 border-app-muted border-t-white rounded-full" />
+              )}
+            </div>
           </div>
         ) : (
           <div className="text-center w-full">
