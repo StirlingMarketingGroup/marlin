@@ -181,10 +181,7 @@ export interface ThumbnailOptions extends Omit<ThumbnailRequest, 'path'> {
   thumbnailUrl?: string;
 }
 
-export function useThumbnail(
-  path: string | undefined,
-  options: ThumbnailOptions = {}
-) {
+export function useThumbnail(path: string | undefined, options: ThumbnailOptions = {}) {
   const { accent } = useAccentColor();
   const { size, quality, priority, format, accent: accentOverride, thumbnailUrl } = options;
   const effectiveAccent = accentOverride ?? accent;

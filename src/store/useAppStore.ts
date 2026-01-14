@@ -978,7 +978,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         }
       } catch (downloadError) {
         console.error('Failed to download Google Drive file:', downloadError);
-        const errorMessage = downloadError instanceof Error ? downloadError.message : String(downloadError);
+        const errorMessage =
+          downloadError instanceof Error ? downloadError.message : String(downloadError);
         toastStore.addToast({
           type: 'error',
           message: `Unable to open ${file.name}: ${errorMessage}`,
