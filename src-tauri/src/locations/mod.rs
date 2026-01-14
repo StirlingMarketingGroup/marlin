@@ -129,6 +129,7 @@ pub struct Location {
 
 impl Location {
     /// Parse a raw URI string into a Location
+    #[allow(dead_code)] // Useful utility for future providers and tests
     pub fn parse(raw: &str) -> Result<Location, String> {
         parse_raw_location(raw.to_string())
     }
