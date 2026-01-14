@@ -11,6 +11,8 @@ rust-version = "1.77.2"
 [features]
 default = []
 cargo-clippy = []
+# SMB support requires libsmbclient: brew install samba (macOS) or apt install libsmbclient-dev (Linux)
+smb = ["pavao"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -94,3 +96,9 @@ windows = { version = "0.62", features = ["Win32_Storage_FileSystem"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = { version = "0.18", package = "gtk" }
+
+# SMB support (macOS/Linux only - Windows uses native UNC paths)
+# Enable with: cargo build --features smb
+# Requires: brew install samba (macOS) or apt install libsmbclient-dev (Linux)
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+pavao = { version = "0.2", optional = true }
