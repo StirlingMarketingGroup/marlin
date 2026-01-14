@@ -231,3 +231,10 @@ export interface ResolveGoogleDriveUrlResult {
   path: string;
   isFolder: boolean;
 }
+
+// SMB Network Share Types
+export interface SmbServerInfo {
+  hostname: string;
+  username: string;
+  domain?: string | null;
+}
