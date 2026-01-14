@@ -117,6 +117,7 @@ pub fn get_smb_servers() -> Result<Vec<SmbServerInfo>, String> {
 }
 
 /// Get credentials for a specific server (internal use)
+#[cfg_attr(not(feature = "smb"), allow(dead_code))]
 pub fn get_server_credentials(hostname: &str) -> Result<SmbServer, String> {
     // Check cache first
     {

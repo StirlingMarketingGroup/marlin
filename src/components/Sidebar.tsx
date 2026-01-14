@@ -17,6 +17,7 @@ import {
   GoogleLogo,
   Plus,
   SignOut,
+  ShareNetwork,
 } from 'phosphor-react';
 import GitRepoBadge from './GitRepoBadge';
 import SymlinkBadge from './SymlinkBadge';
@@ -24,12 +25,13 @@ import type { IconProps } from 'phosphor-react';
 import { useAppStore } from '../store/useAppStore';
 import { useCallback, useEffect, useState, MouseEvent, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { SystemDrive, PinnedDirectory, GoogleAccountInfo } from '../types';
+import { SystemDrive, PinnedDirectory, GoogleAccountInfo, SmbServerInfo } from '../types';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useToastStore } from '../store/useToastStore';
 import { useSidebarDropZone } from '../hooks/useDragDetector';
 import { usePlatform } from '@/hooks/usePlatform';
 import QuickTooltip from './QuickTooltip';
+import AddSmbServerDialog from './AddSmbServerDialog';
 
 type SidebarLink = {
   name: string;
@@ -52,6 +54,9 @@ export default function Sidebar() {
     loadGoogleAccounts,
     addGoogleAccount,
     removeGoogleAccount,
+    smbServers,
+    loadSmbServers,
+    removeSmbServer,
   } = useAppStore();
 
   const [systemDrives, setSystemDrives] = useState<SystemDrive[]>([]);
@@ -59,6 +64,8 @@ export default function Sidebar() {
   const [isDragOver, setIsDragOver] = useState(false);
   const [addingGoogleAccount, setAddingGoogleAccount] = useState(false);
   const [disconnectingAccounts, setDisconnectingAccounts] = useState<Set<string>>(new Set());
+  const [showAddSmbDialog, setShowAddSmbDialog] = useState(false);
+  const [disconnectingSmbServers, setDisconnectingSmbServers] = useState<Set<string>>(new Set());
   const sidebarRef = useRef<HTMLDivElement>(null);
   const isProcessingDropRef = useRef(false);
   const windowRef = useRef(getCurrentWindow());
@@ -175,11 +182,12 @@ export default function Sidebar() {
     }
   );
 
-  // Fetch system drives and Google accounts on component mount
+  // Fetch system drives, Google accounts, and SMB servers on component mount
   useEffect(() => {
     fetchSystemDrives();
     loadGoogleAccounts();
-  }, [loadGoogleAccounts]);
+    loadSmbServers();
+  }, [loadGoogleAccounts, loadSmbServers]);
 
   const fetchSystemDrives = async () => {
     try {
@@ -264,6 +272,38 @@ export default function Sidebar() {
       setDisconnectingAccounts((prev) => {
         const newSet = new Set(prev);
         newSet.delete(account.email);
+        return newSet;
+      });
+    }
+  };
+
+  const handleDisconnectSmbServer = async (
+    server: SmbServerInfo,
+    event: React.MouseEvent
+  ) => {
+    event.stopPropagation();
+    const { addToast } = useToastStore.getState();
+
+    setDisconnectingSmbServers((prev) => new Set(prev).add(server.hostname));
+
+    try {
+      await removeSmbServer(server.hostname);
+      addToast({
+        type: 'success',
+        message: `Disconnected from ${server.hostname}`,
+        duration: 3000,
+      });
+    } catch (error) {
+      console.error('Failed to disconnect SMB server:', error);
+      addToast({
+        type: 'error',
+        message: 'Failed to disconnect from server',
+        duration: 5000,
+      });
+    } finally {
+      setDisconnectingSmbServers((prev) => {
+        const newSet = new Set(prev);
+        newSet.delete(server.hostname);
         return newSet;
       });
     }
@@ -561,6 +601,71 @@ export default function Sidebar() {
           </span>
         </button>
 
+        {/* Network Shares section */}
+        <div className="px-1 pt-3 pb-1 text-xs text-app-muted select-none">Network</div>
+        {smbServers.map((server) => {
+          const smbPath = `smb://${server.hostname}/`;
+          const isActive = currentPath.startsWith(`smb://${server.hostname}`);
+          const isDisconnecting = disconnectingSmbServers.has(server.hostname);
+          const displayName = server.username
+            ? `${server.hostname} (${server.username})`
+            : server.hostname;
+          return (
+            <QuickTooltip key={server.hostname} text={`${server.username}@${server.hostname}`}>
+              {({ onBlur, onFocus, onMouseEnter, onMouseLeave, ref }) => (
+                <div
+                  ref={ref}
+                  onMouseEnter={onMouseEnter}
+                  onMouseLeave={onMouseLeave}
+                  onFocus={onFocus}
+                  onBlur={onBlur}
+                  className={`w-full flex items-center gap-2 px-1.5 py-1 rounded-md text-left leading-5 text-[13px] group ${
+                    isActive ? 'bg-app-light' : 'hover:bg-app-light/70'
+                  }`}
+                >
+                  <button
+                    onClick={() => navigateTo(smbPath)}
+                    className="flex items-center gap-2 flex-1 min-w-0"
+                    data-tauri-drag-region={false}
+                  >
+                    <ShareNetwork
+                      className={`w-5 h-5 flex-shrink-0 ${isActive ? 'text-accent' : ''}`}
+                      weight="fill"
+                    />
+                    <span className={`truncate ${isActive ? 'text-accent' : ''}`}>
+                      {displayName}
+                    </span>
+                  </button>
+
+                  <button
+                    onClick={(e) => handleDisconnectSmbServer(server, e)}
+                    disabled={isDisconnecting}
+                    className="ml-auto p-0.5 rounded hover:bg-app-light/50 text-app-muted hover:text-accent transition-colors cursor-pointer opacity-0 group-hover:opacity-100"
+                    title={isDisconnecting ? 'Disconnecting...' : 'Disconnect server'}
+                    data-tauri-drag-region={false}
+                  >
+                    {isDisconnecting ? (
+                      <CircleNotch className="w-3.5 h-3.5 animate-spin" weight="regular" />
+                    ) : (
+                      <SignOut className="w-3.5 h-3.5" weight="regular" />
+                    )}
+                  </button>
+                </div>
+              )}
+            </QuickTooltip>
+          );
+        })}
+
+        {/* Add Network Share button */}
+        <button
+          onClick={() => setShowAddSmbDialog(true)}
+          className="w-full flex items-center gap-2 px-1.5 py-1 rounded-md text-left leading-5 text-[13px] text-app-muted hover:bg-app-light/70 hover:text-app-text transition-colors"
+          data-tauri-drag-region={false}
+        >
+          <Plus className="w-5 h-5" weight="regular" />
+          <span className="truncate">Add Network Share...</span>
+        </button>
+
         {/* Locations section */}
         <div className="px-1 pt-3 pb-1 text-xs text-app-muted select-none">System</div>
         {systemLinks.map((item) => {
@@ -636,6 +741,12 @@ export default function Sidebar() {
           </>
         )}
       </div>
+
+      {/* Add SMB Server Dialog */}
+      <AddSmbServerDialog
+        isOpen={showAddSmbDialog}
+        onClose={() => setShowAddSmbDialog(false)}
+      />
     </div>
   );
 }

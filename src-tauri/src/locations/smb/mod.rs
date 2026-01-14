@@ -3,13 +3,17 @@ mod auth;
 use async_trait::async_trait;
 use crate::fs_utils::FileItem;
 use crate::locations::{
-    Location, LocationCapabilities, LocationProvider, LocationSummary, ProviderDirectoryEntries,
+    Location, LocationCapabilities, LocationProvider, ProviderDirectoryEntries,
 };
+#[cfg(feature = "smb")]
+use crate::locations::LocationSummary;
 
 pub use auth::{
-    add_smb_server, get_server_credentials, get_smb_servers, remove_smb_server, test_smb_connection,
-    SmbServer, SmbServerInfo,
+    add_smb_server, get_smb_servers, remove_smb_server, test_smb_connection,
+    SmbServerInfo,
 };
+#[cfg(feature = "smb")]
+pub use auth::{get_server_credentials, SmbServer};
 
 #[derive(Default)]
 pub struct SmbProvider;
@@ -455,12 +459,14 @@ impl SmbProvider {
     }
 
     #[cfg(not(feature = "smb"))]
+    #[allow(dead_code)]
     async fn list_shares(&self, _hostname: &str) -> Result<ProviderDirectoryEntries, String> {
         Err("SMB support not compiled. Build with --features smb".to_string())
     }
 }
 
 /// Parse an SMB path into (hostname, share, path)
+#[cfg(feature = "smb")]
 fn parse_smb_path(authority: &str, path: &str) -> Result<(String, String, String), String> {
     let hostname = authority.to_string();
 
