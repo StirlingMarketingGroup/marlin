@@ -458,6 +458,8 @@ export const useAppStore = create<AppState>((set, get) => ({
           filterText: '',
           showFilterInput: false,
         });
+        // Explicitly refresh the directory for Google Drive URLs
+        await get().refreshCurrentDirectory();
         void get().refreshGitStatus({ path: fullPath });
         return;
       } catch (error) {
