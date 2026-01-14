@@ -62,6 +62,12 @@ tauri-private-key*
 src-tauri/target/
 src-tauri/Cargo.lock
 
+# Google OAuth credentials (sensitive)
+src-tauri/google-credentials.json
+src-tauri/service-account.json
+**/client_secret*.json
+**/*-credentials.json
+
 # Rust specific
 **/*.rs.bk
 

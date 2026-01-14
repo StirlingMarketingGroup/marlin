@@ -360,7 +360,8 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   updateDirectoryPreferences: (path, preferences) =>
     set((state) => {
-      const norm = normalizePath(path);
+      // Don't normalize gdrive:// paths - they should be used as-is
+      const norm = path.startsWith('gdrive://') ? path : normalizePath(path);
       return {
         directoryPreferences: {
           ...state.directoryPreferences,
@@ -582,7 +583,12 @@ export const useAppStore = create<AppState>((set, get) => ({
       const listing = await invoke<DirectoryListingResponse>('read_directory', {
         path: currentPath,
       });
-      const normalized = normalizePath(listing.location.displayPath || listing.location.path);
+
+      // For gdrive:// paths, use the raw URI directly; otherwise normalize the display path
+      const isGdrive = listing.location.scheme === 'gdrive';
+      const normalized = isGdrive
+        ? listing.location.raw
+        : normalizePath(listing.location.displayPath || listing.location.path);
 
       set((state) => {
         const updatedHistory = [...state.pathHistory];
@@ -638,7 +644,12 @@ export const useAppStore = create<AppState>((set, get) => ({
         { path: currentPath, sessionId }
       );
 
-      const normalized = normalizePath(response.location.displayPath || response.location.path);
+      // For gdrive:// paths, use the raw URI directly; otherwise normalize the display path
+      const isGdrive = response.location.scheme === 'gdrive';
+      const normalized = isGdrive
+        ? response.location.raw
+        : normalizePath(response.location.displayPath || response.location.path);
+      const locationRaw = response.location.raw;
 
       set((state) => {
         const updatedHistory = [...state.pathHistory];
@@ -648,7 +659,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
         return {
           currentPath: normalized,
-          currentLocationRaw: response.location.raw,
+          currentLocationRaw: locationRaw,
           currentProviderCapabilities: response.capabilities,
           pathHistory: updatedHistory,
         };
