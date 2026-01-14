@@ -39,7 +39,7 @@ use crate::locations::gdrive::{
     add_google_account as add_gdrive_account, get_google_accounts as get_gdrive_accounts,
     remove_google_account as remove_gdrive_account, GoogleAccountInfo,
 };
-use crate::locations::gdrive::provider::{resolve_file_id_to_path, download_file_to_temp};
+use crate::locations::gdrive::provider::{resolve_file_id_to_path, download_file_to_temp, fetch_url_with_auth, extract_gdrive_zip, get_folder_id_by_path};
 use crate::locations::gdrive::url_parser::{is_google_drive_url, parse_google_drive_url};
 #[cfg(target_os = "macos")]
 use crate::macos_security;
@@ -4015,4 +4015,37 @@ pub async fn resolve_google_drive_url(url: String) -> Result<ResolveGoogleDriveU
 #[command]
 pub async fn download_gdrive_file(email: String, file_id: String, file_name: String) -> Result<String, String> {
     download_file_to_temp(&email, &file_id, &file_name).await
+}
+
+/// Fetch a URL with Google Drive authentication and return as data URL
+/// This is used for thumbnail URLs that require authentication
+#[command]
+pub async fn fetch_gdrive_url(email: String, url: String) -> Result<String, String> {
+    fetch_url_with_auth(&email, &url).await
+}
+
+/// Get the user's Downloads directory path
+#[command]
+pub fn get_downloads_dir() -> Result<String, String> {
+    dirs::download_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .ok_or_else(|| "Could not determine Downloads directory".to_string())
+}
+
+/// Extract a zip file from Google Drive and upload contents back to Google Drive
+/// Returns the folder ID of the created folder
+#[command]
+pub async fn extract_gdrive_archive(
+    email: String,
+    file_id: String,
+    file_name: String,
+    destination_folder_id: String,
+) -> Result<String, String> {
+    extract_gdrive_zip(&email, &file_id, &file_name, &destination_folder_id).await
+}
+
+/// Get the folder ID for a Google Drive path
+#[command]
+pub async fn get_gdrive_folder_id(email: String, path: String) -> Result<String, String> {
+    get_folder_id_by_path(&email, &path).await
 }

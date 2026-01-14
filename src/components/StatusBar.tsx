@@ -106,8 +106,11 @@ export default function StatusBar() {
   const [diskError, setDiskError] = useState<string | null>(null);
   const [diskLoading, setDiskLoading] = useState(false);
 
+  // Remote paths (like gdrive://) don't have local disk or git info
+  const isRemotePath = currentPath?.includes('://') ?? false;
+
   useEffect(() => {
-    if (!currentPath) {
+    if (!currentPath || isRemotePath) {
       setDiskUsage(null);
       setDiskError(null);
       setDiskLoading(false);
@@ -150,7 +153,7 @@ export default function StatusBar() {
     return () => {
       cancelled = true;
     };
-  }, [currentPath]);
+  }, [currentPath, isRemotePath]);
 
   const diskSummary = useMemo(() => {
     if (diskLoading && !diskUsage) {
@@ -349,20 +352,22 @@ export default function StatusBar() {
           value={loading && files.length === 0 ? '...' : formatBytes(stats.totalSize)}
           title={`${formatBytes(stats.totalSize)} (${numberFormatter.format(stats.totalSize)} B)`}
         />
-        {gitSegment}
-        <div className="flex items-baseline gap-1 text-xs text-app-muted">
-          <span>Disk</span>
-          {typeof diskSummary === 'string' ? (
-            <span className="text-app-text font-medium">{diskSummary}</span>
-          ) : (
-            <span className="text-app-text font-medium" title={diskSummary.tooltip}>
-              {diskSummary.display}
-              <span className="text-app-muted/70 ml-2">
-                {diskSummary.detail} | {formatPercent(diskSummary.percent)} free
+        {!isRemotePath && gitSegment}
+        {!isRemotePath && (
+          <div className="flex items-baseline gap-1 text-xs text-app-muted">
+            <span>Disk</span>
+            {typeof diskSummary === 'string' ? (
+              <span className="text-app-text font-medium">{diskSummary}</span>
+            ) : (
+              <span className="text-app-text font-medium" title={diskSummary.tooltip}>
+                {diskSummary.display}
+                <span className="text-app-muted/70 ml-2">
+                  {diskSummary.detail} | {formatPercent(diskSummary.percent)} free
+                </span>
               </span>
-            </span>
-          )}
-        </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

@@ -270,6 +270,7 @@ interface AppState {
   removeGoogleAccount: (email: string) => Promise<void>;
   // Rename UX
   renameTargetPath?: string;
+  renameLoading: boolean;
   setRenameTarget: (path?: string) => void;
   beginRenameSelected: () => void;
   renameFile: (newName: string) => Promise<void>;
@@ -617,6 +618,12 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   refreshCurrentDirectoryStreaming: async () => {
     const { currentPath, setLoading, setError } = get();
+
+    // For remote paths (gdrive://), use non-streaming refresh since streaming isn't supported
+    if (currentPath?.includes('://')) {
+      await get().refreshCurrentDirectory();
+      return;
+    }
 
     // Cancel any existing streaming session
     await get().cancelDirectoryStream();
@@ -1108,14 +1115,93 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
 
     activeArchiveExtractions.add(archivePath);
-    console.info(
-      '[extractArchive] start',
-      archivePath,
-      '->',
-      destinationDir,
-      'format:',
-      archiveFormat
-    );
+
+    // Check if this is a Google Drive file
+    const isGdriveFile = archivePath.startsWith('gdrive://');
+
+    if (isGdriveFile) {
+      // For Google Drive files: extract and upload back to Google Drive
+      if (!file.remote_id) {
+        console.error('Google Drive file missing remote_id');
+        activeArchiveExtractions.delete(archivePath);
+        return false;
+      }
+
+      // Extract email and path from gdrive://email/path
+      const pathWithoutScheme = archivePath.slice('gdrive://'.length);
+      const slashIndex = pathWithoutScheme.indexOf('/');
+      const email = slashIndex >= 0 ? pathWithoutScheme.slice(0, slashIndex) : pathWithoutScheme;
+      const gdrivePathPart = slashIndex >= 0 ? pathWithoutScheme.slice(slashIndex) : '/';
+
+      // Get parent folder path (remove file name from path)
+      const parentPath = gdrivePathPart.substring(0, gdrivePathPart.lastIndexOf('/')) || '/My Drive';
+
+      console.info('[extractArchive] Google Drive extraction', {
+        email,
+        fileId: file.remote_id,
+        fileName: file.name,
+        parentPath,
+      });
+
+      const progressTimer = window.setTimeout(() => {
+        void (async () => {
+          try {
+            await invoke('show_archive_progress_window', {
+              fileName: file.name,
+              destinationDir: destinationDir,
+              format: archiveFormat,
+            });
+          } catch (error) {
+            console.warn('Failed to show archive progress window:', error);
+          }
+        })();
+      }, 500);
+
+      try {
+        // Get the folder ID of the current directory
+        const destFolderId = await invoke<string>('get_gdrive_folder_id', {
+          email,
+          path: parentPath,
+        });
+
+        console.info('[extractArchive] destination folder ID:', destFolderId);
+
+        // Extract and upload back to Google Drive
+        await invoke<string>('extract_gdrive_archive', {
+          email,
+          fileId: file.remote_id,
+          fileName: file.name,
+          destinationFolderId: destFolderId,
+        });
+
+        console.info('[extractArchive] Google Drive extraction complete');
+
+        // Refresh the current directory to show the new folder
+        await state.refreshCurrentDirectory();
+        return true;
+      } catch (error) {
+        console.error('Failed to extract Google Drive archive:', error);
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        try {
+          await message(`Failed to extract ${file.name}: ${errorMsg}`, {
+            title: 'Archive Extraction',
+            kind: 'error',
+          });
+        } catch (dialogError) {
+          console.warn('Failed to show extraction error dialog:', dialogError);
+        }
+        return false;
+      } finally {
+        window.clearTimeout(progressTimer);
+        void invoke('hide_archive_progress_window').catch((error) => {
+          console.warn('Failed to hide archive progress window:', error);
+        });
+        activeArchiveExtractions.delete(archivePath);
+      }
+    }
+
+    // Local file extraction
+    console.info('[extractArchive] start', archivePath, '->', destinationDir, 'format:', archiveFormat);
 
     const progressTimer = window.setTimeout(() => {
       void showProgressWindow();
@@ -1126,7 +1212,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       try {
         await invoke('show_archive_progress_window', {
           fileName: file.name,
-          destinationDir,
+          destinationDir: destinationDir,
           format: archiveFormat,
         });
         progressWindowShown = true;
@@ -1141,8 +1227,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         usedSystemFallback?: boolean;
         format?: string;
       }>('extract_archive', {
-        archivePath,
-        destinationDir,
+        archivePath: archivePath,
+        destinationDir: destinationDir,
         formatHint: archiveFormat,
       });
 
@@ -1428,8 +1514,9 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   // Rename state
   renameTargetPath: undefined,
+  renameLoading: false,
   pendingRevealTarget: undefined,
-  setRenameTarget: (path?: string) => set({ renameTargetPath: path }),
+  setRenameTarget: (path?: string) => set({ renameTargetPath: path, renameLoading: false }),
   beginRenameSelected: () => {
     const { selectedFiles } = get();
     if (!selectedFiles || selectedFiles.length === 0) return;
@@ -1462,13 +1549,23 @@ export const useAppStore = create<AppState>((set, get) => ({
     const lastSep = Math.max(target.lastIndexOf('/'), target.lastIndexOf('\\'));
     const parent = lastSep >= 0 ? target.slice(0, lastSep) : state.currentPath;
     const toPath = parent ? `${parent}${sep}${trimmed}` : trimmed;
+
+    // Set loading state to show feedback during rename operation
+    set({ renameLoading: true });
+
     try {
       // Tauri command args expect camelCase keys
       await invoke('rename_file', { fromPath: target, toPath });
-      set({ renameTargetPath: undefined });
+      set({ renameTargetPath: undefined, renameLoading: false });
       state.setSelectedFiles([toPath]);
-      await state.refreshCurrentDirectoryStreaming();
+      // Use non-streaming refresh for remote paths (gdrive://)
+      if (state.currentPath?.includes('://')) {
+        await state.refreshCurrentDirectory();
+      } else {
+        await state.refreshCurrentDirectoryStreaming();
+      }
     } catch (err) {
+      set({ renameLoading: false });
       const msg = err instanceof Error ? err.message : String(err);
       try {
         await message(`Failed to rename:\n${msg}`, {
