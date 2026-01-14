@@ -440,10 +440,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
 
       try {
-        const [email, resolvedPath] = await invoke<[string, string, string]>(
+        const [email, resolvedPath, folderName] = await invoke<[string, string, string]>(
           'resolve_gdrive_folder_url',
           { folderId: gdriveId, accounts: accountEmails }
         );
+        console.info('[navigateTo] Resolved to folder:', folderName);
 
         const fullPath = `gdrive://${email}${resolvedPath}`;
         console.info('[navigateTo] Resolved Google Drive URL to:', fullPath);
