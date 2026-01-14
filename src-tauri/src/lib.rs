@@ -163,6 +163,11 @@ pub fn run() {
             commands::extract_gdrive_archive,
             commands::get_gdrive_folder_id,
             commands::resolve_gdrive_folder_url,
+            // SMB network share integration
+            commands::get_smb_servers,
+            commands::add_smb_server,
+            commands::remove_smb_server,
+            commands::test_smb_connection,
             plugins::drag_detector::enable_drag_detection,
             plugins::drag_detector::set_drop_zone,
             plugins::drag_detector::simulate_drop,
