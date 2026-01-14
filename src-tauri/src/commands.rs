@@ -4060,3 +4060,82 @@ pub async fn resolve_gdrive_folder_url(
 ) -> Result<(String, String, String), String> {
     resolve_folder_id(&accounts, &folder_id).await
 }
+
+// SMB Network Share Commands (macOS/Linux only)
+// ============================================================================
+
+/// Get all connected SMB servers
+#[cfg(not(target_os = "windows"))]
+#[command]
+pub fn get_smb_servers() -> Result<Vec<crate::locations::smb::SmbServerInfo>, String> {
+    crate::locations::smb::get_smb_servers()
+}
+
+/// Get all connected SMB servers (Windows stub - SMB uses native UNC paths)
+#[cfg(target_os = "windows")]
+#[command]
+pub fn get_smb_servers() -> Result<Vec<()>, String> {
+    Ok(vec![])
+}
+
+/// Add a new SMB server
+#[cfg(not(target_os = "windows"))]
+#[command]
+pub fn add_smb_server(
+    hostname: String,
+    username: String,
+    password: String,
+    domain: Option<String>,
+) -> Result<crate::locations::smb::SmbServerInfo, String> {
+    crate::locations::smb::add_smb_server(hostname, username, password, domain)
+}
+
+/// Add a new SMB server (Windows stub)
+#[cfg(target_os = "windows")]
+#[command]
+pub fn add_smb_server(
+    _hostname: String,
+    _username: String,
+    _password: String,
+    _domain: Option<String>,
+) -> Result<(), String> {
+    Err("SMB on Windows uses native UNC paths. Navigate to \\\\server\\share directly.".to_string())
+}
+
+/// Remove an SMB server
+#[cfg(not(target_os = "windows"))]
+#[command]
+pub fn remove_smb_server(hostname: String) -> Result<(), String> {
+    crate::locations::smb::remove_smb_server(&hostname)
+}
+
+/// Remove an SMB server (Windows stub)
+#[cfg(target_os = "windows")]
+#[command]
+pub fn remove_smb_server(_hostname: String) -> Result<(), String> {
+    Ok(())
+}
+
+/// Test connection to an SMB server
+#[cfg(not(target_os = "windows"))]
+#[command]
+pub fn test_smb_connection(
+    hostname: String,
+    username: String,
+    password: String,
+    domain: Option<String>,
+) -> Result<bool, String> {
+    crate::locations::smb::test_smb_connection(&hostname, &username, &password, domain.as_deref())
+}
+
+/// Test connection to an SMB server (Windows stub)
+#[cfg(target_os = "windows")]
+#[command]
+pub fn test_smb_connection(
+    _hostname: String,
+    _username: String,
+    _password: String,
+    _domain: Option<String>,
+) -> Result<bool, String> {
+    Ok(true)
+}
