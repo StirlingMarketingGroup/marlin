@@ -146,17 +146,25 @@ impl ThumbnailWorker {
                         .await;
 
                         let response = match result {
-                            Ok(Ok((data_url, has_transparency))) => {
+                            Ok(Ok(gen_result)) => {
                                 let generation_time_ms = start_time.elapsed().as_millis() as u64;
-                                // Store in cache
+                                log::info!(
+                                    "THUMBNAIL GENERATED: path={}, dimensions={:?}x{:?}",
+                                    request.path,
+                                    gen_result.image_width,
+                                    gen_result.image_height
+                                );
+                                // Store in cache (including dimensions)
                                 if let Err(e) = cache_clone
                                     .put(
                                         &request.path,
                                         request.size,
                                         request.accent.as_ref(),
-                                        data_url.clone(),
+                                        gen_result.data_url.clone(),
                                         generation_time_ms,
-                                        has_transparency,
+                                        gen_result.has_transparency,
+                                        gen_result.image_width,
+                                        gen_result.image_height,
                                     )
                                     .await
                                 {
@@ -164,10 +172,12 @@ impl ThumbnailWorker {
                                 }
                                 Ok(ThumbnailResponse {
                                     id: request.id.clone(),
-                                    data_url,
+                                    data_url: gen_result.data_url,
                                     cached: false,
                                     generation_time_ms,
-                                    has_transparency,
+                                    has_transparency: gen_result.has_transparency,
+                                    image_width: gen_result.image_width,
+                                    image_height: gen_result.image_height,
                                 })
                             }
                             Ok(Err(e)) => Err(format!("Thumbnail generation failed: {}", e)),

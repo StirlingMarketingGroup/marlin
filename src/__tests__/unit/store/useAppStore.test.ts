@@ -214,6 +214,124 @@ describe('useAppStore', () => {
     });
   });
 
+  describe('setFiles', () => {
+    it('should preserve existing image dimensions when new listing lacks them', () => {
+      useAppStore.setState({
+        files: [
+          {
+            name: 'photo.jpg',
+            path: 'smb://server/share/photo.jpg',
+            size: 10,
+            modified: new Date().toISOString(),
+            is_directory: false,
+            is_hidden: false,
+            is_symlink: false,
+            is_git_repo: false,
+            extension: 'jpg',
+            image_width: 1920,
+            image_height: 1080,
+          },
+        ],
+      });
+
+      useAppStore.getState().setFiles([
+        {
+          name: 'photo.jpg',
+          path: 'smb://server/share/photo.jpg',
+          size: 12,
+          modified: new Date().toISOString(),
+          is_directory: false,
+          is_hidden: false,
+          is_symlink: false,
+          is_git_repo: false,
+          extension: 'jpg',
+          // No image_width/height in the refreshed listing
+        },
+      ]);
+
+      const file = useAppStore
+        .getState()
+        .files.find((f) => f.path === 'smb://server/share/photo.jpg');
+      expect(file?.image_width).toBe(1920);
+      expect(file?.image_height).toBe(1080);
+    });
+  });
+
+  describe('refreshCurrentDirectory', () => {
+    it('should preserve existing image dimensions on refresh when backend does not return them', async () => {
+      const smbPath = 'smb://server/share/folder';
+      useAppStore.setState({
+        currentPath: smbPath,
+        currentLocationRaw: smbPath,
+        files: [
+          {
+            name: 'photo.jpg',
+            path: 'smb://server/share/folder/photo.jpg',
+            size: 10,
+            modified: new Date().toISOString(),
+            is_directory: false,
+            is_hidden: false,
+            is_symlink: false,
+            is_git_repo: false,
+            extension: 'jpg',
+            image_width: 1920,
+            image_height: 1080,
+          },
+        ],
+      });
+
+      mockInvoke.mockImplementationOnce((cmd) => {
+        if (cmd === 'read_directory') {
+          return Promise.resolve({
+            entries: [
+              {
+                name: 'photo.jpg',
+                path: 'smb://server/share/folder/photo.jpg',
+                size: 12,
+                modified: new Date().toISOString(),
+                is_directory: false,
+                is_hidden: false,
+                is_symlink: false,
+                is_git_repo: false,
+                extension: 'jpg',
+                // No image_width/height
+              },
+            ],
+            location: {
+              raw: smbPath,
+              scheme: 'smb',
+              authority: 'server',
+              path: '/share/folder',
+              displayPath: smbPath,
+            },
+            capabilities: {
+              scheme: 'smb',
+              displayName: 'SMB',
+              canRead: true,
+              canWrite: true,
+              canCreateDirectories: true,
+              canDelete: true,
+              canRename: true,
+              canCopy: true,
+              canMove: true,
+              supportsWatching: false,
+              requiresExplicitRefresh: false,
+            },
+          });
+        }
+        return Promise.resolve(undefined);
+      });
+
+      await useAppStore.getState().refreshCurrentDirectory();
+
+      const file = useAppStore
+        .getState()
+        .files.find((f) => f.path === 'smb://server/share/folder/photo.jpg');
+      expect(file?.image_width).toBe(1920);
+      expect(file?.image_height).toBe(1080);
+    });
+  });
+
   describe('navigation', () => {
     it('should navigate to new path and update history', () => {
       const store = useAppStore.getState();

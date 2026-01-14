@@ -1,4 +1,4 @@
-use super::super::ThumbnailRequest;
+use super::super::{ThumbnailGenerationResult, ThumbnailRequest};
 use crate::thumbnails::generators::ThumbnailGenerator;
 use image::{DynamicImage, RgbaImage};
 use mupdf::Document;
@@ -7,7 +7,7 @@ use std::path::Path;
 pub struct PdfGenerator;
 
 impl PdfGenerator {
-    pub fn generate(request: &ThumbnailRequest) -> Result<(String, bool), String> {
+    pub fn generate(request: &ThumbnailRequest) -> Result<ThumbnailGenerationResult, String> {
         let path = Path::new(&request.path);
 
         if !path.exists() {
@@ -18,7 +18,7 @@ impl PdfGenerator {
         Self::generate_with_mupdf(request)
     }
 
-    fn generate_with_mupdf(request: &ThumbnailRequest) -> Result<(String, bool), String> {
+    fn generate_with_mupdf(request: &ThumbnailRequest) -> Result<ThumbnailGenerationResult, String> {
         // Open the PDF document with MuPDF
         let doc =
             Document::open(&request.path).map_err(|e| format!("Failed to open PDF: {:?}", e))?;
@@ -117,6 +117,14 @@ impl PdfGenerator {
         // Encode to data URL
         let data_url =
             ThumbnailGenerator::encode_to_data_url(&final_image, request.format, request.quality)?;
-        Ok((data_url, has_transparency))
+
+        // PDF dimensions are in points, convert to approximate pixels at 72 DPI
+        // These are the original page dimensions, not the rendered thumbnail size
+        Ok(ThumbnailGenerationResult {
+            data_url,
+            has_transparency,
+            image_width: Some(page_width.round() as u32),
+            image_height: Some(page_height.round() as u32),
+        })
     }
 }

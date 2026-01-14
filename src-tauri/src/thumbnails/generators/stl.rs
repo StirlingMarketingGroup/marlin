@@ -5,7 +5,7 @@ use std::path::Path;
 use base64::Engine as _;
 use image::{Rgba, RgbaImage};
 
-use super::super::ThumbnailRequest;
+use super::super::{ThumbnailGenerationResult, ThumbnailRequest};
 
 #[derive(Clone, Copy, Debug, Default)]
 struct Vec3 {
@@ -57,7 +57,7 @@ struct Tri {
 pub struct StlGenerator;
 
 impl StlGenerator {
-    pub fn generate(request: &ThumbnailRequest) -> Result<(String, bool), String> {
+    pub fn generate(request: &ThumbnailRequest) -> Result<ThumbnailGenerationResult, String> {
         let path = Path::new(&request.path);
         if !path.exists() {
             return Err("STL file does not exist".into());
@@ -260,7 +260,13 @@ impl StlGenerator {
             base64::engine::general_purpose::STANDARD.encode(out)
         );
         // STL renders typically have transparent backgrounds
-        Ok((data_url, true))
+        // STL files don't have inherent dimensions like images, so we return None
+        Ok(ThumbnailGenerationResult {
+            data_url,
+            has_transparency: true,
+            image_width: None,
+            image_height: None,
+        })
     }
 }
 

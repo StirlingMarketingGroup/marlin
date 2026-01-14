@@ -1,12 +1,20 @@
 mod auth;
+#[cfg(test)]
+mod smb_test;
 
 use async_trait::async_trait;
 use crate::fs_utils::FileItem;
+#[cfg(feature = "smb")]
+use crate::fs_utils::is_hidden_file;
 use crate::locations::{
     Location, LocationCapabilities, LocationProvider, ProviderDirectoryEntries,
 };
 #[cfg(feature = "smb")]
 use crate::locations::LocationSummary;
+#[cfg(feature = "smb")]
+use std::sync::Mutex;
+#[cfg(feature = "smb")]
+use once_cell::sync::Lazy;
 
 pub use auth::{
     add_smb_server, get_smb_servers, remove_smb_server, test_smb_connection,
@@ -14,6 +22,11 @@ pub use auth::{
 };
 #[cfg(feature = "smb")]
 pub use auth::get_server_credentials;
+
+// Global mutex to serialize ALL SMB operations
+// libsmbclient has global state and is NOT thread-safe, even across separate connections
+#[cfg(feature = "smb")]
+pub static SMB_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 #[derive(Default)]
 pub struct SmbProvider;
@@ -33,120 +46,126 @@ impl LocationProvider for SmbProvider {
         &self,
         location: &Location,
     ) -> Result<ProviderDirectoryEntries, String> {
-        use chrono::{DateTime, Utc};
-        use pavao::{SmbClient, SmbCredentials, SmbOptions};
-
         let authority = location
             .authority()
-            .ok_or_else(|| "SMB path requires server: smb://server/share/path".to_string())?;
+            .ok_or_else(|| "SMB path requires server: smb://server/share/path".to_string())?
+            .to_string();
 
-        let path = location.path();
+        let path = location.path().to_string();
 
         // If path is just "/" or empty, enumerate shares
         if path == "/" || path.is_empty() {
-            return self.list_shares(authority).await;
+            return self.list_shares(&authority).await;
         }
 
-        let (hostname, share, dir_path) = parse_smb_path(authority, path)?;
+        let (hostname, share, dir_path) = parse_smb_path(&authority, &path)?;
 
         // Get credentials
         let creds = get_server_credentials(&hostname)?;
 
-        // Build connection
-        let smb_url = format!("smb://{}", hostname);
-        let share_path = if share.starts_with('/') {
-            share.clone()
-        } else {
-            format!("/{}", share)
-        };
+        // Clone values for the blocking closure
+        let hostname_clone = hostname.clone();
+        let share_clone = share.clone();
+        let dir_path_clone = dir_path.clone();
 
-        let mut credentials = SmbCredentials::default()
-            .server(&smb_url)
-            .share(&share_path)
-            .username(&creds.username)
-            .password(&creds.password);
+        // Run SMB operations on a blocking thread with mutex (libsmbclient is not thread-safe)
+        let items = tokio::task::spawn_blocking(move || {
+            use chrono::{DateTime, Utc};
+            use pavao::{SmbClient, SmbCredentials, SmbDirentType, SmbOptions};
 
-        if let Some(domain) = &creds.domain {
-            credentials = credentials.workgroup(domain);
-        }
+            // Acquire global SMB mutex - libsmbclient has global state
+            let _guard = SMB_MUTEX.lock().map_err(|e| format!("SMB mutex poisoned: {}", e))?;
 
-        let client = SmbClient::new(credentials, SmbOptions::default())
-            .map_err(|e| format!("Failed to connect to SMB server: {}", e))?;
+            // Build connection
+            let smb_url = format!("smb://{}", hostname_clone);
+            let share_path = if share_clone.starts_with('/') {
+                share_clone.clone()
+            } else {
+                format!("/{}", share_clone)
+            };
 
-        // List directory
-        let entries = client
-            .list_dir(&dir_path)
-            .map_err(|e| format!("Failed to list directory: {}", e))?;
+            let mut credentials = SmbCredentials::default()
+                .server(&smb_url)
+                .share(&share_path)
+                .username(&creds.username)
+                .password(&creds.password);
 
-        let mut items: Vec<FileItem> = Vec::new();
-
-        for entry in entries {
-            let name = entry.name();
-
-            // Skip . and ..
-            if name == "." || name == ".." {
-                continue;
+            if let Some(domain) = &creds.domain {
+                credentials = credentials.workgroup(domain);
             }
 
-            let full_path = if dir_path == "/" {
-                format!("smb://{}/{}/{}", hostname, share, name)
-            } else {
-                format!("smb://{}/{}{}/{}", hostname, share, dir_path, name)
-            };
+            let client = SmbClient::new(credentials, SmbOptions::default())
+                .map_err(|e| format!("Failed to connect to SMB server: {}", e))?;
 
-            // Get file stats if available
-            let entry_path = if dir_path == "/" {
-                format!("/{}", name)
-            } else {
-                format!("{}/{}", dir_path, name)
-            };
+            // Use list_dirplus to get file metadata (size, mtime) inline with listing
+            // This uses SMB2's enhanced directory listing - no separate stat() calls needed!
+            // Critical for performance with large directories (90k+ files)
+            let entries = client
+                .list_dirplus(&dir_path_clone)
+                .map_err(|e| format!("Failed to list directory: {}", e))?;
 
-            let (is_directory, size, modified) = match client.stat(&entry_path) {
-                Ok(stat) => {
-                    let is_dir = stat.mode.is_dir();
-                    let file_size = stat.size;
-                    let mtime: DateTime<Utc> = stat.modified.into();
-                    (is_dir, file_size, mtime)
+            let mut items: Vec<FileItem> = Vec::new();
+
+            for entry in entries {
+                let name = entry.name();
+
+                // Skip . and ..
+                if name == "." || name == ".." {
+                    continue;
                 }
-                Err(_) => {
-                    // Fallback: try to detect directory by listing it
-                    let is_dir = client.list_dir(&entry_path).is_ok();
-                    (is_dir, 0, Utc::now())
-                }
-            };
 
-            items.push(FileItem {
-                name: name.to_string(),
-                path: full_path,
-                is_directory,
-                is_hidden: name.starts_with('.'),
-                size,
-                modified,
-                extension: if is_directory {
-                    None
+                let full_path = if dir_path_clone == "/" {
+                    format!("smb://{}/{}/{}", hostname_clone, share_clone, name)
                 } else {
-                    std::path::Path::new(name)
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .map(|e| e.to_lowercase())
-                },
-                is_symlink: false,
-                is_git_repo: false,
-                child_count: None,
-                image_width: None,
-                image_height: None,
-                remote_id: None,
-                thumbnail_url: None,
-                download_url: None,
-            });
-        }
+                    format!("smb://{}/{}{}/{}", hostname_clone, share_clone, dir_path_clone, name)
+                };
 
-        // Sort: directories first, then by name
-        items.sort_by(|a, b| match (a.is_directory, b.is_directory) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-        });
+                // Use entry type from directory listing - no stat() calls needed!
+                let entry_type = entry.get_type();
+                let is_directory = matches!(entry_type, SmbDirentType::Dir);
+                // Note: list_dirplus doesn't distinguish symlinks via attrs, default to false
+                let is_symlink = false;
+
+                // Convert SystemTime to DateTime<Utc>
+                let modified: DateTime<Utc> = entry.mtime.into();
+
+                items.push(FileItem {
+                    name: name.to_string(),
+                    path: full_path,
+                    is_directory,
+                    is_hidden: is_hidden_file(name),
+                    size: entry.size, // Size from list_dirplus - no stat() needed!
+                    modified,         // Modified time from list_dirplus - no stat() needed!
+                    extension: if is_directory {
+                        None
+                    } else {
+                        std::path::Path::new(name)
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .map(|e| e.to_lowercase())
+                    },
+                    is_symlink,
+                    is_git_repo: false,
+                    child_count: None,
+                    image_width: None,
+                    image_height: None,
+                    remote_id: None,
+                    thumbnail_url: None,
+                    download_url: None,
+                });
+            }
+
+            // Sort: directories first, then by name
+            items.sort_by(|a, b| match (a.is_directory, b.is_directory) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+            });
+
+            Ok::<Vec<FileItem>, String>(items)
+        })
+        .await
+        .map_err(|e| format!("SMB task failed: {}", e))??;
 
         let display_path = format!("smb://{}/{}{}", hostname, share, dir_path);
 
@@ -218,7 +237,7 @@ impl LocationProvider for SmbProvider {
             name: name.clone(),
             path: location.raw().to_string(),
             is_directory,
-            is_hidden: name.starts_with('.'),
+            is_hidden: is_hidden_file(&name),
             size: stat.size,
             modified,
             extension: if is_directory {
@@ -402,36 +421,56 @@ impl SmbProvider {
     #[cfg(feature = "smb")]
     async fn list_shares(&self, hostname: &str) -> Result<ProviderDirectoryEntries, String> {
         use chrono::Utc;
-        use pavao::{SmbClient, SmbCredentials, SmbOptions};
+        use std::process::Command;
 
         let creds = get_server_credentials(hostname)?;
 
-        let smb_url = format!("smb://{}", hostname);
-
-        let mut credentials = SmbCredentials::default()
-            .server(&smb_url)
-            .share("/")
-            .username(&creds.username)
-            .password(&creds.password);
+        // Use smbclient -L to enumerate shares (pavao doesn't support this well)
+        let mut cmd = Command::new("smbclient");
+        cmd.arg("-L")
+            .arg(format!("//{}", hostname))
+            .arg("-U")
+            .arg(format!("{}%{}", creds.username, creds.password))
+            .arg("-g"); // Machine-readable output
 
         if let Some(domain) = &creds.domain {
-            credentials = credentials.workgroup(domain);
+            cmd.arg("-W").arg(domain);
         }
 
-        let client = SmbClient::new(credentials, SmbOptions::default())
-            .map_err(|e| format!("Failed to connect: {}", e))?;
+        let output = cmd
+            .output()
+            .map_err(|e| format!("Failed to run smbclient: {}. Make sure samba is installed (brew install samba)", e))?;
 
-        // List shares (directories at the root)
-        let entries = client
-            .list_dir("/")
-            .map_err(|e| format!("Failed to enumerate shares: {}", e))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            // Check for common errors
+            if stderr.contains("NT_STATUS_LOGON_FAILURE") {
+                return Err(format!("Authentication failed. Try using your full email as username (e.g., user@domain.com)"));
+            }
+            return Err(format!("Failed to list shares: {}", stderr.trim()));
+        }
 
-        let items: Vec<FileItem> = entries
-            .into_iter()
-            .filter_map(|entry| {
-                let name = entry.name();
-                // Skip hidden shares (ending in $) and special entries
-                if name == "." || name == ".." || name.ends_with('$') {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        // Parse the -g (grep-friendly) output format: type|name|comment
+        let items: Vec<FileItem> = stdout
+            .lines()
+            .filter_map(|line| {
+                let parts: Vec<&str> = line.split('|').collect();
+                if parts.len() < 2 {
+                    return None;
+                }
+
+                let share_type = parts[0];
+                let name = parts[1];
+
+                // Only include Disk shares, skip IPC$, ADMIN$, etc.
+                if share_type != "Disk" {
+                    return None;
+                }
+
+                // Skip hidden shares (ending in $)
+                if name.ends_with('$') {
                     return None;
                 }
 
@@ -545,7 +584,7 @@ pub fn strip_url_credentials(url: &str) -> String {
     url.to_string()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "smb"))]
 mod tests {
     use super::*;
 

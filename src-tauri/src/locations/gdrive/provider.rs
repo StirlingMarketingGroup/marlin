@@ -259,6 +259,18 @@ impl GoogleDriveProvider {
         let thumbnail_url = file.thumbnail_link.clone();
         let download_url = file.web_content_link.clone();
 
+        // Extract image dimensions from imageMediaMetadata if available
+        let (image_width, image_height) = file
+            .image_media_metadata
+            .as_ref()
+            .map(|meta| {
+                (
+                    meta.width.map(|w| w as u32),
+                    meta.height.map(|h| h as u32),
+                )
+            })
+            .unwrap_or((None, None));
+
         FileItem {
             name,
             path,
@@ -270,8 +282,8 @@ impl GoogleDriveProvider {
             is_git_repo: false,
             extension,
             child_count: None,
-            image_width: None,
-            image_height: None,
+            image_width,
+            image_height,
             remote_id: if file_id.is_empty() { None } else { Some(file_id) },
             thumbnail_url,
             download_url,
@@ -287,7 +299,7 @@ impl GoogleDriveProvider {
             .q("'root' in parents and trashed = false")
             .page_size(1000)
             .add_scope(google_drive3::api::Scope::Full)
-            .param("fields", "files(id,name,mimeType,size,modifiedTime,parents,thumbnailLink,webContentLink)")
+            .param("fields", "files(id,name,mimeType,size,modifiedTime,parents,thumbnailLink,webContentLink,imageMediaMetadata(width,height))")
             .doit()
             .await
             .map_err(|e| {
@@ -324,7 +336,7 @@ impl GoogleDriveProvider {
             .supports_all_drives(true)  // Required for shared drives
             .include_items_from_all_drives(true)  // Include shared drive items
             .add_scope(google_drive3::api::Scope::Full)
-            .param("fields", "files(id,name,mimeType,size,modifiedTime,parents,thumbnailLink,webContentLink)")
+            .param("fields", "files(id,name,mimeType,size,modifiedTime,parents,thumbnailLink,webContentLink,imageMediaMetadata(width,height))")
             .doit()
             .await
             .map_err(|e| format!("Failed to list folder: {}", e))?;
@@ -346,7 +358,7 @@ impl GoogleDriveProvider {
             .q("sharedWithMe = true and trashed = false")
             .page_size(1000)
             .add_scope(google_drive3::api::Scope::Full)
-            .param("fields", "files(id,name,mimeType,size,modifiedTime,parents,thumbnailLink,webContentLink)")
+            .param("fields", "files(id,name,mimeType,size,modifiedTime,parents,thumbnailLink,webContentLink,imageMediaMetadata(width,height))")
             .doit()
             .await
             .map_err(|e| format!("Failed to list shared files: {}", e))?;
@@ -368,7 +380,7 @@ impl GoogleDriveProvider {
             .q("starred = true and trashed = false")
             .page_size(1000)
             .add_scope(google_drive3::api::Scope::Full)
-            .param("fields", "files(id,name,mimeType,size,modifiedTime,parents,thumbnailLink,webContentLink)")
+            .param("fields", "files(id,name,mimeType,size,modifiedTime,parents,thumbnailLink,webContentLink,imageMediaMetadata(width,height))")
             .doit()
             .await
             .map_err(|e| format!("Failed to list starred files: {}", e))?;
@@ -391,7 +403,7 @@ impl GoogleDriveProvider {
             .order_by("viewedByMeTime desc")
             .page_size(50)
             .add_scope(google_drive3::api::Scope::Full)
-            .param("fields", "files(id,name,mimeType,size,modifiedTime,parents,thumbnailLink,webContentLink)")
+            .param("fields", "files(id,name,mimeType,size,modifiedTime,parents,thumbnailLink,webContentLink,imageMediaMetadata(width,height))")
             .doit()
             .await
             .map_err(|e| format!("Failed to list recent files: {}", e))?;
@@ -488,7 +500,7 @@ impl GoogleDriveProvider {
             .supports_all_drives(true)
             .page_size(1000)
             .add_scope(google_drive3::api::Scope::Full)
-            .param("fields", "files(id,name,mimeType,size,modifiedTime,parents,thumbnailLink,webContentLink)")
+            .param("fields", "files(id,name,mimeType,size,modifiedTime,parents,thumbnailLink,webContentLink,imageMediaMetadata(width,height))")
             .doit()
             .await
             .map_err(|e| format!("Failed to list shared drive contents: {}", e))?;

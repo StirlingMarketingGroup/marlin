@@ -13,6 +13,7 @@
 ## Task 1: Add pavao dependency
 
 **Files:**
+
 - Modify: `src-tauri/Cargo.toml`
 
 **Step 1: Add pavao to dependencies**
@@ -42,6 +43,7 @@ git commit -m "feat(smb): add pavao dependency for SMB support"
 ## Task 2: Create SMB module structure
 
 **Files:**
+
 - Create: `src-tauri/src/locations/smb/mod.rs`
 - Create: `src-tauri/src/locations/smb/auth.rs`
 - Modify: `src-tauri/src/locations/mod.rs`
@@ -353,6 +355,7 @@ git commit -m "feat(smb): add SMB provider module structure"
 ## Task 3: Add Tauri commands for SMB server management
 
 **Files:**
+
 - Modify: `src-tauri/src/commands.rs`
 - Modify: `src-tauri/src/lib.rs`
 
@@ -460,6 +463,7 @@ git commit -m "feat(smb): add Tauri commands for SMB server management"
 ## Task 4: Implement SMB connection and directory listing with pavao
 
 **Files:**
+
 - Modify: `src-tauri/src/locations/smb/mod.rs`
 - Create: `src-tauri/src/locations/smb/connection.rs`
 
@@ -801,6 +805,7 @@ git commit -m "feat(smb): implement directory listing and file operations"
 ## Task 5: Add frontend TypeScript types and utilities
 
 **Files:**
+
 - Create: `src/utils/smbPath.ts`
 - Modify: `src/types/index.ts`
 
@@ -875,6 +880,7 @@ git commit -m "feat(smb): add frontend TypeScript types and utilities"
 ## Task 6: Add SMB server management to Zustand store
 
 **Files:**
+
 - Modify: `src/store/useAppStore.ts`
 
 **Step 1: Add SMB state and actions to store**
@@ -891,7 +897,8 @@ Add to the store actions:
 ```typescript
 // SMB actions
 loadSmbServers: () => Promise<void>;
-addSmbServer: (hostname: string, username: string, password: string, domain?: string) => Promise<void>;
+addSmbServer: (hostname: string, username: string, password: string, domain?: string) =>
+  Promise<void>;
 removeSmbServer: (hostname: string) => Promise<void>;
 ```
 
@@ -964,6 +971,7 @@ git commit -m "feat(smb): add SMB server management to Zustand store"
 ## Task 7: Add SMB section to sidebar
 
 **Files:**
+
 - Modify: `src/components/Sidebar.tsx`
 
 **Step 1: Add SMB servers section to sidebar**
@@ -971,24 +979,26 @@ git commit -m "feat(smb): add SMB server management to Zustand store"
 Find where Google Drive accounts are rendered and add a similar section for SMB:
 
 ```tsx
-{/* SMB Servers */}
-{smbServers.length > 0 && (
-  <div className="mb-4">
-    <div className="text-xs font-medium text-gray-500 dark:text-gray-400 px-2 mb-1">
-      Network
+{
+  /* SMB Servers */
+}
+{
+  smbServers.length > 0 && (
+    <div className="mb-4">
+      <div className="text-xs font-medium text-gray-500 dark:text-gray-400 px-2 mb-1">Network</div>
+      {smbServers.map((server) => (
+        <SidebarItem
+          key={server.hostname}
+          icon={<HardDrives size={16} weight="fill" />}
+          label={server.hostname}
+          path={`smb://${server.hostname}`}
+          isActive={currentPath.startsWith(`smb://${server.hostname}`)}
+          onNavigate={() => handleNavigate(`smb://${server.hostname}`)}
+        />
+      ))}
     </div>
-    {smbServers.map((server) => (
-      <SidebarItem
-        key={server.hostname}
-        icon={<HardDrives size={16} weight="fill" />}
-        label={server.hostname}
-        path={`smb://${server.hostname}`}
-        isActive={currentPath.startsWith(`smb://${server.hostname}`)}
-        onNavigate={() => handleNavigate(`smb://${server.hostname}`)}
-      />
-    ))}
-  </div>
-)}
+  );
+}
 ```
 
 **Step 2: Add SMB state selector**
@@ -1025,6 +1035,7 @@ git commit -m "feat(smb): add SMB servers section to sidebar"
 ## Task 8: Add "Add SMB Server" dialog
 
 **Files:**
+
 - Create: `src/components/AddSmbServerDialog.tsx`
 - Modify: `src/components/Sidebar.tsx`
 
@@ -1148,9 +1159,7 @@ export function AddSmbServerDialog({ isOpen, onClose }: AddSmbServerDialogProps)
             />
           </div>
 
-          {error && (
-            <div className="text-red-500 text-sm">{error}</div>
-          )}
+          {error && <div className="text-red-500 text-sm">{error}</div>}
 
           <div className="flex justify-end gap-2 pt-2">
             <button
@@ -1221,6 +1230,7 @@ git commit -m "feat(smb): add dialog for connecting to SMB servers"
 ## Task 9: Handle share enumeration at server root
 
 **Files:**
+
 - Modify: `src-tauri/src/locations/smb/mod.rs`
 
 **Step 1: Add share enumeration when path is just the server**
@@ -1320,6 +1330,7 @@ git commit -m "feat(smb): add share enumeration at server root"
 ## Task 10: Add URL credential parsing support
 
 **Files:**
+
 - Modify: `src-tauri/src/locations/smb/mod.rs`
 - Modify: `src-tauri/src/locations/mod.rs`
 
@@ -1463,5 +1474,6 @@ This implementation plan adds SMB network share support through:
    - Windows: Native UNC paths via `FileSystemProvider`
 
 **Dependencies:**
+
 - `pavao = "0.2"` (macOS/Linux only)
 - Requires `brew install samba` on macOS or `apt install libsmbclient-dev` on Linux

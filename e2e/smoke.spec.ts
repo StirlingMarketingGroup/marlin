@@ -24,9 +24,12 @@ test.describe('Smoke Tests', () => {
     await pathInput.fill(MOCK_DOWNLOADS_DIR);
     await pathInput.press('Enter');
 
-    // Verify files are displayed (mock returns sample.pdf and image.png)
+    // Verify files are displayed (mock returns sample.pdf, image.png, photo.jpg)
     // This also confirms navigation completed successfully
-    await expect(page.getByText('sample.pdf')).toBeVisible({ timeout: 5000 });
+    // Use file-item data-name attribute since text may be combined with size in grid view
+    await expect(page.locator('[data-testid="file-item"][data-name="sample.pdf"]')).toBeVisible({
+      timeout: 5000,
+    });
 
     // Verify the path input shows Downloads path
     await expect(pathInput).toHaveValue(MOCK_DOWNLOADS_DIR);

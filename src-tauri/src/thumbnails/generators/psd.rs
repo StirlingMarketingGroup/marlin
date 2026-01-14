@@ -1,10 +1,10 @@
-use super::super::ThumbnailRequest;
+use super::super::{ThumbnailGenerationResult, ThumbnailRequest};
 use std::path::Path;
 
 pub struct PsdGenerator;
 
 impl PsdGenerator {
-    pub fn generate(request: &ThumbnailRequest) -> Result<(String, bool), String> {
+    pub fn generate(request: &ThumbnailRequest) -> Result<ThumbnailGenerationResult, String> {
         let path = Path::new(&request.path);
 
         if !path.exists() {

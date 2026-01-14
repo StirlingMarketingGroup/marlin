@@ -145,7 +145,7 @@ pub fn get_server_credentials(hostname: &str) -> Result<SmbServer, String> {
         .iter()
         .find(|s| s.hostname.eq_ignore_ascii_case(hostname))
         .cloned()
-        .ok_or_else(|| format!("No credentials stored for server: {}", hostname))
+        .ok_or_else(|| format!("[SMB_NO_CREDENTIALS] No credentials stored for server: {}", hostname))
 }
 
 /// Add a new SMB server

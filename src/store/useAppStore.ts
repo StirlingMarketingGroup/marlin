@@ -226,6 +226,8 @@ interface AppState {
 
   // SMB network shares
   smbServers: SmbServerInfo[];
+  // Pending credential request (when navigating to an SMB path without stored credentials)
+  pendingSmbCredentialRequest: { hostname: string; targetPath: string } | null;
 
   // UI State
   sidebarWidth: number;
@@ -274,6 +276,7 @@ interface AppState {
   refreshCurrentDirectoryStreaming: () => Promise<void>;
   appendStreamingBatch: (batch: DirectoryBatch) => void;
   applyMetadataUpdates: (batch: MetadataBatch) => void;
+  updateFileDimensions: (path: string, width: number, height: number) => void;
   cancelDirectoryStream: () => Promise<void>;
   openFile: (file: FileItem) => Promise<void>;
   extractArchive: (file: FileItem) => Promise<boolean>;
@@ -301,6 +304,9 @@ interface AppState {
     domain?: string
   ) => Promise<SmbServerInfo>;
   removeSmbServer: (hostname: string) => Promise<void>;
+  setPendingSmbCredentialRequest: (
+    request: { hostname: string; targetPath: string } | null
+  ) => void;
   // Rename UX
   renameTargetPath?: string;
   renameLoading: boolean;
@@ -351,6 +357,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   pinnedDirectories: [],
   googleAccounts: [],
   smbServers: [],
+  pendingSmbCredentialRequest: null,
 
   sidebarWidth: 240,
   showSidebar: true,
@@ -368,7 +375,26 @@ export const useAppStore = create<AppState>((set, get) => ({
     void get().refreshGitStatus({ path: norm });
   },
   setHomeDir: (path) => set({ homeDir: path }),
-  setFiles: (files) => set({ files }),
+  setFiles: (files) =>
+    set((state) => {
+      const prevByPath = new Map(state.files.map((file) => [file.path, file]));
+      const merged = files.map((file) => {
+        const prev = prevByPath.get(file.path);
+        if (!prev) return file;
+        return {
+          ...file,
+          child_count: file.child_count ?? prev.child_count,
+          image_width: file.image_width ?? prev.image_width,
+          image_height: file.image_height ?? prev.image_height,
+          extension: file.extension ?? prev.extension,
+          remote_id: file.remote_id ?? prev.remote_id,
+          thumbnail_url: file.thumbnail_url ?? prev.thumbnail_url,
+          download_url: file.download_url ?? prev.download_url,
+        };
+      });
+
+      return { files: merged };
+    }),
   setLoading: (loading) => set({ loading }),
   setError: (error) => set({ error }),
   setSelectedFiles: (files) => {
@@ -519,6 +545,12 @@ export const useAppStore = create<AppState>((set, get) => ({
       filterText: '',
       showFilterInput: false,
     });
+
+    // For URI paths (smb://, gdrive://, etc.), explicitly refresh the directory
+    if (isUri) {
+      await get().refreshCurrentDirectory();
+    }
+
     void get().refreshGitStatus({ path: norm });
   },
 
@@ -666,6 +698,22 @@ export const useAppStore = create<AppState>((set, get) => ({
         ? listing.location.raw
         : normalizePath(listing.location.displayPath || listing.location.path);
 
+      const prevByPath = new Map(get().files.map((file) => [file.path, file]));
+      const mergedEntries = listing.entries.map((file) => {
+        const prev = prevByPath.get(file.path);
+        if (!prev) return file;
+        return {
+          ...file,
+          child_count: file.child_count ?? prev.child_count,
+          image_width: file.image_width ?? prev.image_width,
+          image_height: file.image_height ?? prev.image_height,
+          extension: file.extension ?? prev.extension,
+          remote_id: file.remote_id ?? prev.remote_id,
+          thumbnail_url: file.thumbnail_url ?? prev.thumbnail_url,
+          download_url: file.download_url ?? prev.download_url,
+        };
+      });
+
       set((state) => {
         const updatedHistory = [...state.pathHistory];
         if (state.historyIndex >= 0 && state.historyIndex < updatedHistory.length) {
@@ -673,7 +721,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         }
 
         return {
-          files: listing.entries,
+          files: mergedEntries,
           currentPath: normalized,
           currentLocationRaw: listing.location.raw,
           currentProviderCapabilities: listing.capabilities,
@@ -685,6 +733,22 @@ export const useAppStore = create<AppState>((set, get) => ({
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error('❌ refreshCurrentDirectory failed:', msg);
+
+      // Check if this is an SMB "no credentials" error
+      if (msg.includes('[SMB_NO_CREDENTIALS]')) {
+        // Extract hostname from the current path (smb://hostname/...)
+        const smbMatch = currentPath.match(/^smb:\/\/([^/]+)/);
+        if (smbMatch) {
+          const hostname = smbMatch[1];
+          // Set pending credential request to trigger the dialog
+          set({
+            pendingSmbCredentialRequest: { hostname, targetPath: currentPath },
+            error: undefined, // Don't show error, we'll show the dialog instead
+          });
+          return;
+        }
+      }
+
       setError(`Failed to refresh: ${msg}`);
     } finally {
       setLoading(false);
@@ -801,12 +865,32 @@ export const useAppStore = create<AppState>((set, get) => ({
           is_directory: update.isDirectory,
           is_symlink: update.isSymlink,
           is_git_repo: update.isGitRepo,
-          child_count: update.childCount ?? undefined,
-          image_width: update.imageWidth ?? undefined,
-          image_height: update.imageHeight ?? undefined,
+          child_count: update.childCount != null ? update.childCount : file.child_count,
+          image_width: update.imageWidth != null ? update.imageWidth : file.image_width,
+          image_height: update.imageHeight != null ? update.imageHeight : file.image_height,
         };
       });
 
+      return { files: updatedFiles };
+    });
+  },
+
+  updateFileDimensions: (path: string, width: number, height: number) => {
+    set((state) => {
+      const idx = state.files.findIndex((f) => f.path === path);
+      if (idx === -1) {
+        return {}; // File not found, no update needed
+      }
+      // Only update if dimensions are not already set
+      if (state.files[idx].image_width != null && state.files[idx].image_height != null) {
+        return {}; // Already has dimensions
+      }
+      const updatedFiles = [...state.files];
+      updatedFiles[idx] = {
+        ...updatedFiles[idx],
+        image_width: width,
+        image_height: height,
+      };
       return { files: updatedFiles };
     });
   },
@@ -1606,12 +1690,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
-  addSmbServer: async (
-    hostname: string,
-    username: string,
-    password: string,
-    domain?: string
-  ) => {
+  addSmbServer: async (hostname: string, username: string, password: string, domain?: string) => {
     try {
       const newServer = await invoke<SmbServerInfo>('add_smb_server', {
         hostname,
@@ -1620,10 +1699,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         domain,
       });
       set((state) => ({
-        smbServers: [
-          ...state.smbServers.filter((s) => s.hostname !== hostname),
-          newServer,
-        ],
+        smbServers: [...state.smbServers.filter((s) => s.hostname !== hostname), newServer],
       }));
       return newServer;
     } catch (error) {
@@ -1642,6 +1718,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       console.error('Failed to remove SMB server:', error);
       throw error;
     }
+  },
+
+  setPendingSmbCredentialRequest: (request) => {
+    set({ pendingSmbCredentialRequest: request });
   },
 
   // Rename state

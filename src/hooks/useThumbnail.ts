@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { useAppStore } from '@/store/useAppStore';
 
 export interface AccentColor {
   r: number;
@@ -22,6 +23,10 @@ export interface ThumbnailResponse {
   cached: boolean;
   generation_time_ms: number;
   has_transparency: boolean;
+  /** Original image width in pixels (if available) */
+  image_width?: number | null;
+  /** Original image height in pixels (if available) */
+  image_height?: number | null;
 }
 
 export interface ThumbnailCacheStats {
@@ -192,6 +197,11 @@ export function useThumbnail(path: string | undefined, options: ThumbnailOptions
   const [cached, setCached] = useState(false);
   const [generationTimeMs, setGenerationTimeMs] = useState<number>(0);
   const [hasTransparency, setHasTransparency] = useState<boolean>(false);
+  const [imageWidth, setImageWidth] = useState<number | undefined>(undefined);
+  const [imageHeight, setImageHeight] = useState<number | undefined>(undefined);
+
+  // Get store method to update file dimensions
+  const updateFileDimensions = useAppStore((state) => state.updateFileDimensions);
 
   const abortControllerRef = useRef<AbortController | null>(null);
   const currentPathRef = useRef<string | null>(null);
@@ -318,6 +328,13 @@ export function useThumbnail(path: string | undefined, options: ThumbnailOptions
           setCached(response.cached);
           setGenerationTimeMs(response.generation_time_ms);
           setHasTransparency(response.has_transparency);
+          // Update dimensions if we got them
+          if (response.image_width != null && response.image_height != null) {
+            setImageWidth(response.image_width);
+            setImageHeight(response.image_height);
+            // Update the store so the FileItem in the list gets the dimensions
+            updateFileDimensions(path, response.image_width, response.image_height);
+          }
           requestIdRef.current = response.id;
           setLoading(false);
         }
@@ -344,6 +361,7 @@ export function useThumbnail(path: string | undefined, options: ThumbnailOptions
     effectiveAccentKey,
     fetchThumbnail,
     cancelCurrentRequest,
+    updateFileDimensions,
   ]);
 
   const retry = useCallback(() => {
@@ -362,6 +380,13 @@ export function useThumbnail(path: string | undefined, options: ThumbnailOptions
             setCached(response.cached);
             setGenerationTimeMs(response.generation_time_ms);
             setHasTransparency(response.has_transparency);
+            // Only update dimensions if we got them (not cached responses)
+            if (response.image_width != null && response.image_height != null) {
+              setImageWidth(response.image_width);
+              setImageHeight(response.image_height);
+              // Update the store so the FileItem in the list gets the dimensions
+              updateFileDimensions(path, response.image_width, response.image_height);
+            }
             requestIdRef.current = response.id;
             setLoading(false);
           }
@@ -373,7 +398,17 @@ export function useThumbnail(path: string | undefined, options: ThumbnailOptions
           }
         });
     }
-  }, [path, size, quality, priority, format, effectiveAccent, effectiveAccentKey, fetchThumbnail]);
+  }, [
+    path,
+    size,
+    quality,
+    priority,
+    format,
+    effectiveAccent,
+    effectiveAccentKey,
+    fetchThumbnail,
+    updateFileDimensions,
+  ]);
 
   return {
     dataUrl,
@@ -382,6 +417,8 @@ export function useThumbnail(path: string | undefined, options: ThumbnailOptions
     cached,
     generationTimeMs,
     hasTransparency,
+    imageWidth,
+    imageHeight,
     retry,
   };
 }
