@@ -56,6 +56,7 @@ fn load_service_account_key() -> Result<ServiceAccountKey, String> {
 }
 
 /// Check if a service account is configured
+#[allow(dead_code)] // Useful for checking service account availability
 pub fn is_service_account_configured() -> bool {
     SERVICE_ACCOUNT_KEY.is_some()
 }
