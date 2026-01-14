@@ -1020,6 +1020,153 @@ pub async fn resolve_file_id_to_path(file_id: &str) -> Result<(String, String), 
     Err("File not accessible with any connected account".to_string())
 }
 
+/// Resolve a Google Drive folder ID to a navigable path.
+/// Returns (email, path, name) where path is either:
+/// - "/My Drive/path/to/folder" for items in My Drive
+/// - "/id/FOLDER_ID" for shared items not in My Drive hierarchy
+pub async fn resolve_folder_id(
+    accounts: &[String],
+    folder_id: &str,
+) -> Result<(String, String, String), String> {
+    log::info!("resolve_folder_id: folder_id={}, accounts={:?}", folder_id, accounts);
+
+    if accounts.is_empty() {
+        return Err("No accounts provided".to_string());
+    }
+
+    for email in accounts {
+        log::info!("  Trying account: {}", email);
+        match try_resolve_folder_id(email, folder_id).await {
+            Ok((path, name)) => {
+                log::info!("  Success: email={}, path={}, name={}", email, path, name);
+                return Ok((email.clone(), path, name));
+            }
+            Err(e) => {
+                log::info!("  Account {} cannot access folder {}: {}", email, folder_id, e);
+                continue;
+            }
+        }
+    }
+
+    Err(format!("No connected account has access to folder {}", folder_id))
+}
+
+async fn try_resolve_folder_id(email: &str, folder_id: &str) -> Result<(String, String), String> {
+    let access_token = ensure_valid_token(email).await?;
+    let client = reqwest::Client::new();
+
+    // Get folder metadata
+    let url = format!(
+        "https://www.googleapis.com/drive/v3/files/{}?fields=id,name,parents,mimeType&supportsAllDrives=true",
+        folder_id
+    );
+
+    let response = client
+        .get(&url)
+        .bearer_auth(&access_token)
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("API error: {}", response.status()));
+    }
+
+    let metadata: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse response: {}", e))?;
+
+    // Verify it's a folder
+    let mime_type = metadata["mimeType"].as_str().unwrap_or("");
+    if mime_type != "application/vnd.google-apps.folder" {
+        return Err("ID refers to a file, not a folder".to_string());
+    }
+
+    let name = metadata["name"].as_str().unwrap_or("Unknown").to_string();
+    let file_id = metadata["id"].as_str().unwrap_or(folder_id);
+
+    // Try to build full path by traversing parents
+    if let Some(parents) = metadata["parents"].as_array() {
+        if !parents.is_empty() {
+            match build_path_from_parents(file_id, &access_token).await {
+                Ok(path) => return Ok((path, name)),
+                Err(e) => {
+                    log::info!("  Can't build path, using @id notation: {}", e);
+                    // Can't build path, use id notation
+                    return Ok((format!("/id/{}", folder_id), name));
+                }
+            }
+        }
+    }
+
+    // No parents means it's a root or shared item
+    Ok((format!("/id/{}", folder_id), name))
+}
+
+async fn build_path_from_parents(
+    folder_id: &str,
+    access_token: &str,
+) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let mut path_parts: Vec<String> = Vec::new();
+    let mut current_id = folder_id.to_string();
+
+    // Traverse up to 20 levels (safety limit)
+    for _ in 0..20 {
+        let url = format!(
+            "https://www.googleapis.com/drive/v3/files/{}?fields=id,name,parents&supportsAllDrives=true",
+            current_id
+        );
+
+        let response = client
+            .get(&url)
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|e| format!("Request failed: {}", e))?;
+
+        if !response.status().is_success() {
+            return Err("Cannot access parent".to_string());
+        }
+
+        let metadata: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse: {}", e))?;
+
+        let name = metadata["name"].as_str().unwrap_or("Unknown");
+
+        // Check if this is the root "My Drive"
+        if let Some(parents) = metadata["parents"].as_array() {
+            if parents.is_empty() {
+                // This is a root
+                path_parts.reverse();
+                return Ok(format!("/{}/{}", name, path_parts.join("/")));
+            }
+
+            path_parts.push(name.to_string());
+
+            if let Some(parent_id) = parents.first().and_then(|p| p.as_str()) {
+                // Check if parent is "root" (My Drive root)
+                if parent_id == "root" {
+                    path_parts.reverse();
+                    return Ok(format!("/{}/{}", VIRTUAL_MY_DRIVE, path_parts.join("/")));
+                }
+                current_id = parent_id.to_string();
+            } else {
+                return Err("Invalid parent ID".to_string());
+            }
+        } else {
+            // No parents - this is root
+            path_parts.reverse();
+            return Ok(format!("/{}/{}", name, path_parts.join("/")));
+        }
+    }
+
+    Err("Path too deep".to_string())
+}
+
 /// Fetch a URL with Google Drive authentication and return as data URL
 /// This is used for thumbnail URLs that require authentication
 pub async fn fetch_url_with_auth(email: &str, url: &str) -> Result<String, String> {

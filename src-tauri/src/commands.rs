@@ -39,7 +39,7 @@ use crate::locations::gdrive::{
     add_google_account as add_gdrive_account, get_google_accounts as get_gdrive_accounts,
     remove_google_account as remove_gdrive_account, GoogleAccountInfo,
 };
-use crate::locations::gdrive::provider::{resolve_file_id_to_path, download_file_to_temp, fetch_url_with_auth, extract_gdrive_zip, get_folder_id_by_path};
+use crate::locations::gdrive::provider::{resolve_file_id_to_path, resolve_folder_id, download_file_to_temp, fetch_url_with_auth, extract_gdrive_zip, get_folder_id_by_path};
 use crate::locations::gdrive::url_parser::{is_google_drive_url, parse_google_drive_url};
 #[cfg(target_os = "macos")]
 use crate::macos_security;
@@ -4048,4 +4048,15 @@ pub async fn extract_gdrive_archive(
 #[command]
 pub async fn get_gdrive_folder_id(email: String, path: String) -> Result<String, String> {
     get_folder_id_by_path(&email, &path).await
+}
+
+/// Resolve a Google Drive folder ID to a navigable path
+/// Tries each account in order until one succeeds
+/// Returns (email, path, folder_name) as a tuple
+#[command]
+pub async fn resolve_gdrive_folder_url(
+    folder_id: String,
+    accounts: Vec<String>,
+) -> Result<(String, String, String), String> {
+    resolve_folder_id(&accounts, &folder_id).await
 }
