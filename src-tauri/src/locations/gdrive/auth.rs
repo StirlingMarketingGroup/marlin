@@ -538,8 +538,10 @@ pub async fn ensure_valid_token(email: &str) -> Result<String, String> {
         .map_err(|e| format!("Failed to refresh token: {}", e))?;
 
     if !response.status().is_success() {
+        let status = response.status();
         let error_text = response.text().await.unwrap_or_default();
-        return Err(format!("Token refresh failed: {}", error_text));
+        log::error!("Token refresh failed with status {}: {}", status, error_text);
+        return Err(format!("Token refresh failed (status {}). Re-authentication may be required.", status));
     }
 
     #[derive(Deserialize)]

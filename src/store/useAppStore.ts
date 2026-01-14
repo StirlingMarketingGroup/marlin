@@ -1182,7 +1182,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       const gdrivePathPart = slashIndex >= 0 ? pathWithoutScheme.slice(slashIndex) : '/';
 
       // Get parent folder path (remove file name from path)
-      const parentPath = gdrivePathPart.substring(0, gdrivePathPart.lastIndexOf('/')) || '/My Drive';
+      const parentPath =
+        gdrivePathPart.substring(0, gdrivePathPart.lastIndexOf('/')) || '/My Drive';
 
       console.info('[extractArchive] Google Drive extraction', {
         email,
@@ -1249,7 +1250,14 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
 
     // Local file extraction
-    console.info('[extractArchive] start', archivePath, '->', destinationDir, 'format:', archiveFormat);
+    console.info(
+      '[extractArchive] start',
+      archivePath,
+      '->',
+      destinationDir,
+      'format:',
+      archiveFormat
+    );
 
     const progressTimer = window.setTimeout(() => {
       void showProgressWindow();

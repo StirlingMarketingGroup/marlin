@@ -23,6 +23,16 @@ describe('parseGoogleDriveUrl', () => {
     expect(parseGoogleDriveUrl(url)).toBe('1Buzv1qFiKf79xF_RE91MfAcMxPnu6CWS');
   });
 
+  it('extracts ID from docs.google.com document URL', () => {
+    const url = 'https://docs.google.com/document/d/1Buzv1qFiKf79xF_RE91MfAcMxPnu6CWS/edit';
+    expect(parseGoogleDriveUrl(url)).toBe('1Buzv1qFiKf79xF_RE91MfAcMxPnu6CWS');
+  });
+
+  it('extracts ID from docs.google.com spreadsheet URL', () => {
+    const url = 'https://docs.google.com/spreadsheets/d/1Buzv1qFiKf79xF_RE91MfAcMxPnu6CWS/edit';
+    expect(parseGoogleDriveUrl(url)).toBe('1Buzv1qFiKf79xF_RE91MfAcMxPnu6CWS');
+  });
+
   it('returns null for non-Google Drive URLs', () => {
     expect(parseGoogleDriveUrl('https://example.com/folder')).toBeNull();
     expect(parseGoogleDriveUrl('/Users/home/folder')).toBeNull();
