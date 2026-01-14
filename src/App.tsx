@@ -217,10 +217,12 @@ function App() {
     return resolvedPath;
   };
 
-  // Only show the blocking loading overlay if loading lasts > 500ms
+  // Only show the blocking loading overlay during initial app load (not folder navigation)
+  // Folder navigation uses a subtle spinner in MainPanel instead
   useEffect(() => {
     let timer: number | undefined;
-    if (loading) {
+    // Only show full-screen overlay before app is initialized
+    if (loading && !initializedRef.current) {
       timer = window.setTimeout(() => setShowLoadingOverlay(true), 500);
     } else {
       setShowLoadingOverlay(false);
@@ -425,7 +427,12 @@ function App() {
         }
 
         // Try to load the directory using streaming for better performance
-        await useAppStore.getState().refreshCurrentDirectoryStreaming();
+        // Note: gdrive:// paths don't support streaming, use non-streaming method
+        if (currentPath.startsWith('gdrive://')) {
+          await useAppStore.getState().refreshCurrentDirectory();
+        } else {
+          await useAppStore.getState().refreshCurrentDirectoryStreaming();
+        }
         setError(undefined); // Clear any previous errors on success
 
         // Check if we have a pending file selection (from navigating to a file path)
