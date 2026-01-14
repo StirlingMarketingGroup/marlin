@@ -1,6 +1,15 @@
 import { useEffect, useRef, useState, useCallback, type ReactNode } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { CaretUp, CaretDown, Play, AppWindow, Folder, Package, Disc } from 'phosphor-react';
+import {
+  CaretUp,
+  CaretDown,
+  Play,
+  AppWindow,
+  Folder,
+  Package,
+  Disc,
+  CircleNotch,
+} from 'phosphor-react';
 import { FileItem, ViewPreferences } from '../types';
 import { useAppStore } from '../store/useAppStore';
 import { useDragStore } from '../store/useDragStore';
@@ -17,6 +26,7 @@ import SymlinkBadge from '@/components/SymlinkBadge';
 import GitRepoBadge from '@/components/GitRepoBadge';
 import { normalizePreviewIcon } from '@/utils/iconSizing';
 import { isArchiveFile, isVideoExtension, isMacOSBundle } from '@/utils/fileTypes';
+import { isGoogleDrivePath, parseGoogleDrivePathEmail } from '@/utils/googleDriveUrl';
 import { useScrollContainerRef } from '@/contexts/ScrollContext';
 import { useSortedFiles } from '@/hooks/useSortedFiles';
 
@@ -177,6 +187,7 @@ export default function FileList({ files, preferences }: FileListProps) {
   const renameInputRef = useRef<HTMLInputElement>(null);
   const { fetchAppIcon } = useAppStore();
   const [draggedFile, setDraggedFile] = useState<string | null>(null);
+  const [downloadingForDrag, setDownloadingForDrag] = useState<Set<string>>(new Set());
   const listRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useScrollContainerRef();
   const lastClickRef = useRef<{ path: string; time: number; x: number; y: number } | null>(null);
@@ -397,9 +408,56 @@ export default function FileList({ files, preferences }: FileListProps) {
               }
             }
 
+            // Build paths for native drag, downloading Google Drive files to temp first
+            const dragPaths: string[] = [];
+            const gdriveFiles = selected.filter((f) => isGoogleDrivePath(f.path) && f.remote_id);
+
+            // Show loading indicator for Google Drive files being downloaded
+            if (gdriveFiles.length > 0) {
+              setDownloadingForDrag(new Set(gdriveFiles.map((f) => f.path)));
+            }
+
+            try {
+              for (const f of selected) {
+                if (isGoogleDrivePath(f.path) && f.remote_id) {
+                  // Download Google Drive file to temp location
+                  const email = parseGoogleDrivePathEmail(f.path);
+                  if (email) {
+                    try {
+                      const tempPath = await invoke<string>('download_gdrive_file', {
+                        email,
+                        fileId: f.remote_id,
+                        fileName: f.name,
+                      });
+                      dragPaths.push(tempPath);
+                    } catch (downloadError) {
+                      console.warn(
+                        'Failed to download GDrive file for drag:',
+                        f.name,
+                        downloadError
+                      );
+                      // Skip this file in the drag
+                    }
+                  }
+                } else {
+                  // Local file, use path directly
+                  dragPaths.push(f.path);
+                }
+              }
+            } finally {
+              // Clear downloading indicator
+              setDownloadingForDrag(new Set());
+            }
+
+            // Only proceed if we have files to drag
+            if (dragPaths.length === 0) {
+              console.warn('No files available for drag');
+              return;
+            }
+
             // Use new unified native drag API
             await invoke('start_native_drag', {
-              paths: selected.map((f) => f.path),
+              paths: dragPaths,
               previewImage: dragImageDataUrl,
               dragOffsetY: 0,
             });
@@ -604,6 +662,7 @@ export default function FileList({ files, preferences }: FileListProps) {
     const isDragged =
       (draggedFile !== null && (draggedFile === file.path || selectedFiles.includes(file.path))) ||
       isDraggedDirectory(file.path);
+    const isDownloadingForDrag = downloadingForDrag.has(file.path);
     // Use virtual index for alternating row colors since we're virtualizing
     const isOdd = virtualIndex % 2 === 1;
 
@@ -647,6 +706,12 @@ export default function FileList({ files, preferences }: FileListProps) {
         onMouseDown={(e) => handleMouseDownForFile(e, file)}
         draggable={false}
       >
+        {/* Loading overlay for Google Drive file downloads */}
+        {isDownloadingForDrag && (
+          <div className="absolute inset-0 bg-app-dark/60 rounded-full flex items-center justify-center z-30">
+            <CircleNotch className="w-4 h-4 text-white animate-spin" weight="bold" />
+          </div>
+        )}
         {/* Name column */}
         <div className="col-span-5 flex items-center gap-2 min-w-0 pl-2 pr-2">
           <span className="relative flex-shrink-0 w-5 h-5">
