@@ -16,6 +16,7 @@ import {
   DeletePathsResponse,
   DeleteItemPayload,
   GoogleAccountInfo,
+  SmbServerInfo,
 } from '../types';
 import { invoke } from '@tauri-apps/api/core';
 import { open as openShell } from '@tauri-apps/plugin-shell';
@@ -204,6 +205,9 @@ interface AppState {
   // Google Drive accounts
   googleAccounts: GoogleAccountInfo[];
 
+  // SMB network shares
+  smbServers: SmbServerInfo[];
+
   // UI State
   sidebarWidth: number;
   showSidebar: boolean;
@@ -269,6 +273,15 @@ interface AppState {
   loadGoogleAccounts: () => Promise<void>;
   addGoogleAccount: () => Promise<GoogleAccountInfo>;
   removeGoogleAccount: (email: string) => Promise<void>;
+  // SMB network shares
+  loadSmbServers: () => Promise<void>;
+  addSmbServer: (
+    hostname: string,
+    username: string,
+    password: string,
+    domain?: string
+  ) => Promise<SmbServerInfo>;
+  removeSmbServer: (hostname: string) => Promise<void>;
   // Rename UX
   renameTargetPath?: string;
   renameLoading: boolean;
@@ -318,6 +331,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   appIconCache: {},
   pinnedDirectories: [],
   googleAccounts: [],
+  smbServers: [],
 
   sidebarWidth: 240,
   showSidebar: true,
@@ -1564,6 +1578,55 @@ export const useAppStore = create<AppState>((set, get) => ({
       }));
     } catch (error) {
       console.error('Failed to remove Google account:', error);
+      throw error;
+    }
+  },
+
+  // SMB network shares
+  loadSmbServers: async () => {
+    try {
+      const servers = await invoke<SmbServerInfo[]>('get_smb_servers');
+      set({ smbServers: servers });
+    } catch (error) {
+      console.error('Failed to load SMB servers:', error);
+      set({ smbServers: [] });
+    }
+  },
+
+  addSmbServer: async (
+    hostname: string,
+    username: string,
+    password: string,
+    domain?: string
+  ) => {
+    try {
+      const newServer = await invoke<SmbServerInfo>('add_smb_server', {
+        hostname,
+        username,
+        password,
+        domain,
+      });
+      set((state) => ({
+        smbServers: [
+          ...state.smbServers.filter((s) => s.hostname !== hostname),
+          newServer,
+        ],
+      }));
+      return newServer;
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      throw new Error(errorMessage);
+    }
+  },
+
+  removeSmbServer: async (hostname: string) => {
+    try {
+      await invoke('remove_smb_server', { hostname });
+      set((state) => ({
+        smbServers: state.smbServers.filter((s) => s.hostname !== hostname),
+      }));
+    } catch (error) {
+      console.error('Failed to remove SMB server:', error);
       throw error;
     }
   },
