@@ -13,6 +13,7 @@
 ## Task 1: Add URL Parsing Utility
 
 **Files:**
+
 - Create: `src/utils/googleDriveUrl.ts`
 - Test: `src/utils/googleDriveUrl.test.ts`
 
@@ -122,6 +123,7 @@ git commit -m "feat(gdrive): add URL parsing utility for Google Drive links"
 ## Task 2: Add Backend Command to Resolve Folder ID
 
 **Files:**
+
 - Modify: `src-tauri/src/locations/gdrive/provider.rs`
 - Modify: `src-tauri/src/commands.rs`
 - Modify: `src-tauri/src/lib.rs`
@@ -271,6 +273,7 @@ pub async fn resolve_gdrive_folder_url(
 **Step 3: Register command in lib.rs**
 
 Add to the `invoke_handler` macro:
+
 ```rust
 commands::resolve_gdrive_folder_url,
 ```
@@ -292,11 +295,13 @@ git commit -m "feat(gdrive): add backend command to resolve folder ID to path"
 ## Task 3: Update navigateTo to Handle Google Drive URLs
 
 **Files:**
+
 - Modify: `src/store/useAppStore.ts`
 
 **Step 1: Import the URL parser**
 
 At top of file, add:
+
 ```typescript
 import { parseGoogleDriveUrl } from '@/utils/googleDriveUrl';
 ```
@@ -380,6 +385,7 @@ navigateTo: async (path) => {
 **Step 3: Update type signature**
 
 In the interface, change:
+
 ```typescript
 navigateTo: (path: string) => Promise<void>;
 ```
@@ -401,6 +407,7 @@ git commit -m "feat(gdrive): handle Google Drive URLs in navigateTo"
 ## Task 4: Support @id Path Segments in Provider
 
 **Files:**
+
 - Modify: `src-tauri/src/locations/gdrive/provider.rs`
 
 **Step 1: Update read_directory to handle @id paths**
@@ -528,6 +535,7 @@ git commit --allow-empty -m "test(gdrive): manual testing of URL paste feature c
 ## Summary
 
 This implementation:
+
 1. Parses various Google Drive URL formats to extract folder IDs
 2. Tries each connected account to find one with access
 3. Resolves the folder ID to either a full path (My Drive) or @id notation (shared)

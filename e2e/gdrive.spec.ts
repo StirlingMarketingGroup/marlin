@@ -279,7 +279,9 @@ test.describe('Google Drive Integration', () => {
 
     // Navigate to the image folder
     await pathInput.click();
-    await pathInput.fill(`${MOCK_GDRIVE_ROOT}/Shared drives/${MOCK_SHARED_DRIVE_NAME}/${MOCK_FOLDER_NAME}`);
+    await pathInput.fill(
+      `${MOCK_GDRIVE_ROOT}/Shared drives/${MOCK_SHARED_DRIVE_NAME}/${MOCK_FOLDER_NAME}`
+    );
     await pathInput.press('Enter');
 
     // Wait for files to load - use more specific selector to avoid strict mode violation

@@ -7,12 +7,13 @@
  * - https://drive.google.com/drive/u/0/folders/ID
  * - https://drive.google.com/open?id=ID
  * - https://drive.google.com/file/d/ID/view
+ * - https://docs.google.com/document/d/ID/edit
  *
  * @returns The extracted ID or null if not a valid Google Drive URL
  */
 export function parseGoogleDriveUrl(url: string): string | null {
-  // Must be a drive.google.com URL
-  if (!url.includes('drive.google.com')) {
+  // Must be a Google URL (drive.google.com or docs.google.com)
+  if (!url.includes('drive.google.com') && !url.includes('docs.google.com')) {
     return null;
   }
 
@@ -22,8 +23,8 @@ export function parseGoogleDriveUrl(url: string): string | null {
     return foldersMatch[1];
   }
 
-  // Try /file/d/ID
-  const fileMatch = url.match(/\/file\/d\/([a-zA-Z0-9_-]+)/);
+  // Try /file/d/ID or /document/d/ID (for docs.google.com)
+  const fileMatch = url.match(/\/(?:file|document|spreadsheets|presentation)\/d\/([a-zA-Z0-9_-]+)/);
   if (fileMatch?.[1]) {
     return fileMatch[1];
   }

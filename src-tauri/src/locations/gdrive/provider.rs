@@ -280,7 +280,7 @@ impl GoogleDriveProvider {
 
     /// List files in My Drive root
     async fn list_my_drive_root(&self, hub: &DriveHubType, email: &str) -> Result<Vec<FileItem>, String> {
-        log::info!("Listing My Drive root for {}", email);
+        log::debug!("Listing My Drive root for {}", email);
         let result = hub
             .files()
             .list()
@@ -296,10 +296,7 @@ impl GoogleDriveProvider {
             })?;
 
         let files = result.1.files.unwrap_or_default();
-        log::info!("Got {} files from My Drive root", files.len());
-        for f in &files {
-            log::info!("  - {:?}", f.name);
-        }
+        log::debug!("Got {} files from My Drive root", files.len());
         let parent_path = format!("/{}", VIRTUAL_MY_DRIVE);
 
         Ok(files
@@ -317,7 +314,7 @@ impl GoogleDriveProvider {
         parent_path: &str,
     ) -> Result<Vec<FileItem>, String> {
         let query = format!("'{}' in parents and trashed = false", folder_id);
-        log::info!("list_folder_by_id: folder_id={}, query={}", folder_id, query);
+        log::debug!("list_folder_by_id: folder_id={}, query={}", folder_id, query);
 
         let result = hub
             .files()
@@ -333,7 +330,7 @@ impl GoogleDriveProvider {
             .map_err(|e| format!("Failed to list folder: {}", e))?;
 
         let files = result.1.files.unwrap_or_default();
-        log::info!("  -> found {} files", files.len());
+        log::debug!("  -> found {} files", files.len());
 
         Ok(files
             .iter()
@@ -606,10 +603,10 @@ impl GoogleDriveProvider {
         hub: &DriveHubType,
         path_parts: &[&str],
     ) -> Result<Option<String>, String> {
-        log::info!("find_shared_file_by_path: path_parts={:?}", path_parts);
+        log::debug!("find_shared_file_by_path: path_parts={:?}", path_parts);
 
         if path_parts.is_empty() {
-            log::info!("  -> empty path parts, returning None");
+            log::debug!("  -> empty path parts, returning None");
             return Ok(None);
         }
 
@@ -619,7 +616,7 @@ impl GoogleDriveProvider {
             "sharedWithMe = true and name = '{}' and trashed = false",
             first_name
         );
-        log::info!("  -> searching for shared item with query: {}", query);
+        log::debug!("  -> searching for shared item with query: {}", query);
 
         let result = hub
             .files()
@@ -633,29 +630,26 @@ impl GoogleDriveProvider {
             .map_err(|e| format!("Failed to search for shared file: {}", e))?;
 
         let files = result.1.files.unwrap_or_default();
-        log::info!("  -> found {} shared items with name '{}'", files.len(), first_name);
-        for f in &files {
-            log::info!("    - id={:?}, name={:?}", f.id, f.name);
-        }
+        log::debug!("  -> found {} shared items with name '{}'", files.len(), first_name);
 
         let shared_item = match files.first() {
             Some(f) => f.id.clone().unwrap_or_default(),
             None => {
-                log::info!("  -> no shared item found with name '{}', returning None", first_name);
+                log::debug!("  -> no shared item found with name '{}', returning None", first_name);
                 return Ok(None);
             }
         };
 
-        log::info!("  -> using shared item id: {}", shared_item);
+        log::debug!("  -> using shared item id: {}", shared_item);
 
         // If there's only one path part, we found it
         if path_parts.len() == 1 {
-            log::info!("  -> single path part, returning shared_item");
+            log::debug!("  -> single path part, returning shared_item");
             return Ok(Some(shared_item));
         }
 
         // Otherwise, navigate into children from the shared item
-        log::info!("  -> navigating into children: {:?}", &path_parts[1..]);
+        log::debug!("  -> navigating into children: {:?}", &path_parts[1..]);
         self.find_file_by_path_from_parent(hub, &shared_item, &path_parts[1..]).await
     }
 
@@ -686,7 +680,7 @@ impl GoogleDriveProvider {
         file: &DriveFile,
         email: &str,
     ) -> Result<String, String> {
-        log::info!("build_file_path: file={:?}, id={:?}, parents={:?}, driveId={:?}",
+        log::debug!("build_file_path: file={:?}, id={:?}, parents={:?}, driveId={:?}",
             file.name, file.id, file.parents, file.drive_id);
 
         let file_id = file.id.clone().unwrap_or_default();
@@ -695,34 +689,42 @@ impl GoogleDriveProvider {
 
         // Walk up the parent chain to determine if this is in My Drive
         let mut is_my_drive = false;
+        let mut visited = std::collections::HashSet::new();
         for i in 0..50 {
-            log::info!("  iteration {}: current_parents={:?}", i, current_parents);
+            log::debug!("  iteration {}: current_parents={:?}", i, current_parents);
 
             if current_parents.is_empty() {
                 // Not in My Drive (didn't find "root")
-                log::info!("  -> Reached root without 'root' parent, not My Drive");
+                log::debug!("  -> Reached root without 'root' parent, not My Drive");
                 break;
             }
 
             let parent_id = &current_parents[0];
-            log::info!("  -> parent_id={}", parent_id);
+
+            // Detect cycles in parent chain
+            if !visited.insert(parent_id.clone()) {
+                log::warn!("  -> Cycle detected in parent chain at {}", parent_id);
+                break;
+            }
+
+            log::debug!("  -> parent_id={}", parent_id);
 
             // "root" is the My Drive root
             if parent_id == "root" {
-                log::info!("  -> Found 'root', this is My Drive");
+                log::debug!("  -> Found 'root', this is My Drive");
                 is_my_drive = true;
                 path_parts.push(VIRTUAL_MY_DRIVE.to_string());
                 break;
             }
 
             let parent = self.get_file_by_id(hub, parent_id).await?;
-            log::info!("  -> parent name={:?}, id={:?}, parents={:?}",
+            log::debug!("  -> parent name={:?}, id={:?}, parents={:?}",
                 parent.name, parent.id, parent.parents);
 
             // Check if this parent is a Shared Drive root (has no parents but has drive_id)
             let parent_parents = parent.parents.clone().unwrap_or_default();
             if parent_parents.is_empty() && parent.drive_id.is_some() {
-                log::info!("  -> Shared Drive root, not My Drive");
+                log::debug!("  -> Shared Drive root, not My Drive");
                 break;
             }
 
@@ -740,7 +742,7 @@ impl GoogleDriveProvider {
             format!("gdrive://{}/{}/{}", email, VIRTUAL_BY_ID, file_id)
         };
 
-        log::info!("  -> final path: {}", final_path);
+        log::debug!("  -> final path: {}", final_path);
         Ok(final_path)
     }
 }
@@ -771,21 +773,21 @@ impl LocationProvider for GoogleDriveProvider {
         let email = self.get_account_email(location)?;
         let path = location.path();
 
-        log::info!("read_directory: email={}, path={}", email, path);
+        log::debug!("read_directory: email={}, path={}", email, path);
 
         // Virtual root - show My Drive, Shared, Starred, Recent
         let (root_folder, subpath) = self.parse_virtual_path(path);
-        log::info!("  root_folder={:?}, subpath={:?}", root_folder, subpath);
+        log::debug!("  root_folder={:?}, subpath={:?}", root_folder, subpath);
 
         if root_folder.is_none() {
-            log::info!("  -> listing virtual root");
+            log::debug!("  -> listing virtual root");
             let result = self.list_virtual_root(&email);
-            log::info!("  -> returning {} entries", result.entries.len());
+            log::debug!("  -> returning {} entries", result.entries.len());
             return Ok(result);
         }
 
         let root = root_folder.unwrap();
-        log::info!("  -> root={}", root);
+        log::debug!("  -> root={}", root);
         let hub = self.create_hub(&email).await?;
 
         let entries = match root {
@@ -802,16 +804,16 @@ impl LocationProvider for GoogleDriveProvider {
             }
             VIRTUAL_SHARED => {
                 if subpath.is_empty() {
-                    log::info!("  -> listing shared with me root");
+                    log::debug!("  -> listing shared with me root");
                     self.list_shared_with_me(&hub, &email).await?
                 } else {
                     // Navigate into a shared folder
                     // For shared items, use special lookup that finds shared items first
-                    log::info!("  -> finding shared file by path: {:?}", subpath);
+                    log::debug!("  -> finding shared file by path: {:?}", subpath);
                     let folder_id = self.find_shared_file_by_path(&hub, &subpath).await?
                         .ok_or_else(|| format!("Folder not found: {}", subpath.join("/")))?;
 
-                    log::info!("  -> found folder_id: {}", folder_id);
+                    log::debug!("  -> found folder_id: {}", folder_id);
                     self.list_folder_by_id(&hub, &folder_id, &email, path).await?
                 }
             }
@@ -819,12 +821,12 @@ impl LocationProvider for GoogleDriveProvider {
             VIRTUAL_RECENT => self.list_recent(&hub, &email).await?,
             VIRTUAL_SHARED_DRIVES => {
                 if subpath.is_empty() {
-                    log::info!("  -> listing shared drives root");
+                    log::debug!("  -> listing shared drives root");
                     self.list_shared_drives(&hub, &email).await?
                 } else {
                     // First part is the drive name, rest is the path within
                     let drive_name = subpath[0];
-                    log::info!("  -> listing shared drive: {}", drive_name);
+                    log::debug!("  -> listing shared drive: {}", drive_name);
 
                     // Find the drive ID by name
                     let drive_id = self.find_shared_drive_by_name(&hub, drive_name).await?
@@ -848,7 +850,7 @@ impl LocationProvider for GoogleDriveProvider {
                     return Err("Missing file ID in path".to_string());
                 }
                 let file_id = subpath[0];
-                log::info!("  -> Direct ID navigation: {}", file_id);
+                log::debug!("  -> Direct ID navigation: {}", file_id);
                 self.list_folder_by_id(&hub, file_id, &email, path).await?
             }
             _ => {
@@ -1542,7 +1544,8 @@ pub async fn download_file_to_temp(email: &str, file_id: &str, file_name: &str) 
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        return Err(format!("Download failed with status {}: {}", status, body));
+        log::error!("Download failed with status {}: {}", status, body);
+        return Err(format!("Download failed (status {}). Check logs for details.", status));
     }
 
     let bytes = response.bytes()
@@ -1621,7 +1624,8 @@ pub async fn upload_file_to_gdrive(
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        return Err(format!("Upload failed with status {}: {}", status, body));
+        log::error!("Upload failed with status {}: {}", status, body);
+        return Err(format!("Upload failed (status {}). Check logs for details.", status));
     }
 
     let result: serde_json::Value = response.json().await
@@ -1668,7 +1672,8 @@ pub async fn create_gdrive_folder(
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        return Err(format!("Create folder failed with status {}: {}", status, body));
+        log::error!("Create folder failed with status {}: {}", status, body);
+        return Err(format!("Create folder failed (status {}). Check logs for details.", status));
     }
 
     let result: serde_json::Value = response.json().await
@@ -1678,7 +1683,7 @@ pub async fn create_gdrive_folder(
         .ok_or_else(|| "No folder ID in response".to_string())?
         .to_string();
 
-    log::info!("Created folder, got ID: {}", folder_id);
+    log::debug!("Created folder, got ID: {}", folder_id);
     Ok(folder_id)
 }
 
