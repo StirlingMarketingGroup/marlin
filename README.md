@@ -19,6 +19,14 @@ A fast, minimal file browser built with Tauri.
 - Dark theme
 - Keyboard navigation
 
+### Google Drive Integration
+
+- **Account Management**: Connect multiple Google accounts from the sidebar
+- **Full Navigation**: Browse My Drive, Shared Drives, and Shared with me
+- **URL Paste**: Paste any Google Drive folder URL into the path bar to navigate directly
+- **Thumbnails**: View image thumbnails for Google Drive files
+- **Smart View Defaults**: Image-heavy folders automatically switch to grid view
+
 ## Tech
 
 - **Frontend**: React 18, TypeScript, Tailwind CSS, Zustand
