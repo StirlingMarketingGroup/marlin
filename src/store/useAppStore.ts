@@ -67,6 +67,25 @@ const normalizePath = (input: string): string => {
   const raw = (input ?? '').trim();
   if (!raw) return '/';
 
+  // Check for URI scheme (e.g., gdrive://, smb://, s3://)
+  // URI format: scheme://authority/path
+  const uriMatch = raw.match(/^([a-zA-Z][a-zA-Z0-9+.-]*):\/\//);
+  if (uriMatch) {
+    // For URIs, preserve scheme and authority, only normalize path portion
+    const scheme = uriMatch[1];
+    const afterScheme = raw.slice(uriMatch[0].length);
+    const slashIdx = afterScheme.indexOf('/');
+    if (slashIdx === -1) {
+      // Just scheme://authority with no path
+      return raw;
+    }
+    const authority = afterScheme.slice(0, slashIdx);
+    const pathPart = afterScheme.slice(slashIdx);
+    // Clean up the path part (remove double slashes, etc.) but keep it simple
+    const cleanPath = pathPart.replace(/\/+/g, '/').replace(/\/$/, '') || '/';
+    return `${scheme}://${authority}${cleanPath}`;
+  }
+
   let path = raw.replace(/\\/g, '/');
   let drivePrefix = '';
 
@@ -376,8 +395,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   updateDirectoryPreferences: (path, preferences) =>
     set((state) => {
-      // Don't normalize gdrive:// paths - they should be used as-is
-      const norm = path.startsWith('gdrive://') ? path : normalizePath(path);
+      const norm = normalizePath(path);
       return {
         directoryPreferences: {
           ...state.directoryPreferences,
@@ -486,16 +504,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
     }
 
-    // Handle gdrive:// URIs - don't use normalizePath for these
-    let norm: string;
-    let locationRaw: string;
-    if (trimmed.startsWith('gdrive://')) {
-      norm = trimmed;
-      locationRaw = trimmed;
-    } else {
-      norm = normalizePath(path);
-      locationRaw = toFileUri(norm);
-    }
+    // Normalize path (handles URIs like gdrive://, smb://, etc.)
+    const norm = normalizePath(path);
+    // For URIs, use the normalized URI as locationRaw; for file paths, convert to file:// URI
+    const isUri = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(norm);
+    const locationRaw = isUri ? norm : toFileUri(norm);
 
     const newHistory = [...pathHistory.slice(0, historyIndex + 1), norm];
     set({
