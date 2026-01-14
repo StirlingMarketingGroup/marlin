@@ -211,7 +211,10 @@ function App() {
     });
 
     if (applyDefaults) {
-      await applySmartViewDefaults(listing.location.path, listing.entries);
+      // For gdrive:// paths, use the full raw URI since that's the key in directoryPreferences
+      const prefsPath =
+        listing.location.scheme === 'gdrive' ? listing.location.raw : listing.location.path;
+      await applySmartViewDefaults(prefsPath, listing.entries);
     }
 
     return resolvedPath;
