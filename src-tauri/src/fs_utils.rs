@@ -38,6 +38,15 @@ pub struct FileItem {
     pub child_count: Option<u64>,
     pub image_width: Option<u32>,
     pub image_height: Option<u32>,
+    /// Remote file ID (e.g., Google Drive file ID)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_id: Option<String>,
+    /// Remote thumbnail URL (e.g., Google Drive thumbnail link)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thumbnail_url: Option<String>,
+    /// Remote download URL (e.g., Google Drive web content link)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub download_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,6 +122,9 @@ fn build_file_item_skeleton(entry: &std::fs::DirEntry) -> Option<FileItem> {
         child_count: None, // Filled in by metadata update
         image_width: None, // Filled in by metadata update
         image_height: None, // Filled in by metadata update
+        remote_id: None,
+        thumbnail_url: None,
+        download_url: None,
     })
 }
 
@@ -300,6 +312,9 @@ fn build_file_item(path: &Path) -> Result<FileItem, String> {
         child_count,
         image_width,
         image_height,
+        remote_id: None,
+        thumbnail_url: None,
+        download_url: None,
     })
 }
 

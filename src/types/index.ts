@@ -11,6 +11,9 @@ export interface FileItem {
   child_count?: number; // Shallow file count for directories
   image_width?: number; // Image dimensions (width in pixels)
   image_height?: number; // Image dimensions (height in pixels)
+  remote_id?: string; // Remote file ID (e.g., Google Drive file ID)
+  thumbnail_url?: string; // Remote thumbnail URL (e.g., Google Drive thumbnail link)
+  download_url?: string; // Remote download URL (e.g., Google Drive web content link)
 }
 
 export interface LocationSummary {

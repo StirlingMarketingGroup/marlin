@@ -139,6 +139,9 @@ impl GoogleDriveProvider {
                 child_count: None,
                 image_width: None,
                 image_height: None,
+                remote_id: None,
+                thumbnail_url: None,
+                download_url: None,
             },
             FileItem {
                 name: VIRTUAL_SHARED.to_string(),
@@ -153,6 +156,9 @@ impl GoogleDriveProvider {
                 child_count: None,
                 image_width: None,
                 image_height: None,
+                remote_id: None,
+                thumbnail_url: None,
+                download_url: None,
             },
             FileItem {
                 name: VIRTUAL_STARRED.to_string(),
@@ -167,6 +173,9 @@ impl GoogleDriveProvider {
                 child_count: None,
                 image_width: None,
                 image_height: None,
+                remote_id: None,
+                thumbnail_url: None,
+                download_url: None,
             },
             FileItem {
                 name: VIRTUAL_RECENT.to_string(),
@@ -181,6 +190,9 @@ impl GoogleDriveProvider {
                 child_count: None,
                 image_width: None,
                 image_height: None,
+                remote_id: None,
+                thumbnail_url: None,
+                download_url: None,
             },
         ];
 
@@ -225,6 +237,10 @@ impl GoogleDriveProvider {
             None
         };
 
+        // Extract thumbnail and download URLs from Google Drive
+        let thumbnail_url = file.thumbnail_link.clone();
+        let download_url = file.web_content_link.clone();
+
         FileItem {
             name,
             path,
@@ -238,6 +254,9 @@ impl GoogleDriveProvider {
             child_count: None,
             image_width: None,
             image_height: None,
+            remote_id: if file_id.is_empty() { None } else { Some(file_id) },
+            thumbnail_url,
+            download_url,
         }
     }
 
@@ -250,7 +269,7 @@ impl GoogleDriveProvider {
             .q("'root' in parents and trashed = false")
             .page_size(1000)
             .add_scope(google_drive3::api::Scope::Full)
-            .param("fields", "files(id,name,mimeType,size,modifiedTime,parents)")
+            .param("fields", "files(id,name,mimeType,size,modifiedTime,parents,thumbnailLink,webContentLink)")
             .doit()
             .await
             .map_err(|e| {
@@ -290,7 +309,7 @@ impl GoogleDriveProvider {
             .supports_all_drives(true)  // Required for shared drives
             .include_items_from_all_drives(true)  // Include shared drive items
             .add_scope(google_drive3::api::Scope::Full)
-            .param("fields", "files(id,name,mimeType,size,modifiedTime,parents)")
+            .param("fields", "files(id,name,mimeType,size,modifiedTime,parents,thumbnailLink,webContentLink)")
             .doit()
             .await
             .map_err(|e| format!("Failed to list folder: {}", e))?;
@@ -312,7 +331,7 @@ impl GoogleDriveProvider {
             .q("sharedWithMe = true and trashed = false")
             .page_size(1000)
             .add_scope(google_drive3::api::Scope::Full)
-            .param("fields", "files(id,name,mimeType,size,modifiedTime,parents)")
+            .param("fields", "files(id,name,mimeType,size,modifiedTime,parents,thumbnailLink,webContentLink)")
             .doit()
             .await
             .map_err(|e| format!("Failed to list shared files: {}", e))?;
@@ -334,7 +353,7 @@ impl GoogleDriveProvider {
             .q("starred = true and trashed = false")
             .page_size(1000)
             .add_scope(google_drive3::api::Scope::Full)
-            .param("fields", "files(id,name,mimeType,size,modifiedTime,parents)")
+            .param("fields", "files(id,name,mimeType,size,modifiedTime,parents,thumbnailLink,webContentLink)")
             .doit()
             .await
             .map_err(|e| format!("Failed to list starred files: {}", e))?;
@@ -357,7 +376,7 @@ impl GoogleDriveProvider {
             .order_by("viewedByMeTime desc")
             .page_size(50)
             .add_scope(google_drive3::api::Scope::Full)
-            .param("fields", "files(id,name,mimeType,size,modifiedTime,parents)")
+            .param("fields", "files(id,name,mimeType,size,modifiedTime,parents,thumbnailLink,webContentLink)")
             .doit()
             .await
             .map_err(|e| format!("Failed to list recent files: {}", e))?;
@@ -687,6 +706,9 @@ impl LocationProvider for GoogleDriveProvider {
                     child_count: None,
                     image_width: None,
                     image_height: None,
+                    remote_id: None,
+                    thumbnail_url: None,
+                    download_url: None,
                 });
             }
         } else {
@@ -704,6 +726,9 @@ impl LocationProvider for GoogleDriveProvider {
                 child_count: None,
                 image_width: None,
                 image_height: None,
+                remote_id: None,
+                thumbnail_url: None,
+                download_url: None,
             });
         }
 
