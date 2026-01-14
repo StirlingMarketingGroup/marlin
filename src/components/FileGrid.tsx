@@ -105,7 +105,7 @@ function GridFilePreview({
   const thumbnailPriority = stage === 'visible' ? 'high' : 'medium';
   const { dataUrl, loading, hasTransparency } = useThumbnail(
     shouldLoadThumbnail && stage !== 'far' ? file.path : undefined,
-    { size: requestSize, quality: 'medium', priority: thumbnailPriority }
+    { size: requestSize, quality: 'medium', priority: thumbnailPriority, thumbnailUrl: file.thumbnail_url }
   );
 
   // Image-like previews (real thumbnails)

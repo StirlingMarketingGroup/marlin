@@ -176,12 +176,17 @@ const thumbnailPromises = new Map<string, Promise<ThumbnailResponse>>();
 // Active request IDs for cancellation
 const activeRequests = new Map<string, string>();
 
+export interface ThumbnailOptions extends Omit<ThumbnailRequest, 'path'> {
+  /** Remote thumbnail URL (e.g., from Google Drive) - used directly instead of generating */
+  thumbnailUrl?: string;
+}
+
 export function useThumbnail(
   path: string | undefined,
-  options: Omit<ThumbnailRequest, 'path'> = {}
+  options: ThumbnailOptions = {}
 ) {
   const { accent } = useAccentColor();
-  const { size, quality, priority, format, accent: accentOverride } = options;
+  const { size, quality, priority, format, accent: accentOverride, thumbnailUrl } = options;
   const effectiveAccent = accentOverride ?? accent;
   const effectiveAccentKey = accentKeyFor(effectiveAccent);
   const [dataUrl, setDataUrl] = useState<string | undefined>(undefined);
@@ -208,6 +213,18 @@ export function useThumbnail(
     }
     currentPathRef.current = null;
   }, []);
+
+  // If we have a remote thumbnail URL (e.g., from Google Drive), use it directly
+  useEffect(() => {
+    if (thumbnailUrl && path) {
+      setDataUrl(thumbnailUrl);
+      setCached(true);
+      setGenerationTimeMs(0);
+      setHasTransparency(false);
+      setLoading(false);
+      setError(undefined);
+    }
+  }, [thumbnailUrl, path]);
 
   const fetchThumbnail = useCallback(
     async (thumbnailPath: string, requestOptions: Omit<ThumbnailRequest, 'path'>) => {
@@ -252,6 +269,11 @@ export function useThumbnail(
       return;
     }
 
+    // If we have a remote thumbnail URL, skip backend generation
+    if (thumbnailUrl) {
+      return;
+    }
+
     // Cancel any existing request
     cancelCurrentRequest();
 
@@ -287,6 +309,7 @@ export function useThumbnail(
     };
   }, [
     path,
+    thumbnailUrl,
     size,
     quality,
     priority,
