@@ -39,7 +39,7 @@ use crate::locations::gdrive::{
     add_google_account as add_gdrive_account, get_google_accounts as get_gdrive_accounts,
     remove_google_account as remove_gdrive_account, GoogleAccountInfo,
 };
-use crate::locations::gdrive::provider::resolve_file_id_to_path;
+use crate::locations::gdrive::provider::{resolve_file_id_to_path, download_file_to_temp};
 use crate::locations::gdrive::url_parser::{is_google_drive_url, parse_google_drive_url};
 #[cfg(target_os = "macos")]
 use crate::macos_security;
@@ -4008,4 +4008,11 @@ pub async fn resolve_google_drive_url(url: String) -> Result<ResolveGoogleDriveU
         path,
         is_folder: url_info.is_folder,
     })
+}
+
+/// Download a Google Drive file to a temporary location and open it
+/// Returns the temporary file path
+#[command]
+pub async fn download_gdrive_file(email: String, file_id: String, file_name: String) -> Result<String, String> {
+    download_file_to_temp(&email, &file_id, &file_name).await
 }

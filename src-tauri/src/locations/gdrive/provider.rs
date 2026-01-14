@@ -1020,6 +1020,61 @@ pub async fn resolve_file_id_to_path(file_id: &str) -> Result<(String, String), 
     Err("File not accessible with any connected account".to_string())
 }
 
+/// Download a Google Drive file to a temporary location and return the path
+/// This is used for opening files that need to be downloaded first
+pub async fn download_file_to_temp(email: &str, file_id: &str, file_name: &str) -> Result<String, String> {
+    use std::io::Write;
+
+    log::info!("download_file_to_temp: email={}, file_id={}, name={}", email, file_id, file_name);
+
+    // Create temp directory if it doesn't exist
+    let temp_dir = std::env::temp_dir().join("marlin-gdrive-cache");
+    std::fs::create_dir_all(&temp_dir)
+        .map_err(|e| format!("Failed to create temp directory: {}", e))?;
+
+    // Create temp file path with original filename
+    let temp_path = temp_dir.join(format!("{}_{}", file_id, file_name));
+    let temp_path_str = temp_path.to_string_lossy().to_string();
+
+    // Get the access token
+    let access_token = ensure_valid_token(email).await?;
+
+    // Download using direct HTTPS request with the access token
+    // The Google Drive API download endpoint: https://www.googleapis.com/drive/v3/files/{fileId}?alt=media
+    let download_url = format!(
+        "https://www.googleapis.com/drive/v3/files/{}?alt=media&supportsAllDrives=true",
+        file_id
+    );
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(&download_url)
+        .bearer_auth(&access_token)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to download file: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("Download failed with status {}: {}", status, body));
+    }
+
+    let bytes = response.bytes()
+        .await
+        .map_err(|e| format!("Failed to read file content: {}", e))?;
+
+    let mut file = std::fs::File::create(&temp_path)
+        .map_err(|e| format!("Failed to create temp file: {}", e))?;
+
+    file.write_all(&bytes)
+        .map_err(|e| format!("Failed to write temp file: {}", e))?;
+
+    log::info!("Downloaded {} bytes to {}", bytes.len(), temp_path_str);
+
+    Ok(temp_path_str)
+}
+
 // Suppress warnings for unused cache variables (will be used for optimization)
 #[allow(dead_code)]
 fn _use_caches() {
