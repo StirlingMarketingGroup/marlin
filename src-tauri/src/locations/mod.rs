@@ -9,9 +9,13 @@ use crate::fs_utils::FileItem;
 
 mod file;
 pub mod gdrive;
+#[cfg(not(target_os = "windows"))]
+pub mod smb;
 
 pub use file::FileSystemProvider;
 pub use gdrive::GoogleDriveProvider;
+#[cfg(not(target_os = "windows"))]
+pub use smb::SmbProvider;
 
 pub type ProviderRef = Arc<dyn LocationProvider + Send + Sync>;
 
@@ -23,6 +27,11 @@ static REGISTRY: Lazy<RwLock<ProviderMap>> = Lazy::new(|| {
     map.insert(file_provider.scheme().to_string(), file_provider);
     let gdrive_provider: ProviderRef = Arc::new(GoogleDriveProvider::default());
     map.insert(gdrive_provider.scheme().to_string(), gdrive_provider);
+    #[cfg(not(target_os = "windows"))]
+    {
+        let smb_provider: ProviderRef = Arc::new(SmbProvider::default());
+        map.insert(smb_provider.scheme().to_string(), smb_provider);
+    }
     RwLock::new(map)
 });
 
