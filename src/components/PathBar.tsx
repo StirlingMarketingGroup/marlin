@@ -510,6 +510,9 @@ export default function PathBar() {
           data-testid="path-input"
           data-tauri-drag-region={false}
           autoComplete="off"
+          autoCorrect="off"
+          autoCapitalize="off"
+          spellCheck={false}
         />
         {showSuggestions && suggestions.length > 0 && (
           <div className="absolute left-0 right-0 top-full mt-1 rounded-md border border-app-border bg-app-gray shadow-lg z-30 overflow-hidden">
