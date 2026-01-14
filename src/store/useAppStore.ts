@@ -23,6 +23,7 @@ import { ask, message, open as openDialog } from '@tauri-apps/plugin-dialog';
 import { getExtractableArchiveFormat, isArchiveFile } from '@/utils/fileTypes';
 import { basename } from '@/utils/pathUtils';
 import { useToastStore } from './useToastStore';
+import { parseGoogleDriveUrl } from '@/utils/googleDriveUrl';
 
 // Concurrency limiter for app icon generation requests (macOS)
 const __iconQueue: Array<() => void> = [];
@@ -237,7 +238,7 @@ interface AppState {
   setFilterText: (text: string) => void;
   appendToFilter: (char: string) => void;
   clearFilter: () => void;
-  navigateTo: (path: string) => void;
+  navigateTo: (path: string) => Promise<void>;
   goBack: () => void;
   goForward: () => void;
   canGoBack: () => boolean;
@@ -420,9 +421,53 @@ export const useAppStore = create<AppState>((set, get) => ({
       showFilterInput: false,
     }),
 
-  navigateTo: (path) => {
-    const { pathHistory, historyIndex } = get();
+  navigateTo: async (path) => {
+    const { pathHistory, historyIndex, googleAccounts } = get();
     const trimmed = path.trim();
+
+    // Check if this is a Google Drive URL
+    const gdriveId = parseGoogleDriveUrl(trimmed);
+    if (gdriveId) {
+      // Resolve the folder ID to a path
+      const accountEmails = googleAccounts.map((a) => a.email);
+      if (accountEmails.length === 0) {
+        console.error('No Google accounts connected');
+        await message(
+          'No Google Drive accounts are connected. Please add an account in the sidebar first.',
+          { title: 'Cannot Open Folder', kind: 'error' }
+        );
+        return;
+      }
+
+      try {
+        const [email, resolvedPath] = await invoke<[string, string, string]>(
+          'resolve_gdrive_folder_url',
+          { folderId: gdriveId, accounts: accountEmails }
+        );
+
+        const fullPath = `gdrive://${email}${resolvedPath}`;
+        console.info('[navigateTo] Resolved Google Drive URL to:', fullPath);
+
+        const newHistory = [...pathHistory.slice(0, historyIndex + 1), fullPath];
+        set({
+          currentPath: fullPath,
+          currentLocationRaw: fullPath,
+          pathHistory: newHistory,
+          historyIndex: newHistory.length - 1,
+          filterText: '',
+          showFilterInput: false,
+        });
+        void get().refreshGitStatus({ path: fullPath });
+        return;
+      } catch (error) {
+        console.error('Failed to resolve Google Drive URL:', error);
+        await message(
+          'Could not access this Google Drive folder. Make sure the folder exists and you have access with one of your connected accounts.',
+          { title: 'Cannot Open Folder', kind: 'error' }
+        );
+        return;
+      }
+    }
 
     // Handle gdrive:// URIs - don't use normalizePath for these
     let norm: string;
