@@ -8,7 +8,7 @@ import {
   type ReactNode,
 } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { Play, AppWindow, Folder } from 'phosphor-react';
+import { Play, AppWindow, Folder, CircleNotch } from 'phosphor-react';
 import { FileItem, ViewPreferences } from '../types';
 import { useAppStore } from '../store/useAppStore';
 import { useDragStore } from '../store/useDragStore';
@@ -25,6 +25,7 @@ import SymlinkBadge from '@/components/SymlinkBadge';
 import GitRepoBadge from '@/components/GitRepoBadge';
 import { normalizePreviewIcon } from '@/utils/iconSizing';
 import { isArchiveFile, isVideoExtension, isMacOSBundle } from '@/utils/fileTypes';
+import { isGoogleDrivePath, parseGoogleDrivePathEmail } from '@/utils/googleDriveUrl';
 import { useScrollContainerRef } from '@/contexts/ScrollContext';
 import { useSortedFiles } from '@/hooks/useSortedFiles';
 
@@ -250,6 +251,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
   const { startNativeDrag, endNativeDrag, isDraggedDirectory } = useDragStore();
   const [renameText, setRenameText] = useState<string>('');
   const [draggedFile, setDraggedFile] = useState<string | null>(null);
+  const [downloadingForDrag, setDownloadingForDrag] = useState<Set<string>>(new Set());
   const renameInputRef = useRef<HTMLInputElement>(null);
   const gridRef = useRef<HTMLDivElement>(null);
   const lastClickRef = useRef<{ path: string; time: number; x: number; y: number } | null>(null);
@@ -432,9 +434,56 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
               }
             }
 
+            // Build paths for native drag, downloading Google Drive files to temp first
+            const dragPaths: string[] = [];
+            const gdriveFiles = selected.filter((f) => isGoogleDrivePath(f.path) && f.remote_id);
+
+            // Show loading indicator for Google Drive files being downloaded
+            if (gdriveFiles.length > 0) {
+              setDownloadingForDrag(new Set(gdriveFiles.map((f) => f.path)));
+            }
+
+            try {
+              for (const f of selected) {
+                if (isGoogleDrivePath(f.path) && f.remote_id) {
+                  // Download Google Drive file to temp location
+                  const email = parseGoogleDrivePathEmail(f.path);
+                  if (email) {
+                    try {
+                      const tempPath = await invoke<string>('download_gdrive_file', {
+                        email,
+                        fileId: f.remote_id,
+                        fileName: f.name,
+                      });
+                      dragPaths.push(tempPath);
+                    } catch (downloadError) {
+                      console.warn(
+                        'Failed to download GDrive file for drag:',
+                        f.name,
+                        downloadError
+                      );
+                      // Skip this file in the drag
+                    }
+                  }
+                } else {
+                  // Local file, use path directly
+                  dragPaths.push(f.path);
+                }
+              }
+            } finally {
+              // Clear downloading indicator
+              setDownloadingForDrag(new Set());
+            }
+
+            // Only proceed if we have files to drag
+            if (dragPaths.length === 0) {
+              console.warn('No files available for drag');
+              return;
+            }
+
             // Use new unified native drag API
             await invoke('start_native_drag', {
-              paths: selected.map((f) => f.path),
+              paths: dragPaths,
               previewImage: dragImageDataUrl,
               dragOffsetY: 0,
             });
@@ -777,6 +826,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
       (draggedFile !== null && (draggedFile === file.path || selectedFiles.includes(file.path))) ||
       isDraggedDirectory(file.path);
     const isRenaming = renameTargetPath === file.path;
+    const isDownloadingForDrag = downloadingForDrag.has(file.path);
 
     return (
       <div
@@ -816,6 +866,12 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
         onMouseDown={(e) => handleMouseDownForFile(e, file)}
         draggable={false}
       >
+        {/* Loading overlay for Google Drive file downloads */}
+        {isDownloadingForDrag && (
+          <div className="absolute inset-0 bg-app-dark/60 rounded-md flex items-center justify-center z-30">
+            <CircleNotch className="w-8 h-8 text-white animate-spin" weight="bold" />
+          </div>
+        )}
         <div
           className="mb-2 flex-shrink-0"
           style={{

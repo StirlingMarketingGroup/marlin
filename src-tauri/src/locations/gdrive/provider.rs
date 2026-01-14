@@ -571,7 +571,8 @@ impl GoogleDriveProvider {
         for part in path_parts {
             let query = format!(
                 "'{}' in parents and name = '{}' and trashed = false",
-                current_parent, part
+                current_parent,
+                part.replace("'", "\\'")
             );
 
             let result = hub
@@ -614,7 +615,7 @@ impl GoogleDriveProvider {
         let first_name = path_parts[0];
         let query = format!(
             "sharedWithMe = true and name = '{}' and trashed = false",
-            first_name
+            first_name.replace("'", "\\'")
         );
         log::debug!("  -> searching for shared item with query: {}", query);
 
@@ -1507,6 +1508,22 @@ pub async fn fetch_url_with_auth(email: &str, url: &str) -> Result<String, Strin
     Ok(format!("data:{};base64,{}", content_type, base64_data))
 }
 
+/// Sanitize a filename to prevent path traversal attacks
+/// Extracts only the base filename and removes dangerous characters
+fn sanitize_filename(name: &str) -> String {
+    // Extract just the filename component (removes any path traversal)
+    let base_name = std::path::Path::new(name)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("download");
+
+    // Remove dangerous characters and leading dots
+    base_name
+        .replace(['/', '\\', '\0'], "_")
+        .trim_start_matches('.')
+        .to_string()
+}
+
 /// Download a Google Drive file to a temporary location and return the path
 /// This is used for opening files that need to be downloaded first
 pub async fn download_file_to_temp(email: &str, file_id: &str, file_name: &str) -> Result<String, String> {
@@ -1519,8 +1536,11 @@ pub async fn download_file_to_temp(email: &str, file_id: &str, file_name: &str) 
     std::fs::create_dir_all(&temp_dir)
         .map_err(|e| format!("Failed to create temp directory: {}", e))?;
 
-    // Create temp file path with original filename
-    let temp_path = temp_dir.join(format!("{}_{}", file_id, file_name));
+    // Sanitize filename to prevent path traversal attacks
+    let safe_name = sanitize_filename(file_name);
+
+    // Create temp file path with sanitized filename
+    let temp_path = temp_dir.join(format!("{}_{}", file_id, safe_name));
     let temp_path_str = temp_path.to_string_lossy().to_string();
 
     // Get the access token

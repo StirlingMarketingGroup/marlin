@@ -1,6 +1,37 @@
 // src/utils/googleDriveUrl.ts
 
 /**
+ * Check if a path is a Google Drive internal path (gdrive://...)
+ */
+export function isGoogleDrivePath(path: string): boolean {
+  return path.startsWith('gdrive://');
+}
+
+/**
+ * Parse a Google Drive internal path and extract the email (authority).
+ * Format: gdrive://email@example.com/path/to/file
+ *
+ * @returns The email address or null if not a valid Google Drive path
+ */
+export function parseGoogleDrivePathEmail(path: string): string | null {
+  if (!isGoogleDrivePath(path)) {
+    return null;
+  }
+
+  // Remove the gdrive:// prefix and extract everything before the first /
+  const withoutScheme = path.slice('gdrive://'.length);
+  const slashIndex = withoutScheme.indexOf('/');
+
+  if (slashIndex === -1) {
+    // No path component, the whole thing is the email
+    return withoutScheme || null;
+  }
+
+  const email = withoutScheme.slice(0, slashIndex);
+  return email || null;
+}
+
+/**
  * Parse a Google Drive URL and extract the file/folder ID.
  * Supports various URL formats:
  * - https://drive.google.com/drive/folders/ID
