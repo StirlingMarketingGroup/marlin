@@ -52,6 +52,17 @@ pub enum ThumbnailFormat {
     JPEG,
 }
 
+/// Result of thumbnail generation including metadata
+#[derive(Debug, Clone)]
+pub struct ThumbnailGenerationResult {
+    pub data_url: String,
+    pub has_transparency: bool,
+    /// Original image width in pixels (if available)
+    pub image_width: Option<u32>,
+    /// Original image height in pixels (if available)
+    pub image_height: Option<u32>,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ThumbnailResponse {
     pub id: String,
@@ -59,6 +70,10 @@ pub struct ThumbnailResponse {
     pub cached: bool,
     pub generation_time_ms: u64,
     pub has_transparency: bool,
+    /// Original image width in pixels (if available)
+    pub image_width: Option<u32>,
+    /// Original image height in pixels (if available)
+    pub image_height: Option<u32>,
 }
 
 pub struct ThumbnailService {
@@ -78,22 +93,77 @@ impl ThumbnailService {
         &self,
         request: ThumbnailRequest,
     ) -> Result<ThumbnailResponse, String> {
+        fn expects_image_dimensions(path: &str) -> bool {
+            let ext = Path::new(path)
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_ascii_lowercase());
+
+            matches!(
+                ext.as_deref(),
+                Some("jpg")
+                    | Some("jpeg")
+                    | Some("png")
+                    | Some("gif")
+                    | Some("webp")
+                    | Some("bmp")
+                    | Some("tiff")
+                    | Some("tga")
+                    | Some("ico")
+            )
+        }
+
+        let request_clone = request.clone();
+
         // Try cache first (L1 memory, then L2 disk)
-        if let Some((cached_data, has_transparency)) = self
+        if let Some((cached_data, has_transparency, image_width, image_height)) = self
             .cache
             .get(&request.path, request.size, request.accent.as_ref())
             .await
         {
+            log::info!(
+                "THUMBNAIL CACHE HIT: path={}, dimensions={:?}x{:?}",
+                request.path,
+                image_width,
+                image_height
+            );
+
+            // SMB thumbnails created before we started persisting dimensions will load fine but never
+            // show original image size in the UI. If the cache entry has no dimensions for an
+            // image type, regenerate once to backfill metadata; fall back to cached thumbnail on
+            // failure.
+            if request.path.starts_with("smb://")
+                && expects_image_dimensions(&request.path)
+                && (image_width.is_none() || image_height.is_none())
+            {
+                log::info!(
+                    "THUMBNAIL CACHE HIT MISSING DIMENSIONS: path={}, regenerating...",
+                    request.path
+                );
+                match self.worker.submit_request(request_clone).await {
+                    Ok(response) => return Ok(response),
+                    Err(err) => {
+                        log::warn!(
+                            "Failed to regenerate SMB thumbnail to backfill dimensions (serving cached): path={}, error={}",
+                            request.path,
+                            err
+                        );
+                    }
+                }
+            }
             return Ok(ThumbnailResponse {
                 id: request.id,
                 data_url: cached_data,
                 cached: true,
                 generation_time_ms: 0,
                 has_transparency,
+                image_width,
+                image_height,
             });
         }
 
-        // Submit to worker queue
+        // Cache miss - submit to worker queue
+        log::info!("THUMBNAIL CACHE MISS: path={}", request.path);
         self.worker.submit_request(request).await
     }
 

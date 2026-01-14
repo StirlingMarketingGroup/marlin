@@ -91,11 +91,19 @@ pub struct MetadataBatch {
 
 /// Files that should be treated as hidden regardless of their name starting with a dot.
 /// These are typically system-generated files that users don't want to see.
-const HIDDEN_SYSTEM_FILES: &[&str] = &["Thumbs.db", "desktop.ini"];
+/// Note: .DS_Store is already covered by the dotfile check.
+const HIDDEN_SYSTEM_FILES: &[&str] = &[
+    "Thumbs.db",      // Windows thumbnail cache
+    "desktop.ini",    // Windows folder settings
+    "ehthumbs.db",    // Windows Media Center thumbnails
+    "ehthumbs_vista.db", // Vista Media Center thumbnails
+    "$RECYCLE.BIN",   // Windows recycle bin folder
+    "System Volume Information", // Windows system folder
+];
 
 /// Check if a file should be considered hidden.
 /// Returns true for dotfiles and known system files.
-fn is_hidden_file(name: &str) -> bool {
+pub fn is_hidden_file(name: &str) -> bool {
     name.starts_with('.') || HIDDEN_SYSTEM_FILES.iter().any(|&f| name.eq_ignore_ascii_case(f))
 }
 

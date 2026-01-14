@@ -18,6 +18,12 @@ pub struct CacheEntry {
     pub size_bytes: usize,
     pub generation_time_ms: u64,
     pub has_transparency: bool,
+    /// Original image width in pixels (if available)
+    #[serde(default)]
+    pub image_width: Option<u32>,
+    /// Original image height in pixels (if available)
+    #[serde(default)]
+    pub image_height: Option<u32>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -87,12 +93,13 @@ impl ThumbnailCache {
         Ok(cache)
     }
 
+    /// Returns (data_url, has_transparency, image_width, image_height)
     pub async fn get(
         &self,
         path: &str,
         size: u32,
         accent: Option<&AccentColor>,
-    ) -> Option<(String, bool)> {
+    ) -> Option<(String, bool, Option<u32>, Option<u32>)> {
         let cache_key = self.generate_cache_key(path, size, accent).await?;
 
         // Try L1 memory cache first
@@ -101,17 +108,17 @@ impl ThumbnailCache {
             if let Some(entry) = memory_cache.get_mut(&cache_key) {
                 entry.last_accessed = Utc::now();
                 self.record_hit().await;
-                return Some((entry.data_url.clone(), entry.has_transparency));
+                return Some((entry.data_url.clone(), entry.has_transparency, entry.image_width, entry.image_height));
             }
         }
 
         // Try L2 disk cache
-        if let Some((data_url, has_transparency)) = self.get_from_disk(&cache_key).await {
+        if let Some((data_url, has_transparency, image_width, image_height)) = self.get_from_disk(&cache_key).await {
             // Promote to memory cache
-            self.put_memory(&cache_key, &data_url, 0, has_transparency)
+            self.put_memory(&cache_key, &data_url, 0, has_transparency, image_width, image_height)
                 .await;
             self.record_hit().await;
-            return Some((data_url, has_transparency));
+            return Some((data_url, has_transparency, image_width, image_height));
         }
 
         self.record_miss().await;
@@ -126,6 +133,8 @@ impl ThumbnailCache {
         data_url: String,
         generation_time_ms: u64,
         has_transparency: bool,
+        image_width: Option<u32>,
+        image_height: Option<u32>,
     ) -> Result<(), String> {
         let cache_key = self
             .generate_cache_key(path, size, accent)
@@ -133,9 +142,9 @@ impl ThumbnailCache {
             .ok_or("Failed to generate cache key")?;
 
         // Store in both memory and disk cache
-        self.put_memory(&cache_key, &data_url, generation_time_ms, has_transparency)
+        self.put_memory(&cache_key, &data_url, generation_time_ms, has_transparency, image_width, image_height)
             .await;
-        self.put_disk(&cache_key, &data_url, generation_time_ms, has_transparency)
+        self.put_disk(&cache_key, &data_url, generation_time_ms, has_transparency, image_width, image_height)
             .await?;
 
         // Cleanup if necessary
@@ -150,6 +159,8 @@ impl ThumbnailCache {
         data_url: &str,
         generation_time_ms: u64,
         has_transparency: bool,
+        image_width: Option<u32>,
+        image_height: Option<u32>,
     ) {
         let entry = CacheEntry {
             data_url: data_url.to_string(),
@@ -158,6 +169,8 @@ impl ThumbnailCache {
             size_bytes: data_url.len(),
             generation_time_ms,
             has_transparency,
+            image_width,
+            image_height,
         };
 
         let mut memory_cache = self.memory_cache.write().await;
@@ -193,6 +206,8 @@ impl ThumbnailCache {
         data_url: &str,
         generation_time_ms: u64,
         has_transparency: bool,
+        image_width: Option<u32>,
+        image_height: Option<u32>,
     ) -> Result<(), String> {
         let entry = CacheEntry {
             data_url: data_url.to_string(),
@@ -201,6 +216,8 @@ impl ThumbnailCache {
             size_bytes: data_url.len(),
             generation_time_ms,
             has_transparency,
+            image_width,
+            image_height,
         };
 
         // Write to disk
@@ -219,7 +236,7 @@ impl ThumbnailCache {
         Ok(())
     }
 
-    async fn get_from_disk(&self, key: &str) -> Option<(String, bool)> {
+    async fn get_from_disk(&self, key: &str) -> Option<(String, bool, Option<u32>, Option<u32>)> {
         // Check index first
         {
             let index = self.disk_cache_index.read().await;
@@ -241,7 +258,7 @@ impl ThumbnailCache {
             }
         }
 
-        Some((entry.data_url, entry.has_transparency))
+        Some((entry.data_url, entry.has_transparency, entry.image_width, entry.image_height))
     }
 
     async fn generate_cache_key(
@@ -250,8 +267,13 @@ impl ThumbnailCache {
         size: u32,
         accent: Option<&AccentColor>,
     ) -> Option<String> {
-        let path_obj = Path::new(path);
-        let mtime = super::get_file_mtime(path_obj);
+        // Handle SMB paths specially - they can't use std::path for mtime
+        let mtime = if path.starts_with("smb://") {
+            super::generators::smb::get_smb_file_mtime(path)
+        } else {
+            let path_obj = Path::new(path);
+            super::get_file_mtime(path_obj)
+        };
         Some(super::generate_cache_key(path, size, mtime, accent))
     }
 

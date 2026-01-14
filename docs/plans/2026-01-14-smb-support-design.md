@@ -41,6 +41,7 @@ src-tauri/src/locations/
 Using the pure Rust `pavao` crate for SMB2/3 client functionality.
 
 **Rationale:**
+
 - Zero system dependencies = easy cross-platform installation
 - SMB2/3 covers all modern servers (Windows Server 2008+, Samba 3.6+)
 - Pure Rust = consistent behavior across macOS, Windows, Linux
@@ -57,6 +58,7 @@ smb://server/share/path/to/file
 ```
 
 Examples:
+
 - `smb://fileserver.corp/shared/documents/report.pdf`
 - `smb://nas.local/media/photos/2024`
 - `smb://192.168.1.100/backups`
@@ -66,6 +68,7 @@ This matches the standard SMB URL format used by Finder's "Connect to Server" an
 ### Credential Association
 
 Credentials are stored per-server (not in the URL). When navigating to an SMB path:
+
 1. Extract server hostname from URL
 2. Look up stored credentials for that server
 3. If not found, prompt user to authenticate
@@ -94,6 +97,7 @@ Credentials are stored per-server (not in the URL). When navigating to an SMB pa
 ### Phase 1.5: URL Credential Support
 
 Support `smb://user:pass@server/share` format for power users:
+
 - Parse credentials from URL
 - Strip from display/history
 - Store using same mechanism as manual entry
@@ -107,17 +111,17 @@ Separate enhancement to try macOS Keychain / Windows Credential Manager before p
 
 ### LocationProvider Implementation
 
-| Operation | SMB Support | Notes |
-|-----------|-------------|-------|
-| `read_directory` | ✓ | List files and folders in share |
-| `get_file_metadata` | ✓ | Size, dates, attributes |
-| `create_directory` | ✓ | Create new folders |
-| `delete` | ✓ | Delete files/folders |
-| `rename` | ✓ | Rename within same share |
-| `copy` | ✓ | Copy within share or to local |
-| `move_item` | ✓ | Move within same share |
-| `read_file` | ✓ | Stream file contents |
-| `write_file` | ✓ | Write/upload files |
+| Operation           | SMB Support | Notes                           |
+| ------------------- | ----------- | ------------------------------- |
+| `read_directory`    | ✓           | List files and folders in share |
+| `get_file_metadata` | ✓           | Size, dates, attributes         |
+| `create_directory`  | ✓           | Create new folders              |
+| `delete`            | ✓           | Delete files/folders            |
+| `rename`            | ✓           | Rename within same share        |
+| `copy`              | ✓           | Copy within share or to local   |
+| `move_item`         | ✓           | Move within same share          |
+| `read_file`         | ✓           | Stream file contents            |
+| `write_file`        | ✓           | Write/upload files              |
 
 ### Server Discovery
 
@@ -234,6 +238,7 @@ pub enum SmbError {
 ### Large Directories
 
 SMB naturally handles large directories better than Google Drive (no pagination needed for listing). However:
+
 - Consider streaming directory results for very large folders (50k+ files)
 - Virtual scrolling on frontend (existing plan)
 
@@ -259,6 +264,7 @@ SMB naturally handles large directories better than Google Drive (no pagination 
 ### Integration Tests
 
 **Challenge:** Requires actual SMB server. Options:
+
 1. Skip E2E tests for SMB (documented limitation)
 2. Docker-based Samba container for CI
 3. Mock SMB responses at protocol level
@@ -268,6 +274,7 @@ SMB naturally handles large directories better than Google Drive (no pagination 
 ## Implementation Plan
 
 ### Phase 1: Core Browsing
+
 1. Add `pavao` dependency and basic connection
 2. Implement `SmbProvider` with `read_directory`
 3. Add credential storage (encrypted)
@@ -275,18 +282,21 @@ SMB naturally handles large directories better than Google Drive (no pagination 
 5. Navigate and browse shares
 
 ### Phase 2: File Operations
+
 1. Implement remaining `LocationProvider` methods
 2. Copy/move between SMB and local
 3. Delete with confirmation
 4. Create new folders
 
 ### Phase 3: Polish
+
 1. URL credential parsing (`smb://user:pass@server`)
 2. Connection error recovery
 3. Share enumeration at server root
 4. Performance optimization
 
 ### Future Enhancements (Separate Issues)
+
 - System credential integration (Phase 2 auth)
 - Network discovery (NetBIOS/mDNS)
 - Kerberos authentication for enterprise
@@ -300,5 +310,5 @@ SMB naturally handles large directories better than Google Drive (no pagination 
 ## References
 
 - [pavao crate](https://crates.io/crates/pavao) - Pure Rust SMB2/3 client
-- [SMB URL scheme](https://docs.microsoft.com/en-us/previous-versions/windows/internet-explorer/ie-developer/platform-apis/jj710207(v=vs.85)) - Microsoft documentation
+- [SMB URL scheme](<https://docs.microsoft.com/en-us/previous-versions/windows/internet-explorer/ie-developer/platform-apis/jj710207(v=vs.85)>) - Microsoft documentation
 - [Google Drive integration PR](./2025-12-09-google-drive-integration-design.md) - Similar pattern reference

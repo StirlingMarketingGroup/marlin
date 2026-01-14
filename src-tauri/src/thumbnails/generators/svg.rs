@@ -1,11 +1,11 @@
-use super::super::ThumbnailRequest;
+use super::super::{ThumbnailGenerationResult, ThumbnailRequest};
 use image::DynamicImage;
 use std::fs;
 
 pub struct SvgGenerator;
 
 impl SvgGenerator {
-    pub fn generate(request: &ThumbnailRequest) -> Result<(String, bool), String> {
+    pub fn generate(request: &ThumbnailRequest) -> Result<ThumbnailGenerationResult, String> {
         let svg_data = fs::read(&request.path).map_err(|e| format!("Failed to read SVG: {}", e))?;
 
         // Parse SVG using resvg/usvg
@@ -64,6 +64,12 @@ impl SvgGenerator {
         let data_url =
             super::ThumbnailGenerator::encode_to_data_url(&di, request.format, request.quality)?;
 
-        Ok((data_url, has_transparency))
+        // SVG dimensions from the parsed tree (in pixels)
+        Ok(ThumbnailGenerationResult {
+            data_url,
+            has_transparency,
+            image_width: Some(w.round() as u32),
+            image_height: Some(h.round() as u32),
+        })
     }
 }

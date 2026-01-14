@@ -1,8 +1,8 @@
-use super::super::{ThumbnailFormat, ThumbnailQuality, ThumbnailRequest};
+use super::super::{ThumbnailFormat, ThumbnailGenerationResult, ThumbnailQuality, ThumbnailRequest};
 use super::ThumbnailGenerator;
 use ffmpeg_sidecar::command::FfmpegCommand;
 use ffmpeg_sidecar::download::{download_ffmpeg_package, ffmpeg_download_url, unpack_ffmpeg};
-use image::DynamicImage;
+use image::{DynamicImage, GenericImageView};
 use once_cell::sync::OnceCell;
 use std::{
     fs,
@@ -16,7 +16,7 @@ impl VideoGenerator {
     const MIN_SCALE: u32 = 160;
     const MAX_SCALE: u32 = 1920;
 
-    pub fn generate(request: &ThumbnailRequest) -> Result<(String, bool), String> {
+    pub fn generate(request: &ThumbnailRequest) -> Result<ThumbnailGenerationResult, String> {
         let path = Path::new(&request.path);
 
         if !path.exists() {
@@ -29,13 +29,18 @@ impl VideoGenerator {
         let frame = image::load_from_memory(&frame_bytes)
             .map_err(|e| format!("Failed to decode FFmpeg output: {e}"))?;
 
-        Self::encode_thumbnail(frame, request)
+        // Get frame dimensions before resizing
+        let (video_width, video_height) = frame.dimensions();
+
+        Self::encode_thumbnail(frame, request, video_width, video_height)
     }
 
     fn encode_thumbnail(
         frame: DynamicImage,
         request: &ThumbnailRequest,
-    ) -> Result<(String, bool), String> {
+        video_width: u32,
+        video_height: u32,
+    ) -> Result<ThumbnailGenerationResult, String> {
         let resized = ThumbnailGenerator::resize_image(frame, request.size, request.quality)?;
 
         let target_format = match request.format {
@@ -44,7 +49,12 @@ impl VideoGenerator {
 
         let data_url =
             ThumbnailGenerator::encode_to_data_url(&resized, target_format, request.quality)?;
-        Ok((data_url, false))
+        Ok(ThumbnailGenerationResult {
+            data_url,
+            has_transparency: false,
+            image_width: Some(video_width),
+            image_height: Some(video_height),
+        })
     }
 
     fn extract_frame(

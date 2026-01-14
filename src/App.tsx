@@ -196,30 +196,6 @@ function App() {
     }
   };
 
-  // Helper to process a directory listing response and update app state
-  const handleDirectoryListing = async (
-    listing: DirectoryListingResponse,
-    options: { applyDefaults?: boolean } = {}
-  ): Promise<string> => {
-    const { applyDefaults = true } = options;
-    const resolvedPath = listing.location.displayPath || listing.location.path;
-
-    setFiles(listing.entries);
-    useAppStore.setState({
-      currentLocationRaw: listing.location.raw,
-      currentProviderCapabilities: listing.capabilities,
-    });
-
-    if (applyDefaults) {
-      // For gdrive:// paths, use the full raw URI since that's the key in directoryPreferences
-      const prefsPath =
-        listing.location.scheme === 'gdrive' ? listing.location.raw : listing.location.path;
-      await applySmartViewDefaults(prefsPath, listing.entries);
-    }
-
-    return resolvedPath;
-  };
-
   // Only show the blocking loading overlay during initial app load (not folder navigation)
   // Folder navigation uses a subtle spinner in MainPanel instead
   useEffect(() => {
@@ -435,10 +411,11 @@ function App() {
         }
 
         // Try to load the directory using streaming for better performance
-        // Note: gdrive:// paths don't support streaming, use non-streaming method
-        if (currentPath.startsWith('gdrive://')) {
+        // Note: Remote paths (gdrive://, smb://) don't support streaming, use non-streaming method
+        const isRemotePath = currentPath.includes('://');
+        if (isRemotePath) {
           await useAppStore.getState().refreshCurrentDirectory();
-          // Apply smart view defaults after loading gdrive directory
+          // Apply smart view defaults after loading remote directory
           const { files } = useAppStore.getState();
           await applySmartViewDefaults(currentPath, files);
         } else {
@@ -517,7 +494,7 @@ function App() {
     }
 
     loadDirectory();
-  }, [currentPath, setError, setCurrentPath]);
+  }, [currentPath, navigateTo, setError, setLoading, setCurrentPath]);
 
   // File system watcher for auto-reload
   useEffect(() => {
@@ -533,7 +510,6 @@ function App() {
       if (!isActive) return;
 
       const payload = event.payload;
-      console.log('[FileWatcher] Directory changed:', payload?.changeType, payload?.affectedFiles);
 
       // Skip access-only changes (e.g., opening a file updates atime)
       // Only refresh for actual content changes: create, delete, rename, write
@@ -1167,7 +1143,11 @@ function App() {
             const listing = await invoke<DirectoryListingResponse>('read_directory', {
               path: currentPath,
             });
-            await handleDirectoryListing(listing, { applyDefaults: false });
+            useAppStore.getState().setFiles(listing.entries);
+            useAppStore.setState({
+              currentLocationRaw: listing.location.raw,
+              currentProviderCapabilities: listing.capabilities,
+            });
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
             const hint = msg.includes('Operation not permitted')

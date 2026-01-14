@@ -104,6 +104,7 @@ function GridFilePreview({
   const shouldLoadThumbnail = isImage || isPdf || isAi || isPsd || isStl || isVideo;
   const requestSize = pickBucket(Math.round((box - pad * 2) * dpr));
   const thumbnailPriority = stage === 'visible' ? 'high' : 'medium';
+
   const { dataUrl, loading, hasTransparency } = useThumbnail(
     shouldLoadThumbnail && stage !== 'far' ? file.path : undefined,
     {

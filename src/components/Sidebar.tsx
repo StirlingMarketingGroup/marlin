@@ -57,6 +57,8 @@ export default function Sidebar() {
     smbServers,
     loadSmbServers,
     removeSmbServer,
+    pendingSmbCredentialRequest,
+    setPendingSmbCredentialRequest,
   } = useAppStore();
 
   const [systemDrives, setSystemDrives] = useState<SystemDrive[]>([]);
@@ -277,10 +279,7 @@ export default function Sidebar() {
     }
   };
 
-  const handleDisconnectSmbServer = async (
-    server: SmbServerInfo,
-    event: React.MouseEvent
-  ) => {
+  const handleDisconnectSmbServer = async (server: SmbServerInfo, event: React.MouseEvent) => {
     event.stopPropagation();
     const { addToast } = useToastStore.getState();
 
@@ -744,8 +743,15 @@ export default function Sidebar() {
 
       {/* Add SMB Server Dialog */}
       <AddSmbServerDialog
-        isOpen={showAddSmbDialog}
-        onClose={() => setShowAddSmbDialog(false)}
+        isOpen={showAddSmbDialog || !!pendingSmbCredentialRequest}
+        onClose={() => {
+          setShowAddSmbDialog(false);
+          if (pendingSmbCredentialRequest) {
+            setPendingSmbCredentialRequest(null);
+          }
+        }}
+        initialHostname={pendingSmbCredentialRequest?.hostname}
+        targetPath={pendingSmbCredentialRequest?.targetPath}
       />
     </div>
   );

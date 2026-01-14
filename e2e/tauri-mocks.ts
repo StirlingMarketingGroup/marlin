@@ -18,6 +18,8 @@ export function getTauriMockScript(): string {
           path: mockHomeDir + '/Documents',
           is_directory: true,
           is_hidden: false,
+          is_symlink: false,
+          is_git_repo: false,
           size: 0,
           modified: new Date().toISOString(),
           created: new Date().toISOString(),
@@ -29,6 +31,8 @@ export function getTauriMockScript(): string {
           path: mockDownloadsDir,
           is_directory: true,
           is_hidden: false,
+          is_symlink: false,
+          is_git_repo: false,
           size: 0,
           modified: new Date().toISOString(),
           created: new Date().toISOString(),
@@ -40,6 +44,8 @@ export function getTauriMockScript(): string {
           path: mockHomeDir + '/.hidden',
           is_directory: false,
           is_hidden: true,
+          is_symlink: false,
+          is_git_repo: false,
           size: 100,
           modified: new Date().toISOString(),
           created: new Date().toISOString(),
@@ -54,6 +60,8 @@ export function getTauriMockScript(): string {
           path: mockDownloadsDir + '/sample.pdf',
           is_directory: false,
           is_hidden: false,
+          is_symlink: false,
+          is_git_repo: false,
           size: 2048,
           modified: new Date().toISOString(),
           created: new Date().toISOString(),
@@ -65,11 +73,32 @@ export function getTauriMockScript(): string {
           path: mockDownloadsDir + '/image.png',
           is_directory: false,
           is_hidden: false,
+          is_symlink: false,
+          is_git_repo: false,
           size: 4096,
           modified: new Date().toISOString(),
           created: new Date().toISOString(),
           extension: 'png',
           permissions: { read: true, write: true, execute: false },
+          // Pre-populated dimensions (as if already fetched)
+          image_width: 1920,
+          image_height: 1080,
+        },
+        {
+          name: 'photo.jpg',
+          path: mockDownloadsDir + '/photo.jpg',
+          is_directory: false,
+          is_hidden: false,
+          is_symlink: false,
+          is_git_repo: false,
+          size: 8192,
+          modified: new Date().toISOString(),
+          created: new Date().toISOString(),
+          extension: 'jpg',
+          permissions: { read: true, write: true, execute: false },
+          // Pre-populated dimensions
+          image_width: 3024,
+          image_height: 4032,
         },
       ];
 
@@ -199,7 +228,15 @@ export function getTauriMockScript(): string {
           };
         },
         cancel_directory_stream: () => undefined,
-        read_preferences: () => JSON.stringify({}),
+        read_preferences: () => JSON.stringify({
+          globalPreferences: {
+            viewMode: 'grid',
+            sortBy: 'name',
+            sortOrder: 'asc',
+            showHidden: false,
+            foldersFirst: true,
+          },
+        }),
         get_dir_prefs: () => JSON.stringify({}),
         set_dir_prefs: () => undefined,
         set_last_dir: () => undefined,
@@ -214,9 +251,30 @@ export function getTauriMockScript(): string {
         load_pinned_directories: () => [],
         get_system_drives: () => [],
         get_google_accounts: () => [],
+        get_smb_servers: () => [],
         get_disk_usage: () => ({ total: 1000000000, free: 500000000 }),
         enable_drag_detection: () => undefined,
         set_drop_zone: () => undefined,
+        // Thumbnail service
+        request_thumbnail: (args) => {
+          const path = args?.path || '';
+          // Lookup dimensions from mock files
+          const allFiles = [...mockFiles, ...mockDownloadsFiles];
+          const file = allFiles.find(f => f.path === path);
+          // Generate a simple placeholder data URL
+          const placeholderDataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+          console.log('[Tauri Mock] request_thumbnail for', path, 'dimensions:', file?.image_width, 'x', file?.image_height);
+          return {
+            id: args?.id || 'mock-thumb-id',
+            data_url: placeholderDataUrl,
+            cached: false,
+            generation_time_ms: 10,
+            has_transparency: false,
+            image_width: file?.image_width || null,
+            image_height: file?.image_height || null,
+          };
+        },
+        cancel_thumbnail: () => undefined,
         'plugin:app|version': () => '0.1.0',
         'plugin:os|platform': () => 'linux', // Return non-macOS to skip permission check
         'plugin:os|version': () => '5.0',

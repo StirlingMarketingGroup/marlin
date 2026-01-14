@@ -1,16 +1,19 @@
-use super::super::{get_thumbnail_format_from_path, ThumbnailRequest};
+use super::super::{get_thumbnail_format_from_path, ThumbnailGenerationResult, ThumbnailRequest};
 use super::ThumbnailGenerator;
-use image::{DynamicImage, ImageReader};
+use image::{DynamicImage, GenericImageView, ImageReader};
 use std::path::Path;
 
 pub struct ImageGenerator;
 
 impl ImageGenerator {
-    pub fn generate(request: &ThumbnailRequest) -> Result<(String, bool), String> {
+    pub fn generate(request: &ThumbnailRequest) -> Result<ThumbnailGenerationResult, String> {
         let path = Path::new(&request.path);
 
         // Load the image
         let image = Self::load_image(path)?;
+
+        // Get original dimensions before resizing
+        let (image_width, image_height) = image.dimensions();
 
         // Check if the original image has transparency
         let has_transparency = Self::has_transparency(&image);
@@ -27,7 +30,12 @@ impl ImageGenerator {
 
         // Encode to data URL
         let data_url = ThumbnailGenerator::encode_to_data_url(&resized, format, request.quality)?;
-        Ok((data_url, has_transparency))
+        Ok(ThumbnailGenerationResult {
+            data_url,
+            has_transparency,
+            image_width: Some(image_width),
+            image_height: Some(image_height),
+        })
     }
 
     fn load_image(path: &Path) -> Result<DynamicImage, String> {

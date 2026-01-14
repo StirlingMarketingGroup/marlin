@@ -3,7 +3,7 @@ use image::{DynamicImage, GenericImageView, ImageFormat};
 use std::io::Cursor;
 use std::path::Path;
 
-use super::{ThumbnailFormat, ThumbnailQuality, ThumbnailRequest};
+use super::{ThumbnailFormat, ThumbnailGenerationResult, ThumbnailQuality, ThumbnailRequest};
 
 #[cfg(target_os = "macos")]
 use crate::macos_security;
@@ -16,10 +16,24 @@ pub mod stl;
 pub mod svg;
 pub mod video;
 
+pub mod smb;
+
 pub struct ThumbnailGenerator;
 
 impl ThumbnailGenerator {
-    pub fn generate(request: &ThumbnailRequest) -> Result<(String, bool), String> {
+    pub fn generate(request: &ThumbnailRequest) -> Result<ThumbnailGenerationResult, String> {
+        // Check for SMB paths and handle them specially
+        if smb::is_smb_path(&request.path) {
+            return smb::generate_smb_thumbnail(request);
+        }
+
+        // Handle local files
+        Self::generate_local(request)
+    }
+
+    /// Generate a thumbnail from a local file path.
+    /// This is called directly for local files, or after downloading remote files.
+    pub fn generate_local(request: &ThumbnailRequest) -> Result<ThumbnailGenerationResult, String> {
         let path = Path::new(&request.path);
 
         if !path.exists() {

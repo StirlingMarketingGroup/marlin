@@ -7,11 +7,21 @@ import { useToastStore } from '@/store/useToastStore';
 interface AddSmbServerDialogProps {
   isOpen: boolean;
   onClose: () => void;
+  /** Pre-filled hostname (e.g., when triggered by missing credentials) */
+  initialHostname?: string;
+  /** Path to navigate to after successful connection (instead of server root) */
+  targetPath?: string;
 }
 
-export default function AddSmbServerDialog({ isOpen, onClose }: AddSmbServerDialogProps) {
+export default function AddSmbServerDialog({
+  isOpen,
+  onClose,
+  initialHostname,
+  targetPath,
+}: AddSmbServerDialogProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
-  const firstInputRef = useRef<HTMLInputElement>(null);
+  const hostnameInputRef = useRef<HTMLInputElement>(null);
+  const usernameInputRef = useRef<HTMLInputElement>(null);
 
   const [hostname, setHostname] = useState('');
   const [username, setUsername] = useState('');
@@ -22,13 +32,27 @@ export default function AddSmbServerDialog({ isOpen, onClose }: AddSmbServerDial
 
   const { addSmbServer, navigateTo } = useAppStore();
 
-  // Focus first input when dialog opens
+  // Focus appropriate input when dialog opens
   useEffect(() => {
     if (isOpen) {
       // Small delay to ensure dialog is rendered
-      setTimeout(() => firstInputRef.current?.focus(), 50);
+      setTimeout(() => {
+        // If hostname is pre-filled, focus username; otherwise focus hostname
+        if (initialHostname) {
+          usernameInputRef.current?.focus();
+        } else {
+          hostnameInputRef.current?.focus();
+        }
+      }, 50);
     }
-  }, [isOpen]);
+  }, [isOpen, initialHostname]);
+
+  // Set initial hostname when provided and dialog opens
+  useEffect(() => {
+    if (isOpen && initialHostname) {
+      setHostname(initialHostname);
+    }
+  }, [isOpen, initialHostname]);
 
   // Reset form when dialog closes
   useEffect(() => {
@@ -116,8 +140,8 @@ export default function AddSmbServerDialog({ isOpen, onClose }: AddSmbServerDial
 
       onClose();
 
-      // Navigate to the newly added server
-      navigateTo(`smb://${server.hostname}/`);
+      // Navigate to the target path (if provided) or the server root
+      navigateTo(targetPath || `smb://${server.hostname}/`);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setError(message);
@@ -155,14 +179,14 @@ export default function AddSmbServerDialog({ isOpen, onClose }: AddSmbServerDial
               Server
             </label>
             <input
-              ref={firstInputRef}
+              ref={hostnameInputRef}
               id="smb-hostname"
               type="text"
               value={hostname}
               onChange={(e) => setHostname(e.target.value)}
               placeholder="server.local or 192.168.1.100"
               className="w-full px-3 py-2 text-sm bg-app-gray border border-app-border rounded-md focus:outline-none focus:ring-2 focus:ring-accent/50 focus:border-accent"
-              disabled={isConnecting}
+              disabled={isConnecting || !!initialHostname}
               autoComplete="off"
               autoCorrect="off"
               autoCapitalize="off"
@@ -176,6 +200,7 @@ export default function AddSmbServerDialog({ isOpen, onClose }: AddSmbServerDial
               Username
             </label>
             <input
+              ref={usernameInputRef}
               id="smb-username"
               type="text"
               value={username}
