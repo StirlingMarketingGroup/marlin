@@ -211,6 +211,7 @@ function getPerformanceMockScript(fileCount: number): string {
         get_pinned_directories: () => [],
         load_pinned_directories: () => [],
         get_system_drives: () => [],
+        get_google_accounts: () => [],
         get_disk_usage: () => ({ total: 1000000000, free: 500000000 }),
         enable_drag_detection: () => undefined,
         set_drop_zone: () => undefined,
