@@ -85,3 +85,4 @@ src-tauri/service-account.json
 *.njsproj
 *.sln
 *.sw?
+.worktrees/
