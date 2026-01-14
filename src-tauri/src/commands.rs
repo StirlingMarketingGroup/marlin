@@ -3567,24 +3567,33 @@ pub fn write_preferences(json: String) -> Result<(), String> {
     Ok(())
 }
 
-fn normalize_path(mut s: String) -> String {
+fn normalize_path(s: String) -> String {
     if s.is_empty() {
         return "/".to_string();
     }
-    s = s.replace('\\', "/");
-    while s.contains("//") {
-        s = s.replace("//", "/");
+
+    // For URI schemes (e.g., gdrive://user@email/path), don't apply file path normalization
+    // URI schemes contain "://" and should be kept as-is
+    if s.contains("://") {
+        // This is a URI - return as-is without path normalization
+        return s;
     }
-    if s.len() > 1 && s.ends_with('/') {
-        s.pop();
+
+    // Regular file path normalization
+    let mut result = s.replace('\\', "/");
+    while result.contains("//") {
+        result = result.replace("//", "/");
     }
-    if s.len() == 2 && s.chars().nth(1) == Some(':') {
-        s.push('/');
+    if result.len() > 1 && result.ends_with('/') {
+        result.pop();
     }
-    if s.is_empty() {
-        s = "/".into();
+    if result.len() == 2 && result.chars().nth(1) == Some(':') {
+        result.push('/');
     }
-    s
+    if result.is_empty() {
+        result = "/".into();
+    }
+    result
 }
 
 fn read_prefs_value() -> Result<Value, String> {

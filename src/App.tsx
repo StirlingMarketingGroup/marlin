@@ -317,13 +317,18 @@ function App() {
           console.warn('Could not get system accent color:', e);
         }
 
-        // Now try to load the initial directory using streaming
+        // Now try to load the initial directory
         let loadSuccess = false;
         const tryLoadPath = async (path: string): Promise<boolean> => {
           try {
             setCurrentPath(path);
             navigateTo(path);
-            await useAppStore.getState().refreshCurrentDirectoryStreaming();
+            // Use non-streaming refresh for gdrive:// paths since streaming isn't supported
+            if (path.startsWith('gdrive://')) {
+              await useAppStore.getState().refreshCurrentDirectory();
+            } else {
+              await useAppStore.getState().refreshCurrentDirectoryStreaming();
+            }
             return true;
           } catch (err) {
             console.error('Failed to load directory:', path, err);
