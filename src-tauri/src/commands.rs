@@ -5086,23 +5086,48 @@ pub fn get_pinned_directories() -> Result<Vec<PinnedDirectory>, String> {
 }
 
 #[command]
-pub fn add_pinned_directory(path: String, name: Option<String>) -> Result<PinnedDirectory, String> {
-    let expanded_path = expand_path(&path)?;
-    let path_obj = &expanded_path;
-
-    if !path_obj.exists() {
-        return Err("Path does not exist".to_string());
+pub async fn add_pinned_directory(
+    path: String,
+    name: Option<String>,
+) -> Result<PinnedDirectory, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("Path is required".to_string());
     }
 
-    if !path_obj.is_dir() {
-        return Err("Path is not a directory".to_string());
-    }
+    let input = LocationInput::Raw(trimmed.to_string());
+    let parsed = input
+        .clone()
+        .into_location()
+        .map_err(|e| format!("Invalid path: {e}"))?;
 
-    let expanded_path_str = expanded_path.to_string_lossy().to_string();
+    let (stored_path, local_path_opt, resolved_name_opt) = if parsed.scheme() == "file" {
+        let expanded = expand_path(&parsed.to_path_string())?;
+        if !expanded.exists() {
+            return Err("Path does not exist".to_string());
+        }
+        if !expanded.is_dir() {
+            return Err("Path is not a directory".to_string());
+        }
+        let expanded_str = expanded.to_string_lossy().to_string();
+        let filename = expanded
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string());
+        (expanded_str, Some(expanded), filename)
+    } else {
+        let (provider, location) = resolve_location(input)?;
+        let metadata = provider.get_file_metadata(&location).await?;
+        if !metadata.is_directory {
+            return Err("Path is not a directory".to_string());
+        }
+        (location.raw().to_string(), None, Some(metadata.name))
+    };
+
     let mut stored_pins = load_stored_pinned_directories()?;
 
     // Check if already pinned
-    if stored_pins.iter().any(|p| p.path == expanded_path_str) {
+    if stored_pins.iter().any(|p| p.path == stored_path) {
         return Err("Directory is already pinned".to_string());
     }
 
@@ -5112,28 +5137,33 @@ pub fn add_pinned_directory(path: String, name: Option<String>) -> Result<Pinned
     }
 
     let dir_name = name.unwrap_or_else(|| {
-        path_obj
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("Unknown")
-            .to_string()
+        resolved_name_opt.unwrap_or_else(|| {
+            let parts: Vec<&str> = stored_path
+                .split('/')
+                .filter(|part| !part.is_empty())
+                .collect();
+            parts.last().copied().unwrap_or("Unknown").to_string()
+        })
     });
 
     let new_stored = StoredPinnedDirectory {
         name: dir_name.clone(),
-        path: expanded_path_str.clone(),
+        path: stored_path.clone(),
         pinned_at: Utc::now(),
     };
 
     stored_pins.push(new_stored.clone());
     save_pinned_directories(&stored_pins)?;
 
-    // Compute metadata for the response
-    let (is_git_repo, is_symlink) = compute_pin_metadata(path_obj);
+    // Compute metadata for the response (only for local filesystem pins)
+    let (is_git_repo, is_symlink) = local_path_opt
+        .as_deref()
+        .map(compute_pin_metadata)
+        .unwrap_or((false, false));
 
     Ok(PinnedDirectory {
         name: dir_name,
-        path: expanded_path_str,
+        path: stored_path,
         pinned_at: new_stored.pinned_at,
         is_git_repo,
         is_symlink,
