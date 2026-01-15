@@ -166,7 +166,10 @@ function App() {
         return !!ext && mediaExtensions.has(ext);
       });
 
-      if (mediaFiles.length / mediaRelevantFiles.length >= 0.75) {
+      const mediaRatio = mediaFiles.length / mediaRelevantFiles.length;
+      const mediaThreshold = path.startsWith('smb://') ? 0.6 : 0.75;
+
+      if (mediaRatio >= mediaThreshold) {
         const prefs: Partial<ViewPreferences> = {
           viewMode: 'grid',
           sortBy: 'modified',
