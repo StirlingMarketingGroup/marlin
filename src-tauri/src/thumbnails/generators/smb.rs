@@ -17,7 +17,7 @@ pub fn is_smb_path(path: &str) -> bool {
 pub fn download_smb_file_sync(smb_path: &str) -> Result<std::path::PathBuf, String> {
     use pavao::{SmbClient, SmbCredentials, SmbOpenOptions, SmbOptions};
     use sha2::{Digest, Sha256};
-    use std::io::{Read, Write};
+    use std::io::Write;
 
     log::debug!("download_smb_file_sync: path={}", smb_path);
 
@@ -84,23 +84,19 @@ pub fn download_smb_file_sync(smb_path: &str) -> Result<std::path::PathBuf, Stri
         .open_with(&file_path, SmbOpenOptions::default().read(true))
         .map_err(|e| format!("Failed to open SMB file: {}", e))?;
 
-    // Read the entire file content using std::io::Read trait
-    let mut content = Vec::new();
-    smb_file
-        .read_to_end(&mut content)
-        .map_err(|e| format!("Failed to read SMB file: {}", e))?;
-
-    // Write to temp file
+    // Write to temp file (streaming; avoids loading whole file into memory)
     let mut local_file = std::fs::File::create(&temp_path)
         .map_err(|e| format!("Failed to create temp file: {}", e))?;
 
+    std::io::copy(&mut smb_file, &mut local_file)
+        .map_err(|e| format!("Failed to copy SMB file to temp: {}", e))?;
+
     local_file
-        .write_all(&content)
-        .map_err(|e| format!("Failed to write temp file: {}", e))?;
+        .flush()
+        .map_err(|e| format!("Failed to flush temp file: {}", e))?;
 
     log::debug!(
-        "Downloaded {} bytes from SMB to {}",
-        content.len(),
+        "Downloaded SMB file to {}",
         temp_path.display()
     );
 

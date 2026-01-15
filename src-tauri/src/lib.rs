@@ -168,6 +168,7 @@ pub fn run() {
             commands::add_smb_server,
             commands::remove_smb_server,
             commands::test_smb_connection,
+            commands::download_smb_file,
             plugins::drag_detector::enable_drag_detection,
             plugins::drag_detector::set_drop_zone,
             plugins::drag_detector::simulate_drop,

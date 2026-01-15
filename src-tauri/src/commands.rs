@@ -4139,3 +4139,23 @@ pub fn test_smb_connection(
 ) -> Result<bool, String> {
     Ok(true)
 }
+
+/// Download an SMB file to a temporary location (for drag-out/open-in-external-app).
+/// Returns the temporary file path.
+#[cfg(all(not(target_os = "windows"), feature = "smb"))]
+#[command]
+pub async fn download_smb_file(path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::thumbnails::generators::smb::download_smb_file_sync(&path)
+            .map(|p| p.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|e| format!("Task join error: {e}"))?
+}
+
+/// Download an SMB file to a temporary location (Windows / SMB-disabled stub).
+#[cfg(any(target_os = "windows", not(feature = "smb")))]
+#[command]
+pub async fn download_smb_file(_path: String) -> Result<String, String> {
+    Err("SMB download not supported in this build".to_string())
+}
