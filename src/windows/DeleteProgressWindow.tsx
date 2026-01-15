@@ -7,8 +7,7 @@ import type { DeleteProgressPayload, DeleteProgressUpdatePayload } from '@/types
 import { useDeleteProgressStore } from '@/store/useDeleteProgressStore';
 import { basename } from '@/utils/pathUtils';
 import QuickTooltip from '@/components/QuickTooltip';
-
-const CONTAINER_TOP_PAD = '3rem';
+import { WINDOW_CONTENT_TOP_PADDING } from '@/windows/windowLayout';
 
 const DELETE_PROGRESS_EVENT = 'delete-progress:init';
 const DELETE_PROGRESS_UPDATE_EVENT = 'delete-progress:update';
@@ -110,7 +109,7 @@ export default function DeleteProgressWindow() {
     <div className="min-h-screen bg-app-dark text-app-text">
       <div
         className="relative mx-auto flex h-full max-w-md flex-col gap-5 px-6 pb-8"
-        style={{ paddingTop: CONTAINER_TOP_PAD }}
+        style={{ paddingTop: WINDOW_CONTENT_TOP_PADDING }}
       >
         <div data-tauri-drag-region className="absolute inset-x-2 top-0 h-10 rounded-lg" />
         <header className="flex items-start gap-3">

@@ -3169,6 +3169,18 @@ pub fn show_delete_progress_window(
     Ok(())
 }
 
+fn configure_modal_utility_window<'a, R: tauri::Runtime, M: tauri::Manager<R>>(
+    builder: tauri::WebviewWindowBuilder<'a, R, M>,
+) -> tauri::WebviewWindowBuilder<'a, R, M> {
+    builder
+        .resizable(false)
+        .fullscreen(false)
+        .minimizable(false)
+        .maximizable(false)
+        .closable(true)
+        .decorations(true)
+}
+
 #[command]
 pub fn open_smb_connect_window(
     app: AppHandle,
@@ -3188,16 +3200,13 @@ pub fn open_smb_connect_window(
     }
 
     let url = tauri::WebviewUrl::App("index.html?view=smb-connect".into());
-    let builder = tauri::WebviewWindowBuilder::new(&app, SMB_CONNECT_WINDOW_LABEL, url)
+    let builder = configure_modal_utility_window(tauri::WebviewWindowBuilder::new(
+        &app,
+        SMB_CONNECT_WINDOW_LABEL,
+        url,
+    ))
         .title("Add Network Share")
-        .inner_size(460.0, 520.0)
-        .resizable(false)
-        .fullscreen(false)
-        .minimizable(false)
-        .maximizable(false)
-        .closable(true)
-        .decorations(true)
-        .always_on_top(true);
+        .inner_size(460.0, 520.0);
 
     #[cfg(target_os = "macos")]
     let builder = builder
@@ -3250,16 +3259,13 @@ pub fn open_permissions_window(app: AppHandle) -> Result<(), String> {
     }
 
     let url = tauri::WebviewUrl::App("index.html?view=permissions".into());
-    let builder = tauri::WebviewWindowBuilder::new(&app, PERMISSIONS_WINDOW_LABEL, url)
+    let builder = configure_modal_utility_window(tauri::WebviewWindowBuilder::new(
+        &app,
+        PERMISSIONS_WINDOW_LABEL,
+        url,
+    ))
         .title("Full Disk Access")
-        .inner_size(520.0, 560.0)
-        .resizable(false)
-        .fullscreen(false)
-        .minimizable(false)
-        .maximizable(false)
-        .closable(true)
-        .decorations(true)
-        .always_on_top(true);
+        .inner_size(520.0, 560.0);
 
     #[cfg(target_os = "macos")]
     let builder = builder

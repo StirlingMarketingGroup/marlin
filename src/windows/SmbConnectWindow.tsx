@@ -4,9 +4,8 @@ import { emit, listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { CircleNotch, ShareNetwork, CheckCircle, X } from 'phosphor-react';
 import type { SmbConnectInitPayload, SmbConnectSuccessPayload, SmbServerInfo } from '@/types';
-
-const CONTAINER_TOP_PAD = '3rem';
-const SMB_CONNECT_INIT_EVENT = 'smb-connect:init';
+import { SMB_CONNECT_INIT_EVENT, SMB_CONNECT_SUCCESS_EVENT } from '@/utils/events';
+import { WINDOW_CONTENT_TOP_PADDING } from '@/windows/windowLayout';
 
 export default function SmbConnectWindow() {
   const windowRef = getCurrentWindow();
@@ -122,7 +121,7 @@ export default function SmbConnectWindow() {
       };
 
       setConnected(true);
-      await emit('smb-connect:success', payload);
+      await emit(SMB_CONNECT_SUCCESS_EVENT, payload);
 
       window.setTimeout(() => {
         void closeWindow();
@@ -150,7 +149,7 @@ export default function SmbConnectWindow() {
     <div className="min-h-screen bg-app-dark text-app-text">
       <div
         className="relative mx-auto flex h-full max-w-md flex-col gap-4 px-6 pb-8"
-        style={{ paddingTop: CONTAINER_TOP_PAD }}
+        style={{ paddingTop: WINDOW_CONTENT_TOP_PADDING }}
       >
         <div data-tauri-drag-region className="absolute inset-x-2 top-0 h-10 rounded-lg" />
 

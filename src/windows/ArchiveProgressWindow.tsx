@@ -5,8 +5,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import type { ArchiveProgressPayload, ArchiveProgressUpdatePayload } from '@/types';
 import { useArchiveProgressStore } from '@/store/useArchiveProgressStore';
 import QuickTooltip from '@/components/QuickTooltip';
-
-const CONTAINER_TOP_PAD = '3rem';
+import { WINDOW_CONTENT_TOP_PADDING } from '@/windows/windowLayout';
 
 export default function ArchiveProgressWindow() {
   const windowRef = getCurrentWindow();
@@ -93,7 +92,7 @@ export default function ArchiveProgressWindow() {
     <div className="min-h-screen bg-app-dark text-app-text">
       <div
         className="relative mx-auto flex h-full max-w-md flex-col gap-5 px-6 pb-8"
-        style={{ paddingTop: CONTAINER_TOP_PAD }}
+        style={{ paddingTop: WINDOW_CONTENT_TOP_PADDING }}
       >
         <div data-tauri-drag-region className="absolute inset-x-2 top-0 h-10 rounded-lg" />
         <div className="flex items-start gap-3">

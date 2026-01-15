@@ -5,6 +5,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { CheckCircle, WarningCircle, XCircle } from 'phosphor-react';
 import { FolderSizeInitPayload, FolderSizeProgressPayload } from '@/types';
 import { useFolderSizeStore } from '@/store/useFolderSizeStore';
+import { WINDOW_CONTENT_TOP_PADDING } from '@/windows/windowLayout';
 
 const formatBytes = (bytes: number): string => {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
@@ -16,8 +17,6 @@ const formatBytes = (bytes: number): string => {
 
 const formatNumber = (value: number): string =>
   new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(value);
-
-const CONTAINER_TOP_PAD = '3rem';
 
 export default function FolderSizeWindow() {
   const windowRef = getCurrentWindow();
@@ -180,7 +179,7 @@ export default function FolderSizeWindow() {
     <div className="min-h-screen bg-app-dark text-app-text">
       <div
         className="relative mx-auto flex h-full max-w-lg flex-col gap-6 px-6 pb-10"
-        style={{ paddingTop: CONTAINER_TOP_PAD }}
+        style={{ paddingTop: WINDOW_CONTENT_TOP_PADDING }}
       >
         <div data-tauri-drag-region className="absolute inset-x-2 top-0 h-12 rounded-lg" />
         <div className="absolute inset-x-0 top-0 h-12 flex items-center justify-center pointer-events-none">
