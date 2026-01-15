@@ -568,14 +568,35 @@ fn parse_smb_path(authority: &str, path: &str) -> Result<(String, String, String
 /// Parse a full SMB URL into (hostname, share, path)
 #[cfg(feature = "smb")]
 pub fn parse_smb_url(url: &str) -> Result<(String, String, String), String> {
-    let parsed = url::Url::parse(url).map_err(|e| format!("Invalid SMB URL: {}", e))?;
-    if parsed.scheme() != "smb" {
-        return Err(format!("Invalid SMB URL scheme (expected smb://): {}", url));
+    // NOTE: Do not use `url::Url::parse` here.
+    // Our `smb://` paths are *not* guaranteed to be RFC-3986 compliant URLs:
+    // - SMB hostnames can contain underscores and other characters `url` rejects.
+    // - Paths can contain characters that `url` would treat as query/fragment delimiters.
+    //
+    // The rest of the app treats these as "raw" locations (see `locations::Location`), so we
+    // parse them leniently to match that behavior.
+    let remainder = url
+        .strip_prefix("smb://")
+        .ok_or_else(|| format!("Invalid SMB URL scheme (expected smb://): {}", url))?;
+
+    // Support (but do not require) smb://user:pass@server/share/path by stripping credentials.
+    let (authority_part, path_part) = remainder
+        .split_once('/')
+        .ok_or_else(|| "SMB URL must include share name: smb://server/share/path".to_string())?;
+
+    let hostname = authority_part
+        .rsplit_once('@')
+        .map(|(_, host)| host)
+        .unwrap_or(authority_part);
+
+    if hostname.is_empty() {
+        return Err("SMB URL requires server hostname".to_string());
     }
-    let hostname = parsed
-        .host_str()
-        .ok_or_else(|| "SMB URL requires server hostname".to_string())?;
-    parse_smb_path(hostname, parsed.path())
+
+    // Normalize any accidental duplicate slashes at the start of the path portion.
+    let path = format!("/{}", path_part.trim_start_matches('/'));
+
+    parse_smb_path(hostname, &path)
 }
 
 /// Extract credentials from SMB URL if present
@@ -642,6 +663,23 @@ mod tests {
         assert_eq!(host, "server.local");
         assert_eq!(share, "myshare");
         assert_eq!(path, "/");
+    }
+
+    #[test]
+    fn test_parse_smb_url_lenient_hostname() {
+        let (host, share, path) = parse_smb_url("smb://nas_1/myshare/folder/file name.jpg").unwrap();
+        assert_eq!(host, "nas_1");
+        assert_eq!(share, "myshare");
+        assert_eq!(path, "/folder/file name.jpg");
+    }
+
+    #[test]
+    fn test_parse_smb_url_strips_credentials() {
+        let (host, share, path) =
+            parse_smb_url("smb://user:password@server.local/share/folder/file.txt").unwrap();
+        assert_eq!(host, "server.local");
+        assert_eq!(share, "share");
+        assert_eq!(path, "/folder/file.txt");
     }
 
     #[test]

@@ -180,8 +180,18 @@ impl ThumbnailWorker {
                                     image_height: gen_result.image_height,
                                 })
                             }
-                            Ok(Err(e)) => Err(format!("Thumbnail generation failed: {}", e)),
-                            Err(e) => Err(format!("Task execution failed: {}", e)),
+                            Ok(Err(e)) => {
+                                log::warn!("THUMBNAIL GENERATION FAILED: path={}, error={}", request.path, e);
+                                Err(format!("Thumbnail generation failed: {}", e))
+                            }
+                            Err(e) => {
+                                log::warn!(
+                                    "THUMBNAIL TASK FAILED: path={}, error={}",
+                                    request.path,
+                                    e
+                                );
+                                Err(format!("Task execution failed: {}", e))
+                            }
                         };
 
                         // Send response back
