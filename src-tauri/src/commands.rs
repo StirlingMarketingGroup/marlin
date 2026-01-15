@@ -97,6 +97,9 @@ const ARCHIVE_PROGRESS_UPDATE_EVENT: &str = "archive-progress:update";
 const DELETE_PROGRESS_EVENT: &str = "delete-progress:init";
 const DELETE_PROGRESS_UPDATE_EVENT: &str = "delete-progress:update";
 const DELETE_PROGRESS_WINDOW_LABEL: &str = "delete-progress";
+const SMB_CONNECT_INIT_EVENT: &str = "smb-connect:init";
+const SMB_CONNECT_WINDOW_LABEL: &str = "smb-connect";
+const PERMISSIONS_WINDOW_LABEL: &str = "permissions";
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -185,6 +188,8 @@ static ARCHIVE_PROGRESS_QUEUE: Lazy<WindowPayloadQueue<ArchiveProgressPayload>> 
     Lazy::new(|| WindowPayloadQueue::new(ARCHIVE_PROGRESS_WINDOW_LABEL, ARCHIVE_PROGRESS_EVENT));
 static DELETE_PROGRESS_QUEUE: Lazy<WindowPayloadQueue<DeleteProgressPayload>> =
     Lazy::new(|| WindowPayloadQueue::new(DELETE_PROGRESS_WINDOW_LABEL, DELETE_PROGRESS_EVENT));
+static SMB_CONNECT_QUEUE: Lazy<WindowPayloadQueue<SmbConnectInitPayload>> =
+    Lazy::new(|| WindowPayloadQueue::new(SMB_CONNECT_WINDOW_LABEL, SMB_CONNECT_INIT_EVENT));
 
 const FOLDER_SIZE_WINDOW_READY_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const FOLDER_SIZE_WINDOW_READY_POLL_ATTEMPTS: u32 = 40;
@@ -501,6 +506,13 @@ struct ArchiveProgressUpdatePayload {
     entry_name: Option<String>,
     format: String,
     finished: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SmbConnectInitPayload {
+    initial_hostname: Option<String>,
+    target_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3154,6 +3166,111 @@ pub fn show_delete_progress_window(
         .map_err(|e| format!("Failed to create delete progress window: {}", e))?;
 
     DELETE_PROGRESS_QUEUE.queue(&app, payload);
+    Ok(())
+}
+
+#[command]
+pub fn open_smb_connect_window(
+    app: AppHandle,
+    initial_hostname: Option<String>,
+    target_path: Option<String>,
+) -> Result<(), String> {
+    let payload = SmbConnectInitPayload {
+        initial_hostname,
+        target_path,
+    };
+
+    if let Some(existing) = app.get_webview_window(SMB_CONNECT_WINDOW_LABEL) {
+        SMB_CONNECT_QUEUE.queue(&app, payload);
+        let _ = existing.show();
+        let _ = existing.set_focus();
+        return Ok(());
+    }
+
+    let url = tauri::WebviewUrl::App("index.html?view=smb-connect".into());
+    let builder = tauri::WebviewWindowBuilder::new(&app, SMB_CONNECT_WINDOW_LABEL, url)
+        .title("Add Network Share")
+        .inner_size(460.0, 520.0)
+        .resizable(false)
+        .fullscreen(false)
+        .minimizable(false)
+        .maximizable(false)
+        .closable(true)
+        .decorations(true)
+        .always_on_top(true);
+
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true)
+        .traffic_light_position(tauri::LogicalPosition::new(14.0, 14.0));
+
+    SMB_CONNECT_QUEUE.set_ready(false);
+
+    builder
+        .build()
+        .map_err(|e| format!("Failed to create SMB connect window: {}", e))?;
+
+    SMB_CONNECT_QUEUE.queue(&app, payload);
+    Ok(())
+}
+
+#[command]
+pub fn hide_smb_connect_window(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(SMB_CONNECT_WINDOW_LABEL) {
+        if let Err(err) = window.close() {
+            warn!("Failed to close SMB connect window: {err}");
+        }
+    }
+
+    SMB_CONNECT_QUEUE.set_ready(false);
+    SMB_CONNECT_QUEUE.clear_pending();
+    Ok(())
+}
+
+#[command]
+pub fn smb_connect_window_ready(app: AppHandle) -> Result<(), String> {
+    SMB_CONNECT_QUEUE.set_ready(true);
+    SMB_CONNECT_QUEUE.try_emit(&app);
+    Ok(())
+}
+
+#[command]
+pub fn smb_connect_window_unready() -> Result<(), String> {
+    SMB_CONNECT_QUEUE.set_ready(false);
+    Ok(())
+}
+
+#[command]
+pub fn open_permissions_window(app: AppHandle) -> Result<(), String> {
+    if let Some(existing) = app.get_webview_window(PERMISSIONS_WINDOW_LABEL) {
+        let _ = existing.show();
+        let _ = existing.set_focus();
+        return Ok(());
+    }
+
+    let url = tauri::WebviewUrl::App("index.html?view=permissions".into());
+    let builder = tauri::WebviewWindowBuilder::new(&app, PERMISSIONS_WINDOW_LABEL, url)
+        .title("Full Disk Access")
+        .inner_size(520.0, 560.0)
+        .resizable(false)
+        .fullscreen(false)
+        .minimizable(false)
+        .maximizable(false)
+        .closable(true)
+        .decorations(true)
+        .always_on_top(true);
+
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true)
+        .traffic_light_position(tauri::LogicalPosition::new(14.0, 14.0));
+
+    builder
+        .build()
+        .map_err(|e| format!("Failed to create permissions window: {}", e))?;
+
     Ok(())
 }
 
