@@ -1,6 +1,4 @@
 mod auth;
-#[cfg(test)]
-mod smb_test;
 
 use async_trait::async_trait;
 use crate::fs_utils::FileItem;
