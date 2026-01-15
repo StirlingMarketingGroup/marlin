@@ -1,14 +1,8 @@
 import { useCallback } from 'react';
-import { platform } from '@tauri-apps/plugin-os';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { ShieldCheck, FolderSimple, X } from 'phosphor-react';
 import { FULL_DISK_ACCESS_DISMISSED_KEY } from '@/utils/fullDiskAccessPrompt';
-
-const CONTAINER_TOP_PAD = '3rem';
-
-interface MacOSPermissionsAPI {
-  requestFullDiskAccessPermission: () => Promise<void>;
-}
+import { WINDOW_CONTENT_TOP_PADDING } from '@/windows/windowLayout';
 
 export default function PermissionsWindow() {
   const windowRef = getCurrentWindow();
@@ -31,14 +25,8 @@ export default function PermissionsWindow() {
   }, [closeWindow]);
 
   const handleGrantAccess = useCallback(async () => {
-    if (platform() !== 'macos') {
-      void closeWindow();
-      return;
-    }
-
     try {
-      const mod =
-        (await import('tauri-plugin-macos-permissions-api')) as unknown as MacOSPermissionsAPI;
+      const mod = await import('tauri-plugin-macos-permissions-api');
       await mod.requestFullDiskAccessPermission();
       void closeWindow();
     } catch (error) {
@@ -50,7 +38,7 @@ export default function PermissionsWindow() {
     <div className="min-h-screen bg-app-dark text-app-text">
       <div
         className="relative mx-auto flex h-full max-w-lg flex-col px-6 pb-8"
-        style={{ paddingTop: CONTAINER_TOP_PAD }}
+        style={{ paddingTop: WINDOW_CONTENT_TOP_PADDING }}
       >
         <div data-tauri-drag-region className="absolute inset-x-2 top-0 h-10 rounded-lg" />
 

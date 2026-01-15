@@ -18,6 +18,7 @@ import { getEffectiveExtension } from './utils/fileTypes';
 import Toast from './components/Toast';
 import FilterInput from './components/FilterInput';
 import { FULL_DISK_ACCESS_DISMISSED_KEY } from '@/utils/fullDiskAccessPrompt';
+import { SMB_CONNECT_SUCCESS_EVENT } from '@/utils/events';
 import type {
   DirectoryChangeEventPayload,
   DirectoryListingResponse,
@@ -47,7 +48,7 @@ async function checkAndShowFullDiskAccessPrompt() {
 
   try {
     const mod = await import('tauri-plugin-macos-permissions-api');
-    const hasAccess = await (mod.checkFullDiskAccessPermission as () => Promise<boolean>)();
+    const hasAccess = await mod.checkFullDiskAccessPermission();
     if (!hasAccess) {
       await invoke('open_permissions_window');
     }
@@ -251,20 +252,23 @@ function App() {
 
     (async () => {
       try {
-        unlisten = await listen<SmbConnectSuccessPayload>('smb-connect:success', async (evt) => {
-          const payload = evt.payload;
-          if (!payload?.hostname) return;
+        unlisten = await listen<SmbConnectSuccessPayload>(
+          SMB_CONNECT_SUCCESS_EVENT,
+          async (evt) => {
+            const payload = evt.payload;
+            if (!payload?.hostname) return;
 
-          const state = useAppStore.getState();
-          try {
-            await state.loadSmbServers();
-          } catch (error) {
-            console.warn('Failed to refresh SMB server list after connect:', error);
+            const state = useAppStore.getState();
+            try {
+              await state.loadSmbServers();
+            } catch (error) {
+              console.warn('Failed to refresh SMB server list after connect:', error);
+            }
+
+            state.setPendingSmbCredentialRequest(null);
+            await state.navigateTo(payload.targetPath || `smb://${payload.hostname}/`);
           }
-
-          state.setPendingSmbCredentialRequest(null);
-          await state.navigateTo(payload.targetPath || `smb://${payload.hostname}/`);
-        });
+        );
       } catch (error) {
         console.warn('Failed to listen for SMB connect success:', error);
       }
