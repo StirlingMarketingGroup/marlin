@@ -195,6 +195,28 @@ impl LocationProvider for SmbProvider {
             .authority()
             .ok_or_else(|| "SMB path requires server".to_string())?;
 
+        // Server root (share listing)
+        let location_path = location.path();
+        if location_path == "/" || location_path.is_empty() {
+            return Ok(FileItem {
+                name: authority.to_string(),
+                path: location.raw().to_string(),
+                is_directory: true,
+                is_hidden: false,
+                is_symlink: false,
+                is_git_repo: false,
+                size: 0,
+                modified: Utc::now(),
+                extension: None,
+                child_count: None,
+                image_width: None,
+                image_height: None,
+                remote_id: None,
+                thumbnail_url: None,
+                download_url: None,
+            });
+        }
+
         let (hostname, share, path) = parse_smb_path(authority, location.path())?;
         let creds = get_server_credentials(&hostname)?;
 

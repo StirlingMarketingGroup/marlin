@@ -12,6 +12,7 @@ import {
   CaretRight,
   SquaresFour,
   List,
+  Folder,
   ArrowUp,
   ArrowClockwise,
   Minus,
@@ -25,6 +26,9 @@ import { useAppStore } from '@/store/useAppStore';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import ZoomSlider from './ZoomSlider';
 import UpdateNotice from '@/components/UpdateNotice';
+import GitRepoBadge from '@/components/GitRepoBadge';
+import SymlinkBadge from '@/components/SymlinkBadge';
+import { useDragStore } from '@/store/useDragStore';
 
 const MAX_SUGGESTIONS = 8;
 
@@ -167,17 +171,41 @@ export default function PathBar() {
   const isMacPlatform = platform.includes('MAC');
 
   const inputRef = useRef<HTMLInputElement>(null);
+  const [currentDirMeta, setCurrentDirMeta] = useState<FileItem | null>(null);
   const windowRef = useRef(getCurrentWindow());
   const autocompleteInfoRef = useRef<AutocompleteInfo | null>(null);
   const originalValueRef = useRef<string>('');
   const skipNextFetchRef = useRef(false);
   const suggestionRequestIdRef = useRef(0);
+  const startNativeDrag = useDragStore((state) => state.startNativeDrag);
+  const endNativeDrag = useDragStore((state) => state.endNativeDrag);
 
   const clearSuggestions = useCallback(() => {
     setSuggestions([]);
     setShowSuggestions(false);
     setActiveSuggestion(-1);
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const metadata = await invoke<FileItem>('get_file_metadata', { path: currentPath });
+        if (!cancelled) {
+          setCurrentDirMeta(metadata);
+        }
+      } catch {
+        if (!cancelled) {
+          setCurrentDirMeta(null);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentPath]);
 
   const scheduleSelection = (start: number, end: number) => {
     requestAnimationFrame(() => {
@@ -439,6 +467,81 @@ export default function PathBar() {
     }
   };
 
+  const handleCurrentDirMouseDown = useCallback(
+    (event: ReactMouseEvent<HTMLButtonElement>) => {
+      event.stopPropagation();
+
+      if (event.button !== 0) return;
+      if (!currentDirMeta?.is_directory) return;
+
+      const startX = event.clientX;
+      const startY = event.clientY;
+      const dragThreshold = 5;
+      const isRemote = currentPath.includes('://');
+      let dragStarted = false;
+
+      const cleanup = () => {
+        window.removeEventListener('mousemove', onMouseMove);
+        window.removeEventListener('mouseup', onMouseUp);
+      };
+
+      const onMouseUp = (upEvent: MouseEvent) => {
+        cleanup();
+
+        if (!dragStarted) {
+          inputRef.current?.focus();
+          return;
+        }
+
+        if (!isRemote) {
+          return;
+        }
+
+        const el = document.elementFromPoint(upEvent.clientX, upEvent.clientY);
+        const isOverSidebar = Boolean(el?.closest('[data-drop-zone-id="sidebar"]'));
+        if (isOverSidebar) {
+          void invoke('simulate_drop', { paths: [currentPath], targetId: 'sidebar' }).catch(
+            (error) => {
+              console.warn('Failed to pin current directory via drop simulation:', error);
+            }
+          );
+        }
+        endNativeDrag();
+      };
+
+      const onMouseMove = (moveEvent: MouseEvent) => {
+        const dx = moveEvent.clientX - startX;
+        const dy = moveEvent.clientY - startY;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+        if (distance < dragThreshold || dragStarted) return;
+        dragStarted = true;
+
+        startNativeDrag({ path: currentPath, name: currentDirMeta.name });
+
+        if (isRemote) {
+          return;
+        }
+
+        cleanup();
+        void invoke('start_native_drag', {
+          paths: [currentPath],
+          previewImage: null,
+          dragOffsetY: 0,
+        })
+          .catch((error) => {
+            console.warn('Native drag failed for current directory:', error);
+          })
+          .finally(() => {
+            endNativeDrag();
+          });
+      };
+
+      window.addEventListener('mousemove', onMouseMove);
+      window.addEventListener('mouseup', onMouseUp);
+    },
+    [currentDirMeta, currentPath, endNativeDrag, startNativeDrag]
+  );
+
   return (
     <div
       className="toolbar gap-3 select-none relative"
@@ -497,6 +600,25 @@ export default function PathBar() {
 
       {/* Path input */}
       <div className="flex-1 flex items-center gap-2 relative">
+        <button
+          type="button"
+          className="btn-icon bg-app-gray border border-app-border"
+          title="Drag to pin this folder to the sidebar"
+          data-tauri-drag-region={false}
+          onMouseDown={handleCurrentDirMouseDown}
+        >
+          <span className="relative flex-shrink-0 w-5 h-5">
+            <div className="w-full h-full flex items-center justify-center">
+              <Folder className="w-5 h-5" weight="fill" />
+            </div>
+            {currentDirMeta?.is_git_repo && (
+              <GitRepoBadge size="sm" style={{ bottom: -2, left: -2 }} />
+            )}
+            {currentDirMeta?.is_symlink && (
+              <SymlinkBadge size="sm" style={{ bottom: -2, right: -2 }} />
+            )}
+          </span>
+        </button>
         <input
           ref={inputRef}
           type="text"
