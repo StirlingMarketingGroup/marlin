@@ -131,7 +131,9 @@ function App() {
         return;
       }
 
-      const mediaExtensions = new Set([
+      // Default to grid only when we can actually show thumbnails (locally generated, or remote-provided).
+      // This avoids switching to grid for file types we can't thumbnail yet (e.g., docx).
+      const thumbnailCapableExtensions = new Set([
         // Images
         'jpg',
         'jpeg',
@@ -140,8 +142,6 @@ function App() {
         'webp',
         'svg',
         'bmp',
-        'heic',
-        'raw',
         'tiff',
         'tif',
         'tga',
@@ -154,20 +154,27 @@ function App() {
         'webm',
         'flv',
         'm4v',
-        // Documents with thumbnails
+        // Documents / other with generated thumbnails
         'pdf',
         'ai',
         'eps',
         'psd',
         'psb',
+        'stl',
       ]);
-      const mediaFiles = mediaRelevantFiles.filter((file) => {
-        const ext = file.extension?.toLowerCase();
-        return !!ext && mediaExtensions.has(ext);
-      });
 
-      const mediaRatio = mediaFiles.length / mediaRelevantFiles.length;
-      const mediaThreshold = path.startsWith('smb://') ? 0.6 : 0.75;
+      const hasGeneratedThumbnail = (file: FileItem) => {
+        if (file.thumbnail_url) return true;
+        const ext = file.extension?.toLowerCase();
+        return !!ext && thumbnailCapableExtensions.has(ext);
+      };
+
+      const thumbnailFiles = mediaRelevantFiles.filter(hasGeneratedThumbnail);
+
+      const mediaRatio = thumbnailFiles.length / mediaRelevantFiles.length;
+      // SMB folders tend to be "mixed" (e.g., 1 image + 1 doc). If at least half the files can
+      // show thumbnails, default to grid when there's no stored preference.
+      const mediaThreshold = path.startsWith('smb://') ? 0.5 : 0.75;
 
       if (mediaRatio >= mediaThreshold) {
         const prefs: Partial<ViewPreferences> = {
