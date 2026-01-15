@@ -172,9 +172,8 @@ function App() {
       const thumbnailFiles = mediaRelevantFiles.filter(hasGeneratedThumbnail);
 
       const mediaRatio = thumbnailFiles.length / mediaRelevantFiles.length;
-      // SMB folders tend to be "mixed" (e.g., 1 image + 1 doc). If at least half the files can
-      // show thumbnails, default to grid when there's no stored preference.
-      const mediaThreshold = path.startsWith('smb://') ? 0.5 : 0.75;
+      // If at least half the files can show thumbnails, default to grid when there's no stored preference.
+      const mediaThreshold = 0.5;
 
       if (mediaRatio >= mediaThreshold) {
         const prefs: Partial<ViewPreferences> = {
