@@ -26,6 +26,7 @@ import GitRepoBadge from '@/components/GitRepoBadge';
 import { normalizePreviewIcon } from '@/utils/iconSizing';
 import { isArchiveFile, isVideoExtension, isMacOSBundle } from '@/utils/fileTypes';
 import { isGoogleDrivePath, parseGoogleDrivePathEmail } from '@/utils/googleDriveUrl';
+import { isSmbPath } from '@/utils/smbPath';
 import { useScrollContainerRef } from '@/contexts/ScrollContext';
 import { useSortedFiles } from '@/hooks/useSortedFiles';
 
@@ -435,13 +436,14 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
               }
             }
 
-            // Build paths for native drag, downloading Google Drive files to temp first
+            // Build paths for native drag, downloading remote files to temp first
             const dragPaths: string[] = [];
             const gdriveFiles = selected.filter((f) => isGoogleDrivePath(f.path) && f.remote_id);
+            const smbFiles = selected.filter((f) => isSmbPath(f.path) && !f.is_directory);
 
-            // Show loading indicator for Google Drive files being downloaded
-            if (gdriveFiles.length > 0) {
-              setDownloadingForDrag(new Set(gdriveFiles.map((f) => f.path)));
+            // Show loading indicator for files being downloaded
+            if (gdriveFiles.length > 0 || smbFiles.length > 0) {
+              setDownloadingForDrag(new Set([...gdriveFiles, ...smbFiles].map((f) => f.path)));
             }
 
             try {
@@ -465,6 +467,19 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
                       );
                       // Skip this file in the drag
                     }
+                  }
+                } else if (isSmbPath(f.path)) {
+                  if (f.is_directory) {
+                    // We don't currently support dragging SMB directories to external apps since there is no
+                    // local path representation (we don't mount shares).
+                    continue;
+                  }
+                  try {
+                    const tempPath = await invoke<string>('download_smb_file', { path: f.path });
+                    dragPaths.push(tempPath);
+                  } catch (downloadError) {
+                    console.warn('Failed to download SMB file for drag:', f.name, downloadError);
+                    // Skip this file in the drag
                   }
                 } else {
                   // Local file, use path directly
