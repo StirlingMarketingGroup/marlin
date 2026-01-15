@@ -31,7 +31,6 @@ import { useToastStore } from '../store/useToastStore';
 import { useSidebarDropZone } from '../hooks/useDragDetector';
 import { usePlatform } from '@/hooks/usePlatform';
 import QuickTooltip from './QuickTooltip';
-import AddSmbServerDialog from './AddSmbServerDialog';
 
 type SidebarLink = {
   name: string;
@@ -66,7 +65,6 @@ export default function Sidebar() {
   const [isDragOver, setIsDragOver] = useState(false);
   const [addingGoogleAccount, setAddingGoogleAccount] = useState(false);
   const [disconnectingAccounts, setDisconnectingAccounts] = useState<Set<string>>(new Set());
-  const [showAddSmbDialog, setShowAddSmbDialog] = useState(false);
   const [disconnectingSmbServers, setDisconnectingSmbServers] = useState<Set<string>>(new Set());
   const sidebarRef = useRef<HTMLDivElement>(null);
   const isProcessingDropRef = useRef(false);
@@ -94,6 +92,22 @@ export default function Sidebar() {
     setIsDragOver(true);
   }, []);
   const handleDragLeave = useCallback(() => setIsDragOver(false), []);
+
+  useEffect(() => {
+    if (!pendingSmbCredentialRequest) return;
+
+    (async () => {
+      try {
+        await invoke('open_smb_connect_window', {
+          initialHostname: pendingSmbCredentialRequest.hostname,
+          targetPath: pendingSmbCredentialRequest.targetPath,
+        });
+        setPendingSmbCredentialRequest(null);
+      } catch (error) {
+        console.warn('Failed to open SMB connect window:', error);
+      }
+    })();
+  }, [pendingSmbCredentialRequest, setPendingSmbCredentialRequest]);
 
   useSidebarDropZone(
     async (paths) => {
@@ -657,7 +671,7 @@ export default function Sidebar() {
 
         {/* Add Network Share button */}
         <button
-          onClick={() => setShowAddSmbDialog(true)}
+          onClick={() => void invoke('open_smb_connect_window', {})}
           className="w-full flex items-center gap-2 px-1.5 py-1 rounded-md text-left leading-5 text-[13px] text-app-muted hover:bg-app-light/70 hover:text-app-text transition-colors"
           data-tauri-drag-region={false}
         >
@@ -740,19 +754,6 @@ export default function Sidebar() {
           </>
         )}
       </div>
-
-      {/* Add SMB Server Dialog */}
-      <AddSmbServerDialog
-        isOpen={showAddSmbDialog || !!pendingSmbCredentialRequest}
-        onClose={() => {
-          setShowAddSmbDialog(false);
-          if (pendingSmbCredentialRequest) {
-            setPendingSmbCredentialRequest(null);
-          }
-        }}
-        initialHostname={pendingSmbCredentialRequest?.hostname}
-        targetPath={pendingSmbCredentialRequest?.targetPath}
-      />
     </div>
   );
 }

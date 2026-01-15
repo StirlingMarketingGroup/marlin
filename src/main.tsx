@@ -4,6 +4,8 @@ import App from './App';
 import FolderSizeWindow from './windows/FolderSizeWindow';
 import ArchiveProgressWindow from './windows/ArchiveProgressWindow';
 import DeleteProgressWindow from './windows/DeleteProgressWindow';
+import SmbConnectWindow from './windows/SmbConnectWindow';
+import PermissionsWindow from './windows/PermissionsWindow';
 import './index.css';
 
 const params = new URLSearchParams(window.location.search);
@@ -16,7 +18,11 @@ const Root =
       ? ArchiveProgressWindow
       : view === 'delete-progress'
         ? DeleteProgressWindow
-        : App;
+        : view === 'smb-connect'
+          ? SmbConnectWindow
+          : view === 'permissions'
+            ? PermissionsWindow
+            : App;
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

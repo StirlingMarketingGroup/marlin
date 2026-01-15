@@ -238,3 +238,13 @@ export interface SmbServerInfo {
   username: string;
   domain?: string | null;
 }
+
+export interface SmbConnectInitPayload {
+  initialHostname?: string | null;
+  targetPath?: string | null;
+}
+
+export interface SmbConnectSuccessPayload {
+  hostname: string;
+  targetPath?: string | null;
+}

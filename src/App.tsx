@@ -12,16 +12,18 @@ import { openFolderSizeWindow } from './store/useFolderSizeStore';
 import { useDirectoryStream } from './hooks/useDirectoryStream';
 import { message } from '@tauri-apps/plugin-dialog';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { platform } from '@tauri-apps/plugin-os';
 import { getEffectiveExtension } from './utils/fileTypes';
 
 import Toast from './components/Toast';
-import PermissionPrompt from './components/PermissionPrompt';
 import FilterInput from './components/FilterInput';
+import { FULL_DISK_ACCESS_DISMISSED_KEY } from '@/utils/fullDiskAccessPrompt';
 import type {
   DirectoryChangeEventPayload,
   DirectoryListingResponse,
   FileItem,
   PersistedPreferences,
+  SmbConnectSuccessPayload,
   ViewPreferences,
 } from './types';
 
@@ -37,6 +39,21 @@ function parseErrorCode(error: unknown): string | null {
   const message = error instanceof Error ? error.message : String(error);
   const match = message.match(/^\[([A-Z]+)\]/);
   return match ? match[1] : null;
+}
+
+async function checkAndShowFullDiskAccessPrompt() {
+  if (platform() !== 'macos') return;
+  if (localStorage.getItem(FULL_DISK_ACCESS_DISMISSED_KEY) === 'true') return;
+
+  try {
+    const mod = await import('tauri-plugin-macos-permissions-api');
+    const hasAccess = await (mod.checkFullDiskAccessPermission as () => Promise<boolean>)();
+    if (!hasAccess) {
+      await invoke('open_permissions_window');
+    }
+  } catch {
+    // Plugin not available or check failed; avoid blocking app start.
+  }
 }
 
 function App() {
@@ -222,6 +239,43 @@ function App() {
   }, [loading]);
 
   // Remove global subscriptions that write the entire file to avoid clobbering across windows
+
+  // Use a dedicated window for Full Disk Access prompt (macOS only)
+  useEffect(() => {
+    void checkAndShowFullDiskAccessPrompt();
+  }, []);
+
+  // Handle SMB connect flow coming from the SMB connect window
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+
+    (async () => {
+      try {
+        unlisten = await listen<SmbConnectSuccessPayload>('smb-connect:success', async (evt) => {
+          const payload = evt.payload;
+          if (!payload?.hostname) return;
+
+          const state = useAppStore.getState();
+          try {
+            await state.loadSmbServers();
+          } catch (error) {
+            console.warn('Failed to refresh SMB server list after connect:', error);
+          }
+
+          state.setPendingSmbCredentialRequest(null);
+          await state.navigateTo(payload.targetPath || `smb://${payload.hostname}/`);
+        });
+      } catch (error) {
+        console.warn('Failed to listen for SMB connect success:', error);
+      }
+    })();
+
+    return () => {
+      if (unlisten) {
+        unlisten();
+      }
+    };
+  }, []);
 
   useEffect(() => {
     // Initialize the app by getting the home directory
@@ -1378,9 +1432,6 @@ function App() {
 
       {/* Toast notifications */}
       <Toast />
-
-      {/* macOS Full Disk Access permission prompt */}
-      <PermissionPrompt />
     </div>
   );
 }
