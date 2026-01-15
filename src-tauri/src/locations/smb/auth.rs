@@ -320,6 +320,10 @@ pub fn test_smb_connection(
 ) -> Result<bool, String> {
     use pavao::{SmbClient, SmbCredentials, SmbOptions};
 
+    let _guard = super::SMB_MUTEX
+        .lock()
+        .map_err(|e| format!("SMB mutex poisoned: {}", e))?;
+
     let smb_url = format!("smb://{}", hostname);
 
     let mut credentials = SmbCredentials::default()

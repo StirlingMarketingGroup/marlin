@@ -220,63 +220,79 @@ impl LocationProvider for SmbProvider {
         let (hostname, share, path) = parse_smb_path(authority, location.path())?;
         let creds = get_server_credentials(&hostname)?;
 
-        let smb_url = format!("smb://{}", hostname);
-        let share_path = if share.starts_with('/') {
-            share.clone()
-        } else {
-            format!("/{}", share)
-        };
+        let hostname = hostname.to_string();
+        let share = share.to_string();
+        let path = path.to_string();
+        let location_raw = location.raw().to_string();
+        let username = creds.username.clone();
+        let password = creds.password.clone();
+        let domain = creds.domain.clone();
 
-        let mut credentials = SmbCredentials::default()
-            .server(&smb_url)
-            .share(&share_path)
-            .username(&creds.username)
-            .password(&creds.password);
+        tokio::task::spawn_blocking(move || {
+            let _guard = SMB_MUTEX
+                .lock()
+                .map_err(|e| format!("SMB mutex poisoned: {}", e))?;
 
-        if let Some(domain) = &creds.domain {
-            credentials = credentials.workgroup(domain);
-        }
-
-        let client = SmbClient::new(credentials, SmbOptions::default())
-            .map_err(|e| format!("Failed to connect: {}", e))?;
-
-        let stat = client
-            .stat(&path)
-            .map_err(|e| format!("Failed to get file metadata: {}", e))?;
-
-        let name = std::path::Path::new(&path)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(&path)
-            .to_string();
-
-        let is_directory = stat.mode.is_dir();
-        let modified: DateTime<Utc> = stat.modified.into();
-
-        Ok(FileItem {
-            name: name.clone(),
-            path: location.raw().to_string(),
-            is_directory,
-            is_hidden: is_hidden_file(&name),
-            size: stat.size,
-            modified,
-            extension: if is_directory {
-                None
+            let smb_url = format!("smb://{}", hostname);
+            let share_path = if share.starts_with('/') {
+                share
             } else {
-                std::path::Path::new(&name)
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .map(|e| e.to_lowercase())
-            },
-            is_symlink: false,
-            is_git_repo: false,
-            child_count: None,
-            image_width: None,
-            image_height: None,
-            remote_id: None,
-            thumbnail_url: None,
-            download_url: None,
+                format!("/{}", share)
+            };
+
+            let mut credentials = SmbCredentials::default()
+                .server(&smb_url)
+                .share(&share_path)
+                .username(&username)
+                .password(&password);
+
+            if let Some(domain) = &domain {
+                credentials = credentials.workgroup(domain);
+            }
+
+            let client = SmbClient::new(credentials, SmbOptions::default())
+                .map_err(|e| format!("Failed to connect: {}", e))?;
+
+            let stat = client
+                .stat(&path)
+                .map_err(|e| format!("Failed to get file metadata: {}", e))?;
+
+            let name = std::path::Path::new(&path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(&path)
+                .to_string();
+
+            let is_directory = stat.mode.is_dir();
+            let modified: DateTime<Utc> = stat.modified.into();
+
+            Ok::<FileItem, String>(FileItem {
+                name: name.clone(),
+                path: location_raw,
+                is_directory,
+                is_hidden: is_hidden_file(&name),
+                size: stat.size,
+                modified,
+                extension: if is_directory {
+                    None
+                } else {
+                    std::path::Path::new(&name)
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .map(|e| e.to_lowercase())
+                },
+                is_symlink: false,
+                is_git_repo: false,
+                child_count: None,
+                image_width: None,
+                image_height: None,
+                remote_id: None,
+                thumbnail_url: None,
+                download_url: None,
+            })
         })
+        .await
+        .map_err(|e| format!("SMB task failed: {}", e))?
     }
 
     #[cfg(not(feature = "smb"))]
@@ -295,29 +311,44 @@ impl LocationProvider for SmbProvider {
         let (hostname, share, path) = parse_smb_path(authority, location.path())?;
         let creds = get_server_credentials(&hostname)?;
 
-        let smb_url = format!("smb://{}", hostname);
-        let share_path = if share.starts_with('/') {
-            share.clone()
-        } else {
-            format!("/{}", share)
-        };
+        let hostname = hostname.to_string();
+        let share = share.to_string();
+        let path = path.to_string();
+        let username = creds.username.clone();
+        let password = creds.password.clone();
+        let domain = creds.domain.clone();
 
-        let mut credentials = SmbCredentials::default()
-            .server(&smb_url)
-            .share(&share_path)
-            .username(&creds.username)
-            .password(&creds.password);
+        tokio::task::spawn_blocking(move || {
+            let _guard = SMB_MUTEX
+                .lock()
+                .map_err(|e| format!("SMB mutex poisoned: {}", e))?;
 
-        if let Some(domain) = &creds.domain {
-            credentials = credentials.workgroup(domain);
-        }
+            let smb_url = format!("smb://{}", hostname);
+            let share_path = if share.starts_with('/') {
+                share
+            } else {
+                format!("/{}", share)
+            };
 
-        let client = SmbClient::new(credentials, SmbOptions::default())
-            .map_err(|e| format!("Failed to connect: {}", e))?;
+            let mut credentials = SmbCredentials::default()
+                .server(&smb_url)
+                .share(&share_path)
+                .username(&username)
+                .password(&password);
 
-        client
-            .mkdir(&path, SmbMode::from(0o755))
-            .map_err(|e| format!("Failed to create directory: {}", e))
+            if let Some(domain) = &domain {
+                credentials = credentials.workgroup(domain);
+            }
+
+            let client = SmbClient::new(credentials, SmbOptions::default())
+                .map_err(|e| format!("Failed to connect: {}", e))?;
+
+            client
+                .mkdir(&path, SmbMode::from(0o755))
+                .map_err(|e| format!("Failed to create directory: {}", e))
+        })
+        .await
+        .map_err(|e| format!("SMB task failed: {}", e))?
     }
 
     #[cfg(not(feature = "smb"))]
@@ -336,40 +367,54 @@ impl LocationProvider for SmbProvider {
         let (hostname, share, path) = parse_smb_path(authority, location.path())?;
         let creds = get_server_credentials(&hostname)?;
 
-        let smb_url = format!("smb://{}", hostname);
-        let share_path = if share.starts_with('/') {
-            share.clone()
-        } else {
-            format!("/{}", share)
-        };
+        let hostname = hostname.to_string();
+        let share = share.to_string();
+        let path = path.to_string();
+        let username = creds.username.clone();
+        let password = creds.password.clone();
+        let domain = creds.domain.clone();
 
-        let mut credentials = SmbCredentials::default()
-            .server(&smb_url)
-            .share(&share_path)
-            .username(&creds.username)
-            .password(&creds.password);
+        tokio::task::spawn_blocking(move || {
+            let _guard = SMB_MUTEX
+                .lock()
+                .map_err(|e| format!("SMB mutex poisoned: {}", e))?;
 
-        if let Some(domain) = &creds.domain {
-            credentials = credentials.workgroup(domain);
-        }
+            let smb_url = format!("smb://{}", hostname);
+            let share_path = if share.starts_with('/') {
+                share
+            } else {
+                format!("/{}", share)
+            };
 
-        let client = SmbClient::new(credentials, SmbOptions::default())
-            .map_err(|e| format!("Failed to connect: {}", e))?;
+            let mut credentials = SmbCredentials::default()
+                .server(&smb_url)
+                .share(&share_path)
+                .username(&username)
+                .password(&password);
 
-        // Check if it's a directory or file
-        let stat = client
-            .stat(&path)
-            .map_err(|e| format!("Failed to stat path: {}", e))?;
+            if let Some(domain) = &domain {
+                credentials = credentials.workgroup(domain);
+            }
 
-        if stat.mode.is_dir() {
-            client
-                .rmdir(&path)
-                .map_err(|e| format!("Failed to delete directory: {}", e))
-        } else {
-            client
-                .unlink(&path)
-                .map_err(|e| format!("Failed to delete file: {}", e))
-        }
+            let client = SmbClient::new(credentials, SmbOptions::default())
+                .map_err(|e| format!("Failed to connect: {}", e))?;
+
+            let stat = client
+                .stat(&path)
+                .map_err(|e| format!("Failed to stat path: {}", e))?;
+
+            if stat.mode.is_dir() {
+                client
+                    .rmdir(&path)
+                    .map_err(|e| format!("Failed to delete directory: {}", e))
+            } else {
+                client
+                    .unlink(&path)
+                    .map_err(|e| format!("Failed to delete file: {}", e))
+            }
+        })
+        .await
+        .map_err(|e| format!("SMB task failed: {}", e))?
     }
 
     #[cfg(not(feature = "smb"))]
@@ -401,29 +446,45 @@ impl LocationProvider for SmbProvider {
 
         let creds = get_server_credentials(&hostname)?;
 
-        let smb_url = format!("smb://{}", hostname);
-        let share_path = if share.starts_with('/') {
-            share.clone()
-        } else {
-            format!("/{}", share)
-        };
+        let hostname = hostname.to_string();
+        let share = share.to_string();
+        let from_path = from_path.to_string();
+        let to_path = to_path.to_string();
+        let username = creds.username.clone();
+        let password = creds.password.clone();
+        let domain = creds.domain.clone();
 
-        let mut credentials = SmbCredentials::default()
-            .server(&smb_url)
-            .share(&share_path)
-            .username(&creds.username)
-            .password(&creds.password);
+        tokio::task::spawn_blocking(move || {
+            let _guard = SMB_MUTEX
+                .lock()
+                .map_err(|e| format!("SMB mutex poisoned: {}", e))?;
 
-        if let Some(domain) = &creds.domain {
-            credentials = credentials.workgroup(domain);
-        }
+            let smb_url = format!("smb://{}", hostname);
+            let share_path = if share.starts_with('/') {
+                share
+            } else {
+                format!("/{}", share)
+            };
 
-        let client = SmbClient::new(credentials, SmbOptions::default())
-            .map_err(|e| format!("Failed to connect: {}", e))?;
+            let mut credentials = SmbCredentials::default()
+                .server(&smb_url)
+                .share(&share_path)
+                .username(&username)
+                .password(&password);
 
-        client
-            .rename(&from_path, &to_path)
-            .map_err(|e| format!("Failed to rename: {}", e))
+            if let Some(domain) = &domain {
+                credentials = credentials.workgroup(domain);
+            }
+
+            let client = SmbClient::new(credentials, SmbOptions::default())
+                .map_err(|e| format!("Failed to connect: {}", e))?;
+
+            client
+                .rename(&from_path, &to_path)
+                .map_err(|e| format!("Failed to rename: {}", e))
+        })
+        .await
+        .map_err(|e| format!("SMB task failed: {}", e))?
     }
 
     #[cfg(not(feature = "smb"))]
