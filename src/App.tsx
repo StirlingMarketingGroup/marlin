@@ -12,6 +12,7 @@ import { openFolderSizeWindow } from './store/useFolderSizeStore';
 import { useDirectoryStream } from './hooks/useDirectoryStream';
 import { message } from '@tauri-apps/plugin-dialog';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { getEffectiveExtension } from './utils/fileTypes';
 
 import Toast from './components/Toast';
 import PermissionPrompt from './components/PermissionPrompt';
@@ -165,7 +166,7 @@ function App() {
 
       const hasGeneratedThumbnail = (file: FileItem) => {
         if (file.thumbnail_url) return true;
-        const ext = file.extension?.toLowerCase();
+        const ext = getEffectiveExtension(file)?.toLowerCase();
         return !!ext && thumbnailCapableExtensions.has(ext);
       };
 
