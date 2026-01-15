@@ -1119,29 +1119,37 @@ export const useAppStore = create<AppState>((set, get) => ({
   openFile: async (file) => {
     const toastStore = useToastStore.getState();
 
-    // Handle Google Drive files - need to download first
-    if (file.path.startsWith('gdrive://') && file.remote_id) {
+    let pathToOpen = file.path;
+    let downloadToastId: string | undefined;
+
+    // Remote files: download to a temp path before opening.
+    if (file.path.startsWith('gdrive://')) {
+      if (!file.remote_id) {
+        toastStore.addToast({
+          type: 'error',
+          message: `Unable to open ${file.name}: missing Google Drive file id.`,
+          duration: 6000,
+        });
+        return;
+      }
+
       try {
         // Extract email from path: gdrive://email/path
         const pathWithoutScheme = file.path.slice('gdrive://'.length);
         const slashIndex = pathWithoutScheme.indexOf('/');
         const email = slashIndex >= 0 ? pathWithoutScheme.slice(0, slashIndex) : pathWithoutScheme;
 
-        // Download file to temp location
-        const tempPath = await invoke<string>('download_gdrive_file', {
+        downloadToastId = toastStore.addToast({
+          type: 'info',
+          message: `Downloading ${file.name}...`,
+          duration: 0,
+        });
+
+        pathToOpen = await invoke<string>('download_gdrive_file', {
           email,
           fileId: file.remote_id,
           fileName: file.name,
         });
-
-        // Open the downloaded file
-        try {
-          await openShell(tempPath);
-          return;
-        } catch {
-          await invoke('open_path', { path: tempPath });
-          return;
-        }
       } catch (downloadError) {
         console.error('Failed to download Google Drive file:', downloadError);
         const errorMessage =
@@ -1152,18 +1160,46 @@ export const useAppStore = create<AppState>((set, get) => ({
           duration: 6000,
         });
         return;
+      } finally {
+        if (downloadToastId) {
+          toastStore.removeToast(downloadToastId);
+        }
+      }
+    } else if (file.path.startsWith('smb://') && !file.is_directory) {
+      try {
+        downloadToastId = toastStore.addToast({
+          type: 'info',
+          message: `Downloading ${file.name}...`,
+          duration: 0,
+        });
+
+        pathToOpen = await invoke<string>('download_smb_file', { path: file.path });
+      } catch (downloadError) {
+        console.error('Failed to download SMB file:', downloadError);
+        const errorMessage =
+          downloadError instanceof Error ? downloadError.message : String(downloadError);
+        toastStore.addToast({
+          type: 'error',
+          message: `Unable to open ${file.name}: ${errorMessage}`,
+          duration: 6000,
+        });
+        return;
+      } finally {
+        if (downloadToastId) {
+          toastStore.removeToast(downloadToastId);
+        }
       }
     }
 
     try {
-      await openShell(file.path);
+      await openShell(pathToOpen);
       return;
     } catch (shellError) {
       console.warn('Plugin shell open failed:', shellError);
     }
 
     try {
-      await invoke('open_path', { path: file.path });
+      await invoke('open_path', { path: pathToOpen });
       return;
     } catch (fallbackError) {
       console.warn('Fallback open_path failed:', fallbackError);
@@ -1211,7 +1247,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     try {
       await invoke('open_path_with', {
-        path: file.path,
+        path: pathToOpen,
         applicationPath,
       });
 
