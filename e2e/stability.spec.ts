@@ -114,8 +114,12 @@ test.describe('Render Stability', () => {
     await pathInput.press('Enter');
 
     // Wait for files to load
-    await expect(page.getByText('sample.pdf')).toBeVisible({ timeout: 5000 });
-    await expect(page.getByText('image.png')).toBeVisible({ timeout: 5000 });
+    await expect(
+      page.locator('[data-testid="file-item"][data-name="sample.pdf"]').first()
+    ).toBeVisible({ timeout: 5000 });
+    await expect(
+      page.locator('[data-testid="file-item"][data-name="image.png"]').first()
+    ).toBeVisible({ timeout: 5000 });
 
     // Give time for any initial settling
     await page.waitForTimeout(500);
@@ -219,7 +223,9 @@ test.describe('Render Stability', () => {
     await pathInput.press('Enter');
 
     // Wait for files to load
-    await expect(page.getByText('image.png')).toBeVisible({ timeout: 5000 });
+    await expect(
+      page.locator('[data-testid="file-item"][data-name="image.png"]').first()
+    ).toBeVisible({ timeout: 5000 });
 
     // Give time for settling
     await page.waitForTimeout(500);

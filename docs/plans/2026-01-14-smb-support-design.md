@@ -38,16 +38,21 @@ src-tauri/src/locations/
 
 ### Library Choice: `pavao`
 
-Using the pure Rust `pavao` crate for SMB2/3 client functionality.
+Using the `pavao` crate (a Rust wrapper around `libsmbclient`) for SMB2/3 client functionality.
 
 **Rationale:**
 
-- Zero system dependencies = easy cross-platform installation
+- Works well with modern SMB2/3 servers (Windows Server 2008+, Samba 3.6+)
+- Mature underlying implementation via `libsmbclient`
 - SMB2/3 covers all modern servers (Windows Server 2008+, Samba 3.6+)
-- Pure Rust = consistent behavior across macOS, Windows, Linux
-- No Homebrew/apt dependencies for end users
+- System dependency: requires `libsmbclient` (via Samba) to be present on the machine
+  - macOS: `brew install samba`
+  - Linux: `apt install libsmbclient-dev` (build) and `samba`/`smbclient` (runtime as needed)
 
-**Fallback Plan:** If `pavao` hits edge cases with specific servers, we can add `libsmbclient` bindings as an optional fallback (would require system library installation).
+**Notes:**
+
+- Share enumeration currently shells out to `smbclient -L` for machine-readable share lists.
+  This adds an external `smbclient` dependency in addition to `libsmbclient`.
 
 ## URI Scheme
 

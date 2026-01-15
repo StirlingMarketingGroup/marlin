@@ -96,7 +96,9 @@ test.describe('File Manager Preferences', () => {
     await pathInput.click();
     await pathInput.fill(MOCK_DOWNLOADS_DIR);
     await pathInput.press('Enter');
-    await expect(page.getByText('sample.pdf')).toBeVisible({ timeout: 5000 });
+    await expect(
+      page.locator('[data-testid="file-item"][data-name="sample.pdf"]').first()
+    ).toBeVisible({ timeout: 5000 });
 
     // Navigate back
     await page.keyboard.press('ControlOrMeta+ArrowLeft');
@@ -160,7 +162,9 @@ test.describe('File Manager Preferences', () => {
     await downloadsDir.dblclick();
 
     // Should navigate and show Downloads contents
-    await expect(page.getByText('sample.pdf')).toBeVisible({ timeout: 5000 });
+    await expect(
+      page.locator('[data-testid="file-item"][data-name="sample.pdf"]').first()
+    ).toBeVisible({ timeout: 5000 });
 
     const currentPath = await pathInput.inputValue();
     expect(currentPath).toContain('Downloads');

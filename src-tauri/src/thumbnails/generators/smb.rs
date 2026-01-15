@@ -22,7 +22,7 @@ pub fn download_smb_file_sync(smb_path: &str) -> Result<std::path::PathBuf, Stri
     log::debug!("download_smb_file_sync: path={}", smb_path);
 
     // Parse the SMB URL
-    let (hostname, share, file_path) = parse_smb_url(smb_path)?;
+    let (hostname, share, file_path) = crate::locations::smb::parse_smb_url(smb_path)?;
 
     // Get credentials for this server
     let creds = crate::locations::smb::get_server_credentials(&hostname)?;
@@ -112,27 +112,20 @@ pub fn download_smb_file_sync(_smb_path: &str) -> Result<std::path::PathBuf, Str
 /// Get the modified time for an SMB file.
 /// Returns 0 if the mtime cannot be determined.
 #[cfg(feature = "smb")]
-pub fn get_smb_file_mtime(smb_path: &str) -> u64 {
+pub fn get_smb_file_mtime(smb_path: &str) -> Result<u64, String> {
     use pavao::{SmbClient, SmbCredentials, SmbOptions};
     use std::time::UNIX_EPOCH;
 
     // Parse the SMB URL
-    let (hostname, share, file_path) = match parse_smb_url(smb_path) {
-        Ok(result) => result,
-        Err(_) => return 0,
-    };
+    let (hostname, share, file_path) = crate::locations::smb::parse_smb_url(smb_path)?;
 
     // Get credentials for this server
-    let creds = match crate::locations::smb::get_server_credentials(&hostname) {
-        Ok(c) => c,
-        Err(_) => return 0,
-    };
+    let creds = crate::locations::smb::get_server_credentials(&hostname)?;
 
     // Acquire global SMB mutex
-    let _guard = match crate::locations::smb::SMB_MUTEX.lock() {
-        Ok(g) => g,
-        Err(_) => return 0,
-    };
+    let _guard = crate::locations::smb::SMB_MUTEX
+        .lock()
+        .map_err(|e| format!("SMB mutex poisoned: {}", e))?;
 
     // Build connection
     let smb_url = format!("smb://{}", hostname);
@@ -152,68 +145,24 @@ pub fn get_smb_file_mtime(smb_path: &str) -> u64 {
         credentials = credentials.workgroup(domain);
     }
 
-    let client = match SmbClient::new(credentials, SmbOptions::default()) {
-        Ok(c) => c,
-        Err(_) => return 0,
-    };
+    let client = SmbClient::new(credentials, SmbOptions::default())
+        .map_err(|e| format!("Failed to connect to SMB server: {}", e))?;
 
-    match client.stat(&file_path) {
-        Ok(stat) => {
-            let system_time: std::time::SystemTime = stat.modified.into();
-            system_time
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0)
-        }
-        Err(_) => 0,
-    }
+    let stat = client
+        .stat(&file_path)
+        .map_err(|e| format!("Failed to stat SMB file: {}", e))?;
+
+    let system_time: std::time::SystemTime = stat.modified.into();
+    Ok(system_time
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0))
 }
 
 /// Stub implementation when SMB feature is disabled
 #[cfg(not(feature = "smb"))]
-pub fn get_smb_file_mtime(_smb_path: &str) -> u64 {
-    0
-}
-
-/// Parse an SMB URL into (hostname, share, path) components.
-#[cfg(feature = "smb")]
-fn parse_smb_url(url: &str) -> Result<(String, String, String), String> {
-    let without_scheme = url
-        .strip_prefix("smb://")
-        .ok_or_else(|| format!("Invalid SMB URL (must start with smb://): {}", url))?;
-
-    // Split into authority and path
-    let (authority, path) = match without_scheme.find('/') {
-        Some(idx) => (&without_scheme[..idx], &without_scheme[idx..]),
-        None => (without_scheme, "/"),
-    };
-
-    // Authority might have credentials (user:pass@server) - strip them
-    let hostname = if let Some(at_pos) = authority.rfind('@') {
-        authority[at_pos + 1..].to_string()
-    } else {
-        authority.to_string()
-    };
-
-    // Path format: /share/rest/of/path
-    let path = if path.starts_with('/') {
-        &path[1..]
-    } else {
-        path
-    };
-
-    let mut parts = path.splitn(2, '/');
-    let share = parts.next().unwrap_or("").to_string();
-    let file_path = parts
-        .next()
-        .map(|p| format!("/{}", p))
-        .unwrap_or_else(|| "/".to_string());
-
-    if share.is_empty() {
-        return Err(format!("SMB URL must include share name: {}", url));
-    }
-
-    Ok((hostname, share, file_path))
+pub fn get_smb_file_mtime(_smb_path: &str) -> Result<u64, String> {
+    Err("SMB support not compiled. Build with --features smb".to_string())
 }
 
 /// Generate a thumbnail for an SMB file.

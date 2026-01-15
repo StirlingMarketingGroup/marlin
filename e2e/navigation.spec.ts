@@ -22,7 +22,9 @@ test.describe('File Manager Navigation', () => {
     await pathInput.press('Enter');
 
     // Wait for navigation to complete
-    await expect(page.getByText('sample.pdf')).toBeVisible({ timeout: 5000 });
+    await expect(
+      page.locator('[data-testid="file-item"][data-name="sample.pdf"]').first()
+    ).toBeVisible({ timeout: 5000 });
 
     const newPath = await pathInput.inputValue();
     expect(newPath).not.toBe(initialPath);
@@ -55,7 +57,9 @@ test.describe('File Manager Navigation', () => {
     await pathInput.press('Enter');
 
     // Verify we're in Downloads
-    await expect(page.getByText('sample.pdf')).toBeVisible({ timeout: 5000 });
+    await expect(
+      page.locator('[data-testid="file-item"][data-name="sample.pdf"]').first()
+    ).toBeVisible({ timeout: 5000 });
     const downloadsPath = await pathInput.inputValue();
     expect(downloadsPath).toBe(MOCK_DOWNLOADS_DIR);
 
@@ -83,7 +87,9 @@ test.describe('File Manager Navigation', () => {
     await pathInput.press('Enter');
 
     // Wait for navigation
-    await expect(page.getByText('sample.pdf')).toBeVisible({ timeout: 5000 });
+    await expect(
+      page.locator('[data-testid="file-item"][data-name="sample.pdf"]').first()
+    ).toBeVisible({ timeout: 5000 });
 
     // Should navigate to Downloads directory
     const finalPath = await pathInput.inputValue();
@@ -118,7 +124,9 @@ test.describe('File Manager Navigation', () => {
     await pathInput.fill(MOCK_DOWNLOADS_DIR);
     await pathInput.press('Enter');
 
-    await expect(page.getByText('sample.pdf')).toBeVisible({ timeout: 5000 });
+    await expect(
+      page.locator('[data-testid="file-item"][data-name="sample.pdf"]').first()
+    ).toBeVisible({ timeout: 5000 });
 
     const finalPath = await pathInput.inputValue();
 
@@ -157,7 +165,9 @@ test.describe('File Manager Navigation', () => {
     await pathInput.fill(MOCK_DOWNLOADS_DIR);
     await pathInput.press('Enter');
 
-    await expect(page.getByText('sample.pdf')).toBeVisible({ timeout: 5000 });
+    await expect(
+      page.locator('[data-testid="file-item"][data-name="sample.pdf"]').first()
+    ).toBeVisible({ timeout: 5000 });
 
     const newTitle = await page.title();
     // Title should change after navigation (implementation dependent)

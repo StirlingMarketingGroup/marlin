@@ -230,11 +230,12 @@ export function getTauriMockScript(): string {
         cancel_directory_stream: () => undefined,
         read_preferences: () => JSON.stringify({
           globalPreferences: {
-            viewMode: 'grid',
+            viewMode: 'list',
             sortBy: 'name',
             sortOrder: 'asc',
             showHidden: false,
             foldersFirst: true,
+            gridSize: 120,
           },
         }),
         get_dir_prefs: () => JSON.stringify({}),

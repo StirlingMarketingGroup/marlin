@@ -196,7 +196,17 @@ function getPerformanceMockScript(fileCount: number): string {
           };
         },
         cancel_directory_stream: () => undefined,
-        read_preferences: () => JSON.stringify({}),
+        read_preferences: () =>
+          JSON.stringify({
+            globalPreferences: {
+              viewMode: 'list',
+              sortBy: 'name',
+              sortOrder: 'asc',
+              showHidden: false,
+              foldersFirst: true,
+              gridSize: 120,
+            },
+          }),
         get_dir_prefs: () => JSON.stringify({}),
         set_dir_prefs: () => undefined,
         set_last_dir: () => undefined,
@@ -212,6 +222,7 @@ function getPerformanceMockScript(fileCount: number): string {
         load_pinned_directories: () => [],
         get_system_drives: () => [],
         get_google_accounts: () => [],
+        get_smb_servers: () => [],
         get_disk_usage: () => ({ total: 1000000000, free: 500000000 }),
         enable_drag_detection: () => undefined,
         set_drop_zone: () => undefined,
