@@ -259,7 +259,9 @@ test.describe('Google Drive Integration', () => {
     await pathInput.press('Enter');
 
     // Should see the test shared drive
-    await expect(page.getByText(MOCK_SHARED_DRIVE_NAME)).toBeVisible({ timeout: 5000 });
+    await expect(
+      page.locator(`[data-testid="file-item"][data-name="${MOCK_SHARED_DRIVE_NAME}"]`).first()
+    ).toBeVisible({ timeout: 5000 });
   });
 
   test('should resolve Google Drive URL and navigate', async ({ page }) => {
@@ -285,10 +287,12 @@ test.describe('Google Drive Integration', () => {
     await pathInput.press('Enter');
 
     // Wait for files to load - use more specific selector to avoid strict mode violation
-    await expect(page.locator('.file-grid').getByText('photo1.jpg')).toBeVisible({ timeout: 5000 });
+    await expect(
+      page.locator('[data-testid="file-grid"]').getByText('photo1.jpg').first()
+    ).toBeVisible({ timeout: 5000 });
 
     // Check that grid view is applied (smart defaults for image-heavy folders)
     // The file-grid class indicates grid view mode
-    await expect(page.locator('.file-grid')).toBeVisible({ timeout: 5000 });
+    await expect(page.locator('[data-testid="file-grid"]')).toBeVisible({ timeout: 5000 });
   });
 });

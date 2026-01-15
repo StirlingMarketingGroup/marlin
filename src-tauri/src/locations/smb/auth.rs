@@ -4,6 +4,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::RwLock;
 
+const SMB_KEYRING_SERVICE: &str = "marlin-smb";
+
 /// Information about a connected SMB server (safe to expose to frontend)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -13,10 +15,19 @@ pub struct SmbServerInfo {
     pub domain: Option<String>,
 }
 
-/// Stored server data with credentials
+/// Stored server data on disk (no secrets)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SmbServer {
+    pub hostname: String,
+    pub username: String,
+    pub domain: Option<String>,
+}
+
+/// Server credentials resolved from keychain (internal use)
+#[cfg_attr(not(feature = "smb"), allow(dead_code))]
+#[derive(Debug, Clone)]
+pub struct SmbServerCredentials {
     pub hostname: String,
     pub username: String,
     pub password: String,
@@ -31,6 +42,35 @@ struct ServerStorage {
 
 /// In-memory cache of servers
 static SERVERS_CACHE: Lazy<RwLock<Option<Vec<SmbServer>>>> = Lazy::new(|| RwLock::new(None));
+
+fn keyring_entry(hostname: &str) -> Result<keyring::Entry, String> {
+    keyring::Entry::new(SMB_KEYRING_SERVICE, hostname)
+        .map_err(|e| format!("Failed to create keyring entry: {}", e))
+}
+
+fn set_password(hostname: &str, password: &str) -> Result<(), String> {
+    let entry = keyring_entry(hostname)?;
+    entry
+        .set_password(password)
+        .map_err(|e| format!("Failed to store password in keychain: {}", e))
+}
+
+fn get_password(hostname: &str) -> Result<String, String> {
+    let entry = keyring_entry(hostname)?;
+    entry
+        .get_password()
+        .map_err(|e| format!("[SMB_NO_CREDENTIALS] Failed to read password from keychain: {}", e))
+}
+
+fn delete_password(hostname: &str) -> Result<(), String> {
+    let entry = keyring_entry(hostname)?;
+    // Ignore missing entries; we still want server removal to succeed.
+    match entry.delete_credential() {
+        Ok(_) => Ok(()),
+        Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(format!("Failed to delete password from keychain: {}", e)),
+    }
+}
 
 /// Get the path to the servers storage file
 fn get_servers_path() -> Result<PathBuf, String> {
@@ -57,10 +97,45 @@ fn load_servers_from_disk() -> Result<Vec<SmbServer>, String> {
     let contents = fs::read_to_string(&path)
         .map_err(|e| format!("Failed to read servers file: {}", e))?;
 
-    let storage: ServerStorage = serde_json::from_str(&contents)
-        .map_err(|e| format!("Failed to parse servers file: {}", e))?;
+    #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+    #[serde(rename_all = "camelCase")]
+    struct SmbServerDisk {
+        hostname: String,
+        username: String,
+        #[serde(default)]
+        password: Option<String>,
+        domain: Option<String>,
+    }
 
-    Ok(storage.servers)
+    #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+    struct ServerStorageDisk {
+        servers: Vec<SmbServerDisk>,
+    }
+
+    let storage: ServerStorageDisk =
+        serde_json::from_str(&contents).map_err(|e| format!("Failed to parse servers file: {}", e))?;
+
+    // Migrate any legacy plaintext passwords into the OS keychain, and rewrite file without them.
+    let mut migrated = false;
+    let mut servers: Vec<SmbServer> = Vec::with_capacity(storage.servers.len());
+    for server in storage.servers {
+        if let Some(password) = server.password.as_deref() {
+            set_password(&server.hostname, password)?;
+            migrated = true;
+        }
+
+        servers.push(SmbServer {
+            hostname: server.hostname,
+            username: server.username,
+            domain: server.domain,
+        });
+    }
+
+    if migrated {
+        save_servers_to_disk(&servers)?;
+    }
+
+    Ok(servers)
 }
 
 /// Save servers to disk
@@ -118,7 +193,7 @@ pub fn get_smb_servers() -> Result<Vec<SmbServerInfo>, String> {
 
 /// Get credentials for a specific server (internal use)
 #[cfg_attr(not(feature = "smb"), allow(dead_code))]
-pub fn get_server_credentials(hostname: &str) -> Result<SmbServer, String> {
+pub fn get_server_credentials(hostname: &str) -> Result<SmbServerCredentials, String> {
     // Check cache first
     {
         let cache = SERVERS_CACHE.read().map_err(|e| e.to_string())?;
@@ -127,7 +202,13 @@ pub fn get_server_credentials(hostname: &str) -> Result<SmbServer, String> {
                 .iter()
                 .find(|s| s.hostname.eq_ignore_ascii_case(hostname))
             {
-                return Ok(server.clone());
+                let password = get_password(&server.hostname)?;
+                return Ok(SmbServerCredentials {
+                    hostname: server.hostname.clone(),
+                    username: server.username.clone(),
+                    password,
+                    domain: server.domain.clone(),
+                });
             }
         }
     }
@@ -141,11 +222,19 @@ pub fn get_server_credentials(hostname: &str) -> Result<SmbServer, String> {
         *cache = Some(servers.clone());
     }
 
-    servers
+    let server = servers
         .iter()
         .find(|s| s.hostname.eq_ignore_ascii_case(hostname))
         .cloned()
-        .ok_or_else(|| format!("[SMB_NO_CREDENTIALS] No credentials stored for server: {}", hostname))
+        .ok_or_else(|| format!("[SMB_NO_CREDENTIALS] No credentials stored for server: {}", hostname))?;
+
+    let password = get_password(&server.hostname)?;
+    Ok(SmbServerCredentials {
+        hostname: server.hostname,
+        username: server.username,
+        password,
+        domain: server.domain,
+    })
 }
 
 /// Add a new SMB server
@@ -156,6 +245,7 @@ pub fn add_smb_server(
     domain: Option<String>,
 ) -> Result<SmbServerInfo, String> {
     let mut servers = load_servers_from_disk()?;
+    let mut keychain_hostname = hostname.clone();
 
     // Check if server already exists
     if let Some(existing) = servers
@@ -163,19 +253,19 @@ pub fn add_smb_server(
         .find(|s| s.hostname.eq_ignore_ascii_case(&hostname))
     {
         // Update existing
+        keychain_hostname = existing.hostname.clone();
         existing.username = username.clone();
-        existing.password = password;
         existing.domain = domain.clone();
     } else {
         // Add new
         servers.push(SmbServer {
             hostname: hostname.clone(),
             username: username.clone(),
-            password,
             domain: domain.clone(),
         });
     }
 
+    set_password(&keychain_hostname, &password)?;
     save_servers_to_disk(&servers)?;
 
     // Update cache
@@ -196,12 +286,19 @@ pub fn remove_smb_server(hostname: &str) -> Result<(), String> {
     let mut servers = load_servers_from_disk()?;
 
     let original_len = servers.len();
+    let stored_hostname = servers
+        .iter()
+        .find(|s| s.hostname.eq_ignore_ascii_case(hostname))
+        .map(|s| s.hostname.clone());
     servers.retain(|s| !s.hostname.eq_ignore_ascii_case(hostname));
 
     if servers.len() == original_len {
         return Err(format!("Server not found: {}", hostname));
     }
 
+    if let Some(stored_hostname) = stored_hostname {
+        delete_password(&stored_hostname)?;
+    }
     save_servers_to_disk(&servers)?;
 
     // Update cache

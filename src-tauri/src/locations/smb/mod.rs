@@ -420,6 +420,7 @@ impl SmbProvider {
     async fn list_shares(&self, hostname: &str) -> Result<ProviderDirectoryEntries, String> {
         use chrono::Utc;
         use std::process::Command;
+        use uuid::Uuid;
 
         let creds = get_server_credentials(hostname)?;
 
@@ -427,17 +428,45 @@ impl SmbProvider {
         let mut cmd = Command::new("smbclient");
         cmd.arg("-L")
             .arg(format!("//{}", hostname))
-            .arg("-U")
-            .arg(format!("{}%{}", creds.username, creds.password))
             .arg("-g"); // Machine-readable output
 
-        if let Some(domain) = &creds.domain {
-            cmd.arg("-W").arg(domain);
+        // Avoid putting credentials on the process command line.
+        // smbclient supports reading auth data from an authfile via -A.
+        let auth_file_path = std::env::temp_dir().join(format!("marlin-smb-auth-{}.conf", Uuid::new_v4()));
+        let auth_file_contents = {
+            let mut s = format!("username = {}\npassword = {}\n", creds.username, creds.password);
+            if let Some(domain) = &creds.domain {
+                s.push_str(&format!("domain = {}\n", domain));
+            }
+            s
+        };
+
+        if let Err(e) = std::fs::write(&auth_file_path, auth_file_contents) {
+            return Err(format!("Failed to create smbclient auth file: {}", e));
         }
 
-        let output = cmd
-            .output()
-            .map_err(|e| format!("Failed to run smbclient: {}. Make sure samba is installed (brew install samba)", e))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(metadata) = std::fs::metadata(&auth_file_path) {
+                let mut perms = metadata.permissions();
+                perms.set_mode(0o600);
+                let _ = std::fs::set_permissions(&auth_file_path, perms);
+            }
+        }
+
+        cmd.arg("-A").arg(&auth_file_path);
+
+        let output = cmd.output();
+        let _ = std::fs::remove_file(&auth_file_path);
+
+        let output = output.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                "smbclient not found. Install Samba (macOS: `brew install samba`, Linux: `sudo apt-get install smbclient`)".to_string()
+            } else {
+                format!("Failed to run smbclient: {}", e)
+            }
+        })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -534,6 +563,19 @@ fn parse_smb_path(authority: &str, path: &str) -> Result<(String, String, String
     }
 
     Ok((hostname, share, file_path))
+}
+
+/// Parse a full SMB URL into (hostname, share, path)
+#[cfg(feature = "smb")]
+pub fn parse_smb_url(url: &str) -> Result<(String, String, String), String> {
+    let parsed = url::Url::parse(url).map_err(|e| format!("Invalid SMB URL: {}", e))?;
+    if parsed.scheme() != "smb" {
+        return Err(format!("Invalid SMB URL scheme (expected smb://): {}", url));
+    }
+    let hostname = parsed
+        .host_str()
+        .ok_or_else(|| "SMB URL requires server hostname".to_string())?;
+    parse_smb_path(hostname, parsed.path())
 }
 
 /// Extract credentials from SMB URL if present

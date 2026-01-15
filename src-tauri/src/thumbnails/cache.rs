@@ -269,7 +269,16 @@ impl ThumbnailCache {
     ) -> Option<String> {
         // Handle SMB paths specially - they can't use std::path for mtime
         let mtime = if path.starts_with("smb://") {
-            super::generators::smb::get_smb_file_mtime(path)
+            match super::generators::smb::get_smb_file_mtime(path) {
+                Ok(mtime) => mtime,
+                Err(_) => {
+                    // If we can't determine SMB mtime (transient network/auth failure),
+                    // avoid using a constant mtime=0 which can cause indefinitely-stale cache keys.
+                    // Instead, bucket to a short-lived time window.
+                    let now = Utc::now().timestamp() as u64;
+                    (now / 3600) * 3600
+                }
+            }
         } else {
             let path_obj = Path::new(path);
             super::get_file_mtime(path_obj)
