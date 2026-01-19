@@ -417,6 +417,60 @@ impl LocationProvider for SmbProvider {
 
 impl SmbProvider {
     #[cfg(feature = "smb")]
+    fn resolve_smbclient_command() -> (std::ffi::OsString, Option<std::ffi::OsString>) {
+        use std::env;
+        use std::ffi::{OsStr, OsString};
+        use std::path::{Path, PathBuf};
+
+        fn find_in_path(program: &str, path: &OsStr) -> Option<PathBuf> {
+            env::split_paths(path)
+                .map(|dir| dir.join(program))
+                .find(|candidate| candidate.is_file())
+        }
+
+        fn join_paths_lossy(paths: &[PathBuf], fallback: OsString) -> OsString {
+            env::join_paths(paths).unwrap_or(fallback)
+        }
+
+        fn macos_extra_paths() -> Vec<PathBuf> {
+            if cfg!(target_os = "macos") {
+                vec![
+                    PathBuf::from("/opt/homebrew/bin"),
+                    PathBuf::from("/usr/local/bin"),
+                    PathBuf::from("/opt/local/bin"),
+                ]
+            } else {
+                Vec::new()
+            }
+        }
+
+        // Allow overriding the smbclient location when needed.
+        if let Some(smbclient_path) = env::var_os("SMBCLIENT_PATH") {
+            let smbclient_path = PathBuf::from(smbclient_path);
+            if smbclient_path.is_file() {
+                return (smbclient_path.into_os_string(), None);
+            }
+        }
+
+        let current_path = env::var_os("PATH").unwrap_or_default();
+        if let Some(found) = find_in_path("smbclient", &current_path) {
+            return (found.into_os_string(), None);
+        }
+
+        // Packaged macOS apps (launched from Finder) often have a very minimal PATH
+        // and won't include common Homebrew locations.
+        let mut search_paths = macos_extra_paths();
+        search_paths.extend(env::split_paths(&current_path));
+        let augmented_path = join_paths_lossy(&search_paths, current_path);
+
+        if let Some(found) = find_in_path("smbclient", &augmented_path) {
+            return (found.into_os_string(), Some(augmented_path));
+        }
+
+        (OsString::from("smbclient"), Some(augmented_path))
+    }
+
+    #[cfg(feature = "smb")]
     async fn list_shares(&self, hostname: &str) -> Result<ProviderDirectoryEntries, String> {
         use chrono::Utc;
         use std::process::Command;
@@ -425,7 +479,11 @@ impl SmbProvider {
         let creds = get_server_credentials(hostname)?;
 
         // Use smbclient -L to enumerate shares (pavao doesn't support this well)
-        let mut cmd = Command::new("smbclient");
+        let (smbclient_program, augmented_path) = Self::resolve_smbclient_command();
+        let mut cmd = Command::new(smbclient_program);
+        if let Some(path_env) = augmented_path {
+            cmd.env("PATH", path_env);
+        }
         cmd.arg("-L")
             .arg(format!("//{}", hostname))
             .arg("-g"); // Machine-readable output
@@ -462,7 +520,7 @@ impl SmbProvider {
 
         let output = output.map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                "smbclient not found. Install Samba (macOS: `brew install samba`, Linux: `sudo apt-get install smbclient`)".to_string()
+                "smbclient not found. Install Samba (macOS: `brew install samba`, Linux: `sudo apt-get install smbclient`). If installed, ensure `smbclient` is in your PATH.".to_string()
             } else {
                 format!("Failed to run smbclient: {}", e)
             }
