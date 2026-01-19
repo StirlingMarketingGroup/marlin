@@ -420,7 +420,7 @@ impl SmbProvider {
     fn resolve_smbclient_command() -> (std::ffi::OsString, Option<std::ffi::OsString>) {
         use std::env;
         use std::ffi::{OsStr, OsString};
-        use std::path::{Path, PathBuf};
+        use std::path::PathBuf;
 
         fn find_in_path(program: &str, path: &OsStr) -> Option<PathBuf> {
             env::split_paths(path)
@@ -430,18 +430,6 @@ impl SmbProvider {
 
         fn join_paths_lossy(paths: &[PathBuf], fallback: OsString) -> OsString {
             env::join_paths(paths).unwrap_or(fallback)
-        }
-
-        fn macos_extra_paths() -> Vec<PathBuf> {
-            if cfg!(target_os = "macos") {
-                vec![
-                    PathBuf::from("/opt/homebrew/bin"),
-                    PathBuf::from("/usr/local/bin"),
-                    PathBuf::from("/opt/local/bin"),
-                ]
-            } else {
-                Vec::new()
-            }
         }
 
         // Allow overriding the smbclient location when needed.
@@ -457,17 +445,29 @@ impl SmbProvider {
             return (found.into_os_string(), None);
         }
 
-        // Packaged macOS apps (launched from Finder) often have a very minimal PATH
-        // and won't include common Homebrew locations.
-        let mut search_paths = macos_extra_paths();
-        search_paths.extend(env::split_paths(&current_path));
-        let augmented_path = join_paths_lossy(&search_paths, current_path);
+        #[cfg(target_os = "macos")]
+        {
+            // Packaged macOS apps (launched from Finder) often have a very minimal PATH
+            // and won't include common Homebrew locations.
+            let mut search_paths = vec![
+                PathBuf::from("/opt/homebrew/bin"),
+                PathBuf::from("/usr/local/bin"),
+                PathBuf::from("/opt/local/bin"),
+            ];
+            search_paths.extend(env::split_paths(&current_path));
+            let augmented_path = join_paths_lossy(&search_paths, current_path);
 
-        if let Some(found) = find_in_path("smbclient", &augmented_path) {
-            return (found.into_os_string(), Some(augmented_path));
+            if let Some(found) = find_in_path("smbclient", &augmented_path) {
+                return (found.into_os_string(), Some(augmented_path));
+            }
+
+            return (OsString::from("smbclient"), Some(augmented_path));
         }
 
-        (OsString::from("smbclient"), Some(augmented_path))
+        #[cfg(not(target_os = "macos"))]
+        {
+            (OsString::from("smbclient"), None)
+        }
     }
 
     #[cfg(feature = "smb")]
