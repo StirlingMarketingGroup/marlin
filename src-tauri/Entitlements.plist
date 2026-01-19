@@ -14,6 +14,8 @@
         The pavao crate dynamically links to libsmbclient (installed via Homebrew),
         which is signed with a different Team ID. This entitlement allows the app
         to load libraries with different or missing signatures.
+        Tracking issue to remove this entitlement by bundling + re-signing libsmbclient:
+        https://github.com/StirlingMarketingGroup/marlin/issues/157
     -->
     <key>com.apple.security.cs.disable-library-validation</key>
     <true/>
