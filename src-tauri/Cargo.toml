@@ -75,7 +75,7 @@ trash = "5.2.5"
 keyring = { version = "3.6.3", default-features = false, features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust", "vendored"] }
 
 # Google Drive integration
-google-drive3 = "5"
+google-drive3 = "7"
 yup-oauth2 = "12"
 hyper = { version = "1.5", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
