@@ -149,12 +149,13 @@ jobs:
       matrix:
         include:
           # macOS Apple Silicon (M1/M2/M3)
+          # SMB disabled: pavao dynamically links libsmbclient which can't be code-signed for distribution
           - os: macos-15
             target: aarch64-apple-darwin
             arch: arm64
             rust-targets: aarch64-apple-darwin
-            smb: true
-          # macOS Intel (cross-compile from arm64 runner - no SMB due to cross-compile)
+            smb: false
+          # macOS Intel (cross-compile from arm64 runner)
           - os: macos-15
             target: x86_64-apple-darwin
             arch: x86_64
@@ -369,12 +370,13 @@ jobs:
       matrix:
         include:
           # macOS Apple Silicon (M1/M2/M3)
+          # SMB disabled: pavao dynamically links libsmbclient which can't be code-signed for distribution
           - os: macos-15
             target: aarch64-apple-darwin
             arch: arm64
             rust-targets: aarch64-apple-darwin
-            smb: true
-          # macOS Intel (cross-compile from arm64 runner - no SMB due to cross-compile)
+            smb: false
+          # macOS Intel (cross-compile from arm64 runner)
           - os: macos-15
             target: x86_64-apple-darwin
             arch: x86_64
