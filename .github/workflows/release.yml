@@ -307,6 +307,19 @@ jobs:
           # Clean up certificate file
           rm -f $RUNNER_TEMP/certificate.p12
 
+      - name: Clean up disk image processes (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          # Kill any stale disk image helper processes that could cause "Resource busy" errors
+          pkill -9 diskimages-helper || true
+          pkill -9 hdiutil || true
+          # Detach any mounted disk images
+          for mount in $(hdiutil info 2>/dev/null | grep -E '^/dev/disk[0-9]+' | awk '{print $1}'); do
+            hdiutil detach "$mount" -force 2>/dev/null || true
+          done
+          # Small delay to ensure resources are released
+          sleep 2
+
       - name: Build and publish installers
         uses: tauri-apps/tauri-action@v0
         env:
@@ -460,6 +473,19 @@ jobs:
 
       - name: Install frontend dependencies
         run: npm ci
+
+      - name: Clean up disk image processes (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          # Kill any stale disk image helper processes that could cause "Resource busy" errors
+          pkill -9 diskimages-helper || true
+          pkill -9 hdiutil || true
+          # Detach any mounted disk images
+          for mount in $(hdiutil info 2>/dev/null | grep -E '^/dev/disk[0-9]+' | awk '{print $1}'); do
+            hdiutil detach "$mount" -force 2>/dev/null || true
+          done
+          # Small delay to ensure resources are released
+          sleep 2
 
       - name: Build Tauri bundle
         run: |
