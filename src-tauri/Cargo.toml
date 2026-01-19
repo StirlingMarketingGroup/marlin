@@ -76,7 +76,7 @@ keyring = { version = "3.6.3", default-features = false, features = ["apple-nati
 
 # Google Drive integration
 google-drive3 = "5"
-yup-oauth2 = "11"
+yup-oauth2 = "12"
 hyper = { version = "1.5", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
 http-body-util = "0.1"
