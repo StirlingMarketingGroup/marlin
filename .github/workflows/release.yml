@@ -358,7 +358,7 @@ jobs:
             **macOS users**: Choose `arm64` for Apple Silicon (M1/M2/M3) or `x86_64` for Intel Macs.
           releaseDraft: false
           prerelease: ${{ startsWith(env.RELEASE_TAG, 'v0.') }}
-          args: --target ${{ matrix.target }} --verbose ${{ matrix.smb && '--features smb' || '' }}
+          args: --target ${{ matrix.target }} --verbose ${{ matrix.smb && '--features smb' || '' }} ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '--bundles deb' || '' }}
 
   release-dry-run:
     name: Dry Run (${{ matrix.os }} • ${{ matrix.arch }})
@@ -516,7 +516,7 @@ jobs:
       - name: Build Tauri bundle
         run: |
           set -euxo pipefail
-          npm run tauri build -- --ci --target ${{ matrix.target }} --verbose ${{ matrix.smb && '--features smb' || '' }}
+          npm run tauri build -- --ci --target ${{ matrix.target }} --verbose ${{ matrix.smb && '--features smb' || '' }} ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '--bundles deb' || '' }}
         env:
           APPIMAGE_EXTRACT_AND_RUN: ${{ runner.os == 'Linux' && '1' || '0' }}
           TAURI_BUNDLE_DEBUG: '1'
