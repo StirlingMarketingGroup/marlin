@@ -1,6 +1,6 @@
 use chrono::{DateTime, Duration, Utc};
-use google_drive3::oauth2::authenticator_delegate::InstalledFlowDelegate;
-use google_drive3::oauth2::{
+use yup_oauth2::authenticator_delegate::InstalledFlowDelegate;
+use yup_oauth2::{
     ApplicationSecret, InstalledFlowAuthenticator, InstalledFlowReturnMethod,
     ServiceAccountAuthenticator, ServiceAccountKey,
 };

@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use google_drive3::api::File as DriveFile;
 use google_drive3::DriveHub;
-use google_drive3::hyper::client::HttpConnector;
 use google_drive3::hyper_rustls::HttpsConnector;
+use hyper_util::client::legacy::connect::HttpConnector;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -72,7 +72,7 @@ impl GoogleDriveProvider {
     async fn create_hub(&self, email: &str) -> Result<DriveHubType, String> {
         let access_token = ensure_valid_token(email).await?;
 
-        // Use the hyper client compatible with google_drive3 (hyper 0.14)
+        // Use the hyper client compatible with google_drive3 v7 (hyper 1.x via hyper-util)
         let connector = google_drive3::hyper_rustls::HttpsConnectorBuilder::new()
             .with_native_roots()
             .map_err(|e| format!("Failed to load native roots: {}", e))?
@@ -81,10 +81,11 @@ impl GoogleDriveProvider {
             .enable_http2()
             .build();
 
-        let client = google_drive3::hyper::Client::builder().build(connector);
+        let client = hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
+            .build(connector);
 
         // Create an authenticator that uses our stored token
-        let auth = google_drive3::oauth2::AccessTokenAuthenticator::builder(access_token)
+        let auth = yup_oauth2::AccessTokenAuthenticator::builder(access_token)
             .build()
             .await
             .map_err(|e| format!("Failed to create authenticator: {}", e))?;
