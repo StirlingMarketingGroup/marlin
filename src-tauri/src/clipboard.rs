@@ -310,7 +310,14 @@ mod windows {
                     if !ptr.is_null() {
                         std::ptr::copy_nonoverlapping(effect_bytes.as_ptr(), ptr as *mut u8, 4);
                         GlobalUnlock(hmem);
-                        SetClipboardData(format_id, windows::Win32::Foundation::HANDLE(hmem.0 as _));
+                        if SetClipboardData(format_id, windows::Win32::Foundation::HANDLE(hmem.0 as _))
+                            .is_err()
+                        {
+                            // `SetClipboardData` takes ownership on success; on failure we must free.
+                            let _ = GlobalFree(hmem);
+                        }
+                    } else {
+                        let _ = GlobalFree(hmem);
                     }
                 }
             }
@@ -769,16 +776,20 @@ fn generate_unique_path(base_path: &Path) -> std::path::PathBuf {
         }
     }
 
-    // Fallback with timestamp
+    // Fallback with high-resolution timestamp + counter
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static FALLBACK_COUNTER: AtomicU64 = AtomicU64::new(0);
+
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
+        .map(|d| d.as_nanos())
         .unwrap_or(0);
+    let counter = FALLBACK_COUNTER.fetch_add(1, Ordering::Relaxed);
 
     let new_name = if let Some(e) = ext {
-        format!("{}_{}.{}", stem, timestamp, e)
+        format!("{}_{}_{}.{}", stem, timestamp, counter, e)
     } else {
-        format!("{}_{}", stem, timestamp)
+        format!("{}_{}_{}", stem, timestamp, counter)
     };
 
     parent.join(&new_name)

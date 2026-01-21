@@ -11,6 +11,7 @@ A fast, no-nonsense file browser. Gets out of your way and just does files well.
 ## Features
 
 ### Core
+
 - Grid view with thumbnails and list view
 - Editable path bar with autocomplete
 - Type-to-filter: just start typing to filter files instantly
@@ -30,6 +31,7 @@ A fast, no-nonsense file browser. Gets out of your way and just does files well.
 - System accent color support (macOS, more platforms coming)
 
 ### Smart Thumbnails
+
 Marlin generates thumbnails for a wide variety of file types—locally and on remote providers:
 
 - **Images**: JPG, PNG, GIF, WebP, BMP, TIFF, TGA, ICO
@@ -42,18 +44,21 @@ Marlin generates thumbnails for a wide variety of file types—locally and on re
 Image dimensions shown under thumbnails. Image-heavy folders automatically switch to grid view.
 
 ### Google Drive Integration
+
 - **Account Management**: Connect multiple Google accounts from the sidebar
 - **Full Navigation**: Browse My Drive, Shared Drives, and Shared with me
 - **URL Paste**: Paste any Google Drive folder URL into the path bar to navigate directly
 - **Thumbnails**: Full thumbnail support for all file types
 
 ### SMB / Network Shares
+
 - Browse Windows shares, NAS devices, and macOS file sharing
 - **Blazing fast**: Handles folders with 100k+ files with ease
 - **Remote thumbnails**: Generate thumbnails for files on network shares
 - Automatic reconnection and credential management
 
 ### For Developers
+
 - **Git folder badges**: Instantly spot Git repositories in any directory
 - **Git status bar**: See branch name, dirty/clean state, ahead/behind counts
 - **Click to open remote**: Jump to GitHub/GitLab/etc. directly from the status bar
