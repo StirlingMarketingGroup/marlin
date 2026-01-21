@@ -1,6 +1,6 @@
 # Marlin
 
-A fast, minimal file browser built with Tauri.
+A fast, no-nonsense file browser. Gets out of your way and just does files well.
 
 ## Screenshots
 
