@@ -14,11 +14,12 @@ import { message } from '@tauri-apps/plugin-dialog';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { platform } from '@tauri-apps/plugin-os';
 import { getEffectiveExtension } from './utils/fileTypes';
+import { applyAccentVariables, DEFAULT_ACCENT, normalizeHexColor } from '@/utils/accent';
 
 import Toast from './components/Toast';
 import FilterInput from './components/FilterInput';
 import { FULL_DISK_ACCESS_DISMISSED_KEY } from '@/utils/fullDiskAccessPrompt';
-import { SMB_CONNECT_SUCCESS_EVENT } from '@/utils/events';
+import { PREFERENCES_UPDATED_EVENT, SMB_CONNECT_SUCCESS_EVENT } from '@/utils/events';
 import type {
   DirectoryChangeEventPayload,
   DirectoryListingResponse,
@@ -41,6 +42,8 @@ function parseErrorCode(error: unknown): string | null {
   const match = message.match(/^\[([A-Z]+)\]/);
   return match ? match[1] : null;
 }
+
+const ACCENT_POLL_INTERVAL_MS = 5000;
 
 async function checkAndShowFullDiskAccessPrompt() {
   if (platform() !== 'macos') return;
@@ -79,11 +82,18 @@ function App() {
 
   const initializedRef = useRef(false);
   const [showLoadingOverlay, setShowLoadingOverlay] = useState(false);
+  const openPreferences = useCallback(() => {
+    invoke('open_preferences_window').catch((error) => {
+      console.warn('Failed to open preferences window:', error);
+    });
+  }, []);
   const prefsLoadedRef = useRef(false);
   const firstLoadRef = useRef(true);
   const altTogglePendingRef = useRef(false);
   const windowRef = useRef(getCurrentWindow());
   const thumbnailPrewarmRequestedRef = useRef(false);
+  const currentAccentRef = useRef<string | null>(null);
+  const saveGlobalPrefsTimeoutRef = useRef<number | null>(null);
   const currentDirectoryPreference = directoryPreferences[currentPath];
   const pendingFileSelectionRef = useRef<string | null>(null);
   // Apply smart default view and sort preferences based on folder name or contents
@@ -281,6 +291,30 @@ function App() {
     };
   }, []);
 
+  // Sync preferences updates coming from the Preferences window.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+
+    (async () => {
+      try {
+        unlisten = await listen<Partial<ViewPreferences>>(PREFERENCES_UPDATED_EVENT, (evt) => {
+          const payload = evt.payload;
+          if (payload && typeof payload === 'object') {
+            useAppStore.getState().updateGlobalPreferences(payload);
+          }
+        });
+      } catch (error) {
+        console.warn('Failed to listen for preferences updates:', error);
+      }
+    })();
+
+    return () => {
+      if (unlisten) {
+        unlisten();
+      }
+    };
+  }, []);
+
   useEffect(() => {
     // Initialize the app by getting the home directory
     async function initializeApp() {
@@ -345,24 +379,6 @@ function App() {
         const urlParams = new URLSearchParams(window.location.search);
         const initialPath = urlParams.get('path');
         const startPath = initialPath ? decodeURIComponent(initialPath) : lastDir || homeDir;
-
-        // Apply system accent color (macOS) to CSS variables FIRST
-        try {
-          const accent = await invoke<string>('get_system_accent_color');
-          if (accent && /^#?[0-9a-fA-F]{6}$/.test(accent)) {
-            const hex = accent.startsWith('#') ? accent.slice(1) : accent;
-            const r = parseInt(hex.substring(0, 2), 16);
-            const g = parseInt(hex.substring(2, 4), 16);
-            const b = parseInt(hex.substring(4, 6), 16);
-            const soft = `rgba(${r}, ${g}, ${b}, 0.15)`;
-            const selected = `rgba(${r}, ${g}, ${b}, 0.28)`;
-            document.documentElement.style.setProperty('--accent', `#${hex}`);
-            document.documentElement.style.setProperty('--accent-soft', soft);
-            document.documentElement.style.setProperty('--accent-selected', selected);
-          }
-        } catch (e) {
-          console.warn('Could not get system accent color:', e);
-        }
 
         // Now try to load the initial directory
         let loadSuccess = false;
@@ -429,6 +445,72 @@ function App() {
     setHomeDir,
     loadPinnedDirectories,
   ]);
+
+  // Apply accent color preference (system or custom) and keep it updated.
+  useEffect(() => {
+    let isActive = true;
+    let intervalId: number | undefined;
+    const normalizedCustom =
+      normalizeHexColor(globalPreferences.accentColorCustom) ?? DEFAULT_ACCENT;
+    const mode = globalPreferences.accentColorMode ?? 'system';
+
+    const applyIfChanged = (hexColor: string) => {
+      const normalized = normalizeHexColor(hexColor);
+      if (!normalized) return;
+      if (currentAccentRef.current === normalized) return;
+      currentAccentRef.current = normalized;
+      applyAccentVariables(normalized);
+    };
+
+    const updateFromSystem = async () => {
+      try {
+        const accent = await invoke<string>('get_system_accent_color');
+        if (!isActive) return;
+        const normalized = normalizeHexColor(accent) ?? DEFAULT_ACCENT;
+        applyIfChanged(normalized);
+      } catch (error) {
+        if (import.meta.env.DEV) {
+          console.warn('Could not get system accent color:', error);
+        }
+        applyIfChanged(DEFAULT_ACCENT);
+      }
+    };
+
+    if (mode === 'system') {
+      updateFromSystem();
+      intervalId = window.setInterval(updateFromSystem, ACCENT_POLL_INTERVAL_MS);
+    } else {
+      applyIfChanged(normalizedCustom);
+    }
+
+    return () => {
+      isActive = false;
+      if (intervalId) {
+        window.clearInterval(intervalId);
+      }
+    };
+  }, [globalPreferences.accentColorCustom, globalPreferences.accentColorMode]);
+
+  // Persist global preferences (debounced) to avoid clobbering on load.
+  useEffect(() => {
+    if (!prefsLoadedRef.current) return;
+
+    if (saveGlobalPrefsTimeoutRef.current) {
+      window.clearTimeout(saveGlobalPrefsTimeoutRef.current);
+    }
+
+    saveGlobalPrefsTimeoutRef.current = window.setTimeout(() => {
+      invoke('set_global_prefs', { prefs: JSON.stringify(globalPreferences) }).catch((error) => {
+        console.warn('Failed to persist global preferences:', error);
+      });
+    }, 250);
+
+    return () => {
+      if (saveGlobalPrefsTimeoutRef.current) {
+        window.clearTimeout(saveGlobalPrefsTimeoutRef.current);
+      }
+    };
+  }, [globalPreferences]);
 
   // Persist lastDir on navigation
   useEffect(() => {
@@ -745,6 +827,7 @@ function App() {
       await register('menu:sort_type', () => setSortBy('type'));
       await register('menu:sort_order_asc', () => setSortOrder('asc'));
       await register('menu:sort_order_desc', () => setSortOrder('desc'));
+      await register('menu:preferences', () => openPreferences());
 
       const handleCalculateTotalSize = async () => {
         const state = useAppStore.getState();
@@ -938,6 +1021,17 @@ function App() {
       const inEditable =
         !!active &&
         (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable);
+
+      if (
+        ((isMac && e.metaKey) || (!isMac && e.ctrlKey)) &&
+        !e.altKey &&
+        !e.shiftKey &&
+        e.key === ','
+      ) {
+        e.preventDefault();
+        openPreferences();
+        return;
+      }
 
       // Type-to-filter: any single printable character starts/appends to filter
       // We check length === 1 to exclude special keys (Escape, Enter, etc.)
@@ -1432,7 +1526,7 @@ function App() {
       disposed = true;
       unsubs.forEach((u) => u());
     };
-  }, [toggleHiddenFiles, toggleFoldersFirst]);
+  }, [toggleHiddenFiles, toggleFoldersFirst, openPreferences]);
 
   // Sync native menu checkboxes when preferences change
   useEffect(() => {

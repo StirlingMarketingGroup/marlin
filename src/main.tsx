@@ -7,6 +7,7 @@ import DeleteProgressWindow from './windows/DeleteProgressWindow';
 import ClipboardProgressWindow from './windows/ClipboardProgressWindow';
 import SmbConnectWindow from './windows/SmbConnectWindow';
 import PermissionsWindow from './windows/PermissionsWindow';
+import PreferencesWindow from './windows/PreferencesWindow';
 import './index.css';
 
 const params = new URLSearchParams(window.location.search);
@@ -25,7 +26,9 @@ const Root =
             ? SmbConnectWindow
             : view === 'permissions'
               ? PermissionsWindow
-              : App;
+              : view === 'preferences'
+                ? PreferencesWindow
+                : App;
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

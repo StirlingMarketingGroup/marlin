@@ -10,7 +10,7 @@ use std::os::unix::ffi::OsStrExt;
 #[cfg(target_os = "windows")]
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 #[cfg(target_family = "unix")]
@@ -728,4 +728,73 @@ where
     crate::macos_security::persist_bookmark(path, "reading directory contents streaming");
 
     Ok(total_count)
+}
+
+/// Generate a unique path for a file in a directory, avoiding collisions.
+///
+/// If the target path doesn't exist, returns it as-is.
+/// Otherwise, appends " (2)", " (3)", etc. up to 999.
+/// If all numbered variants are taken, falls back to timestamp + counter suffix.
+///
+/// # Arguments
+/// * `dir` - The directory where the file will be placed
+/// * `desired_name` - The desired filename (just the name, not the full path)
+///
+/// # Returns
+/// * `Ok(PathBuf)` - A unique path that doesn't exist
+/// * `Err(String)` - If unable to allocate a unique name after all attempts
+pub fn allocate_unique_path(dir: &Path, desired_name: &str) -> Result<PathBuf, String> {
+    static FALLBACK_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    // Sanitize the desired name to just the filename component
+    let desired_name = Path::new(desired_name)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| "Invalid file name".to_string())?;
+
+    let base = dir.join(desired_name);
+    if !base.exists() {
+        return Ok(base);
+    }
+
+    // Extract stem and extension for generating variants
+    let stem = Path::new(desired_name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(desired_name);
+    let ext = Path::new(desired_name).extension().and_then(|e| e.to_str());
+
+    // Try numbered variants: "name (2).ext", "name (3).ext", etc.
+    for i in 2..1000usize {
+        let candidate = if let Some(e) = ext {
+            format!("{stem} ({i}).{e}")
+        } else {
+            format!("{stem} ({i})")
+        };
+        let p = dir.join(candidate);
+        if !p.exists() {
+            return Ok(p);
+        }
+    }
+
+    // Fallback: use timestamp + atomic counter for guaranteed uniqueness
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+
+    for _ in 0..128u32 {
+        let counter = FALLBACK_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let candidate = if let Some(e) = ext {
+            format!("{stem}_{nanos}_{counter}.{e}")
+        } else {
+            format!("{stem}_{nanos}_{counter}")
+        };
+        let p = dir.join(candidate);
+        if !p.exists() {
+            return Ok(p);
+        }
+    }
+
+    Err("Unable to allocate unique destination name".to_string())
 }

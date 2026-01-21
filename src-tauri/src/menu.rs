@@ -22,7 +22,18 @@ pub fn create_menu<R: Runtime>(
     ),
     tauri::Error,
 > {
+    #[cfg(target_os = "macos")]
+    let preferences_item = MenuItemBuilder::with_id("menu:preferences", "Preferences...")
+        .accelerator("CmdOrCtrl+,")
+        .build(app)?;
+
+    #[cfg(not(target_os = "macos"))]
+    let preferences_item = MenuItemBuilder::with_id("menu:preferences", "Settings...")
+        .accelerator("CmdOrCtrl+,")
+        .build(app)?;
+
     // Create App submenu (appears under app name on macOS)
+    #[cfg(target_os = "macos")]
     let app_submenu = SubmenuBuilder::new(app, "Marlin")
         .about(Some(AboutMetadata {
             name: Some("Marlin".to_string()),
@@ -30,7 +41,26 @@ pub fn create_menu<R: Runtime>(
             ..Default::default()
         }))
         .separator()
-        .text("menu:preferences", "Preferences...")
+        .item(&preferences_item)
+        .text("menu:reset_folder_defaults", "Reset Folder Defaults...")
+        .text("menu:clear_thumbnail_cache", "Clear Thumbnail Cache...")
+        .separator()
+        .services()
+        .separator()
+        .hide()
+        .hide_others()
+        .separator()
+        .quit()
+        .build()?;
+
+    #[cfg(not(target_os = "macos"))]
+    let app_submenu = SubmenuBuilder::new(app, "Marlin")
+        .about(Some(AboutMetadata {
+            name: Some("Marlin".to_string()),
+            version: Some("0.1.0".to_string()),
+            ..Default::default()
+        }))
+        .separator()
         .text("menu:reset_folder_defaults", "Reset Folder Defaults...")
         .text("menu:clear_thumbnail_cache", "Clear Thumbnail Cache...")
         .separator()
@@ -48,8 +78,22 @@ pub fn create_menu<R: Runtime>(
         .build(app)?;
 
     // Create File submenu
+    #[cfg(target_os = "macos")]
     let file_submenu = SubmenuBuilder::new(app, "File")
         .item(&new_window_item)
+        .separator()
+        .text("menu:new_folder", "New Folder")
+        .separator()
+        .text("menu:refresh", "Refresh")
+        .separator()
+        .close_window()
+        .build()?;
+
+    #[cfg(not(target_os = "macos"))]
+    let file_submenu = SubmenuBuilder::new(app, "File")
+        .item(&new_window_item)
+        .separator()
+        .item(&preferences_item)
         .separator()
         .text("menu:new_folder", "New Folder")
         .separator()
@@ -176,6 +220,9 @@ pub fn create_menu<R: Runtime>(
 pub fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, event: &tauri::menu::MenuEvent) {
     let event_id = event.id().0.as_str();
     match event_id {
+        "menu:preferences" => {
+            let _ = app.emit("menu:preferences", ());
+        }
         "menu:toggle_hidden" => {
             // Read and toggle the stored checked state, update the menu item, then emit the new value
             let state: tauri::State<crate::state::MenuState<R>> = app.state();

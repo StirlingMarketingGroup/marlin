@@ -30,7 +30,7 @@ use walkdir::WalkDir;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 use crate::fs_utils::{
-    self, delete_file_or_directory, expand_path, read_directory_streaming,
+    self, allocate_unique_path, delete_file_or_directory, expand_path, read_directory_streaming,
     resolve_symlink_parent, DiskUsage, FileItem, SymlinkResolution,
 };
 use crate::fs_watcher;
@@ -107,6 +107,7 @@ const CLIPBOARD_PROGRESS_WINDOW_LABEL: &str = "clipboard-progress";
 const SMB_CONNECT_INIT_EVENT: &str = "smb-connect:init";
 const SMB_CONNECT_WINDOW_LABEL: &str = "smb-connect";
 const PERMISSIONS_WINDOW_LABEL: &str = "permissions";
+const PREFERENCES_WINDOW_LABEL: &str = "preferences";
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1843,59 +1844,6 @@ fn join_dest_raw(dest_scheme: &str, dest_dir_raw: &str, name: &str) -> String {
     }
 }
 
-fn allocate_unique_local_path(dir: &Path, desired_name: &str) -> Result<PathBuf, String> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static FALLBACK_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    let desired_name = Path::new(desired_name)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| "Invalid file name".to_string())?;
-
-    let base = dir.join(desired_name);
-    if !base.exists() {
-        return Ok(base);
-    }
-
-    let stem = Path::new(desired_name)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or(desired_name);
-    let ext = Path::new(desired_name).extension().and_then(|e| e.to_str());
-
-    for i in 2..1000usize {
-        let candidate = if let Some(e) = ext {
-            format!("{stem} ({i}).{e}")
-        } else {
-            format!("{stem} ({i})")
-        };
-        let p = dir.join(candidate);
-        if !p.exists() {
-            return Ok(p);
-        }
-    }
-
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-
-    for _ in 0..128u32 {
-        let counter = FALLBACK_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let candidate = if let Some(e) = ext {
-            format!("{stem}_{nanos}_{counter}.{e}")
-        } else {
-            format!("{stem}_{nanos}_{counter}")
-        };
-        let p = dir.join(candidate);
-        if !p.exists() {
-            return Ok(p);
-        }
-    }
-
-    Err("Unable to allocate unique destination name".to_string())
-}
-
 fn emit_clipboard_progress_init(app: &AppHandle, operation: String, destination: String, total: usize) {
     emit_clipboard_progress_update(
         app,
@@ -2049,7 +1997,7 @@ pub async fn paste_items_to_location(
                 let Some(dest_dir) = dest_dir_path.as_ref() else {
                     return Err("Local destination directory is required".to_string());
                 };
-                let dest_path = allocate_unique_local_path(dest_dir.as_path(), &name)?;
+                let dest_path = allocate_unique_path(dest_dir.as_path(), &name)?;
                 let dest_raw = dest_path.to_string_lossy().to_string();
                 let (_, dest_item_location) = resolve_location(LI::Raw(dest_raw.clone()))?;
                 if is_cut {
@@ -2295,7 +2243,7 @@ pub async fn paste_items_to_location(
                 let file_id = get_file_id_by_path(email, source_location.path()).await?;
                 let temp_path = download_file_to_temp(email, &file_id, &name).await?;
 
-                let dest_path = allocate_unique_local_path(dest_dir.as_path(), &name)?;
+                let dest_path = allocate_unique_path(dest_dir.as_path(), &name)?;
                 crate::fs_utils::copy_file_or_directory(Path::new(&temp_path), &dest_path)?;
                 let out = dest_path.to_string_lossy().to_string();
                 if is_cut {
@@ -2321,7 +2269,7 @@ pub async fn paste_items_to_location(
                     crate::locations::smb::parse_smb_path(from_authority, source_location.path())?;
                 let creds = get_server_credentials(&hostname)?;
 
-                let dest_path = allocate_unique_local_path(dest_dir.as_path(), &name)?;
+                let dest_path = allocate_unique_path(dest_dir.as_path(), &name)?;
                 let dest_path_string = dest_path.to_string_lossy().to_string();
                 let dest_path_string_for_task = dest_path_string.clone();
 
@@ -4364,6 +4312,36 @@ pub fn open_permissions_window(app: AppHandle) -> Result<(), String> {
 }
 
 #[command]
+pub fn open_preferences_window(app: AppHandle) -> Result<(), String> {
+    if let Some(existing) = app.get_webview_window(PREFERENCES_WINDOW_LABEL) {
+        let _ = existing.show();
+        let _ = existing.set_focus();
+        return Ok(());
+    }
+
+    let url = tauri::WebviewUrl::App("index.html?view=preferences".into());
+    let builder = configure_modal_utility_window(tauri::WebviewWindowBuilder::new(
+        &app,
+        PREFERENCES_WINDOW_LABEL,
+        url,
+    ))
+    .title("Preferences")
+    .inner_size(520.0, 320.0);
+
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true)
+        .traffic_light_position(tauri::LogicalPosition::new(14.0, 14.0));
+
+    builder
+        .build()
+        .map_err(|e| format!("Failed to create preferences window: {}", e))?;
+
+    Ok(())
+}
+
+#[command]
 pub fn hide_delete_progress_window(app: AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(DELETE_PROGRESS_WINDOW_LABEL) {
         if let Err(err) = window.close() {
@@ -4896,6 +4874,23 @@ pub fn set_dir_prefs(path: String, prefs: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn set_global_prefs(prefs: String) -> Result<(), String> {
+    let mut v = read_prefs_value()?;
+    let incoming: Value =
+        serde_json::from_str(&prefs).map_err(|e| format!("Invalid prefs JSON: {}", e))?;
+    let mut merged = v.get("globalPreferences").cloned().unwrap_or(json!({}));
+    if let (Some(obj_in), Some(obj_existing)) = (incoming.as_object(), merged.as_object_mut()) {
+        for (k, val) in obj_in.iter() {
+            obj_existing.insert(k.clone(), val.clone());
+        }
+    } else {
+        merged = incoming;
+    }
+    v["globalPreferences"] = merged;
+    write_prefs_value(&v)
+}
+
+#[tauri::command]
 pub fn clear_all_dir_prefs() -> Result<(), String> {
     let mut v = read_prefs_value()?;
     v["directoryPreferences"] = json!({});
@@ -5125,14 +5120,15 @@ pub async fn add_pinned_directory(
     };
 
     // Normalize path by removing trailing slashes for consistent storage and comparison
-    let stored_path = stored_path.trim_end_matches('/').to_string();
+    // (preserves "/" for root path)
+    let stored_path = normalize_trailing_slash(&stored_path);
 
     let mut stored_pins = load_stored_pinned_directories()?;
 
     // Check if already pinned (compare normalized paths to handle trailing slash differences)
     if stored_pins
         .iter()
-        .any(|p| p.path.trim_end_matches('/') == stored_path)
+        .any(|p| normalize_trailing_slash(&p.path) == stored_path)
     {
         return Err("Directory is already pinned".to_string());
     }
@@ -5178,22 +5174,35 @@ pub async fn add_pinned_directory(
 
 #[command]
 pub fn remove_pinned_directory(path: String) -> Result<bool, String> {
-    let expanded_path = expand_path(&path)?;
-    // Normalize by removing trailing slashes for consistent comparison
-    let expanded_path_str = expanded_path
-        .to_string_lossy()
-        .trim_end_matches('/')
-        .to_string();
+    // Handle remote URIs (smb://, gdrive://) differently from local paths
+    let normalized_path = if path.starts_with("smb://") || path.starts_with("gdrive://") {
+        // For remote URIs, use the path as-is (just normalize trailing slashes)
+        normalize_trailing_slash(&path)
+    } else {
+        // For local paths, expand ~ and resolve the path
+        let expanded_path = expand_path(&path)?;
+        normalize_trailing_slash(&expanded_path.to_string_lossy())
+    };
+
     let mut stored_pins = load_stored_pinned_directories()?;
 
     let initial_len = stored_pins.len();
-    stored_pins.retain(|p| p.path.trim_end_matches('/') != expanded_path_str);
+    stored_pins.retain(|p| normalize_trailing_slash(&p.path) != normalized_path);
 
     if stored_pins.len() < initial_len {
         save_pinned_directories(&stored_pins)?;
         Ok(true)
     } else {
         Ok(false)
+    }
+}
+
+/// Normalize trailing slashes for path comparison, preserving root "/"
+fn normalize_trailing_slash(path: &str) -> String {
+    if path == "/" {
+        path.to_string()
+    } else {
+        path.trim_end_matches('/').to_string()
     }
 }
 
