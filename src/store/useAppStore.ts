@@ -366,6 +366,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     showHidden: false,
     foldersFirst: true,
     gridSize: 120,
+    accentColorMode: 'system',
+    accentColorCustom: '#3584e4',
   },
   directoryPreferences: {},
   lastPreferenceUpdate: 0,

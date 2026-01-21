@@ -88,6 +88,8 @@ export interface ViewPreferences {
   foldersFirst: boolean;
   // Grid (thumbnail) view tile size in px (min column width)
   gridSize?: number;
+  accentColorMode?: 'system' | 'custom';
+  accentColorCustom?: string;
 }
 
 export type DirectoryPreferencesMap = Record<string, Partial<ViewPreferences>>;

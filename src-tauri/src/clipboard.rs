@@ -8,6 +8,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+use crate::fs_utils::allocate_unique_path;
+
 /// Information about clipboard contents
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -754,48 +756,6 @@ pub fn get_clipboard_image() -> Result<Vec<u8>, String> {
 // File Operations
 // ============================================================================
 
-/// Generate a unique filename by appending (2), (3), etc. if the file exists
-fn generate_unique_path(base_path: &Path) -> std::path::PathBuf {
-    if !base_path.exists() {
-        return base_path.to_path_buf();
-    }
-
-    let parent = base_path.parent().unwrap_or(Path::new(""));
-    let stem = base_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-    let ext = base_path.extension().and_then(|e| e.to_str());
-
-    for i in 2..1000 {
-        let new_name = if let Some(e) = ext {
-            format!("{} ({}).{}", stem, i, e)
-        } else {
-            format!("{} ({})", stem, i)
-        };
-
-        let new_path = parent.join(&new_name);
-        if !new_path.exists() {
-            return new_path;
-        }
-    }
-
-    // Fallback with high-resolution timestamp + counter
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static FALLBACK_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let counter = FALLBACK_COUNTER.fetch_add(1, Ordering::Relaxed);
-
-    let new_name = if let Some(e) = ext {
-        format!("{}_{}_{}.{}", stem, timestamp, counter, e)
-    } else {
-        format!("{}_{}_{}", stem, timestamp, counter)
-    };
-
-    parent.join(&new_name)
-}
-
 /// Paste files from clipboard to destination directory
 pub fn paste_files(destination: &str, is_cut: bool) -> Result<PasteResult, String> {
     let clipboard_info = get_clipboard_contents()?;
@@ -836,8 +796,8 @@ pub fn paste_files(destination: &str, is_cut: bool) -> Result<PasteResult, Strin
             .and_then(|n| n.to_str())
             .unwrap_or("unnamed");
 
-        let target_path = dest_path.join(file_name);
-        let final_target = generate_unique_path(&target_path);
+        let final_target = allocate_unique_path(dest_path, file_name)
+            .map_err(|e| format!("Failed to allocate unique path: {}", e))?;
 
         // Use actual clipboard is_cut if available, otherwise use parameter
         let should_move = is_cut || clipboard_info.is_cut;
@@ -895,8 +855,8 @@ pub fn paste_image(destination: &str, filename: Option<&str>) -> Result<PasteIma
         format!("Screenshot {}.png", now.format("%Y-%m-%d at %H-%M-%S"))
     };
 
-    let target_path = dest_path.join(&file_name);
-    let final_target = generate_unique_path(&target_path);
+    let final_target = allocate_unique_path(dest_path, &file_name)
+        .map_err(|e| format!("Failed to allocate unique path: {}", e))?;
 
     std::fs::write(&final_target, &image_data)
         .map_err(|e| format!("Failed to write image: {}", e))?;
