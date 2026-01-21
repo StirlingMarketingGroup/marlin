@@ -10,22 +10,46 @@ A fast, minimal file browser built with Tauri.
 
 ## Features
 
+### Core
 - Grid view with thumbnails and list view
 - Editable path bar with autocomplete
 - Collapsible sidebar with file tree
 - Per-directory view preferences
 - Hidden files toggle
 - Drag and drop to external apps
-- Dark theme
+- Copy file paths—name or full path (looking at you, Finder!)
 - Keyboard navigation
+- Dark theme (light theme coming soon!)
+- System accent color support (macOS, more platforms coming)
+
+### Smart Thumbnails
+Marlin generates thumbnails for a wide variety of file types—locally and on remote providers:
+
+- **Images**: JPG, PNG, GIF, WebP, BMP, TIFF, TGA, ICO
+- **Design files**: PDF, EPS, Adobe Illustrator
+- **Vector**: SVG
+- **3D models**: STL with shaded rendering
+- **Video**: MP4, MOV, MKV, WebM, AVI, and more (first frame preview)
+- **macOS apps**: .app, .dmg, .pkg icons
+
+Image-heavy folders automatically switch to grid view for optimal browsing.
 
 ### Google Drive Integration
-
 - **Account Management**: Connect multiple Google accounts from the sidebar
 - **Full Navigation**: Browse My Drive, Shared Drives, and Shared with me
 - **URL Paste**: Paste any Google Drive folder URL into the path bar to navigate directly
-- **Thumbnails**: View image thumbnails for Google Drive files
-- **Smart View Defaults**: Image-heavy folders automatically switch to grid view
+- **Thumbnails**: Full thumbnail support for all file types
+
+### SMB / Network Shares
+- Browse Windows shares, NAS devices, and macOS file sharing
+- **Blazing fast**: Handles folders with 100k+ files with ease
+- **Remote thumbnails**: Generate thumbnails for files on network shares
+- Automatic reconnection and credential management
+
+### For Developers
+- **Git folder badges**: Instantly spot Git repositories in any directory
+- **Git status bar**: See branch name, dirty/clean state, ahead/behind counts
+- **Click to open remote**: Jump to GitHub/GitLab/etc. directly from the status bar
 
 ## Tech
 
@@ -37,7 +61,7 @@ A fast, minimal file browser built with Tauri.
 Download from [Releases](https://github.com/StirlingMarketingGroup/marlin/releases):
 
 - **macOS**: `.dmg`
-- **Windows**: `.msi`
+- **Windows**: `.msi` (coming soon)
 - **Linux**: `.AppImage` or `.deb`
 
 Or use the install script:
