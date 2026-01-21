@@ -4,6 +4,7 @@ import App from './App';
 import FolderSizeWindow from './windows/FolderSizeWindow';
 import ArchiveProgressWindow from './windows/ArchiveProgressWindow';
 import DeleteProgressWindow from './windows/DeleteProgressWindow';
+import ClipboardProgressWindow from './windows/ClipboardProgressWindow';
 import SmbConnectWindow from './windows/SmbConnectWindow';
 import PermissionsWindow from './windows/PermissionsWindow';
 import './index.css';
@@ -18,11 +19,13 @@ const Root =
       ? ArchiveProgressWindow
       : view === 'delete-progress'
         ? DeleteProgressWindow
-        : view === 'smb-connect'
-          ? SmbConnectWindow
-          : view === 'permissions'
-            ? PermissionsWindow
-            : App;
+        : view === 'clipboard-progress'
+          ? ClipboardProgressWindow
+          : view === 'smb-connect'
+            ? SmbConnectWindow
+            : view === 'permissions'
+              ? PermissionsWindow
+              : App;
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

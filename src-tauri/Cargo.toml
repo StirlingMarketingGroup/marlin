@@ -85,6 +85,7 @@ reqwest = { version = "0.13", features = ["json", "form"] }
 open = "5"
 bytes = "1"
 mime_guess = "2.0.5"
+rustls = { version = "0.23.32", features = ["ring"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa = { version = "0.25" }
@@ -93,7 +94,8 @@ block = "0.1"
 tauri-plugin-macos-permissions = "2.3.0"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.62", features = ["Win32_Storage_FileSystem"] }
+windows = { version = "0.62", features = ["Win32_Storage_FileSystem", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_Foundation"] }
+clipboard-win = "5"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = { version = "0.18", package = "gtk" }

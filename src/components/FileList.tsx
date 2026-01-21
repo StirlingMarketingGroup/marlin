@@ -181,6 +181,8 @@ export default function FileList({ files, preferences }: FileListProps) {
     isStreamingComplete,
     streamingTotalCount,
     filterText,
+    clipboardMode,
+    clipboardPathsSet,
   } = useAppStore();
   const { renameTargetPath, renameLoading, setRenameTarget, renameFile } = useAppStore();
   const { startNativeDrag, endNativeDrag, isDraggedDirectory } = useDragStore();
@@ -678,6 +680,7 @@ export default function FileList({ files, preferences }: FileListProps) {
       (draggedFile !== null && (draggedFile === file.path || selectedFiles.includes(file.path))) ||
       isDraggedDirectory(file.path);
     const isDownloadingForDrag = downloadingForDrag.has(file.path);
+    const isCutFile = clipboardMode === 'cut' && clipboardPathsSet.has(file.path);
     // Use virtual index for alternating row colors since we're virtualizing
     const isOdd = virtualIndex % 2 === 1;
 
@@ -690,7 +693,7 @@ export default function FileList({ files, preferences }: FileListProps) {
             : isOdd
               ? 'bg-app-gray hover:bg-app-light'
               : 'hover:bg-app-light'
-        } ${isDragged ? 'opacity-50' : ''} ${file.is_hidden ? 'opacity-60' : ''}`}
+        } ${isDragged || isCutFile ? 'opacity-50' : ''} ${file.is_hidden ? 'opacity-60' : ''}`}
         data-testid="file-item"
         data-file-item="true"
         data-file-path={file.path}

@@ -409,9 +409,83 @@ impl LocationProvider for SmbProvider {
         Err("SMB support not compiled. Build with --features smb".to_string())
     }
 
+    #[cfg(feature = "smb")]
+    async fn copy(&self, from: &Location, to: &Location) -> Result<(), String> {
+        use pavao::{SmbClient, SmbCredentials, SmbOpenOptions, SmbOptions};
+        use tokio::task::spawn_blocking;
+
+        let from_authority = from
+            .authority()
+            .ok_or_else(|| "SMB path requires server".to_string())?;
+        let to_authority = to
+            .authority()
+            .ok_or_else(|| "SMB path requires server".to_string())?;
+
+        if from_authority != to_authority {
+            return Err("Copying across different SMB servers is not supported".to_string());
+        }
+
+        let (hostname, share, from_path) = parse_smb_path(from_authority, from.path())?;
+        let (_, to_share, to_path) = parse_smb_path(to_authority, to.path())?;
+
+        if share != to_share {
+            return Err("Copying across different SMB shares is not supported".to_string());
+        }
+
+        let creds = get_server_credentials(&hostname)?;
+        let hostname_clone = hostname.clone();
+        let share_clone = share.clone();
+        let from_path_clone = from_path.clone();
+        let to_path_clone = to_path.clone();
+        let creds_username = creds.username.clone();
+        let creds_password = creds.password.clone();
+        let creds_domain = creds.domain.clone();
+
+        spawn_blocking(move || {
+            // Acquire global SMB mutex - libsmbclient has global state
+            let _guard = SMB_MUTEX.lock().map_err(|e| format!("SMB mutex poisoned: {}", e))?;
+
+            let smb_url = format!("smb://{}", hostname_clone);
+            let share_path = if share_clone.starts_with('/') {
+                share_clone.clone()
+            } else {
+                format!("/{}", share_clone)
+            };
+
+            let mut credentials = SmbCredentials::default()
+                .server(&smb_url)
+                .share(&share_path)
+                .username(&creds_username)
+                .password(&creds_password);
+
+            if let Some(domain) = &creds_domain {
+                credentials = credentials.workgroup(domain);
+            }
+
+            let client = SmbClient::new(credentials, SmbOptions::default())
+                .map_err(|e| format!("Failed to connect: {}", e))?;
+
+            let mut src = client
+                .open_with(&from_path_clone, SmbOpenOptions::default().read(true))
+                .map_err(|e| format!("Failed to open source: {}", e))?;
+
+            let mut dst = client
+                .open_with(
+                    &to_path_clone,
+                    SmbOpenOptions::default().write(true).create(true).truncate(true),
+                )
+                .map_err(|e| format!("Failed to open destination: {}", e))?;
+
+            std::io::copy(&mut src, &mut dst).map_err(|e| format!("Failed to copy: {}", e))?;
+            Ok::<(), String>(())
+        })
+        .await
+        .map_err(|e| format!("SMB copy task failed: {}", e))?
+    }
+
+    #[cfg(not(feature = "smb"))]
     async fn copy(&self, _from: &Location, _to: &Location) -> Result<(), String> {
-        // SMB doesn't have native copy - would need to read+write
-        Err("Copy not yet implemented for SMB".to_string())
+        Err("SMB support not compiled. Build with --features smb".to_string())
     }
 }
 
@@ -599,7 +673,7 @@ impl SmbProvider {
 
 /// Parse an SMB path into (hostname, share, path)
 #[cfg(feature = "smb")]
-fn parse_smb_path(authority: &str, path: &str) -> Result<(String, String, String), String> {
+pub(crate) fn parse_smb_path(authority: &str, path: &str) -> Result<(String, String, String), String> {
     let hostname = authority.to_string();
 
     // Path format: /share/rest/of/path

@@ -39,7 +39,11 @@ use crate::locations::gdrive::{
     add_google_account as add_gdrive_account, get_google_accounts as get_gdrive_accounts,
     remove_google_account as remove_gdrive_account, GoogleAccountInfo,
 };
-use crate::locations::gdrive::provider::{resolve_file_id_to_path, resolve_folder_id, download_file_to_temp, fetch_url_with_auth, extract_gdrive_zip, get_folder_id_by_path};
+use crate::locations::gdrive::provider::{
+    download_file_to_temp, extract_gdrive_zip, fetch_url_with_auth, get_folder_id_by_path,
+    get_file_id_by_path, name_exists_in_folder, resolve_file_id_to_path, resolve_folder_id,
+    upload_file_to_gdrive,
+};
 use crate::locations::gdrive::url_parser::{is_google_drive_url, parse_google_drive_url};
 #[cfg(target_os = "macos")]
 use crate::macos_security;
@@ -97,6 +101,9 @@ const ARCHIVE_PROGRESS_UPDATE_EVENT: &str = "archive-progress:update";
 const DELETE_PROGRESS_EVENT: &str = "delete-progress:init";
 const DELETE_PROGRESS_UPDATE_EVENT: &str = "delete-progress:update";
 const DELETE_PROGRESS_WINDOW_LABEL: &str = "delete-progress";
+const CLIPBOARD_PROGRESS_EVENT: &str = "clipboard-progress:init";
+const CLIPBOARD_PROGRESS_UPDATE_EVENT: &str = "clipboard-progress:update";
+const CLIPBOARD_PROGRESS_WINDOW_LABEL: &str = "clipboard-progress";
 const SMB_CONNECT_INIT_EVENT: &str = "smb-connect:init";
 const SMB_CONNECT_WINDOW_LABEL: &str = "smb-connect";
 const PERMISSIONS_WINDOW_LABEL: &str = "permissions";
@@ -188,6 +195,9 @@ static ARCHIVE_PROGRESS_QUEUE: Lazy<WindowPayloadQueue<ArchiveProgressPayload>> 
     Lazy::new(|| WindowPayloadQueue::new(ARCHIVE_PROGRESS_WINDOW_LABEL, ARCHIVE_PROGRESS_EVENT));
 static DELETE_PROGRESS_QUEUE: Lazy<WindowPayloadQueue<DeleteProgressPayload>> =
     Lazy::new(|| WindowPayloadQueue::new(DELETE_PROGRESS_WINDOW_LABEL, DELETE_PROGRESS_EVENT));
+static CLIPBOARD_PROGRESS_QUEUE: Lazy<WindowPayloadQueue<ClipboardProgressPayload>> = Lazy::new(
+    || WindowPayloadQueue::new(CLIPBOARD_PROGRESS_WINDOW_LABEL, CLIPBOARD_PROGRESS_EVENT),
+);
 static SMB_CONNECT_QUEUE: Lazy<WindowPayloadQueue<SmbConnectInitPayload>> =
     Lazy::new(|| WindowPayloadQueue::new(SMB_CONNECT_WINDOW_LABEL, SMB_CONNECT_INIT_EVENT));
 
@@ -198,6 +208,12 @@ const FOLDER_SIZE_WINDOW_READY_STABILIZE_DELAY: Duration = Duration::from_millis
 fn emit_delete_progress_update(app: &AppHandle, payload: DeleteProgressUpdatePayload) {
     if let Err(err) = app.emit(DELETE_PROGRESS_UPDATE_EVENT, payload) {
         warn!("Failed to emit delete progress update: {err}");
+    }
+}
+
+fn emit_clipboard_progress_update(app: &AppHandle, payload: ClipboardProgressUpdatePayload) {
+    if let Err(err) = app.emit(CLIPBOARD_PROGRESS_UPDATE_EVENT, payload) {
+        warn!("Failed to emit clipboard progress update: {err}");
     }
 }
 
@@ -506,6 +522,30 @@ struct ArchiveProgressUpdatePayload {
     entry_name: Option<String>,
     format: String,
     finished: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClipboardProgressPayload {
+    operation: String,
+    destination: String,
+    total_items: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClipboardProgressUpdatePayload {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    operation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    destination: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    current_item: Option<String>,
+    completed: usize,
+    total: usize,
+    finished: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1773,6 +1813,973 @@ pub async fn move_file(from_path: LocationInput, to_path: LocationInput) -> Resu
     }
 
     from_provider.move_item(&from_location, &to_location).await
+}
+
+#[command]
+pub async fn paste_items_to_location(
+    app: AppHandle,
+    destination: LocationInput,
+    source_paths: Vec<LocationInput>,
+    is_cut: bool,
+) -> Result<crate::clipboard::PasteResult, String> {
+    use crate::clipboard::PasteResult;
+    use crate::locations::LocationInput as LI;
+
+    let total_items = source_paths.len();
+
+    if source_paths.is_empty() {
+        return Ok(PasteResult {
+            pasted_paths: vec![],
+            skipped_count: 0,
+            error_message: Some("No source paths provided".to_string()),
+        });
+    }
+
+    let (_, dest_location) = resolve_location(destination)?;
+    let dest_scheme = dest_location.scheme().to_string();
+    let dest_dir_path = if dest_scheme == "file" {
+        let p = PathBuf::from(dest_location.to_path_string());
+        if !p.exists() {
+            return Err(format!("Destination does not exist: {}", p.to_string_lossy()));
+        }
+        if !p.is_dir() {
+            return Err(format!("Destination is not a directory: {}", p.to_string_lossy()));
+        }
+        Some(p)
+    } else {
+        None
+    };
+
+    // Helper: extract file name from a location input.
+    let filename_from_location = |loc: &crate::locations::Location| -> Option<String> {
+        if loc.scheme() == "file" {
+            let path = loc.to_path_string();
+            Path::new(&path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_string())
+        } else {
+            let p = loc.path().trim_end_matches('/');
+            p.rsplit('/')
+                .next()
+                .and_then(|s| (!s.is_empty()).then_some(s.to_string()))
+        }
+    };
+
+    let join_dest_raw = |dest_dir_raw: &str, name: &str| -> String {
+        if dest_scheme == "file" {
+            PathBuf::from(dest_dir_raw)
+                .join(name)
+                .to_string_lossy()
+                .to_string()
+        } else {
+            if dest_dir_raw.ends_with('/') {
+                format!("{dest_dir_raw}{name}")
+            } else {
+                format!("{dest_dir_raw}/{name}")
+            }
+        }
+    };
+
+    // Destination raw representation for joining children.
+    let dest_dir_raw = if dest_location.scheme() == "file" {
+        dest_location.to_path_string()
+    } else {
+        dest_location.raw().to_string()
+    };
+
+    let operation_label = if is_cut {
+        "Moving items".to_string()
+    } else {
+        "Copying items".to_string()
+    };
+
+    emit_clipboard_progress_update(
+        &app,
+        ClipboardProgressUpdatePayload {
+            operation: Some(operation_label.clone()),
+            destination: Some(dest_dir_raw.clone()),
+            current_item: None,
+            completed: 0,
+            total: total_items,
+            finished: false,
+            error: None,
+        },
+    );
+
+    let allocate_unique_local_path = |dir: &PathBuf, desired_name: &str| -> Result<PathBuf, String> {
+        let desired_name = Path::new(desired_name)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| "Invalid file name".to_string())?;
+
+        let base = dir.join(desired_name);
+        if !base.exists() {
+            return Ok(base);
+        }
+
+        let stem = Path::new(desired_name)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(desired_name);
+        let ext = Path::new(desired_name).extension().and_then(|e| e.to_str());
+
+        for i in 2..1000usize {
+            let candidate = if let Some(e) = ext {
+                format!("{stem} ({i}).{e}")
+            } else {
+                format!("{stem} ({i})")
+            };
+            let p = dir.join(candidate);
+            if !p.exists() {
+                return Ok(p);
+            }
+        }
+
+        Err("Unable to allocate unique destination name".to_string())
+    };
+
+    let mut pasted_paths = Vec::new();
+    let mut skipped_count = 0usize;
+    let mut last_error: Option<String> = None;
+    let mut completed = 0usize;
+
+    // Fast paths: same-scheme provider operations (gdrive->gdrive, smb->smb)
+    // and cross-scheme uploads from local files (file->gdrive, file->smb).
+    for input in source_paths {
+        let (source_provider, source_location) = match resolve_location(input) {
+            Ok(v) => v,
+            Err(e) => {
+                skipped_count += 1;
+                last_error = Some(e);
+                completed += 1;
+                emit_clipboard_progress_update(
+                    &app,
+                    ClipboardProgressUpdatePayload {
+                        operation: None,
+                        destination: None,
+                        current_item: None,
+                        completed,
+                        total: total_items,
+                        finished: false,
+                        error: last_error.clone(),
+                    },
+                );
+                continue;
+            }
+        };
+
+        let source_scheme = source_location.scheme().to_string();
+        let Some(name) = filename_from_location(&source_location) else {
+            skipped_count += 1;
+            last_error = Some("Unable to determine file name".to_string());
+            completed += 1;
+            emit_clipboard_progress_update(
+                &app,
+                ClipboardProgressUpdatePayload {
+                    operation: None,
+                    destination: None,
+                    current_item: None,
+                    completed,
+                    total: total_items,
+                    finished: false,
+                    error: last_error.clone(),
+                },
+            );
+            continue;
+        };
+
+        emit_clipboard_progress_update(
+            &app,
+            ClipboardProgressUpdatePayload {
+                operation: None,
+                destination: None,
+                current_item: Some(name.clone()),
+                completed,
+                total: total_items,
+                finished: false,
+                error: None,
+            },
+        );
+
+        // Same-provider operations
+        if source_scheme == dest_scheme {
+            let dest_raw = join_dest_raw(&dest_dir_raw, &name);
+
+            // Special handling for SMB to avoid overwriting and to support auto-rename.
+            #[cfg(all(feature = "smb", not(target_os = "windows")))]
+            if dest_scheme == "smb" {
+                use crate::locations::smb::get_server_credentials;
+                use crate::locations::smb::SMB_MUTEX;
+                use pavao::{SmbClient, SmbCredentials, SmbOpenOptions, SmbOptions};
+                use std::io::ErrorKind;
+
+                let from_authority = source_location
+                    .authority()
+                    .ok_or_else(|| "SMB source missing server".to_string())?;
+                let to_authority = dest_location
+                    .authority()
+                    .ok_or_else(|| "SMB destination missing server".to_string())?;
+
+                if from_authority != to_authority {
+                    skipped_count += 1;
+                    last_error = Some("Cannot paste across different SMB servers".to_string());
+                    continue;
+                }
+
+                let (hostname, share, from_rel) =
+                    crate::locations::smb::parse_smb_path(from_authority, source_location.path())?;
+                let (_, to_share, to_dir_rel) =
+                    crate::locations::smb::parse_smb_path(to_authority, dest_location.path())?;
+
+                if share != to_share {
+                    skipped_count += 1;
+                    last_error = Some("Cannot paste across different SMB shares".to_string());
+                    continue;
+                }
+
+                let creds = get_server_credentials(&hostname)?;
+                let hostname_clone = hostname.clone();
+                let share_clone = share.clone();
+                let to_dir_rel_clone = to_dir_rel.clone();
+                let from_rel_clone = from_rel.clone();
+                let creds_username = creds.username.clone();
+                let creds_password = creds.password.clone();
+                let creds_domain = creds.domain.clone();
+                let name_clone = name.clone();
+                let is_cut_local = is_cut;
+
+                let pasted_name = tokio::task::spawn_blocking(move || -> Result<String, String> {
+                    let _guard = SMB_MUTEX
+                        .lock()
+                        .map_err(|e| format!("SMB mutex poisoned: {e}"))?;
+
+                    let smb_url = format!("smb://{}", hostname_clone);
+                    let share_path = if share_clone.starts_with('/') {
+                        share_clone.clone()
+                    } else {
+                        format!("/{}", share_clone)
+                    };
+
+                    let mut credentials = SmbCredentials::default()
+                        .server(&smb_url)
+                        .share(&share_path)
+                        .username(&creds_username)
+                        .password(&creds_password);
+
+                    if let Some(domain) = &creds_domain {
+                        credentials = credentials.workgroup(domain);
+                    }
+
+                    let client = SmbClient::new(credentials, SmbOptions::default())
+                        .map_err(|e| format!("Failed to connect: {e}"))?;
+
+                    // Allocate a unique destination name without overwriting.
+                    let (stem, ext) = {
+                        let p = Path::new(&name_clone);
+                        let stem = p
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or(&name_clone)
+                            .to_string();
+                        let ext = p.extension().and_then(|e| e.to_str()).map(|s| s.to_string());
+                        (stem, ext)
+                    };
+
+                    for i in 1..1000usize {
+                        let candidate = if i == 1 {
+                            name_clone.clone()
+                        } else if let Some(ref e) = ext {
+                            format!("{stem} ({i}).{e}")
+                        } else {
+                            format!("{stem} ({i})")
+                        };
+
+                        let dest_rel = if to_dir_rel_clone == "/" {
+                            format!("/{}", candidate)
+                        } else {
+                            format!("{}/{}", to_dir_rel_clone.trim_end_matches('/'), candidate)
+                        };
+
+                        if is_cut_local {
+                            // Rename (move) without overwriting.
+                            match client.rename(&from_rel_clone, &dest_rel) {
+                                Ok(()) => return Ok(candidate),
+                                Err(pavao::SmbError::Io(io)) if io.kind() == ErrorKind::AlreadyExists => {
+                                    continue;
+                                }
+                                Err(e) => return Err(format!("Failed to move: {e}")),
+                            }
+                        } else {
+                            // Copy: create destination exclusively, then stream bytes.
+                            let mut src = client
+                                .open_with(&from_rel_clone, SmbOpenOptions::default().read(true))
+                                .map_err(|e| format!("Failed to open source: {e}"))?;
+
+                            let options = SmbOpenOptions::default()
+                                .write(true)
+                                .create(true)
+                                .exclusive(true);
+                            match client.open_with(&dest_rel, options) {
+                                Ok(mut dest) => {
+                                    std::io::copy(&mut src, &mut dest)
+                                        .map_err(|e| format!("Failed to copy: {e}"))?;
+                                    return Ok(candidate);
+                                }
+                                Err(pavao::SmbError::Io(io)) if io.kind() == ErrorKind::AlreadyExists => {
+                                    continue;
+                                }
+                                Err(e) => return Err(format!("Failed to create destination: {e}")),
+                            }
+                        }
+                    }
+
+                    Err("Unable to allocate unique destination name".to_string())
+                })
+                .await
+                .map_err(|e| format!("Task failed: {e}"))??;
+
+                let final_dest_raw = join_dest_raw(&dest_dir_raw, &pasted_name);
+                pasted_paths.push(final_dest_raw);
+                completed += 1;
+                emit_clipboard_progress_update(
+                    &app,
+                    ClipboardProgressUpdatePayload {
+                        operation: None,
+                        destination: None,
+                        current_item: None,
+                        completed,
+                        total: total_items,
+                        finished: false,
+                        error: last_error.clone(),
+                    },
+                );
+                continue;
+            }
+
+            let (_, dest_item_location) = resolve_location(LI::Raw(dest_raw.clone()))?;
+            let op = if is_cut {
+                source_provider.move_item(&source_location, &dest_item_location).await
+            } else {
+                source_provider.copy(&source_location, &dest_item_location).await
+            };
+
+            match op {
+                Ok(()) => pasted_paths.push(dest_raw),
+                Err(e) => {
+                    skipped_count += 1;
+                    last_error = Some(e);
+                }
+            }
+            completed += 1;
+            emit_clipboard_progress_update(
+                &app,
+                ClipboardProgressUpdatePayload {
+                    operation: None,
+                    destination: None,
+                    current_item: None,
+                    completed,
+                    total: total_items,
+                    finished: false,
+                    error: last_error.clone(),
+                },
+            );
+            continue;
+        }
+
+        // Cross-provider uploads from local filesystem
+        if source_scheme == "file" && dest_scheme == "gdrive" {
+            let email = dest_location
+                .authority()
+                .ok_or_else(|| "Google Drive destination missing account".to_string())?;
+            let folder_id = get_folder_id_by_path(email, dest_location.path()).await?;
+
+            let local_path = PathBuf::from(source_location.to_path_string());
+            if !local_path.exists() || !local_path.is_file() {
+                skipped_count += 1;
+                continue;
+            }
+
+            upload_file_to_gdrive(email, &local_path, &folder_id, &name).await?;
+            let dest_raw = join_dest_raw(&dest_dir_raw, &name);
+            pasted_paths.push(dest_raw);
+
+            if is_cut {
+                if let Err(e) = fs::remove_file(&local_path) {
+                    last_error = Some(format!("Uploaded but failed to delete source: {e}"));
+                }
+            }
+            completed += 1;
+            emit_clipboard_progress_update(
+                &app,
+                ClipboardProgressUpdatePayload {
+                    operation: None,
+                    destination: None,
+                    current_item: None,
+                    completed,
+                    total: total_items,
+                    finished: false,
+                    error: last_error.clone(),
+                },
+            );
+            continue;
+        }
+
+        // Cross-provider downloads to local filesystem
+        if dest_scheme == "file" && source_scheme == "gdrive" {
+            let Some(dest_dir) = dest_dir_path.as_ref() else {
+                skipped_count += 1;
+                continue;
+            };
+            let email = source_location
+                .authority()
+                .ok_or_else(|| "Google Drive source missing account".to_string())?;
+            let file_id = get_file_id_by_path(email, source_location.path()).await?;
+            let temp_path = download_file_to_temp(email, &file_id, &name).await?;
+
+            let dest_path = allocate_unique_local_path(&dest_dir.to_path_buf(), &name)?;
+            crate::fs_utils::copy_file_or_directory(Path::new(&temp_path), &dest_path)?;
+            pasted_paths.push(dest_path.to_string_lossy().to_string());
+
+            if is_cut {
+                // Delete the source after successful download+copy.
+                let _ = source_provider.delete(&source_location).await;
+            }
+            completed += 1;
+            emit_clipboard_progress_update(
+                &app,
+                ClipboardProgressUpdatePayload {
+                    operation: None,
+                    destination: None,
+                    current_item: None,
+                    completed,
+                    total: total_items,
+                    finished: false,
+                    error: last_error.clone(),
+                },
+            );
+            continue;
+        }
+
+        #[cfg(all(feature = "smb", not(target_os = "windows")))]
+        if dest_scheme == "file" && source_scheme == "smb" {
+            use crate::locations::smb::get_server_credentials;
+            use crate::locations::smb::SMB_MUTEX;
+            use pavao::{SmbClient, SmbCredentials, SmbOpenOptions, SmbOptions};
+            use std::fs::OpenOptions;
+
+            let Some(dest_dir) = dest_dir_path.as_ref() else {
+                skipped_count += 1;
+                continue;
+            };
+
+            let from_authority = source_location
+                .authority()
+                .ok_or_else(|| "SMB source missing server".to_string())?;
+            let (hostname, share, from_rel) =
+                crate::locations::smb::parse_smb_path(from_authority, source_location.path())?;
+            let creds = get_server_credentials(&hostname)?;
+
+            let dest_path = allocate_unique_local_path(&dest_dir.to_path_buf(), &name)?;
+            let dest_path_string = dest_path.to_string_lossy().to_string();
+            let dest_path_string_for_task = dest_path_string.clone();
+
+            let hostname_clone = hostname.clone();
+            let share_clone = share.clone();
+            let from_rel_clone = from_rel.clone();
+            let creds_username = creds.username.clone();
+            let creds_password = creds.password.clone();
+            let creds_domain = creds.domain.clone();
+            let is_cut_local = is_cut;
+
+            tokio::task::spawn_blocking(move || -> Result<(), String> {
+                let _guard = SMB_MUTEX
+                    .lock()
+                    .map_err(|e| format!("SMB mutex poisoned: {e}"))?;
+
+                let smb_url = format!("smb://{}", hostname_clone);
+                let share_path = if share_clone.starts_with('/') {
+                    share_clone.clone()
+                } else {
+                    format!("/{}", share_clone)
+                };
+
+                let mut credentials = SmbCredentials::default()
+                    .server(&smb_url)
+                    .share(&share_path)
+                    .username(&creds_username)
+                    .password(&creds_password);
+
+                if let Some(domain) = &creds_domain {
+                    credentials = credentials.workgroup(domain);
+                }
+
+                let client = SmbClient::new(credentials, SmbOptions::default())
+                    .map_err(|e| format!("Failed to connect: {e}"))?;
+
+                let mut src = client
+                    .open_with(&from_rel_clone, SmbOpenOptions::default().read(true))
+                    .map_err(|e| format!("Failed to open source: {e}"))?;
+
+                let mut dst = OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&dest_path_string_for_task)
+                    .map_err(|e| format!("Failed to create destination: {e}"))?;
+
+                std::io::copy(&mut src, &mut dst).map_err(|e| format!("Failed to copy: {e}"))?;
+
+                if is_cut_local {
+                    let _ = client.unlink(&from_rel_clone);
+                }
+
+                Ok(())
+            })
+            .await
+            .map_err(|e| format!("Task failed: {e}"))??;
+
+            pasted_paths.push(dest_path_string);
+            completed += 1;
+            emit_clipboard_progress_update(
+                &app,
+                ClipboardProgressUpdatePayload {
+                    operation: None,
+                    destination: None,
+                    current_item: None,
+                    completed,
+                    total: total_items,
+                    finished: false,
+                    error: last_error.clone(),
+                },
+            );
+            continue;
+        }
+
+        #[cfg(all(feature = "smb", not(target_os = "windows")))]
+        if source_scheme == "file" && dest_scheme == "smb" {
+            use crate::locations::smb::get_server_credentials;
+            use crate::locations::smb::SMB_MUTEX;
+            use pavao::{SmbClient, SmbCredentials, SmbOpenOptions, SmbOptions};
+            use std::io::ErrorKind;
+
+            let dest_authority = dest_location
+                .authority()
+                .ok_or_else(|| "SMB destination missing server".to_string())?;
+
+            // Reuse SMB parsing logic from the provider.
+            let (hostname, share, dir_path) =
+                crate::locations::smb::parse_smb_path(dest_authority, dest_location.path())?;
+            let creds = get_server_credentials(&hostname)?;
+
+            let local_path = PathBuf::from(source_location.to_path_string());
+            if !local_path.exists() || !local_path.is_file() {
+                skipped_count += 1;
+                continue;
+            }
+
+            let hostname_clone = hostname.clone();
+            let share_clone = share.clone();
+            let dir_path_clone = dir_path.clone();
+            let creds_username = creds.username.clone();
+            let creds_password = creds.password.clone();
+            let creds_domain = creds.domain.clone();
+            let name_clone = name.clone();
+            let local_path_for_task = local_path.clone();
+
+            let uploaded_name = tokio::task::spawn_blocking(move || -> Result<String, String> {
+                let _guard = SMB_MUTEX
+                    .lock()
+                    .map_err(|e| format!("SMB mutex poisoned: {e}"))?;
+
+                let smb_url = format!("smb://{}", hostname_clone);
+                let share_path = if share_clone.starts_with('/') {
+                    share_clone.clone()
+                } else {
+                    format!("/{}", share_clone)
+                };
+
+                let mut credentials = SmbCredentials::default()
+                    .server(&smb_url)
+                    .share(&share_path)
+                    .username(&creds_username)
+                    .password(&creds_password);
+
+                if let Some(domain) = &creds_domain {
+                    credentials = credentials.workgroup(domain);
+                }
+
+                let client = SmbClient::new(credentials, SmbOptions::default())
+                    .map_err(|e| format!("Failed to connect: {e}"))?;
+
+                let mut source_file =
+                    fs::File::open(&local_path_for_task)
+                        .map_err(|e| format!("Failed to open source: {e}"))?;
+
+                // Allocate a unique destination name without overwriting.
+                let (stem, ext) = {
+                    let p = Path::new(&name_clone);
+                    let stem = p
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or(&name_clone)
+                        .to_string();
+                    let ext = p.extension().and_then(|e| e.to_str()).map(|s| s.to_string());
+                    (stem, ext)
+                };
+
+                for i in 1..1000usize {
+                    let candidate = if i == 1 {
+                        name_clone.clone()
+                    } else if let Some(ref e) = ext {
+                        format!("{stem} ({i}).{e}")
+                    } else {
+                        format!("{stem} ({i})")
+                    };
+
+                    let dest_rel = if dir_path_clone == "/" {
+                        format!("/{}", candidate)
+                    } else {
+                        format!("{}/{}", dir_path_clone.trim_end_matches('/'), candidate)
+                    };
+
+                    let options = SmbOpenOptions::default()
+                        .write(true)
+                        .create(true)
+                        .exclusive(true);
+                    match client.open_with(&dest_rel, options) {
+                        Ok(mut dest_file) => {
+                            std::io::copy(&mut source_file, &mut dest_file)
+                                .map_err(|e| format!("Failed to upload: {e}"))?;
+                            return Ok(candidate);
+                        }
+                        Err(pavao::SmbError::Io(io)) if io.kind() == ErrorKind::AlreadyExists => {
+                            continue;
+                        }
+                        Err(e) => return Err(format!("Failed to create destination: {e}")),
+                    }
+                }
+
+                Err("Unable to allocate unique destination name".to_string())
+            })
+            .await
+            .map_err(|e| format!("Task failed: {e}"))??;
+
+            let dest_raw = join_dest_raw(&dest_dir_raw, &uploaded_name);
+            pasted_paths.push(dest_raw);
+
+            if is_cut {
+                if let Err(e) = fs::remove_file(&local_path) {
+                    last_error = Some(format!("Uploaded but failed to delete source: {e}"));
+                }
+            }
+            completed += 1;
+            emit_clipboard_progress_update(
+                &app,
+                ClipboardProgressUpdatePayload {
+                    operation: None,
+                    destination: None,
+                    current_item: None,
+                    completed,
+                    total: total_items,
+                    finished: false,
+                    error: last_error.clone(),
+                },
+            );
+            continue;
+        }
+
+        #[cfg(not(all(feature = "smb", not(target_os = "windows"))))]
+        if source_scheme == "file" && dest_scheme == "smb" {
+            skipped_count += 1;
+            last_error = Some("SMB support not compiled. Build with --features smb".to_string());
+            continue;
+        }
+
+        skipped_count += 1;
+        last_error = Some("Pasting across providers is not supported for these locations yet".to_string());
+        completed += 1;
+        emit_clipboard_progress_update(
+            &app,
+            ClipboardProgressUpdatePayload {
+                operation: None,
+                destination: None,
+                current_item: None,
+                completed,
+                total: total_items,
+                finished: false,
+                error: last_error.clone(),
+            },
+        );
+    }
+
+    emit_clipboard_progress_update(
+        &app,
+        ClipboardProgressUpdatePayload {
+            operation: Some(operation_label),
+            destination: Some(dest_dir_raw.clone()),
+            current_item: None,
+            completed,
+            total: total_items,
+            finished: true,
+            error: last_error.clone(),
+        },
+    );
+
+    Ok(PasteResult {
+        pasted_paths,
+        skipped_count,
+        error_message: last_error,
+    })
+}
+
+#[command]
+pub async fn clipboard_paste_image_to_location(
+    app: AppHandle,
+    destination: LocationInput,
+) -> Result<crate::clipboard::PasteImageResult, String> {
+    use crate::clipboard::PasteImageResult;
+
+    let (_, dest_location) = resolve_location(destination)?;
+    let dest_scheme = dest_location.scheme().to_string();
+
+    // Read PNG bytes from the OS clipboard (on a blocking thread).
+    let image_bytes = tokio::task::spawn_blocking(crate::clipboard::get_clipboard_image)
+        .await
+        .map_err(|e| format!("Task failed: {e}"))??;
+
+    let now = chrono::Local::now();
+    let base_name = format!("Screenshot {}.png", now.format("%Y-%m-%d at %H-%M-%S"));
+
+    let destination_label = if dest_scheme == "file" {
+        dest_location.to_path_string()
+    } else {
+        dest_location.raw().to_string()
+    };
+
+    emit_clipboard_progress_update(
+        &app,
+        ClipboardProgressUpdatePayload {
+            operation: Some("Pasting screenshot".to_string()),
+            destination: Some(destination_label.clone()),
+            current_item: Some(base_name.clone()),
+            completed: 0,
+            total: 1,
+            finished: false,
+            error: None,
+        },
+    );
+
+    if dest_scheme == "file" {
+        let dest_path = dest_location.to_path_string();
+        let result = tokio::task::spawn_blocking(move || {
+            crate::clipboard::paste_image(&dest_path, Some(&base_name))
+        })
+        .await
+        .map_err(|e| format!("Task failed: {e}"))??;
+
+        emit_clipboard_progress_update(
+            &app,
+            ClipboardProgressUpdatePayload {
+                operation: None,
+                destination: None,
+                current_item: None,
+                completed: 1,
+                total: 1,
+                finished: true,
+                error: None,
+            },
+        );
+        return Ok(result);
+    }
+
+    if dest_scheme == "gdrive" {
+        let email = dest_location
+            .authority()
+            .ok_or_else(|| "Google Drive destination missing account".to_string())?;
+        let folder_id = get_folder_id_by_path(email, dest_location.path()).await?;
+
+        // Ensure a unique name within the folder (Drive allows duplicates; we avoid them).
+        let mut candidate = base_name.clone();
+        let stem = std::path::Path::new(&base_name)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Screenshot");
+        let ext = std::path::Path::new(&base_name).extension().and_then(|e| e.to_str());
+        for i in 1..1000usize {
+            if i == 1 {
+                candidate = base_name.clone();
+            } else if let Some(e) = ext {
+                candidate = format!("{stem} ({i}).{e}");
+            } else {
+                candidate = format!("{stem} ({i})");
+            }
+            if !name_exists_in_folder(email, &folder_id, &candidate).await? {
+                break;
+            }
+        }
+
+        // Write to a temp file and upload (upload helper reads from disk).
+        let temp_dir = std::env::temp_dir().join("marlin-clipboard-cache");
+        std::fs::create_dir_all(&temp_dir)
+            .map_err(|e| format!("Failed to create temp directory: {e}"))?;
+        let temp_path = temp_dir.join(format!("gdrive_upload_{}", uuid::Uuid::new_v4()));
+        std::fs::write(&temp_path, &image_bytes).map_err(|e| format!("Failed to write temp file: {e}"))?;
+
+        upload_file_to_gdrive(email, &temp_path, &folder_id, &candidate).await?;
+
+        // Best-effort cleanup
+        let _ = std::fs::remove_file(&temp_path);
+
+        let dest_raw = if dest_location.raw().ends_with('/') {
+            format!("{}{}", dest_location.raw(), candidate)
+        } else {
+            format!("{}/{}", dest_location.raw(), candidate)
+        };
+
+        let result = PasteImageResult { path: dest_raw };
+        emit_clipboard_progress_update(
+            &app,
+            ClipboardProgressUpdatePayload {
+                operation: None,
+                destination: None,
+                current_item: None,
+                completed: 1,
+                total: 1,
+                finished: true,
+                error: None,
+            },
+        );
+        return Ok(result);
+    }
+
+    #[cfg(all(feature = "smb", not(target_os = "windows")))]
+    if dest_scheme == "smb" {
+        use crate::locations::smb::get_server_credentials;
+        use crate::locations::smb::SMB_MUTEX;
+        use pavao::{SmbClient, SmbCredentials, SmbOpenOptions, SmbOptions};
+        use std::io::{Cursor, ErrorKind};
+
+        let dest_authority = dest_location
+            .authority()
+            .ok_or_else(|| "SMB destination missing server".to_string())?;
+        let (hostname, share, dir_path) =
+            crate::locations::smb::parse_smb_path(dest_authority, dest_location.path())?;
+        let creds = get_server_credentials(&hostname)?;
+
+        let hostname_clone = hostname.clone();
+        let share_clone = share.clone();
+        let dir_path_clone = dir_path.clone();
+        let creds_username = creds.username.clone();
+        let creds_password = creds.password.clone();
+        let creds_domain = creds.domain.clone();
+
+        let candidate_name = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let _guard = SMB_MUTEX
+                .lock()
+                .map_err(|e| format!("SMB mutex poisoned: {e}"))?;
+
+            let smb_url = format!("smb://{}", hostname_clone);
+            let share_path = if share_clone.starts_with('/') {
+                share_clone.clone()
+            } else {
+                format!("/{}", share_clone)
+            };
+
+            let mut credentials = SmbCredentials::default()
+                .server(&smb_url)
+                .share(&share_path)
+                .username(&creds_username)
+                .password(&creds_password);
+
+            if let Some(domain) = &creds_domain {
+                credentials = credentials.workgroup(domain);
+            }
+
+            let client = SmbClient::new(credentials, SmbOptions::default())
+                .map_err(|e| format!("Failed to connect: {e}"))?;
+
+            let (stem, ext) = {
+                let p = std::path::Path::new(&base_name);
+                let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("Screenshot").to_string();
+                let ext = p.extension().and_then(|e| e.to_str()).map(|s| s.to_string());
+                (stem, ext)
+            };
+
+            for i in 1..1000usize {
+                let candidate = if i == 1 {
+                    base_name.clone()
+                } else if let Some(ref e) = ext {
+                    format!("{stem} ({i}).{e}")
+                } else {
+                    format!("{stem} ({i})")
+                };
+
+                let dest_rel = if dir_path_clone == "/" {
+                    format!("/{}", candidate)
+                } else {
+                    format!("{}/{}", dir_path_clone.trim_end_matches('/'), candidate)
+                };
+
+                let options = SmbOpenOptions::default()
+                    .write(true)
+                    .create(true)
+                    .exclusive(true);
+                match client.open_with(&dest_rel, options) {
+                    Ok(mut dest_file) => {
+                        let mut cursor = Cursor::new(&image_bytes[..]);
+                        std::io::copy(&mut cursor, &mut dest_file)
+                            .map_err(|e| format!("Failed to upload: {e}"))?;
+                        dest_file.flush().map_err(|e| format!("Failed to flush: {e}"))?;
+                        return Ok(candidate);
+                    }
+                    Err(pavao::SmbError::Io(io)) if io.kind() == ErrorKind::AlreadyExists => continue,
+                    Err(e) => return Err(format!("Failed to create destination: {e}")),
+                }
+            }
+
+            Err("Unable to allocate unique destination name".to_string())
+        })
+        .await
+        .map_err(|e| format!("Task failed: {e}"))??;
+
+        let dest_raw = if dest_location.raw().ends_with('/') {
+            format!("{}{}", dest_location.raw(), candidate_name)
+        } else {
+            format!("{}/{}", dest_location.raw(), candidate_name)
+        };
+        let result = PasteImageResult { path: dest_raw };
+        emit_clipboard_progress_update(
+            &app,
+            ClipboardProgressUpdatePayload {
+                operation: None,
+                destination: None,
+                current_item: None,
+                completed: 1,
+                total: 1,
+                finished: true,
+                error: None,
+            },
+        );
+        return Ok(result);
+    }
+
+    let error = format!(
+        "Screenshot paste is not supported for destination scheme: {}",
+        dest_scheme
+    );
+    emit_clipboard_progress_update(
+        &app,
+        ClipboardProgressUpdatePayload {
+            operation: None,
+            destination: None,
+            current_item: None,
+            completed: 1,
+            total: 1,
+            finished: true,
+            error: Some(error.clone()),
+        },
+    );
+    Err(error)
 }
 
 fn allocate_destination_folder(destination_root: &Path, base_name: &str) -> Result<String, String> {
@@ -3123,6 +4130,79 @@ pub fn archive_progress_window_unready() -> Result<(), String> {
 }
 
 #[command]
+pub fn show_clipboard_progress_window(
+    app: AppHandle,
+    operation: String,
+    destination: String,
+    total_items: usize,
+) -> Result<(), String> {
+    let payload = ClipboardProgressPayload {
+        operation,
+        destination,
+        total_items,
+    };
+
+    if let Some(existing) = app.get_webview_window(CLIPBOARD_PROGRESS_WINDOW_LABEL) {
+        CLIPBOARD_PROGRESS_QUEUE.queue(&app, payload);
+        let _ = existing.show();
+        let _ = existing.set_focus();
+        return Ok(());
+    }
+
+    let url = tauri::WebviewUrl::App("index.html?view=clipboard-progress".into());
+    let builder = tauri::WebviewWindowBuilder::new(&app, CLIPBOARD_PROGRESS_WINDOW_LABEL, url)
+        .title("Progress")
+        .inner_size(420.0, 420.0)
+        .resizable(false)
+        .fullscreen(false)
+        .minimizable(true)
+        .maximizable(false)
+        .closable(true)
+        .decorations(true);
+
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true)
+        .traffic_light_position(tauri::LogicalPosition::new(14.0, 14.0));
+
+    CLIPBOARD_PROGRESS_QUEUE.set_ready(false);
+
+    builder
+        .build()
+        .map_err(|e| format!("Failed to create clipboard progress window: {}", e))?;
+
+    CLIPBOARD_PROGRESS_QUEUE.queue(&app, payload);
+    Ok(())
+}
+
+#[command]
+pub fn hide_clipboard_progress_window(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(CLIPBOARD_PROGRESS_WINDOW_LABEL) {
+        if let Err(err) = window.close() {
+            warn!("Failed to close clipboard progress window: {err}");
+        }
+    }
+
+    CLIPBOARD_PROGRESS_QUEUE.set_ready(false);
+    CLIPBOARD_PROGRESS_QUEUE.clear_pending();
+    Ok(())
+}
+
+#[command]
+pub fn clipboard_progress_window_ready(app: AppHandle) -> Result<(), String> {
+    CLIPBOARD_PROGRESS_QUEUE.set_ready(true);
+    CLIPBOARD_PROGRESS_QUEUE.try_emit(&app);
+    Ok(())
+}
+
+#[command]
+pub fn clipboard_progress_window_unready() -> Result<(), String> {
+    CLIPBOARD_PROGRESS_QUEUE.set_ready(false);
+    Ok(())
+}
+
+#[command]
 pub fn show_delete_progress_window(
     app: AppHandle,
     request_id: String,
@@ -3315,6 +4395,9 @@ pub fn show_native_context_menu(
     sort_by: Option<String>,
     sort_order: Option<String>,
     path: Option<String>,
+    can_paste_files: Option<bool>,
+    can_paste_image: Option<bool>,
+    can_paste_internal: Option<bool>,
     has_file_context: Option<bool>,
     file_paths: Option<Vec<String>>,
     selected_is_symlink: Option<bool>,
@@ -3469,12 +4552,29 @@ pub fn show_native_context_menu(
     let selection_len = file_paths.as_ref().map(|v| v.len()).unwrap_or(0);
     let is_file_ctx = has_file_context.unwrap_or(false) || selection_len > 0;
     let has_directory_selection = selection_has_directory.unwrap_or(false);
+    let paste_enabled = can_paste_files.unwrap_or(false)
+        || can_paste_image.unwrap_or(false)
+        || can_paste_internal.unwrap_or(false);
 
     let mut builder = MenuBuilder::new(&app);
     if is_file_ctx {
         let rename_item = MenuItemBuilder::with_id("ctx:rename", "Rename")
             .build(&app)
             .map_err(|e| e.to_string())?;
+
+        let copy_files_item = MenuItemBuilder::with_id("menu:copy_files", "Copy")
+            .enabled(!has_directory_selection)
+            .build(&app)
+            .map_err(|e| e.to_string())?;
+        let cut_files_item = MenuItemBuilder::with_id("menu:cut_files", "Cut")
+            .enabled(!has_directory_selection)
+            .build(&app)
+            .map_err(|e| e.to_string())?;
+        let paste_files_item = MenuItemBuilder::with_id("menu:paste_files", "Paste")
+            .enabled(paste_enabled)
+            .build(&app)
+            .map_err(|e| e.to_string())?;
+
         let copy_name_item = MenuItemBuilder::with_id("ctx:copy_name", "Copy File Name")
             .build(&app)
             .map_err(|e| e.to_string())?;
@@ -3500,8 +4600,12 @@ pub fn show_native_context_menu(
         } else {
             None
         };
+        builder = builder.item(&rename_item).separator();
         builder = builder
-            .item(&rename_item)
+            .item(&copy_files_item)
+            .item(&cut_files_item)
+            .item(&paste_files_item)
+            .separator()
             .item(&copy_name_item)
             .item(&copy_full_name_item);
         if let Some(ref item) = calculate_size_item {
@@ -3511,6 +4615,13 @@ pub fn show_native_context_menu(
             builder = builder.item(item);
         }
         builder = builder.separator();
+    } else {
+        // Background context menu: paste into the current directory.
+        let paste_files_item = MenuItemBuilder::with_id("menu:paste_files", "Paste")
+            .enabled(paste_enabled)
+            .build(&app)
+            .map_err(|e| e.to_string())?;
+        builder = builder.item(&paste_files_item).separator();
     }
 
     let ctx_menu = builder

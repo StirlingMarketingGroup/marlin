@@ -34,6 +34,13 @@ export default function ContextMenu({ x, y, isFileContext, onRequestClose }: Con
     setPendingRevealTarget,
     trashSelected,
     deleteSelectedPermanently,
+    copySelectedFiles,
+    cutSelectedFiles,
+    pasteFiles,
+    syncClipboardState,
+    canPasteFiles,
+    canPasteImage,
+    clipboardPaths,
   } = state;
 
   const prefs = useMemo(
@@ -49,6 +56,11 @@ export default function ContextMenu({ x, y, isFileContext, onRequestClose }: Con
     const maxY = vh - 280;
     setPos({ x: Math.max(8, Math.min(x, maxX)), y: Math.max(8, Math.min(y, maxY)) });
   }, [x, y]);
+
+  // Sync clipboard state when menu opens
+  useEffect(() => {
+    void syncClipboardState();
+  }, [syncClipboardState]);
 
   useEffect(() => {
     const onDocClick = (e: MouseEvent) => {
@@ -97,6 +109,8 @@ export default function ContextMenu({ x, y, isFileContext, onRequestClose }: Con
   }, [fileSpecific, files, selectedFiles]);
 
   const hasDirectorySelection = selectedFileItems.some((file) => file.is_directory);
+  // Copy/Cut only available when selection has at least one file (not directory)
+  const hasFileSelection = selectedFileItems.some((file) => !file.is_directory);
   const singleSymlink =
     selectedFileItems.length === 1 && selectedFileItems[0]?.is_symlink
       ? selectedFileItems[0]
@@ -204,7 +218,41 @@ export default function ContextMenu({ x, y, isFileContext, onRequestClose }: Con
               </button>
             )}
             <div className="my-1 h-px bg-app-border" />
+            <button
+              className={`w-full text-left px-3 py-2 hover:bg-app-light ${!hasFileSelection ? 'text-app-muted' : ''}`}
+              disabled={!hasFileSelection}
+              onClick={() => {
+                onRequestClose();
+                void copySelectedFiles();
+              }}
+            >
+              Copy
+            </button>
+            <button
+              className={`w-full text-left px-3 py-2 hover:bg-app-light ${!hasFileSelection ? 'text-app-muted' : ''}`}
+              disabled={!hasFileSelection}
+              onClick={() => {
+                onRequestClose();
+                void cutSelectedFiles();
+              }}
+            >
+              Cut
+            </button>
           </>
+        )}
+        {/* Paste is always available */}
+        <button
+          className={`w-full text-left px-3 py-2 hover:bg-app-light ${!canPasteFiles && !canPasteImage && clipboardPaths.length === 0 ? 'text-app-muted' : ''}`}
+          disabled={!canPasteFiles && !canPasteImage && clipboardPaths.length === 0}
+          onClick={() => {
+            onRequestClose();
+            void pasteFiles();
+          }}
+        >
+          Paste
+        </button>
+        {(fileSpecific || canPasteFiles || canPasteImage || clipboardPaths.length > 0) && (
+          <div className="my-1 h-px bg-app-border" />
         )}
 
         <button

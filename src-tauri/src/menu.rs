@@ -1,5 +1,5 @@
 use tauri::{
-    menu::{AboutMetadata, CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder, SubmenuBuilder},
+    menu::{AboutMetadata, CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder},
     AppHandle, Emitter, Manager, Runtime,
 };
 use tauri_plugin_opener::OpenerExt;
@@ -58,13 +58,27 @@ pub fn create_menu<R: Runtime>(
         .close_window()
         .build()?;
 
+    // Custom clipboard items (frontend decides between text vs file operations)
+    let copy_files_item = MenuItemBuilder::with_id("menu:copy_files", "Copy")
+        .accelerator("CmdOrCtrl+C")
+        .build(app)?;
+    let cut_files_item = MenuItemBuilder::with_id("menu:cut_files", "Cut")
+        .accelerator("CmdOrCtrl+X")
+        .build(app)?;
+    let paste_files_item = MenuItemBuilder::with_id("menu:paste_files", "Paste")
+        .accelerator("CmdOrCtrl+V")
+        .build(app)?;
+
     // Create Edit submenu
     let edit_submenu = SubmenuBuilder::new(app, "Edit")
-        .cut()
-        .copy()
-        .paste()
+        .undo()
+        .redo()
         .separator()
-        .select_all()
+        .item(&cut_files_item)
+        .item(&copy_files_item)
+        .item(&paste_files_item)
+        .separator()
+        .item(&PredefinedMenuItem::select_all(app, None)?)
         .build()?;
 
     // Create the Show Hidden Files checkbox with explicit unchecked state
@@ -444,6 +458,15 @@ pub fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, event: &tauri::menu::Me
         }
         "menu:clear_thumbnail_cache" => {
             let _ = app.emit("menu:clear_thumbnail_cache", ());
+        }
+        "menu:copy_files" => {
+            let _ = app.emit("menu:copy_files", ());
+        }
+        "menu:cut_files" => {
+            let _ = app.emit("menu:cut_files", ());
+        }
+        "menu:paste_files" => {
+            let _ = app.emit("menu:paste_files", ());
         }
         _ => {}
     }

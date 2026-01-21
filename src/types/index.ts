@@ -184,6 +184,22 @@ export interface ArchiveProgressUpdatePayload {
   finished?: boolean;
 }
 
+export interface ClipboardProgressPayload {
+  operation: string;
+  destination: string;
+  totalItems: number;
+}
+
+export interface ClipboardProgressUpdatePayload {
+  operation?: string;
+  destination?: string;
+  currentItem?: string;
+  completed: number;
+  total: number;
+  finished: boolean;
+  error?: string;
+}
+
 export interface TrashPathsResponse {
   trashed: string[];
   undoToken?: string;
@@ -247,4 +263,22 @@ export interface SmbConnectInitPayload {
 export interface SmbConnectSuccessPayload {
   hostname: string;
   targetPath?: string | null;
+}
+
+// Clipboard Types
+export interface ClipboardInfo {
+  hasFiles: boolean;
+  hasImage: boolean;
+  filePaths: string[];
+  isCut: boolean;
+}
+
+export interface PasteResult {
+  pastedPaths: string[];
+  skippedCount: number;
+  errorMessage?: string | null;
+}
+
+export interface PasteImageResult {
+  path: string;
 }

@@ -105,6 +105,8 @@ export default function MainPanel() {
     e.preventDefault();
     try {
       const win = getCurrentWindow();
+      // Keep clipboard flags fresh for paste enable/disable.
+      await useAppStore.getState().syncClipboardState();
       const state = useAppStore.getState();
       const path = state.currentPath;
       const prefs = { ...state.globalPreferences, ...state.directoryPreferences[path] };
@@ -156,6 +158,9 @@ export default function MainPanel() {
         sortBy: sortBy,
         sortOrder: sortOrder,
         path,
+        canPasteFiles: state.canPasteFiles,
+        canPasteImage: state.canPasteImage,
+        canPasteInternal: state.clipboardPaths.length > 0,
         // Always send a boolean (never undefined)
         hasFileContext: !!isFileCtx,
         // Only send file paths when clicking on a file
