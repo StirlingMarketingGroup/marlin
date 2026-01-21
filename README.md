@@ -13,11 +13,18 @@ A fast, no-nonsense file browser. Gets out of your way and just does files well.
 ### Core
 - Grid view with thumbnails and list view
 - Editable path bar with autocomplete
+- Type-to-filter: just start typing to filter files instantly
+- Marquee selection: click and drag to select multiple files
+- Select all with Cmd/Ctrl+A
 - Collapsible sidebar with file tree
 - Per-directory view preferences
 - Hidden files toggle
 - Drag and drop to external apps
 - Copy file paths—name or full path (looking at you, Finder!)
+- Paste screenshots directly from clipboard as files
+- Trash with undo support
+- Double-click archives to extract
+- Calculate folder sizes
 - Keyboard navigation
 - Dark theme (light theme coming soon!)
 - System accent color support (macOS, more platforms coming)
@@ -29,10 +36,10 @@ Marlin generates thumbnails for a wide variety of file types—locally and on re
 - **Design files**: PDF, EPS, Adobe Illustrator
 - **Vector**: SVG
 - **3D models**: STL with shaded rendering
-- **Video**: MP4, MOV, MKV, WebM, AVI, and more (first frame preview)
+- **Video**: MP4, MOV, MKV, WebM, AVI, and more (frame preview)
 - **macOS apps**: .app, .dmg, .pkg icons
 
-Image-heavy folders automatically switch to grid view for optimal browsing.
+Image dimensions shown under thumbnails. Image-heavy folders automatically switch to grid view.
 
 ### Google Drive Integration
 - **Account Management**: Connect multiple Google accounts from the sidebar
