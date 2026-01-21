@@ -28,6 +28,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { SystemDrive, PinnedDirectory, GoogleAccountInfo, SmbServerInfo } from '../types';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useToastStore } from '../store/useToastStore';
+import { useDragStore } from '../store/useDragStore';
 import { useSidebarDropZone } from '../hooks/useDragDetector';
 import { usePlatform } from '@/hooks/usePlatform';
 import QuickTooltip from './QuickTooltip';
@@ -66,9 +67,12 @@ export default function Sidebar() {
   const [addingGoogleAccount, setAddingGoogleAccount] = useState(false);
   const [disconnectingAccounts, setDisconnectingAccounts] = useState<Set<string>>(new Set());
   const [disconnectingSmbServers, setDisconnectingSmbServers] = useState<Set<string>>(new Set());
+  const inAppDropTargetId = useDragStore((state) => state.inAppDropTargetId);
   const sidebarRef = useRef<HTMLDivElement>(null);
   const isProcessingDropRef = useRef(false);
   const windowRef = useRef(getCurrentWindow());
+  const isInAppDragOver = inAppDropTargetId === 'sidebar';
+  const isDragOverCombined = isDragOver || isInAppDragOver;
 
   const handleDragRegionMouseDown = useCallback(async (event: MouseEvent<HTMLElement>) => {
     if (event.button !== 0) return;
@@ -437,7 +441,9 @@ export default function Sidebar() {
     <div
       ref={sidebarRef}
       className={`flex flex-col h-full bg-app-gray rounded-xl overflow-hidden transition-all duration-200 ${
-        isDragOver ? 'drag-over ring-2 ring-accent bg-accent/10 shadow-lg shadow-accent/20' : ''
+        isDragOverCombined
+          ? 'drag-over ring-2 ring-accent bg-accent/10 shadow-lg shadow-accent/20'
+          : ''
       }`}
       style={{ width: sidebarWidth }}
       data-tauri-drag-region={false}
