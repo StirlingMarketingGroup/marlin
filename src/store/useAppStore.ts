@@ -2171,7 +2171,13 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (!clipboardInfo) return;
 
     // Internal clipboard (remote selections) pasted into a local destination.
-    if (!destinationIsRemote && !clipboardInfo.hasFiles && state.clipboardInternalOnly) {
+    // Only use internal clipboard if there's no image in the OS clipboard (screenshot takes priority).
+    if (
+      !destinationIsRemote &&
+      !clipboardInfo.hasFiles &&
+      !clipboardInfo.hasImage &&
+      state.clipboardInternalOnly
+    ) {
       try {
         await pasteInternalClipboardToLocal();
       } catch (error) {
