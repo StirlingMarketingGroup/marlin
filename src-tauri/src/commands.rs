@@ -34,7 +34,7 @@ use crate::fs_utils::{
     resolve_symlink_parent, DiskUsage, FileItem, SymlinkResolution,
 };
 use crate::fs_watcher;
-use crate::locations::{resolve_location, LocationCapabilities, LocationInput, LocationSummary};
+use crate::locations::{resolve_location, Location, LocationCapabilities, LocationInput, LocationSummary};
 use crate::locations::gdrive::{
     add_google_account as add_gdrive_account, get_google_accounts as get_gdrive_accounts,
     remove_google_account as remove_gdrive_account, GoogleAccountInfo,
@@ -1815,6 +1815,145 @@ pub async fn move_file(from_path: LocationInput, to_path: LocationInput) -> Resu
     from_provider.move_item(&from_location, &to_location).await
 }
 
+fn filename_from_location(loc: &Location) -> Option<String> {
+    if loc.scheme() == "file" {
+        let path = loc.to_path_string();
+        Path::new(&path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string())
+    } else {
+        let p = loc.path().trim_end_matches('/');
+        p.rsplit('/')
+            .next()
+            .and_then(|s| (!s.is_empty()).then_some(s.to_string()))
+    }
+}
+
+fn join_dest_raw(dest_scheme: &str, dest_dir_raw: &str, name: &str) -> String {
+    if dest_scheme == "file" {
+        PathBuf::from(dest_dir_raw)
+            .join(name)
+            .to_string_lossy()
+            .to_string()
+    } else if dest_dir_raw.ends_with('/') {
+        format!("{dest_dir_raw}{name}")
+    } else {
+        format!("{dest_dir_raw}/{name}")
+    }
+}
+
+fn allocate_unique_local_path(dir: &Path, desired_name: &str) -> Result<PathBuf, String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static FALLBACK_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let desired_name = Path::new(desired_name)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| "Invalid file name".to_string())?;
+
+    let base = dir.join(desired_name);
+    if !base.exists() {
+        return Ok(base);
+    }
+
+    let stem = Path::new(desired_name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(desired_name);
+    let ext = Path::new(desired_name).extension().and_then(|e| e.to_str());
+
+    for i in 2..1000usize {
+        let candidate = if let Some(e) = ext {
+            format!("{stem} ({i}).{e}")
+        } else {
+            format!("{stem} ({i})")
+        };
+        let p = dir.join(candidate);
+        if !p.exists() {
+            return Ok(p);
+        }
+    }
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+
+    for _ in 0..128u32 {
+        let counter = FALLBACK_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let candidate = if let Some(e) = ext {
+            format!("{stem}_{nanos}_{counter}.{e}")
+        } else {
+            format!("{stem}_{nanos}_{counter}")
+        };
+        let p = dir.join(candidate);
+        if !p.exists() {
+            return Ok(p);
+        }
+    }
+
+    Err("Unable to allocate unique destination name".to_string())
+}
+
+fn emit_clipboard_progress_init(app: &AppHandle, operation: String, destination: String, total: usize) {
+    emit_clipboard_progress_update(
+        app,
+        ClipboardProgressUpdatePayload {
+            operation: Some(operation),
+            destination: Some(destination),
+            current_item: None,
+            completed: 0,
+            total,
+            finished: false,
+            error: None,
+        },
+    );
+}
+
+fn emit_clipboard_progress_item(
+    app: &AppHandle,
+    current_item: Option<String>,
+    completed: usize,
+    total: usize,
+    error: Option<String>,
+) {
+    emit_clipboard_progress_update(
+        app,
+        ClipboardProgressUpdatePayload {
+            operation: None,
+            destination: None,
+            current_item,
+            completed,
+            total,
+            finished: false,
+            error,
+        },
+    );
+}
+
+fn emit_clipboard_progress_finish(
+    app: &AppHandle,
+    operation: String,
+    destination: String,
+    completed: usize,
+    total: usize,
+    error: Option<String>,
+) {
+    emit_clipboard_progress_update(
+        app,
+        ClipboardProgressUpdatePayload {
+            operation: Some(operation),
+            destination: Some(destination),
+            current_item: None,
+            completed,
+            total,
+            finished: true,
+            error,
+        },
+    );
+}
+
 #[command]
 pub async fn paste_items_to_location(
     app: AppHandle,
@@ -1826,8 +1965,7 @@ pub async fn paste_items_to_location(
     use crate::locations::LocationInput as LI;
 
     let total_items = source_paths.len();
-
-    if source_paths.is_empty() {
+    if total_items == 0 {
         return Ok(PasteResult {
             pasted_paths: vec![],
             skipped_count: 0,
@@ -1837,55 +1975,26 @@ pub async fn paste_items_to_location(
 
     let (_, dest_location) = resolve_location(destination)?;
     let dest_scheme = dest_location.scheme().to_string();
-    let dest_dir_path = if dest_scheme == "file" {
-        let p = PathBuf::from(dest_location.to_path_string());
+    let dest_dir_raw = if dest_scheme == "file" {
+        dest_location.to_path_string()
+    } else {
+        dest_location.raw().to_string()
+    };
+
+    let dest_dir_path: Option<PathBuf> = if dest_scheme == "file" {
+        let p = PathBuf::from(&dest_dir_raw);
         if !p.exists() {
             return Err(format!("Destination does not exist: {}", p.to_string_lossy()));
         }
         if !p.is_dir() {
-            return Err(format!("Destination is not a directory: {}", p.to_string_lossy()));
+            return Err(format!(
+                "Destination is not a directory: {}",
+                p.to_string_lossy()
+            ));
         }
         Some(p)
     } else {
         None
-    };
-
-    // Helper: extract file name from a location input.
-    let filename_from_location = |loc: &crate::locations::Location| -> Option<String> {
-        if loc.scheme() == "file" {
-            let path = loc.to_path_string();
-            Path::new(&path)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .map(|s| s.to_string())
-        } else {
-            let p = loc.path().trim_end_matches('/');
-            p.rsplit('/')
-                .next()
-                .and_then(|s| (!s.is_empty()).then_some(s.to_string()))
-        }
-    };
-
-    let join_dest_raw = |dest_dir_raw: &str, name: &str| -> String {
-        if dest_scheme == "file" {
-            PathBuf::from(dest_dir_raw)
-                .join(name)
-                .to_string_lossy()
-                .to_string()
-        } else {
-            if dest_dir_raw.ends_with('/') {
-                format!("{dest_dir_raw}{name}")
-            } else {
-                format!("{dest_dir_raw}/{name}")
-            }
-        }
-    };
-
-    // Destination raw representation for joining children.
-    let dest_dir_raw = if dest_location.scheme() == "file" {
-        dest_location.to_path_string()
-    } else {
-        dest_location.raw().to_string()
     };
 
     let operation_label = if is_cut {
@@ -1893,77 +2002,26 @@ pub async fn paste_items_to_location(
     } else {
         "Copying items".to_string()
     };
+    emit_clipboard_progress_init(&app, operation_label.clone(), dest_dir_raw.clone(), total_items);
 
-    emit_clipboard_progress_update(
-        &app,
-        ClipboardProgressUpdatePayload {
-            operation: Some(operation_label.clone()),
-            destination: Some(dest_dir_raw.clone()),
-            current_item: None,
-            completed: 0,
-            total: total_items,
-            finished: false,
-            error: None,
-        },
-    );
-
-    let allocate_unique_local_path = |dir: &PathBuf, desired_name: &str| -> Result<PathBuf, String> {
-        let desired_name = Path::new(desired_name)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| "Invalid file name".to_string())?;
-
-        let base = dir.join(desired_name);
-        if !base.exists() {
-            return Ok(base);
-        }
-
-        let stem = Path::new(desired_name)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or(desired_name);
-        let ext = Path::new(desired_name).extension().and_then(|e| e.to_str());
-
-        for i in 2..1000usize {
-            let candidate = if let Some(e) = ext {
-                format!("{stem} ({i}).{e}")
-            } else {
-                format!("{stem} ({i})")
-            };
-            let p = dir.join(candidate);
-            if !p.exists() {
-                return Ok(p);
-            }
-        }
-
-        Err("Unable to allocate unique destination name".to_string())
-    };
-
-    let mut pasted_paths = Vec::new();
+    let mut pasted_paths: Vec<String> = Vec::new();
     let mut skipped_count = 0usize;
-    let mut last_error: Option<String> = None;
     let mut completed = 0usize;
+    let mut last_error: Option<String> = None;
 
-    // Fast paths: same-scheme provider operations (gdrive->gdrive, smb->smb)
-    // and cross-scheme uploads from local files (file->gdrive, file->smb).
     for input in source_paths {
         let (source_provider, source_location) = match resolve_location(input) {
             Ok(v) => v,
             Err(e) => {
                 skipped_count += 1;
-                last_error = Some(e);
                 completed += 1;
-                emit_clipboard_progress_update(
+                last_error = Some(e);
+                emit_clipboard_progress_item(
                     &app,
-                    ClipboardProgressUpdatePayload {
-                        operation: None,
-                        destination: None,
-                        current_item: None,
-                        completed,
-                        total: total_items,
-                        finished: false,
-                        error: last_error.clone(),
-                    },
+                    None,
+                    completed,
+                    total_items,
+                    last_error.clone(),
                 );
                 continue;
             }
@@ -1972,43 +2030,39 @@ pub async fn paste_items_to_location(
         let source_scheme = source_location.scheme().to_string();
         let Some(name) = filename_from_location(&source_location) else {
             skipped_count += 1;
-            last_error = Some("Unable to determine file name".to_string());
             completed += 1;
-            emit_clipboard_progress_update(
+            last_error = Some("Unable to determine file name".to_string());
+            emit_clipboard_progress_item(
                 &app,
-                ClipboardProgressUpdatePayload {
-                    operation: None,
-                    destination: None,
-                    current_item: None,
-                    completed,
-                    total: total_items,
-                    finished: false,
-                    error: last_error.clone(),
-                },
+                None,
+                completed,
+                total_items,
+                last_error.clone(),
             );
             continue;
         };
 
-        emit_clipboard_progress_update(
-            &app,
-            ClipboardProgressUpdatePayload {
-                operation: None,
-                destination: None,
-                current_item: Some(name.clone()),
-                completed,
-                total: total_items,
-                finished: false,
-                error: None,
-            },
-        );
+        emit_clipboard_progress_item(&app, Some(name.clone()), completed, total_items, None);
 
-        // Same-provider operations
-        if source_scheme == dest_scheme {
-            let dest_raw = join_dest_raw(&dest_dir_raw, &name);
-
-            // Special handling for SMB to avoid overwriting and to support auto-rename.
+        let result: Result<Option<String>, String> = match (source_scheme.as_str(), dest_scheme.as_str()) {
+            ("file", "file") => {
+                let Some(dest_dir) = dest_dir_path.as_ref() else {
+                    return Err("Local destination directory is required".to_string());
+                };
+                let dest_path = allocate_unique_local_path(dest_dir.as_path(), &name)?;
+                let dest_raw = dest_path.to_string_lossy().to_string();
+                let (_, dest_item_location) = resolve_location(LI::Raw(dest_raw.clone()))?;
+                if is_cut {
+                    source_provider
+                        .move_item(&source_location, &dest_item_location)
+                        .await?;
+                } else {
+                    source_provider.copy(&source_location, &dest_item_location).await?;
+                }
+                Ok(Some(dest_raw))
+            }
             #[cfg(all(feature = "smb", not(target_os = "windows")))]
-            if dest_scheme == "smb" {
+            ("smb", "smb") => {
                 use crate::locations::smb::get_server_credentials;
                 use crate::locations::smb::SMB_MUTEX;
                 use pavao::{SmbClient, SmbCredentials, SmbOpenOptions, SmbOptions};
@@ -2022,9 +2076,7 @@ pub async fn paste_items_to_location(
                     .ok_or_else(|| "SMB destination missing server".to_string())?;
 
                 if from_authority != to_authority {
-                    skipped_count += 1;
-                    last_error = Some("Cannot paste across different SMB servers".to_string());
-                    continue;
+                    return Err("Cannot paste across different SMB servers".to_string());
                 }
 
                 let (hostname, share, from_rel) =
@@ -2033,9 +2085,7 @@ pub async fn paste_items_to_location(
                     crate::locations::smb::parse_smb_path(to_authority, dest_location.path())?;
 
                 if share != to_share {
-                    skipped_count += 1;
-                    last_error = Some("Cannot paste across different SMB shares".to_string());
-                    continue;
+                    return Err("Cannot paste across different SMB shares".to_string());
                 }
 
                 let creds = get_server_credentials(&hostname)?;
@@ -2050,6 +2100,9 @@ pub async fn paste_items_to_location(
                 let is_cut_local = is_cut;
 
                 let pasted_name = tokio::task::spawn_blocking(move || -> Result<String, String> {
+                    use std::sync::atomic::{AtomicU64, Ordering};
+                    static FALLBACK_COUNTER: AtomicU64 = AtomicU64::new(0);
+
                     let _guard = SMB_MUTEX
                         .lock()
                         .map_err(|e| format!("SMB mutex poisoned: {e}"))?;
@@ -2074,7 +2127,6 @@ pub async fn paste_items_to_location(
                     let client = SmbClient::new(credentials, SmbOptions::default())
                         .map_err(|e| format!("Failed to connect: {e}"))?;
 
-                    // Allocate a unique destination name without overwriting.
                     let (stem, ext) = {
                         let p = Path::new(&name_clone);
                         let stem = p
@@ -2086,6 +2138,7 @@ pub async fn paste_items_to_location(
                         (stem, ext)
                     };
 
+                    // Allocate a unique destination name without overwriting.
                     for i in 1..1000usize {
                         let candidate = if i == 1 {
                             name_clone.clone()
@@ -2105,7 +2158,9 @@ pub async fn paste_items_to_location(
                             // Rename (move) without overwriting.
                             match client.rename(&from_rel_clone, &dest_rel) {
                                 Ok(()) => return Ok(candidate),
-                                Err(pavao::SmbError::Io(io)) if io.kind() == ErrorKind::AlreadyExists => {
+                                Err(pavao::SmbError::Io(io))
+                                    if io.kind() == ErrorKind::AlreadyExists =>
+                                {
                                     continue;
                                 }
                                 Err(e) => return Err(format!("Failed to move: {e}")),
@@ -2124,9 +2179,68 @@ pub async fn paste_items_to_location(
                                 Ok(mut dest) => {
                                     std::io::copy(&mut src, &mut dest)
                                         .map_err(|e| format!("Failed to copy: {e}"))?;
+                                    dest.flush().map_err(|e| format!("Failed to flush: {e}"))?;
                                     return Ok(candidate);
                                 }
-                                Err(pavao::SmbError::Io(io)) if io.kind() == ErrorKind::AlreadyExists => {
+                                Err(pavao::SmbError::Io(io))
+                                    if io.kind() == ErrorKind::AlreadyExists =>
+                                {
+                                    continue;
+                                }
+                                Err(e) => return Err(format!("Failed to create destination: {e}")),
+                            }
+                        }
+                    }
+
+                    // Fallback with high-resolution timestamp + counter
+                    let nanos = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos())
+                        .unwrap_or(0);
+
+                    for _ in 0..128u32 {
+                        let counter = FALLBACK_COUNTER.fetch_add(1, Ordering::Relaxed);
+                        let candidate = if let Some(ref e) = ext {
+                            format!("{stem}_{nanos}_{counter}.{e}")
+                        } else {
+                            format!("{stem}_{nanos}_{counter}")
+                        };
+
+                        let dest_rel = if to_dir_rel_clone == "/" {
+                            format!("/{}", candidate)
+                        } else {
+                            format!("{}/{}", to_dir_rel_clone.trim_end_matches('/'), candidate)
+                        };
+
+                        if is_cut_local {
+                            match client.rename(&from_rel_clone, &dest_rel) {
+                                Ok(()) => return Ok(candidate),
+                                Err(pavao::SmbError::Io(io))
+                                    if io.kind() == ErrorKind::AlreadyExists =>
+                                {
+                                    continue;
+                                }
+                                Err(e) => return Err(format!("Failed to move: {e}")),
+                            }
+                        } else {
+                            let mut src = client
+                                .open_with(&from_rel_clone, SmbOpenOptions::default().read(true))
+                                .map_err(|e| format!("Failed to open source: {e}"))?;
+
+                            let options = SmbOpenOptions::default()
+                                .write(true)
+                                .create(true)
+                                .exclusive(true);
+                            match client.open_with(&dest_rel, options) {
+                                Ok(mut dest) => {
+                                    std::io::copy(&mut src, &mut dest)
+                                        .map_err(|e| format!("Failed to copy: {e}"))?;
+                                    dest.flush().map_err(|e| format!("Failed to flush: {e}"))?;
+                                    return Ok(candidate);
+                                }
+                                Err(pavao::SmbError::Io(io))
+                                    if io.kind() == ErrorKind::AlreadyExists =>
+                                {
                                     continue;
                                 }
                                 Err(e) => return Err(format!("Failed to create destination: {e}")),
@@ -2139,390 +2253,279 @@ pub async fn paste_items_to_location(
                 .await
                 .map_err(|e| format!("Task failed: {e}"))??;
 
-                let final_dest_raw = join_dest_raw(&dest_dir_raw, &pasted_name);
-                pasted_paths.push(final_dest_raw);
-                completed += 1;
-                emit_clipboard_progress_update(
-                    &app,
-                    ClipboardProgressUpdatePayload {
-                        operation: None,
-                        destination: None,
-                        current_item: None,
-                        completed,
-                        total: total_items,
-                        finished: false,
-                        error: last_error.clone(),
-                    },
-                );
-                continue;
+                let dest_raw = join_dest_raw(&dest_scheme, &dest_dir_raw, &pasted_name);
+                Ok(Some(dest_raw))
             }
-
-            let (_, dest_item_location) = resolve_location(LI::Raw(dest_raw.clone()))?;
-            let op = if is_cut {
-                source_provider.move_item(&source_location, &dest_item_location).await
-            } else {
-                source_provider.copy(&source_location, &dest_item_location).await
-            };
-
-            match op {
-                Ok(()) => pasted_paths.push(dest_raw),
-                Err(e) => {
-                    skipped_count += 1;
-                    last_error = Some(e);
-                }
-            }
-            completed += 1;
-            emit_clipboard_progress_update(
-                &app,
-                ClipboardProgressUpdatePayload {
-                    operation: None,
-                    destination: None,
-                    current_item: None,
-                    completed,
-                    total: total_items,
-                    finished: false,
-                    error: last_error.clone(),
-                },
-            );
-            continue;
-        }
-
-        // Cross-provider uploads from local filesystem
-        if source_scheme == "file" && dest_scheme == "gdrive" {
-            let email = dest_location
-                .authority()
-                .ok_or_else(|| "Google Drive destination missing account".to_string())?;
-            let folder_id = get_folder_id_by_path(email, dest_location.path()).await?;
-
-            let local_path = PathBuf::from(source_location.to_path_string());
-            if !local_path.exists() || !local_path.is_file() {
-                skipped_count += 1;
-                continue;
-            }
-
-            upload_file_to_gdrive(email, &local_path, &folder_id, &name).await?;
-            let dest_raw = join_dest_raw(&dest_dir_raw, &name);
-            pasted_paths.push(dest_raw);
-
-            if is_cut {
-                if let Err(e) = fs::remove_file(&local_path) {
-                    last_error = Some(format!("Uploaded but failed to delete source: {e}"));
-                }
-            }
-            completed += 1;
-            emit_clipboard_progress_update(
-                &app,
-                ClipboardProgressUpdatePayload {
-                    operation: None,
-                    destination: None,
-                    current_item: None,
-                    completed,
-                    total: total_items,
-                    finished: false,
-                    error: last_error.clone(),
-                },
-            );
-            continue;
-        }
-
-        // Cross-provider downloads to local filesystem
-        if dest_scheme == "file" && source_scheme == "gdrive" {
-            let Some(dest_dir) = dest_dir_path.as_ref() else {
-                skipped_count += 1;
-                continue;
-            };
-            let email = source_location
-                .authority()
-                .ok_or_else(|| "Google Drive source missing account".to_string())?;
-            let file_id = get_file_id_by_path(email, source_location.path()).await?;
-            let temp_path = download_file_to_temp(email, &file_id, &name).await?;
-
-            let dest_path = allocate_unique_local_path(&dest_dir.to_path_buf(), &name)?;
-            crate::fs_utils::copy_file_or_directory(Path::new(&temp_path), &dest_path)?;
-            pasted_paths.push(dest_path.to_string_lossy().to_string());
-
-            if is_cut {
-                // Delete the source after successful download+copy.
-                let _ = source_provider.delete(&source_location).await;
-            }
-            completed += 1;
-            emit_clipboard_progress_update(
-                &app,
-                ClipboardProgressUpdatePayload {
-                    operation: None,
-                    destination: None,
-                    current_item: None,
-                    completed,
-                    total: total_items,
-                    finished: false,
-                    error: last_error.clone(),
-                },
-            );
-            continue;
-        }
-
-        #[cfg(all(feature = "smb", not(target_os = "windows")))]
-        if dest_scheme == "file" && source_scheme == "smb" {
-            use crate::locations::smb::get_server_credentials;
-            use crate::locations::smb::SMB_MUTEX;
-            use pavao::{SmbClient, SmbCredentials, SmbOpenOptions, SmbOptions};
-            use std::fs::OpenOptions;
-
-            let Some(dest_dir) = dest_dir_path.as_ref() else {
-                skipped_count += 1;
-                continue;
-            };
-
-            let from_authority = source_location
-                .authority()
-                .ok_or_else(|| "SMB source missing server".to_string())?;
-            let (hostname, share, from_rel) =
-                crate::locations::smb::parse_smb_path(from_authority, source_location.path())?;
-            let creds = get_server_credentials(&hostname)?;
-
-            let dest_path = allocate_unique_local_path(&dest_dir.to_path_buf(), &name)?;
-            let dest_path_string = dest_path.to_string_lossy().to_string();
-            let dest_path_string_for_task = dest_path_string.clone();
-
-            let hostname_clone = hostname.clone();
-            let share_clone = share.clone();
-            let from_rel_clone = from_rel.clone();
-            let creds_username = creds.username.clone();
-            let creds_password = creds.password.clone();
-            let creds_domain = creds.domain.clone();
-            let is_cut_local = is_cut;
-
-            tokio::task::spawn_blocking(move || -> Result<(), String> {
-                let _guard = SMB_MUTEX
-                    .lock()
-                    .map_err(|e| format!("SMB mutex poisoned: {e}"))?;
-
-                let smb_url = format!("smb://{}", hostname_clone);
-                let share_path = if share_clone.starts_with('/') {
-                    share_clone.clone()
+            (src, dst) if src == dst => {
+                let dest_raw = join_dest_raw(&dest_scheme, &dest_dir_raw, &name);
+                let (_, dest_item_location) = resolve_location(LI::Raw(dest_raw.clone()))?;
+                let op = if is_cut {
+                    source_provider.move_item(&source_location, &dest_item_location).await
                 } else {
-                    format!("/{}", share_clone)
+                    source_provider.copy(&source_location, &dest_item_location).await
+                };
+                op.map(|()| Some(dest_raw)).map_err(|e| e)
+            }
+            ("file", "gdrive") => {
+                let email = dest_location
+                    .authority()
+                    .ok_or_else(|| "Google Drive destination missing account".to_string())?;
+                let folder_id = get_folder_id_by_path(email, dest_location.path()).await?;
+                let local_path = PathBuf::from(source_location.to_path_string());
+                if !local_path.exists() || !local_path.is_file() {
+                    Ok(None)
+                } else {
+                    upload_file_to_gdrive(email, &local_path, &folder_id, &name).await?;
+                    let dest_raw = join_dest_raw(&dest_scheme, &dest_dir_raw, &name);
+                    if is_cut {
+                        if let Err(e) = fs::remove_file(&local_path) {
+                            last_error = Some(format!("Uploaded but failed to delete source: {e}"));
+                        }
+                    }
+                    Ok(Some(dest_raw))
+                }
+            }
+            ("gdrive", "file") => {
+                let Some(dest_dir) = dest_dir_path.as_ref() else {
+                    return Err("Local destination directory is required".to_string());
+                };
+                let email = source_location
+                    .authority()
+                    .ok_or_else(|| "Google Drive source missing account".to_string())?;
+                let file_id = get_file_id_by_path(email, source_location.path()).await?;
+                let temp_path = download_file_to_temp(email, &file_id, &name).await?;
+
+                let dest_path = allocate_unique_local_path(dest_dir.as_path(), &name)?;
+                crate::fs_utils::copy_file_or_directory(Path::new(&temp_path), &dest_path)?;
+                let out = dest_path.to_string_lossy().to_string();
+                if is_cut {
+                    let _ = source_provider.delete(&source_location).await;
+                }
+                Ok(Some(out))
+            }
+            #[cfg(all(feature = "smb", not(target_os = "windows")))]
+            ("smb", "file") => {
+                use crate::locations::smb::get_server_credentials;
+                use crate::locations::smb::SMB_MUTEX;
+                use pavao::{SmbClient, SmbCredentials, SmbOpenOptions, SmbOptions};
+                use std::fs::OpenOptions;
+
+                let Some(dest_dir) = dest_dir_path.as_ref() else {
+                    return Err("Local destination directory is required".to_string());
                 };
 
-                let mut credentials = SmbCredentials::default()
-                    .server(&smb_url)
-                    .share(&share_path)
-                    .username(&creds_username)
-                    .password(&creds_password);
+                let from_authority = source_location
+                    .authority()
+                    .ok_or_else(|| "SMB source missing server".to_string())?;
+                let (hostname, share, from_rel) =
+                    crate::locations::smb::parse_smb_path(from_authority, source_location.path())?;
+                let creds = get_server_credentials(&hostname)?;
 
-                if let Some(domain) = &creds_domain {
-                    credentials = credentials.workgroup(domain);
-                }
+                let dest_path = allocate_unique_local_path(dest_dir.as_path(), &name)?;
+                let dest_path_string = dest_path.to_string_lossy().to_string();
+                let dest_path_string_for_task = dest_path_string.clone();
 
-                let client = SmbClient::new(credentials, SmbOptions::default())
-                    .map_err(|e| format!("Failed to connect: {e}"))?;
+                let hostname_clone = hostname.clone();
+                let share_clone = share.clone();
+                let from_rel_clone = from_rel.clone();
+                let creds_username = creds.username.clone();
+                let creds_password = creds.password.clone();
+                let creds_domain = creds.domain.clone();
+                let is_cut_local = is_cut;
 
-                let mut src = client
-                    .open_with(&from_rel_clone, SmbOpenOptions::default().read(true))
-                    .map_err(|e| format!("Failed to open source: {e}"))?;
+                tokio::task::spawn_blocking(move || -> Result<(), String> {
+                    let _guard = SMB_MUTEX
+                        .lock()
+                        .map_err(|e| format!("SMB mutex poisoned: {e}"))?;
 
-                let mut dst = OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&dest_path_string_for_task)
-                    .map_err(|e| format!("Failed to create destination: {e}"))?;
+                    let smb_url = format!("smb://{}", hostname_clone);
+                    let share_path = if share_clone.starts_with('/') {
+                        share_clone.clone()
+                    } else {
+                        format!("/{}", share_clone)
+                    };
 
-                std::io::copy(&mut src, &mut dst).map_err(|e| format!("Failed to copy: {e}"))?;
+                    let mut credentials = SmbCredentials::default()
+                        .server(&smb_url)
+                        .share(&share_path)
+                        .username(&creds_username)
+                        .password(&creds_password);
 
-                if is_cut_local {
-                    let _ = client.unlink(&from_rel_clone);
-                }
+                    if let Some(domain) = &creds_domain {
+                        credentials = credentials.workgroup(domain);
+                    }
 
-                Ok(())
-            })
-            .await
-            .map_err(|e| format!("Task failed: {e}"))??;
+                    let client = SmbClient::new(credentials, SmbOptions::default())
+                        .map_err(|e| format!("Failed to connect: {e}"))?;
 
-            pasted_paths.push(dest_path_string);
-            completed += 1;
-            emit_clipboard_progress_update(
-                &app,
-                ClipboardProgressUpdatePayload {
-                    operation: None,
-                    destination: None,
-                    current_item: None,
-                    completed,
-                    total: total_items,
-                    finished: false,
-                    error: last_error.clone(),
-                },
-            );
-            continue;
-        }
-
-        #[cfg(all(feature = "smb", not(target_os = "windows")))]
-        if source_scheme == "file" && dest_scheme == "smb" {
-            use crate::locations::smb::get_server_credentials;
-            use crate::locations::smb::SMB_MUTEX;
-            use pavao::{SmbClient, SmbCredentials, SmbOpenOptions, SmbOptions};
-            use std::io::ErrorKind;
-
-            let dest_authority = dest_location
-                .authority()
-                .ok_or_else(|| "SMB destination missing server".to_string())?;
-
-            // Reuse SMB parsing logic from the provider.
-            let (hostname, share, dir_path) =
-                crate::locations::smb::parse_smb_path(dest_authority, dest_location.path())?;
-            let creds = get_server_credentials(&hostname)?;
-
-            let local_path = PathBuf::from(source_location.to_path_string());
-            if !local_path.exists() || !local_path.is_file() {
-                skipped_count += 1;
-                continue;
-            }
-
-            let hostname_clone = hostname.clone();
-            let share_clone = share.clone();
-            let dir_path_clone = dir_path.clone();
-            let creds_username = creds.username.clone();
-            let creds_password = creds.password.clone();
-            let creds_domain = creds.domain.clone();
-            let name_clone = name.clone();
-            let local_path_for_task = local_path.clone();
-
-            let uploaded_name = tokio::task::spawn_blocking(move || -> Result<String, String> {
-                let _guard = SMB_MUTEX
-                    .lock()
-                    .map_err(|e| format!("SMB mutex poisoned: {e}"))?;
-
-                let smb_url = format!("smb://{}", hostname_clone);
-                let share_path = if share_clone.starts_with('/') {
-                    share_clone.clone()
-                } else {
-                    format!("/{}", share_clone)
-                };
-
-                let mut credentials = SmbCredentials::default()
-                    .server(&smb_url)
-                    .share(&share_path)
-                    .username(&creds_username)
-                    .password(&creds_password);
-
-                if let Some(domain) = &creds_domain {
-                    credentials = credentials.workgroup(domain);
-                }
-
-                let client = SmbClient::new(credentials, SmbOptions::default())
-                    .map_err(|e| format!("Failed to connect: {e}"))?;
-
-                let mut source_file =
-                    fs::File::open(&local_path_for_task)
+                    let mut src = client
+                        .open_with(&from_rel_clone, SmbOpenOptions::default().read(true))
                         .map_err(|e| format!("Failed to open source: {e}"))?;
 
-                // Allocate a unique destination name without overwriting.
-                let (stem, ext) = {
-                    let p = Path::new(&name_clone);
-                    let stem = p
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or(&name_clone)
-                        .to_string();
-                    let ext = p.extension().and_then(|e| e.to_str()).map(|s| s.to_string());
-                    (stem, ext)
-                };
-
-                for i in 1..1000usize {
-                    let candidate = if i == 1 {
-                        name_clone.clone()
-                    } else if let Some(ref e) = ext {
-                        format!("{stem} ({i}).{e}")
-                    } else {
-                        format!("{stem} ({i})")
-                    };
-
-                    let dest_rel = if dir_path_clone == "/" {
-                        format!("/{}", candidate)
-                    } else {
-                        format!("{}/{}", dir_path_clone.trim_end_matches('/'), candidate)
-                    };
-
-                    let options = SmbOpenOptions::default()
+                    let mut dst = OpenOptions::new()
                         .write(true)
-                        .create(true)
-                        .exclusive(true);
-                    match client.open_with(&dest_rel, options) {
-                        Ok(mut dest_file) => {
-                            std::io::copy(&mut source_file, &mut dest_file)
-                                .map_err(|e| format!("Failed to upload: {e}"))?;
-                            return Ok(candidate);
-                        }
-                        Err(pavao::SmbError::Io(io)) if io.kind() == ErrorKind::AlreadyExists => {
-                            continue;
-                        }
-                        Err(e) => return Err(format!("Failed to create destination: {e}")),
+                        .create_new(true)
+                        .open(&dest_path_string_for_task)
+                        .map_err(|e| format!("Failed to create destination: {e}"))?;
+
+                    std::io::copy(&mut src, &mut dst).map_err(|e| format!("Failed to copy: {e}"))?;
+
+                    if is_cut_local {
+                        let _ = client.unlink(&from_rel_clone);
                     }
-                }
 
-                Err("Unable to allocate unique destination name".to_string())
-            })
-            .await
-            .map_err(|e| format!("Task failed: {e}"))??;
+                    Ok(())
+                })
+                .await
+                .map_err(|e| format!("Task failed: {e}"))??;
 
-            let dest_raw = join_dest_raw(&dest_dir_raw, &uploaded_name);
-            pasted_paths.push(dest_raw);
+                Ok(Some(dest_path_string))
+            }
+            #[cfg(all(feature = "smb", not(target_os = "windows")))]
+            ("file", "smb") => {
+                use crate::locations::smb::get_server_credentials;
+                use crate::locations::smb::SMB_MUTEX;
+                use pavao::{SmbClient, SmbCredentials, SmbOpenOptions, SmbOptions};
+                use std::io::ErrorKind;
 
-            if is_cut {
-                if let Err(e) = fs::remove_file(&local_path) {
-                    last_error = Some(format!("Uploaded but failed to delete source: {e}"));
+                let dest_authority = dest_location
+                    .authority()
+                    .ok_or_else(|| "SMB destination missing server".to_string())?;
+                let (hostname, share, dir_path) =
+                    crate::locations::smb::parse_smb_path(dest_authority, dest_location.path())?;
+                let creds = get_server_credentials(&hostname)?;
+
+                let local_path = PathBuf::from(source_location.to_path_string());
+                if !local_path.exists() || !local_path.is_file() {
+                    Ok(None)
+                } else {
+                    let hostname_clone = hostname.clone();
+                    let share_clone = share.clone();
+                    let dir_path_clone = dir_path.clone();
+                    let creds_username = creds.username.clone();
+                    let creds_password = creds.password.clone();
+                    let creds_domain = creds.domain.clone();
+                    let name_clone = name.clone();
+                    let local_path_for_task = local_path.clone();
+
+                    let uploaded_name = tokio::task::spawn_blocking(move || -> Result<String, String> {
+                        let _guard = SMB_MUTEX
+                            .lock()
+                            .map_err(|e| format!("SMB mutex poisoned: {e}"))?;
+
+                        let smb_url = format!("smb://{}", hostname_clone);
+                        let share_path = if share_clone.starts_with('/') {
+                            share_clone.clone()
+                        } else {
+                            format!("/{}", share_clone)
+                        };
+
+                        let mut credentials = SmbCredentials::default()
+                            .server(&smb_url)
+                            .share(&share_path)
+                            .username(&creds_username)
+                            .password(&creds_password);
+
+                        if let Some(domain) = &creds_domain {
+                            credentials = credentials.workgroup(domain);
+                        }
+
+                        let client = SmbClient::new(credentials, SmbOptions::default())
+                            .map_err(|e| format!("Failed to connect: {e}"))?;
+
+                        let mut source_file =
+                            fs::File::open(&local_path_for_task).map_err(|e| format!("Failed to open source: {e}"))?;
+
+                        let (stem, ext) = {
+                            let p = Path::new(&name_clone);
+                            let stem = p
+                                .file_stem()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or(&name_clone)
+                                .to_string();
+                            let ext = p.extension().and_then(|e| e.to_str()).map(|s| s.to_string());
+                            (stem, ext)
+                        };
+
+                        for i in 1..1000usize {
+                            let candidate = if i == 1 {
+                                name_clone.clone()
+                            } else if let Some(ref e) = ext {
+                                format!("{stem} ({i}).{e}")
+                            } else {
+                                format!("{stem} ({i})")
+                            };
+
+                            let dest_rel = if dir_path_clone == "/" {
+                                format!("/{}", candidate)
+                            } else {
+                                format!("{}/{}", dir_path_clone.trim_end_matches('/'), candidate)
+                            };
+
+                            let options = SmbOpenOptions::default()
+                                .write(true)
+                                .create(true)
+                                .exclusive(true);
+                            match client.open_with(&dest_rel, options) {
+                                Ok(mut dest_file) => {
+                                    std::io::copy(&mut source_file, &mut dest_file)
+                                        .map_err(|e| format!("Failed to upload: {e}"))?;
+                                    return Ok(candidate);
+                                }
+                                Err(pavao::SmbError::Io(io))
+                                    if io.kind() == ErrorKind::AlreadyExists =>
+                                {
+                                    continue;
+                                }
+                                Err(e) => return Err(format!("Failed to create destination: {e}")),
+                            }
+                        }
+
+                        Err("Unable to allocate unique destination name".to_string())
+                    })
+                    .await
+                    .map_err(|e| format!("Task failed: {e}"))??;
+
+                    let dest_raw = join_dest_raw(&dest_scheme, &dest_dir_raw, &uploaded_name);
+                    if is_cut {
+                        if let Err(e) = fs::remove_file(&local_path) {
+                            last_error = Some(format!("Uploaded but failed to delete source: {e}"));
+                        }
+                    }
+                    Ok(Some(dest_raw))
                 }
             }
-            completed += 1;
-            emit_clipboard_progress_update(
-                &app,
-                ClipboardProgressUpdatePayload {
-                    operation: None,
-                    destination: None,
-                    current_item: None,
-                    completed,
-                    total: total_items,
-                    finished: false,
-                    error: last_error.clone(),
-                },
-            );
-            continue;
+            #[cfg(not(all(feature = "smb", not(target_os = "windows"))))]
+            ("file", "smb") => Err("SMB support not compiled. Build with --features smb".to_string()),
+            _ => Err("Pasting across providers is not supported for these locations yet".to_string()),
+        };
+
+        match result {
+            Ok(Some(p)) => pasted_paths.push(p),
+            Ok(None) => skipped_count += 1,
+            Err(e) => {
+                skipped_count += 1;
+                last_error = Some(e);
+            }
         }
 
-        #[cfg(not(all(feature = "smb", not(target_os = "windows"))))]
-        if source_scheme == "file" && dest_scheme == "smb" {
-            skipped_count += 1;
-            last_error = Some("SMB support not compiled. Build with --features smb".to_string());
-            continue;
-        }
-
-        skipped_count += 1;
-        last_error = Some("Pasting across providers is not supported for these locations yet".to_string());
         completed += 1;
-        emit_clipboard_progress_update(
+        emit_clipboard_progress_item(
             &app,
-            ClipboardProgressUpdatePayload {
-                operation: None,
-                destination: None,
-                current_item: None,
-                completed,
-                total: total_items,
-                finished: false,
-                error: last_error.clone(),
-            },
+            None,
+            completed,
+            total_items,
+            last_error.clone(),
         );
     }
 
-    emit_clipboard_progress_update(
+    emit_clipboard_progress_finish(
         &app,
-        ClipboardProgressUpdatePayload {
-            operation: Some(operation_label),
-            destination: Some(dest_dir_raw.clone()),
-            current_item: None,
-            completed,
-            total: total_items,
-            finished: true,
-            error: last_error.clone(),
-        },
+        operation_label,
+        dest_dir_raw.clone(),
+        completed,
+        total_items,
+        last_error.clone(),
     );
 
     Ok(PasteResult {
