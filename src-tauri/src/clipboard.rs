@@ -349,7 +349,8 @@ mod windows {
                     fWide: i32,
                 }
 
-                let header: DROPFILES = unsafe { std::ptr::read(data.as_ptr() as *const DROPFILES) };
+                let header: DROPFILES =
+                    unsafe { std::ptr::read_unaligned(data.as_ptr() as *const DROPFILES) };
                 let is_unicode = header.fWide != 0;
                 let start = header.pFiles as usize;
 
