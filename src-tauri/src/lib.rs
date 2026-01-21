@@ -1,3 +1,4 @@
+mod clipboard;
 mod commands;
 mod fs_utils;
 mod fs_watcher;
@@ -14,8 +15,17 @@ mod thumbnails;
 
 use state::{DirectoryStreamState, FolderSizeState, MenuState, TrashUndoState};
 use std::sync::Mutex;
-#[cfg(target_os = "linux")]
 use std::sync::OnceLock;
+
+fn ensure_rustls_crypto_provider() {
+    static PROVIDER_ONCE: OnceLock<()> = OnceLock::new();
+    PROVIDER_ONCE.get_or_init(|| {
+        // rustls 0.23 requires explicitly selecting a CryptoProvider when multiple (or none)
+        // are available from crate features. Installing the ring provider avoids runtime panics
+        // in networked providers (e.g. Google Drive).
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
 
 #[cfg(target_os = "linux")]
 fn apply_linux_menu_css() {
@@ -67,6 +77,7 @@ fn apply_linux_menu_css() {
 use tauri::Manager;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    ensure_rustls_crypto_provider();
     tauri::Builder::default()
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_os::init())
@@ -130,6 +141,10 @@ pub fn run() {
             commands::hide_delete_progress_window,
             commands::delete_progress_window_ready,
             commands::delete_progress_window_unready,
+            commands::show_clipboard_progress_window,
+            commands::hide_clipboard_progress_window,
+            commands::clipboard_progress_window_ready,
+            commands::clipboard_progress_window_unready,
             commands::open_smb_connect_window,
             commands::hide_smb_connect_window,
             commands::smb_connect_window_ready,
@@ -157,6 +172,8 @@ pub fn run() {
             commands::add_pinned_directory,
             commands::remove_pinned_directory,
             commands::reorder_pinned_directories,
+            commands::paste_items_to_location,
+            commands::clipboard_paste_image_to_location,
             // Google Drive integration
             commands::get_google_accounts,
             commands::add_google_account,
@@ -177,6 +194,11 @@ pub fn run() {
             plugins::drag_detector::enable_drag_detection,
             plugins::drag_detector::set_drop_zone,
             plugins::drag_detector::simulate_drop,
+            // Clipboard operations
+            clipboard::clipboard_copy_files,
+            clipboard::clipboard_get_contents,
+            clipboard::clipboard_paste_files,
+            clipboard::clipboard_paste_image,
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {

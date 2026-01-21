@@ -248,6 +248,8 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     isStreamingComplete,
     streamingTotalCount,
     filterText,
+    clipboardMode,
+    clipboardPathsSet,
   } = useAppStore();
   const { renameTargetPath, renameLoading, setRenameTarget, renameFile } = useAppStore();
   const { startNativeDrag, endNativeDrag, isDraggedDirectory } = useDragStore();
@@ -843,6 +845,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
       isDraggedDirectory(file.path);
     const isRenaming = renameTargetPath === file.path;
     const isDownloadingForDrag = downloadingForDrag.has(file.path);
+    const isCutFile = clipboardMode === 'cut' && clipboardPathsSet.has(file.path);
 
     return (
       <div
@@ -851,7 +854,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
           isSelected || isRenaming
             ? 'bg-accent-selected z-20 overflow-visible'
             : 'hover:bg-app-light/70'
-        } ${isDragged ? 'opacity-50' : ''} ${file.is_hidden ? 'opacity-60' : ''}`}
+        } ${isDragged || isCutFile ? 'opacity-50' : ''} ${file.is_hidden ? 'opacity-60' : ''}`}
         data-testid="file-item"
         data-file-item="true"
         data-file-path={file.path}

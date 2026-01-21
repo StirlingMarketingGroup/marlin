@@ -681,6 +681,7 @@ function App() {
 
   // View and sort controls via system menu or keyboard
   useEffect(() => {
+    let disposed = false;
     const unsubs: Array<() => void> = [];
 
     // Tauri menu events (if provided by backend)
@@ -692,7 +693,11 @@ function App() {
         const unlisten = await listen<Payload>(eventName, async (evt) => {
           await handler(evt);
         });
-        unsubs.push(unlisten);
+        if (disposed) {
+          unlisten();
+        } else {
+          unsubs.push(unlisten);
+        }
       } catch (error) {
         console.warn('Failed to register menu listener:', { eventName, error });
       }
@@ -875,6 +880,53 @@ function App() {
           console.error('Failed to clear thumbnail cache:', err);
         }
       });
+
+      const execDocumentCommand = (command: 'copy' | 'cut' | 'paste') => {
+        try {
+          document.execCommand(command);
+        } catch (error) {
+          console.warn(`document.execCommand(${command}) failed`, error);
+        }
+      };
+
+      const handleClipboardMenuAction = (action: 'copy' | 'cut' | 'paste') => {
+        const state = useAppStore.getState();
+        const active = document.activeElement as HTMLElement | null;
+        const inEditable =
+          !!active &&
+          (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable);
+
+        if (inEditable) {
+          execDocumentCommand(action);
+          return;
+        }
+
+        if (action === 'copy') {
+          if (state.selectedFiles.length > 0) {
+            void state.copySelectedFiles();
+          } else {
+            execDocumentCommand('copy');
+          }
+          return;
+        }
+
+        if (action === 'cut') {
+          if (state.selectedFiles.length > 0) {
+            void state.cutSelectedFiles();
+          } else {
+            execDocumentCommand('cut');
+          }
+          return;
+        }
+
+        // paste
+        void state.pasteFiles();
+      };
+
+      // Clipboard operations from menu (single Copy/Cut/Paste items)
+      await register('menu:copy_files', () => handleClipboardMenuAction('copy'));
+      await register('menu:cut_files', () => handleClipboardMenuAction('cut'));
+      await register('menu:paste_files', () => handleClipboardMenuAction('paste'));
     })();
 
     // Keyboard shortcuts as fallback (mac-like)
@@ -1265,6 +1317,9 @@ function App() {
 
       const meta = e.metaKey || e.ctrlKey;
       if (!meta) return;
+      const isTauri =
+        typeof (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ !==
+        'undefined';
 
       // New window: Cmd/Ctrl+N
       if (e.key === 'n' || e.key === 'N') {
@@ -1274,6 +1329,42 @@ function App() {
           console.error('Failed to create new window:', err);
         });
         return;
+      }
+
+      // Clipboard shortcuts (Cmd/Ctrl+C, X, V)
+      // In the native app, let menu accelerators handle these so we don't double-trigger.
+      if (!isTauri) {
+        // Only handle when not in editable element and files are selected (for C/X)
+        const keyLc = e.key.toLowerCase();
+
+        // Copy: Cmd/Ctrl+C
+        if (keyLc === 'c' && !inEditable) {
+          const state = useAppStore.getState();
+          if (state.selectedFiles.length > 0) {
+            e.preventDefault();
+            void state.copySelectedFiles();
+            return;
+          }
+          // If no files selected, allow default browser copy (text selection)
+        }
+
+        // Cut: Cmd/Ctrl+X
+        if (keyLc === 'x' && !inEditable) {
+          const state = useAppStore.getState();
+          if (state.selectedFiles.length > 0) {
+            e.preventDefault();
+            void state.cutSelectedFiles();
+            return;
+          }
+          // If no files selected, allow default browser cut
+        }
+
+        // Paste: Cmd/Ctrl+V
+        if (keyLc === 'v' && !inEditable) {
+          e.preventDefault();
+          void useAppStore.getState().pasteFiles();
+          return;
+        }
       }
 
       // Select all: Cmd+A on macOS, Ctrl+A on Windows/Linux
@@ -1338,6 +1429,7 @@ function App() {
     unsubs.push(() => window.removeEventListener('keyup', onKeyUp));
 
     return () => {
+      disposed = true;
       unsubs.forEach((u) => u());
     };
   }, [toggleHiddenFiles, toggleFoldersFirst]);

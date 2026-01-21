@@ -1898,6 +1898,76 @@ pub async fn get_folder_id_by_path(email: &str, path: &str) -> Result<String, St
     }
 }
 
+/// Get the file ID for a Google Drive path (file or folder).
+/// This is used when we need to operate on items referenced by `gdrive://` paths (e.g. download/delete).
+pub async fn get_file_id_by_path(email: &str, path: &str) -> Result<String, String> {
+    log::info!("get_file_id_by_path: email={}, path={}", email, path);
+
+    let provider = GoogleDriveProvider::default();
+    let hub = provider.create_hub(email).await?;
+
+    let (root_folder, subpath) = provider.parse_virtual_path(path);
+
+    match root_folder {
+        Some(VIRTUAL_MY_DRIVE) => {
+            if subpath.is_empty() {
+                Err("Cannot get file ID for My Drive root".to_string())
+            } else {
+                provider
+                    .find_file_by_path(&hub, &subpath)
+                    .await?
+                    .ok_or_else(|| format!("File not found: {}", path))
+            }
+        }
+        Some(VIRTUAL_SHARED) => {
+            if subpath.is_empty() {
+                Err("Cannot get file ID for Shared with me root".to_string())
+            } else {
+                provider
+                    .find_shared_file_by_path(&hub, &subpath)
+                    .await?
+                    .ok_or_else(|| format!("File not found: {}", path))
+            }
+        }
+        Some(VIRTUAL_BY_ID) => {
+            if subpath.is_empty() {
+                Err("Missing file ID in path".to_string())
+            } else {
+                Ok(subpath[0].to_string())
+            }
+        }
+        _ => Err(format!("Unsupported path type: {}", path)),
+    }
+}
+
+/// Check whether a file with a given name exists in a Google Drive folder.
+/// Used to avoid creating duplicate names (which break path-based navigation).
+pub async fn name_exists_in_folder(email: &str, parent_folder_id: &str, name: &str) -> Result<bool, String> {
+    let provider = GoogleDriveProvider::default();
+    let hub = provider.create_hub(email).await?;
+
+    let query = format!(
+        "'{}' in parents and name = '{}' and trashed = false",
+        parent_folder_id,
+        name.replace("'", "\\'")
+    );
+
+    let result = hub
+        .files()
+        .list()
+        .q(&query)
+        .page_size(1)
+        .supports_all_drives(true)
+        .include_items_from_all_drives(true)
+        .add_scope(google_drive3::api::Scope::Full)
+        .param("fields", "files(id)")
+        .doit()
+        .await
+        .map_err(|e| format!("Failed to query folder: {}", e))?;
+
+    Ok(!result.1.files.unwrap_or_default().is_empty())
+}
+
 // Suppress warnings for unused cache variables (will be used for optimization)
 #[allow(dead_code)]
 fn _use_caches() {
