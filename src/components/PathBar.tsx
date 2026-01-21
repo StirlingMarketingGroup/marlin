@@ -23,6 +23,7 @@ import {
 import { invoke } from '@tauri-apps/api/core';
 import type { DirectoryPreferencesMap, DirectoryListingResponse, FileItem } from '@/types';
 import { useAppStore } from '@/store/useAppStore';
+import { useToastStore } from '@/store/useToastStore';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import ZoomSlider from './ZoomSlider';
 import UpdateNotice from '@/components/UpdateNotice';
@@ -165,6 +166,11 @@ export default function PathBar() {
   const [activeSuggestion, setActiveSuggestion] = useState(-1);
   const [isFocused, setIsFocused] = useState(false);
   const [isMaximized, setIsMaximized] = useState(false);
+  const [remoteDragGhost, setRemoteDragGhost] = useState<{
+    x: number;
+    y: number;
+    label: string;
+  } | null>(null);
   const userAgent = typeof navigator !== 'undefined' ? navigator.userAgent.toUpperCase() : '';
   const platform = typeof navigator !== 'undefined' ? navigator.platform.toUpperCase() : '';
   const isLinux = userAgent.includes('LINUX');
@@ -179,6 +185,7 @@ export default function PathBar() {
   const suggestionRequestIdRef = useRef(0);
   const startNativeDrag = useDragStore((state) => state.startNativeDrag);
   const endNativeDrag = useDragStore((state) => state.endNativeDrag);
+  const setInAppDropTargetId = useDragStore((state) => state.setInAppDropTargetId);
 
   const clearSuggestions = useCallback(() => {
     setSuggestions([]);
@@ -479,10 +486,14 @@ export default function PathBar() {
       const dragThreshold = 5;
       const isRemote = currentPath.includes('://');
       let dragStarted = false;
+      const dragLabel =
+        currentDirMeta?.name || currentPath.replace(/\/$/, '').split('/').pop() || currentPath;
 
       const cleanup = () => {
         window.removeEventListener('mousemove', onMouseMove);
         window.removeEventListener('mouseup', onMouseUp);
+        setRemoteDragGhost(null);
+        setInAppDropTargetId(null);
       };
 
       const onMouseUp = (upEvent: MouseEvent) => {
@@ -500,11 +511,23 @@ export default function PathBar() {
         const el = document.elementFromPoint(upEvent.clientX, upEvent.clientY);
         const isOverSidebar = Boolean(el?.closest('[data-drop-zone-id="sidebar"]'));
         if (isOverSidebar) {
-          void invoke('simulate_drop', { paths: [currentPath], targetId: 'sidebar' }).catch(
-            (error) => {
-              console.warn('Failed to pin current directory via drop simulation:', error);
-            }
-          );
+          const { addPinnedDirectory } = useAppStore.getState();
+          void addPinnedDirectory(currentPath)
+            .then(() => {
+              useToastStore.getState().addToast({
+                type: 'success',
+                message: 'Pinned folder to sidebar',
+              });
+            })
+            .catch((error) => {
+              const msg = error instanceof Error ? error.message : String(error);
+              if (!msg.toLowerCase().includes('already pinned')) {
+                useToastStore.getState().addToast({
+                  type: 'error',
+                  message: `Failed to pin: ${msg}`,
+                });
+              }
+            });
         }
         endNativeDrag();
       };
@@ -513,33 +536,53 @@ export default function PathBar() {
         const dx = moveEvent.clientX - startX;
         const dy = moveEvent.clientY - startY;
         const distance = Math.sqrt(dx * dx + dy * dy);
-        if (distance < dragThreshold || dragStarted) return;
-        dragStarted = true;
+        if (!dragStarted) {
+          if (distance < dragThreshold) return;
+          dragStarted = true;
 
-        startNativeDrag({ path: currentPath, name: currentDirMeta.name });
+          startNativeDrag({ path: currentPath, name: currentDirMeta.name });
 
-        if (isRemote) {
+          if (isRemote) {
+            setRemoteDragGhost({
+              x: moveEvent.clientX,
+              y: moveEvent.clientY,
+              label: dragLabel,
+            });
+            const el = document.elementFromPoint(moveEvent.clientX, moveEvent.clientY);
+            const targetId = el?.closest<HTMLElement>('[data-drop-zone-id]')?.dataset.dropZoneId;
+            setInAppDropTargetId(targetId ?? null);
+            return;
+          }
+
+          cleanup();
+          void invoke('start_native_drag', {
+            paths: [currentPath],
+            previewImage: null,
+            dragOffsetY: 0,
+          })
+            .catch((error) => {
+              console.warn('Native drag failed for current directory:', error);
+            })
+            .finally(() => {
+              endNativeDrag();
+            });
           return;
         }
 
-        cleanup();
-        void invoke('start_native_drag', {
-          paths: [currentPath],
-          previewImage: null,
-          dragOffsetY: 0,
-        })
-          .catch((error) => {
-            console.warn('Native drag failed for current directory:', error);
-          })
-          .finally(() => {
-            endNativeDrag();
-          });
+        if (isRemote) {
+          setRemoteDragGhost((prev) =>
+            prev ? { ...prev, x: moveEvent.clientX, y: moveEvent.clientY } : prev
+          );
+          const el = document.elementFromPoint(moveEvent.clientX, moveEvent.clientY);
+          const targetId = el?.closest<HTMLElement>('[data-drop-zone-id]')?.dataset.dropZoneId;
+          setInAppDropTargetId(targetId ?? null);
+        }
       };
 
       window.addEventListener('mousemove', onMouseMove);
       window.addEventListener('mouseup', onMouseUp);
     },
-    [currentDirMeta, currentPath, endNativeDrag, startNativeDrag]
+    [currentDirMeta, currentPath, endNativeDrag, setInAppDropTargetId, startNativeDrag]
   );
 
   return (
@@ -599,18 +642,16 @@ export default function PathBar() {
       </div>
 
       {/* Path input */}
-      <div className="flex-1 flex items-center gap-2 relative">
+      <div className="flex-1 relative">
         <button
           type="button"
-          className="btn-icon bg-app-gray border border-app-border"
-          title="Drag to pin this folder to the sidebar"
+          aria-label="Drag to pin folder to sidebar"
+          className="absolute inset-y-0 left-0 flex items-center pl-2.5 z-10 cursor-grab active:cursor-grabbing text-accent hover:text-accent/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
           data-tauri-drag-region={false}
           onMouseDown={handleCurrentDirMouseDown}
         >
-          <span className="relative flex-shrink-0 w-5 h-5">
-            <div className="w-full h-full flex items-center justify-center">
-              <Folder className="w-5 h-5" weight="fill" />
-            </div>
+          <span className="relative w-5 h-5">
+            <Folder className="w-5 h-5" weight="fill" />
             {currentDirMeta?.is_git_repo && (
               <GitRepoBadge size="sm" style={{ bottom: -2, left: -2 }} />
             )}
@@ -627,7 +668,7 @@ export default function PathBar() {
           onKeyDown={handleKeyDown}
           onFocus={handleFocus}
           onBlur={handleBlur}
-          className="flex-1 input-field"
+          className="w-full input-field pl-10"
           placeholder="Enter path..."
           data-testid="path-input"
           data-tauri-drag-region={false}
@@ -755,6 +796,25 @@ export default function PathBar() {
           >
             <X className="w-3.5 h-3.5" />
           </button>
+        </div>
+      )}
+
+      {remoteDragGhost && (
+        <div
+          className="fixed z-50 pointer-events-none"
+          style={{
+            left: remoteDragGhost.x,
+            top: remoteDragGhost.y,
+            transform: 'translate(12px, 12px)',
+          }}
+          data-tauri-drag-region={false}
+        >
+          <div className="flex items-center gap-2 rounded-md border border-app-border bg-app-gray/95 px-2 py-1.5 shadow-lg backdrop-blur-sm">
+            <Folder className="w-4 h-4 text-accent" weight="fill" />
+            <span className="max-w-[240px] truncate text-xs text-app-muted">
+              {remoteDragGhost.label}
+            </span>
+          </div>
         </div>
       )}
 

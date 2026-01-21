@@ -18,6 +18,7 @@ A fast, no-nonsense file browser. Gets out of your way and just does files well.
 - Marquee selection: click and drag to select multiple files
 - Select all with Cmd/Ctrl+A
 - Collapsible sidebar with file tree
+- **Pinnable favorites**: Drag any folder to the sidebar to pin it for quick access—works with local folders, SMB shares, and Google Drive
 - Per-directory view preferences
 - Hidden files toggle
 - Drag and drop to external apps

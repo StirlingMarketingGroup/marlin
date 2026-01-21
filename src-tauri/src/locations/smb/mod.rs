@@ -634,65 +634,75 @@ impl SmbProvider {
         use uuid::Uuid;
 
         let creds = get_server_credentials(hostname)?;
+        let hostname_clone = hostname.to_string();
 
-        // Use smbclient -L to enumerate shares (pavao doesn't support this well)
-        let (smbclient_program, augmented_path) = Self::resolve_smbclient_command();
-        let mut cmd = Command::new(smbclient_program);
-        if let Some(path_env) = augmented_path {
-            cmd.env("PATH", path_env);
-        }
-        cmd.arg("-L")
-            .arg(format!("//{}", hostname))
-            .arg("-g"); // Machine-readable output
-
-        // Avoid putting credentials on the process command line.
-        // smbclient supports reading auth data from an authfile via -A.
-        let auth_file_path = std::env::temp_dir().join(format!("marlin-smb-auth-{}.conf", Uuid::new_v4()));
-        let auth_file_contents = {
-            let mut s = format!("username = {}\npassword = {}\n", creds.username, creds.password);
-            if let Some(domain) = &creds.domain {
-                s.push_str(&format!("domain = {}\n", domain));
+        // Run blocking smbclient operation in spawn_blocking to avoid blocking the tokio runtime
+        let output_result = tokio::task::spawn_blocking(move || {
+            // Use smbclient -L to enumerate shares (pavao doesn't support this well)
+            let (smbclient_program, augmented_path) = Self::resolve_smbclient_command();
+            let mut cmd = Command::new(smbclient_program);
+            if let Some(path_env) = augmented_path {
+                cmd.env("PATH", path_env);
             }
-            s
-        };
+            cmd.arg("-L")
+                .arg(format!("//{}", hostname_clone))
+                .arg("-g"); // Machine-readable output
 
-        if let Err(e) = std::fs::write(&auth_file_path, auth_file_contents) {
-            return Err(format!("Failed to create smbclient auth file: {}", e));
-        }
+            // Avoid putting credentials on the process command line.
+            // smbclient supports reading auth data from an authfile via -A.
+            let auth_file_path =
+                std::env::temp_dir().join(format!("marlin-smb-auth-{}.conf", Uuid::new_v4()));
+            let auth_file_contents = {
+                let mut s =
+                    format!("username = {}\npassword = {}\n", creds.username, creds.password);
+                if let Some(domain) = &creds.domain {
+                    s.push_str(&format!("domain = {}\n", domain));
+                }
+                s
+            };
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if let Ok(metadata) = std::fs::metadata(&auth_file_path) {
-                let mut perms = metadata.permissions();
-                perms.set_mode(0o600);
-                let _ = std::fs::set_permissions(&auth_file_path, perms);
+            if let Err(e) = std::fs::write(&auth_file_path, auth_file_contents) {
+                return Err(format!("Failed to create smbclient auth file: {}", e));
             }
-        }
 
-        cmd.arg("-A").arg(&auth_file_path);
-
-        let output = cmd.output();
-        let _ = std::fs::remove_file(&auth_file_path);
-
-        let output = output.map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                "smbclient not found. Install Samba (macOS: `brew install samba`, Linux: `sudo apt-get install smbclient`). If installed, ensure `smbclient` is in your PATH.".to_string()
-            } else {
-                format!("Failed to run smbclient: {}", e)
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Ok(metadata) = std::fs::metadata(&auth_file_path) {
+                    let mut perms = metadata.permissions();
+                    perms.set_mode(0o600);
+                    let _ = std::fs::set_permissions(&auth_file_path, perms);
+                }
             }
-        })?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+            cmd.arg("-A").arg(&auth_file_path);
+
+            let output = cmd.output();
+            let _ = std::fs::remove_file(&auth_file_path);
+
+            output.map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    "smbclient not found. Install Samba (macOS: `brew install samba`, Linux: `sudo apt-get install smbclient`). If installed, ensure `smbclient` is in your PATH.".to_string()
+                } else {
+                    format!("Failed to run smbclient: {}", e)
+                }
+            })
+        })
+        .await
+        .map_err(|e| format!("Failed to spawn blocking task: {}", e))??;
+
+        if !output_result.status.success() {
+            let stderr = String::from_utf8_lossy(&output_result.stderr);
             // Check for common errors
             if stderr.contains("NT_STATUS_LOGON_FAILURE") {
-                return Err(format!("Authentication failed. Try using your full email as username (e.g., user@domain.com)"));
+                return Err(
+                    "Authentication failed. Try using your full email as username (e.g., user@domain.com)".to_string(),
+                );
             }
             return Err(format!("Failed to list shares: {}", stderr.trim()));
         }
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout = String::from_utf8_lossy(&output_result.stdout);
 
         // Parse the -g (grep-friendly) output format: type|name|comment
         let items: Vec<FileItem> = stdout

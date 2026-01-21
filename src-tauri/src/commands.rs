@@ -5124,10 +5124,16 @@ pub async fn add_pinned_directory(
         (location.raw().to_string(), None, Some(metadata.name))
     };
 
+    // Normalize path by removing trailing slashes for consistent storage and comparison
+    let stored_path = stored_path.trim_end_matches('/').to_string();
+
     let mut stored_pins = load_stored_pinned_directories()?;
 
-    // Check if already pinned
-    if stored_pins.iter().any(|p| p.path == stored_path) {
+    // Check if already pinned (compare normalized paths to handle trailing slash differences)
+    if stored_pins
+        .iter()
+        .any(|p| p.path.trim_end_matches('/') == stored_path)
+    {
         return Err("Directory is already pinned".to_string());
     }
 
@@ -5173,11 +5179,15 @@ pub async fn add_pinned_directory(
 #[command]
 pub fn remove_pinned_directory(path: String) -> Result<bool, String> {
     let expanded_path = expand_path(&path)?;
-    let expanded_path_str = expanded_path.to_string_lossy().to_string();
+    // Normalize by removing trailing slashes for consistent comparison
+    let expanded_path_str = expanded_path
+        .to_string_lossy()
+        .trim_end_matches('/')
+        .to_string();
     let mut stored_pins = load_stored_pinned_directories()?;
 
     let initial_len = stored_pins.len();
-    stored_pins.retain(|p| p.path != expanded_path_str);
+    stored_pins.retain(|p| p.path.trim_end_matches('/') != expanded_path_str);
 
     if stored_pins.len() < initial_len {
         save_pinned_directories(&stored_pins)?;
