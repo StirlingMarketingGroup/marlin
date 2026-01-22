@@ -29,7 +29,6 @@ describe('useAppStore', () => {
       loading: false,
       pathHistory: ['/test'],
       historyIndex: 0,
-      theme: 'system' as const,
       appIconCache: {},
       pinnedDirectories: [],
       sidebarWidth: 200,

@@ -2,7 +2,6 @@ import { create } from 'zustand';
 import {
   FileItem,
   ViewPreferences,
-  Theme,
   PinnedDirectory,
   DirectoryPreferencesMap,
   GitStatus,
@@ -216,7 +215,6 @@ interface AppState {
   globalPreferences: ViewPreferences;
   directoryPreferences: DirectoryPreferencesMap;
   lastPreferenceUpdate: number; // Timestamp to prevent race conditions
-  theme: Theme;
 
   // App icon cache for macOS Applications view
   appIconCache: Record<string, string>;
@@ -264,7 +262,6 @@ interface AppState {
   setShiftBaseSelection: (paths: string[] | null) => void;
   updateGlobalPreferences: (preferences: Partial<ViewPreferences>) => void;
   updateDirectoryPreferences: (path: string, preferences: Partial<ViewPreferences>) => void;
-  setTheme: (theme: Theme) => void;
   setSidebarWidth: (width: number) => void;
   toggleSidebar: () => void;
   togglePreviewPanel: () => void;
@@ -372,7 +369,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
   directoryPreferences: {},
   lastPreferenceUpdate: 0,
-  theme: 'system',
   appIconCache: {},
   pinnedDirectories: [],
   googleAccounts: [],
@@ -459,7 +455,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       };
     }),
 
-  setTheme: (theme) => set({ theme }),
   setSidebarWidth: (width) => set({ sidebarWidth: Math.max(200, Math.min(400, width)) }),
   toggleSidebar: () => set((state) => ({ showSidebar: !state.showSidebar })),
   togglePreviewPanel: () => set((state) => ({ showPreviewPanel: !state.showPreviewPanel })),
