@@ -29,7 +29,7 @@ A fast, no-nonsense file browser. Gets out of your way and just does files well.
 - Calculate folder sizes
 - Keyboard navigation
 - Dark theme (light theme coming soon!)
-- System accent color support (macOS, more platforms coming)
+- **Accent color**: Follows your system accent color by default, or choose a custom color in Preferences (Cmd/Ctrl+,)
 
 ### Smart Thumbnails
 
