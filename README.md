@@ -8,6 +8,8 @@ A fast, no-nonsense file browser. Gets out of your way and just does files well.
 
 ![List view](screenshots/list.png)
 
+![Light mode](screenshots/light.png)
+
 ## Features
 
 ### Core
@@ -28,7 +30,7 @@ A fast, no-nonsense file browser. Gets out of your way and just does files well.
 - Double-click archives to extract
 - Calculate folder sizes
 - Keyboard navigation
-- Dark theme (light theme coming soon!)
+- Dark and light themes
 - **Accent color**: Follows your system accent color by default, or choose a custom color in Preferences (Cmd/Ctrl+,)
 
 ### Smart Thumbnails

@@ -30,10 +30,61 @@ const EXT_COLORS: Record<string, { bg: string; fg: string }> = {
   stl: { bg: '#14b8a620', fg: '#14b8a6' },
 };
 
+const getThemeColor = (name: string, fallback: string): string => {
+  if (typeof document === 'undefined') return fallback;
+  const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return value || fallback;
+};
+
+const parseColor = (value: string): { r: number; g: number; b: number } | null => {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+
+  if (trimmed.startsWith('#')) {
+    const hex = trimmed.replace('#', '');
+    if (hex.length !== 6) return null;
+    const r = Number.parseInt(hex.slice(0, 2), 16);
+    const g = Number.parseInt(hex.slice(2, 4), 16);
+    const b = Number.parseInt(hex.slice(4, 6), 16);
+    if (Number.isNaN(r) || Number.isNaN(g) || Number.isNaN(b)) return null;
+    return { r, g, b };
+  }
+
+  const rgbMatch = trimmed.match(/^rgb\((\d+)[,\s]+(\d+)[,\s]+(\d+)\)$/i);
+  if (rgbMatch) {
+    return {
+      r: Number(rgbMatch[1]),
+      g: Number(rgbMatch[2]),
+      b: Number(rgbMatch[3]),
+    };
+  }
+
+  const rgbaMatch = trimmed.match(/^rgba\((\d+)[,\s]+(\d+)[,\s]+(\d+)[,\s]+[\d.]+\)$/i);
+  if (rgbaMatch) {
+    return {
+      r: Number(rgbaMatch[1]),
+      g: Number(rgbaMatch[2]),
+      b: Number(rgbaMatch[3]),
+    };
+  }
+
+  return null;
+};
+
+const toRgba = (value: string, alpha: number, fallback = '#000000'): string => {
+  const parsed = parseColor(value) ?? parseColor(fallback);
+  if (!parsed) return `rgba(0, 0, 0, ${alpha})`;
+  return `rgba(${parsed.r}, ${parsed.g}, ${parsed.b}, ${alpha})`;
+};
+
 function extColors(ext?: string): { bg: string; fg: string } {
-  if (!ext) return { bg: '#3a3a3a', fg: '#a1a1aa' };
+  const fallback = {
+    bg: getThemeColor('--color-app-gray', '#3a3a3a'),
+    fg: getThemeColor('--color-app-muted', '#a1a1aa'),
+  };
+  if (!ext) return fallback;
   const c = EXT_COLORS[ext.toLowerCase()];
-  return c || { bg: '#3a3a3a', fg: '#a1a1aa' };
+  return c || fallback;
 }
 
 function roundRect(
@@ -115,8 +166,10 @@ function drawThumbOrBadgeWithIcon(
   const radius = Math.floor(size * 0.12);
 
   // Card background - subtle, translucent
-  ctx.fillStyle = 'rgba(38, 38, 38, 0.9)'; // app-gray with opacity
-  ctx.strokeStyle = 'rgba(58, 58, 58, 0.8)'; // app-border with opacity
+  const cardColor = getThemeColor('--color-app-gray', '#262626');
+  const borderColor = getThemeColor('--color-app-border', '#3a3a3a');
+  ctx.fillStyle = toRgba(cardColor, 0.92, '#262626'); // app-gray with opacity
+  ctx.strokeStyle = toRgba(borderColor, 0.8, '#3a3a3a'); // app-border with opacity
   ctx.lineWidth = 1;
   roundRect(ctx, x, y, size, size, radius);
   ctx.fill();
@@ -226,18 +279,20 @@ export async function createDragImageForSelectionAsync(
         svgClone.setAttribute('width', '100');
         svgClone.setAttribute('height', '100');
 
-        // Force white/light color for all paths and elements in the SVG
+        const iconColor = getThemeColor('--color-app-text', '#e6e6e7');
+
+        // Force theme text color for all paths and elements in the SVG
         svgClone.setAttribute('fill', 'currentColor');
-        svgClone.style.color = '#e6e6e7'; // app-text color
+        svgClone.style.color = iconColor;
 
         // Also update any child elements that might have explicit fill
         const elements = svgClone.querySelectorAll('*');
         elements.forEach((el) => {
           if (el.hasAttribute('fill') && el.getAttribute('fill') !== 'none') {
-            el.setAttribute('fill', '#e6e6e7');
+            el.setAttribute('fill', iconColor);
           }
           if (el.hasAttribute('stroke') && el.getAttribute('stroke') !== 'none') {
-            el.setAttribute('stroke', '#e6e6e7');
+            el.setAttribute('stroke', iconColor);
           }
         });
 
@@ -291,7 +346,8 @@ export async function createDragImageForSelectionAsync(
 
     // Subtle background circle
     ctx.beginPath();
-    ctx.fillStyle = 'rgba(53, 132, 228, 0.9)'; // app-accent with transparency
+    const accentColor = getThemeColor('--accent', '#3584e4');
+    ctx.fillStyle = toRgba(accentColor, 0.9, '#3584e4'); // app-accent with transparency
     ctx.arc(cx, cy, badgeR, 0, Math.PI * 2);
     ctx.fill();
 
@@ -337,7 +393,8 @@ export async function createDragImageForSelectionAsync(
   ctx.shadowOffsetY = 1;
 
   // Text color matching app theme
-  ctx.fillStyle = 'rgba(230, 230, 231, 0.9)'; // app-text with slight transparency
+  const appText = getThemeColor('--color-app-text', '#e6e6e7');
+  ctx.fillStyle = toRgba(appText, 0.9, '#e6e6e7');
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillText(displayText, w / 2, textY);
@@ -392,7 +449,8 @@ export function createDragImageForSelection(
     const cy = badgeR + 6;
 
     ctx.beginPath();
-    ctx.fillStyle = 'rgba(53, 132, 228, 0.9)';
+    const accentColor = getThemeColor('--accent', '#3584e4');
+    ctx.fillStyle = toRgba(accentColor, 0.9, '#3584e4');
     ctx.arc(cx, cy, badgeR, 0, Math.PI * 2);
     ctx.fill();
 
@@ -428,7 +486,8 @@ export function createDragImageForSelection(
   ctx.shadowBlur = 2;
   ctx.shadowOffsetX = 0;
   ctx.shadowOffsetY = 1;
-  ctx.fillStyle = 'rgba(230, 230, 231, 0.9)';
+  const appText = getThemeColor('--color-app-text', '#e6e6e7');
+  ctx.fillStyle = toRgba(appText, 0.9, '#e6e6e7');
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillText(displayText, w / 2, textY);

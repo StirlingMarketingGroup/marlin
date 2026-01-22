@@ -147,7 +147,7 @@ export default function FolderSizeWindow() {
     }
     if (cancelled) {
       return (
-        <div className="flex items-center gap-2 text-sm text-white/60">
+        <div className="flex items-center gap-2 text-sm text-app-muted">
           <XCircle className="h-5 w-5" weight="fill" />
           <span>Scan cancelled</span>
         </div>
@@ -155,9 +155,9 @@ export default function FolderSizeWindow() {
     }
     if (isRunning) {
       return (
-        <div className="flex items-center gap-2 text-sm text-white/70">
+        <div className="flex items-center gap-2 text-sm text-app-muted">
           <div
-            className="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-transparent"
+            className="h-4 w-4 animate-spin rounded-full border-2 border-app-muted/40 border-t-transparent"
             aria-hidden
           />
           <span>{cancelRequested ? 'Cancelling…' : 'Scanning directories…'}</span>
@@ -183,37 +183,39 @@ export default function FolderSizeWindow() {
       >
         <div data-tauri-drag-region className="absolute inset-x-2 top-0 h-12 rounded-lg" />
         <div className="absolute inset-x-0 top-0 h-12 flex items-center justify-center pointer-events-none">
-          <span className="text-sm font-medium text-white/90">Folder Size</span>
+          <span className="text-sm font-medium text-app-text">Folder Size</span>
         </div>
 
-        <section className="space-y-3 rounded-xl border border-white/10 bg-[rgba(34,34,36,0.92)] p-6 shadow-[0_24px_70px_rgba(0,0,0,0.45)]">
-          <div className="flex items-center justify-between text-sm text-white/80">
+        <section className="space-y-3 rounded-xl border border-app-border bg-app-gray/60 p-6 shadow-lg">
+          <div className="flex items-center justify-between text-sm text-app-muted">
             <span>Space on disk</span>
-            <span className="font-medium text-white">
+            <span className="font-medium text-app-text">
               {formatBytes(totalBytes)} ({formatNumber(totalBytes)} B)
             </span>
           </div>
-          <div className="flex items-center justify-between text-sm text-white/80">
+          <div className="flex items-center justify-between text-sm text-app-muted">
             <span>Logical size</span>
-            <span className="font-medium text-white">
+            <span className="font-medium text-app-text">
               {formatBytes(totalApparentBytes)} ({formatNumber(totalApparentBytes)} B)
             </span>
           </div>
           {hasSharedBytes ? (
-            <div className="flex items-center justify-between text-xs text-white/60">
+            <div className="flex items-center justify-between text-xs text-app-muted">
               <span>Shared / sparse data</span>
-              <span className="font-medium text-white/70">
+              <span className="font-medium text-app-text/80">
                 {formatBytes(sharedBytes)} ({formatNumber(sharedBytes)} B)
               </span>
             </div>
           ) : null}
-          <div className="flex items-center justify-between text-sm text-white/80">
+          <div className="flex items-center justify-between text-sm text-app-muted">
             <span>Items scanned</span>
-            <span className="font-medium text-white">{formatNumber(totalItems)}</span>
+            <span className="font-medium text-app-text">{formatNumber(totalItems)}</span>
           </div>
           {lastPath ? (
-            <div className="truncate text-xs text-white/50">
-              <span className="uppercase tracking-wide text-[10px] text-white/50">Last path:</span>
+            <div className="truncate text-xs text-app-muted">
+              <span className="uppercase tracking-wide text-[10px] text-app-muted/80">
+                Last path:
+              </span>
               <div className="truncate" title={lastPath}>
                 {lastPath}
               </div>
@@ -231,7 +233,7 @@ export default function FolderSizeWindow() {
                   void cancel();
                 }
               }}
-              className="rounded-md bg-white/10 px-3 py-2 text-sm text-white transition hover:bg-white/20 disabled:cursor-not-allowed disabled:opacity-60"
+              className="rounded-md bg-app-gray/60 px-3 py-2 text-sm text-app-text transition hover:bg-app-gray/80 disabled:cursor-not-allowed disabled:opacity-60"
               disabled={cancelRequested}
             >
               {cancelRequested ? 'Cancelling…' : 'Cancel'}

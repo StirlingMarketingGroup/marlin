@@ -88,6 +88,7 @@ export interface ViewPreferences {
   foldersFirst: boolean;
   // Grid (thumbnail) view tile size in px (min column width)
   gridSize?: number;
+  theme?: Theme;
   accentColorMode?: 'system' | 'custom';
   accentColorCustom?: string;
 }

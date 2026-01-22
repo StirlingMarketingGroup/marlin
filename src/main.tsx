@@ -8,6 +8,7 @@ import ClipboardProgressWindow from './windows/ClipboardProgressWindow';
 import SmbConnectWindow from './windows/SmbConnectWindow';
 import PermissionsWindow from './windows/PermissionsWindow';
 import PreferencesWindow from './windows/PreferencesWindow';
+import { useThemePreference, useThemeSync } from '@/hooks/useTheme';
 import './index.css';
 
 const params = new URLSearchParams(window.location.search);
@@ -30,8 +31,15 @@ const Root =
                 ? PreferencesWindow
                 : App;
 
+function ThemeBridge() {
+  const preference = useThemePreference();
+  useThemeSync(preference);
+  return null;
+}
+
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
+    <ThemeBridge />
     <Root />
   </React.StrictMode>
 );

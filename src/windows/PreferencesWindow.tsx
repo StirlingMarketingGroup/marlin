@@ -6,7 +6,7 @@ import { X } from 'phosphor-react';
 import { WINDOW_CONTENT_TOP_PADDING } from '@/windows/windowLayout';
 import { applyAccentVariables, DEFAULT_ACCENT, normalizeHexColor } from '@/utils/accent';
 import { PREFERENCES_UPDATED_EVENT } from '@/utils/events';
-import type { ViewPreferences } from '@/types';
+import type { Theme, ViewPreferences } from '@/types';
 
 const ACCENT_POLL_INTERVAL_MS = 5000;
 
@@ -15,6 +15,7 @@ export default function PreferencesWindow() {
   const [accentMode, setAccentMode] = useState<'system' | 'custom'>('system');
   const [customColor, setCustomColor] = useState(DEFAULT_ACCENT);
   const [systemColor, setSystemColor] = useState(DEFAULT_ACCENT);
+  const [themePreference, setThemePreference] = useState<Theme>('system');
 
   const previewColor = useMemo(
     () => (accentMode === 'system' ? systemColor : customColor),
@@ -53,9 +54,14 @@ export default function PreferencesWindow() {
         const global = parsed.globalPreferences ?? {};
         const mode = global.accentColorMode === 'custom' ? 'custom' : 'system';
         const custom = normalizeHexColor(global.accentColorCustom) ?? DEFAULT_ACCENT;
+        const theme =
+          global.theme === 'light' || global.theme === 'dark' || global.theme === 'system'
+            ? global.theme
+            : 'system';
         if (isActive) {
           setAccentMode(mode);
           setCustomColor(custom);
+          setThemePreference(theme);
         }
       } catch (error) {
         console.warn('Failed to load preferences:', error);
@@ -125,6 +131,16 @@ export default function PreferencesWindow() {
     [customColor, persistPreferences]
   );
 
+  const handleThemeChange = useCallback(
+    (event: ChangeEvent<HTMLSelectElement>) => {
+      const value = event.target.value;
+      const nextTheme = value === 'light' || value === 'dark' ? value : 'system';
+      setThemePreference(nextTheme);
+      void persistPreferences({ theme: nextTheme });
+    },
+    [persistPreferences]
+  );
+
   const handleColorChange = useCallback(
     (event: ChangeEvent<HTMLInputElement>) => {
       const normalized = normalizeHexColor(event.target.value) ?? DEFAULT_ACCENT;
@@ -162,6 +178,19 @@ export default function PreferencesWindow() {
         <section className="space-y-3">
           <div className="text-xs uppercase tracking-wide text-app-muted">Appearance</div>
           <div className="rounded-lg border border-app-border bg-app-dark/50 p-4 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <label className="text-sm text-app-text">Theme</label>
+              <select
+                className="input-field h-9"
+                value={themePreference}
+                onChange={handleThemeChange}
+                data-tauri-drag-region={false}
+              >
+                <option value="system">System</option>
+                <option value="light">Light</option>
+                <option value="dark">Dark</option>
+              </select>
+            </div>
             <div className="flex flex-wrap items-center justify-between gap-3">
               <label className="text-sm text-app-text">Accent Color</label>
               <div className="flex items-center gap-2">
