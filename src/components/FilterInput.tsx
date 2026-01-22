@@ -71,7 +71,7 @@ export default function FilterInput() {
           onKeyDown={handleKeyDown}
           placeholder="Filter..."
           data-testid="filter-input"
-          className="bg-transparent border-none outline-none text-sm w-40 text-white placeholder-app-muted"
+          className="bg-transparent border-none outline-none text-sm w-40 text-app-text placeholder-app-muted"
         />
         {filterText && (
           <span className="text-xs text-app-muted whitespace-nowrap w-20 text-right">

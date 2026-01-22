@@ -888,7 +888,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
         {/* Loading overlay for Google Drive file downloads */}
         {isDownloadingForDrag && (
           <div className="absolute inset-0 bg-app-dark/60 rounded-md flex items-center justify-center z-30">
-            <CircleNotch className="w-8 h-8 text-white animate-spin" weight="bold" />
+            <CircleNotch className="w-8 h-8 text-app-text animate-spin" weight="bold" />
           </div>
         )}
         <div

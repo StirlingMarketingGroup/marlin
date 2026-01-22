@@ -33,7 +33,6 @@
     /* Slightly tighter for native-feel labels */
     line-height: 1.35;
     font-weight: 400;
-    color-scheme: dark;
     font-synthesis: none;
     text-rendering: optimizeLegibility;
     /* Let the OS choose the best smoothing on macOS */
@@ -56,6 +55,7 @@
   }
 
   :root {
+    color-scheme: dark;
     /* Runtime-themable accent variables (updated from system on launch) */
     --accent: #3584e4;
     --accent-soft: rgba(53, 132, 228, 0.15);
@@ -64,6 +64,23 @@
     /* RGB values for background colors (for rgba usage) */
     --bg-rgb: 30, 30, 30; /* #1e1e1e */
     --accent-rgb: 53, 132, 228; /* #3584e4 */
+
+    --checker-bg: #1f1f1f;
+    --checker-overlay: rgba(255, 255, 255, 0.08);
+  }
+
+  :root[data-theme='light'] {
+    color-scheme: light;
+    --color-app-dark: #f7f7f8;
+    --color-app-darker: #eceef1;
+    --color-app-gray: #e5e7eb;
+    --color-app-light: #ffffff;
+    --color-app-text: #111827;
+    --color-app-muted: #6b7280;
+    --color-app-border: #d1d5db;
+    --bg-rgb: 247, 247, 248; /* #f7f7f8 */
+    --checker-bg: #f0f1f3;
+    --checker-overlay: rgba(0, 0, 0, 0.05);
   }
 
   /* Sidebar drag-over effect */
@@ -152,12 +169,12 @@
   }
   /* Subtle checkerboard for transparency previews */
   .bg-checker {
-    background-color: #1f1f1f; /* base for dark theme */
+    background-color: var(--checker-bg);
     background-image:
-      linear-gradient(45deg, rgba(255, 255, 255, 0.08) 25%, transparent 25%),
-      linear-gradient(-45deg, rgba(255, 255, 255, 0.08) 25%, transparent 25%),
-      linear-gradient(45deg, transparent 75%, rgba(255, 255, 255, 0.08) 75%),
-      linear-gradient(-45deg, transparent 75%, rgba(255, 255, 255, 0.08) 75%);
+      linear-gradient(45deg, var(--checker-overlay) 25%, transparent 25%),
+      linear-gradient(-45deg, var(--checker-overlay) 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, var(--checker-overlay) 75%),
+      linear-gradient(-45deg, transparent 75%, var(--checker-overlay) 75%);
     background-size: 16px 16px;
     background-position:
       0 0,
