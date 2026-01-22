@@ -73,21 +73,34 @@ export const useThemePreference = (initialPreference: Theme = 'system'): Theme =
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
+    let isActive = true;
 
     (async () => {
       try {
-        unlisten = await listen<Partial<ViewPreferences>>(PREFERENCES_UPDATED_EVENT, (evt) => {
-          const theme = evt.payload?.theme;
-          if (isTheme(theme)) {
-            setPreference(theme);
+        const unlistenFn = await listen<Partial<ViewPreferences>>(
+          PREFERENCES_UPDATED_EVENT,
+          (evt) => {
+            if (!isActive) return;
+            const theme = evt.payload?.theme;
+            if (isTheme(theme)) {
+              setPreference(theme);
+            }
           }
-        });
+        );
+        if (isActive) {
+          unlisten = unlistenFn;
+        } else {
+          unlistenFn();
+        }
       } catch (error) {
-        console.warn('Failed to listen for theme preference updates:', error);
+        if (isActive) {
+          console.warn('Failed to listen for theme preference updates:', error);
+        }
       }
     })();
 
     return () => {
+      isActive = false;
       if (unlisten) {
         unlisten();
       }

@@ -33,13 +33,9 @@ export default function PreferencesWindow() {
   const persistPreferences = useCallback(async (prefs: Partial<ViewPreferences>) => {
     try {
       await invoke('set_global_prefs', { prefs: JSON.stringify(prefs) });
-    } catch (error) {
-      console.warn('Failed to persist preferences:', error);
-    }
-    try {
       await emit(PREFERENCES_UPDATED_EVENT, prefs);
     } catch (error) {
-      console.warn('Failed to emit preferences update:', error);
+      console.warn('Failed to persist preferences:', error);
     }
   }, []);
 
