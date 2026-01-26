@@ -51,8 +51,6 @@ git2 = { version = "0.20", default-features = false, features = ["https", "vendo
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6.0"
 tokio = { version = "1.0", features = ["full"] }
-cocoa = { version = "0.26", optional = true }
-objc = { version = "0.2", optional = true }
 base64 = "0.22"
 # Thumbnail system dependencies
 image = { version = "0.25", features = ["png", "jpeg", "webp", "gif"] }
@@ -99,8 +97,9 @@ mime_guess = "2.0.5"
 rustls = { version = "0.23.32", features = ["ring"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-cocoa = { version = "0.25" }
-objc = { version = "0.2" }
+objc2 = "0.6.3"
+objc2-foundation = "0.3.2"
+objc2-app-kit = "0.3.2"
 block = "0.1"
 tauri-plugin-macos-permissions = "2.3.0"
 

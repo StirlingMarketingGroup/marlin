@@ -8,13 +8,13 @@ mod imp {
     use std::sync::{Mutex, OnceLock};
 
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-    use cocoa::base::{id, nil, NO, YES};
-    use cocoa::foundation::{NSAutoreleasePool, NSString};
+    use objc2::class;
+    use objc2::msg_send;
+    use objc2::rc::{autoreleasepool, Retained};
+    use objc2::runtime::{AnyObject, Bool};
+    use objc2_foundation::{NSData, NSString, NSURL};
     use dirs;
     use log::warn;
-    use objc::rc::StrongPtr;
-    use objc::runtime::BOOL;
-    use objc::{class, msg_send, sel, sel_impl};
     use serde::{Deserialize, Serialize};
 
     const NS_URL_BOOKMARK_CREATION_WITH_SECURITY_SCOPE: u64 = 1 << 11;
@@ -148,7 +148,7 @@ mod imp {
     static SENSITIVE_DIR_SET: OnceLock<Vec<String>> = OnceLock::new();
 
     struct ActiveScope {
-        url: StrongPtr,
+        url: Retained<NSURL>,
         count: usize,
     }
 
@@ -180,70 +180,64 @@ mod imp {
         ACTIVE_SCOPES.get_or_init(|| Mutex::new(HashMap::new()))
     }
 
-    unsafe fn url_for_path(path: &str) -> Result<StrongPtr, String> {
-        let _pool: id = NSAutoreleasePool::new(nil);
-        let ns_path: id = NSString::alloc(nil).init_str(path);
-        let url: id = msg_send![class!(NSURL), fileURLWithPath: ns_path];
-        if url == nil {
-            return Err("Failed to create NSURL".to_string());
-        }
-        // `fileURLWithPath:` returns an autoreleased NSURL; retain it so the
-        // StrongPtr owns a stable +1 reference regardless of the surrounding
-        // autorelease pool lifetime.
-        Ok(StrongPtr::retain(url))
+    unsafe fn url_for_path(path: &str) -> Result<Retained<NSURL>, String> {
+        autoreleasepool(|_| unsafe {
+            let ns_path = NSString::from_str(path);
+            let url: Option<Retained<NSURL>> =
+                msg_send![class!(NSURL), fileURLWithPath: &*ns_path];
+            url.ok_or_else(|| "Failed to create NSURL".to_string())
+        })
     }
 
-    unsafe fn bookmark_from_url(url: &StrongPtr) -> Result<Vec<u8>, String> {
-        let _pool: id = NSAutoreleasePool::new(nil);
-        let mut error: id = nil;
-        let raw_url: id = **url;
-        let bookmark: id = msg_send![raw_url,
-            bookmarkDataWithOptions:NS_URL_BOOKMARK_CREATION_WITH_SECURITY_SCOPE
-            includingResourceValuesForKeys:nil
-            relativeToURL:nil
-            error:&mut error
-        ];
-        if bookmark == nil {
-            return Err("Failed to create bookmark data".to_string());
-        }
-        let length: usize = msg_send![bookmark, length];
-        if length == 0 {
-            return Err("Bookmark data is empty".to_string());
-        }
-        let bytes_ptr: *const std::ffi::c_void = msg_send![bookmark, bytes];
-        if bytes_ptr.is_null() {
-            return Err("Bookmark bytes pointer is null".to_string());
-        }
-        let slice = std::slice::from_raw_parts(bytes_ptr as *const u8, length);
-        Ok(slice.to_vec())
+    unsafe fn bookmark_from_url(url: &Retained<NSURL>) -> Result<Vec<u8>, String> {
+        autoreleasepool(|_| unsafe {
+            let mut error: *mut AnyObject = std::ptr::null_mut();
+            let bookmark: Option<Retained<NSData>> = msg_send![
+                &*url,
+                bookmarkDataWithOptions: NS_URL_BOOKMARK_CREATION_WITH_SECURITY_SCOPE,
+                includingResourceValuesForKeys: std::ptr::null_mut::<AnyObject>(),
+                relativeToURL: std::ptr::null_mut::<AnyObject>(),
+                error: &mut error
+            ];
+            let bookmark = bookmark.ok_or_else(|| "Failed to create bookmark data".to_string())?;
+            let length: usize = msg_send![&*bookmark, length];
+            if length == 0 {
+                return Err("Bookmark data is empty".to_string());
+            }
+            let bytes_ptr: *const std::ffi::c_void = msg_send![&*bookmark, bytes];
+            if bytes_ptr.is_null() {
+                return Err("Bookmark bytes pointer is null".to_string());
+            }
+            let slice = std::slice::from_raw_parts(bytes_ptr as *const u8, length);
+            Ok(slice.to_vec())
+        })
     }
 
-    unsafe fn resolve_bookmark(data: &[u8]) -> Result<(StrongPtr, bool), String> {
-        let _pool: id = NSAutoreleasePool::new(nil);
-        if data.is_empty() {
-            return Err("Bookmark data is empty".to_string());
-        }
-        let nsdata: id = msg_send![class!(NSData), dataWithBytes:data.as_ptr() length:data.len()];
-        if nsdata == nil {
-            return Err("Failed to build NSData from bookmark".to_string());
-        }
-        let mut error: id = nil;
-        let mut is_stale: BOOL = NO;
-        let resolved: id = msg_send![class!(NSURL),
-            URLByResolvingBookmarkData: nsdata
-            options: NS_URL_BOOKMARK_RESOLUTION_WITH_SECURITY_SCOPE
-            relativeToURL: nil
-            bookmarkDataIsStale: &mut is_stale
-            error: &mut error
-        ];
-        if resolved == nil {
-            return Err("Failed to resolve bookmark".to_string());
-        }
-        let started: BOOL = msg_send![resolved, startAccessingSecurityScopedResource];
-        if started == NO {
-            return Err("startAccessingSecurityScopedResource returned false".to_string());
-        }
-        Ok((StrongPtr::retain(resolved), is_stale == YES))
+    unsafe fn resolve_bookmark(data: &[u8]) -> Result<(Retained<NSURL>, bool), String> {
+        autoreleasepool(|_| unsafe {
+            if data.is_empty() {
+                return Err("Bookmark data is empty".to_string());
+            }
+            let nsdata: Option<Retained<NSData>> =
+                msg_send![class!(NSData), dataWithBytes: data.as_ptr(), length: data.len()];
+            let nsdata = nsdata.ok_or_else(|| "Failed to build NSData from bookmark".to_string())?;
+            let mut error: *mut AnyObject = std::ptr::null_mut();
+            let mut is_stale = Bool::NO;
+            let resolved: Option<Retained<NSURL>> = msg_send![
+                class!(NSURL),
+                URLByResolvingBookmarkData: &*nsdata,
+                options: NS_URL_BOOKMARK_RESOLUTION_WITH_SECURITY_SCOPE,
+                relativeToURL: std::ptr::null_mut::<AnyObject>(),
+                bookmarkDataIsStale: &mut is_stale,
+                error: &mut error
+            ];
+            let resolved = resolved.ok_or_else(|| "Failed to resolve bookmark".to_string())?;
+            let started: Bool = msg_send![&*resolved, startAccessingSecurityScopedResource];
+            if started.is_false() {
+                return Err("startAccessingSecurityScopedResource returned false".to_string());
+            }
+            Ok((resolved, is_stale.is_true()))
+        })
     }
 
     fn longest_matching_key<'a>(store: &'a BookmarkStore, path: &str) -> Option<&'a BookmarkEntry> {
@@ -266,8 +260,7 @@ mod imp {
             if let Some(entry) = active.get_mut(&self.key) {
                 if entry.decrement() {
                     unsafe {
-                        let raw_url: id = *entry.url;
-                        let _: () = msg_send![raw_url, stopAccessingSecurityScopedResource];
+                        let _: () = msg_send![&*entry.url, stopAccessingSecurityScopedResource];
                     }
                     active.remove(&self.key);
                 }

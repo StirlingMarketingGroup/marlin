@@ -43,9 +43,12 @@ pub struct PasteImageResult {
 #[cfg(target_os = "macos")]
 mod macos {
     use super::*;
-    use cocoa::base::{id, nil, NO};
-    use cocoa::foundation::NSString;
-    use objc::{class, msg_send, runtime::BOOL, sel, sel_impl};
+    use objc2::class;
+    use objc2::msg_send;
+    use objc2::rc::autoreleasepool;
+    use objc2::runtime::AnyObject;
+    use objc2_app_kit::NSPasteboard;
+    use objc2_foundation::{NSArray, NSString};
 
     /// Copy file paths to the system clipboard (macOS)
     pub fn copy_to_clipboard(paths: &[String], is_cut: bool) -> Result<(), String> {
@@ -53,30 +56,26 @@ mod macos {
             return Err("No paths provided".into());
         }
 
-        unsafe {
-            let pb: id = msg_send![class!(NSPasteboard), generalPasteboard];
-            if pb == nil {
-                return Err("Failed to get general pasteboard".into());
-            }
+        autoreleasepool(|_| {
+            let pb = NSPasteboard::generalPasteboard();
 
             // Clear existing contents
-            let _: i64 = msg_send![pb, clearContents];
+            pb.clearContents();
 
             // Declare types
-            let nsfilenames_type: id = NSString::alloc(nil).init_str("NSFilenamesPboardType");
-            let types_array: id = msg_send![class!(NSArray), arrayWithObject: nsfilenames_type];
-            let _: BOOL = msg_send![pb, declareTypes: types_array owner: nil];
+            let nsfilenames_type = NSString::from_str("NSFilenamesPboardType");
+            let types_array = NSArray::from_retained_slice(&[nsfilenames_type.clone()]);
+            let _ = unsafe { pb.declareTypes_owner(&types_array, None) };
 
             // Create NSArray of file paths
-            let paths_array: id = msg_send![class!(NSMutableArray), array];
-            for path in paths {
-                let path_nsstring: id = NSString::alloc(nil).init_str(path);
-                let _: () = msg_send![paths_array, addObject: path_nsstring];
-            }
+            let path_strings: Vec<_> = paths.iter().map(|path| NSString::from_str(path)).collect();
+            let paths_array = NSArray::from_retained_slice(&path_strings);
+            let paths_any: &AnyObject =
+                unsafe { &*(paths_array.as_ref() as *const _ as *const AnyObject) };
 
             // Set the paths on the pasteboard
-            let success: BOOL = msg_send![pb, setPropertyList: paths_array forType: nsfilenames_type];
-            if success == NO {
+            let success = unsafe { pb.setPropertyList_forType(paths_any, &nsfilenames_type) };
+            if !success {
                 return Err("Failed to set file paths on pasteboard".into());
             }
 
@@ -84,41 +83,36 @@ mod macos {
             // macOS Finder uses "com.apple.pasteboard.promised-file-content-type" for some operations
             // but we'll use a simple marker that we can detect later
             if is_cut {
-                let cut_type: id = NSString::alloc(nil).init_str("com.marlin.cut-operation");
-                // Add the cut type to the pasteboard
-                let types_with_cut: id = msg_send![class!(NSMutableArray), arrayWithCapacity: 2usize];
-                let _: () = msg_send![types_with_cut, addObject: nsfilenames_type];
-                let _: () = msg_send![types_with_cut, addObject: cut_type];
-                let _: BOOL = msg_send![pb, declareTypes: types_with_cut owner: nil];
-                let _: BOOL = msg_send![pb, setPropertyList: paths_array forType: nsfilenames_type];
-                let marker: id = NSString::alloc(nil).init_str("1");
-                let _: BOOL = msg_send![pb, setString: marker forType: cut_type];
+                let cut_type = NSString::from_str("com.marlin.cut-operation");
+                let types_with_cut =
+                    NSArray::from_retained_slice(&[nsfilenames_type.clone(), cut_type.clone()]);
+                let _ = unsafe { pb.declareTypes_owner(&types_with_cut, None) };
+                let _ = unsafe { pb.setPropertyList_forType(paths_any, &nsfilenames_type) };
+                let marker = NSString::from_str("1");
+                let _ = pb.setString_forType(&marker, &cut_type);
             }
 
             Ok(())
-        }
+        })
     }
 
     /// Get clipboard contents information (macOS)
     pub fn get_clipboard_contents() -> Result<ClipboardInfo, String> {
-        unsafe {
-            let pb: id = msg_send![class!(NSPasteboard), generalPasteboard];
-            if pb == nil {
-                return Err("Failed to get general pasteboard".into());
-            }
+        autoreleasepool(|_| unsafe {
+            let pb = NSPasteboard::generalPasteboard();
 
             // Check for files
-            let nsfilenames_type: id = NSString::alloc(nil).init_str("NSFilenamesPboardType");
-            let file_paths_obj: id = msg_send![pb, propertyListForType: nsfilenames_type];
+            let nsfilenames_type = NSString::from_str("NSFilenamesPboardType");
+            let file_paths_obj = pb.propertyListForType(&nsfilenames_type);
 
             let mut file_paths = Vec::new();
-            let has_files = file_paths_obj != nil;
+            let has_files = file_paths_obj.is_some();
 
-            if has_files {
-                let count: usize = msg_send![file_paths_obj, count];
+            if let Some(file_paths_obj) = file_paths_obj.as_ref() {
+                let count: usize = msg_send![&*file_paths_obj, count];
                 for i in 0..count {
-                    let path_obj: id = msg_send![file_paths_obj, objectAtIndex: i];
-                    if path_obj != nil {
+                    let path_obj: *mut AnyObject = msg_send![&*file_paths_obj, objectAtIndex: i];
+                    if !path_obj.is_null() {
                         let path_cstr: *const i8 = msg_send![path_obj, UTF8String];
                         if !path_cstr.is_null() {
                             let path = std::ffi::CStr::from_ptr(path_cstr)
@@ -131,16 +125,16 @@ mod macos {
             }
 
             // Check for cut marker
-            let cut_type: id = NSString::alloc(nil).init_str("com.marlin.cut-operation");
-            let cut_marker: id = msg_send![pb, stringForType: cut_type];
-            let is_cut = cut_marker != nil;
+            let cut_type = NSString::from_str("com.marlin.cut-operation");
+            let cut_marker = pb.stringForType(&cut_type);
+            let is_cut = cut_marker.is_some();
 
             // Check for image data
-            let tiff_type: id = NSString::alloc(nil).init_str("public.tiff");
-            let png_type: id = NSString::alloc(nil).init_str("public.png");
-            let tiff_data: id = msg_send![pb, dataForType: tiff_type];
-            let png_data: id = msg_send![pb, dataForType: png_type];
-            let has_image = tiff_data != nil || png_data != nil;
+            let tiff_type = NSString::from_str("public.tiff");
+            let png_type = NSString::from_str("public.png");
+            let tiff_data = pb.dataForType(&tiff_type);
+            let png_data = pb.dataForType(&png_type);
+            let has_image = tiff_data.is_some() || png_data.is_some();
 
             Ok(ClipboardInfo {
                 has_files,
@@ -148,24 +142,21 @@ mod macos {
                 file_paths,
                 is_cut,
             })
-        }
+        })
     }
 
     /// Get image data from clipboard as PNG bytes (macOS)
     pub fn get_clipboard_image() -> Result<Vec<u8>, String> {
-        unsafe {
-            let pb: id = msg_send![class!(NSPasteboard), generalPasteboard];
-            if pb == nil {
-                return Err("Failed to get general pasteboard".into());
-            }
+        autoreleasepool(|_| unsafe {
+            let pb = NSPasteboard::generalPasteboard();
 
             // Try PNG first, then TIFF
-            let png_type: id = NSString::alloc(nil).init_str("public.png");
-            let png_data: id = msg_send![pb, dataForType: png_type];
+            let png_type = NSString::from_str("public.png");
+            let png_data = pb.dataForType(&png_type);
 
-            if png_data != nil {
-                let length: usize = msg_send![png_data, length];
-                let bytes: *const u8 = msg_send![png_data, bytes];
+            if let Some(png_data) = png_data {
+                let length: usize = msg_send![&*png_data, length];
+                let bytes: *const u8 = msg_send![&*png_data, bytes];
                 if !bytes.is_null() && length > 0 {
                     let slice = std::slice::from_raw_parts(bytes, length);
                     return Ok(slice.to_vec());
@@ -173,25 +164,37 @@ mod macos {
             }
 
             // Try TIFF and convert to PNG
-            let tiff_type: id = NSString::alloc(nil).init_str("public.tiff");
-            let tiff_data: id = msg_send![pb, dataForType: tiff_type];
+            let tiff_type = NSString::from_str("public.tiff");
+            let tiff_data = pb.dataForType(&tiff_type);
 
-            if tiff_data != nil {
+            if let Some(tiff_data) = tiff_data {
                 // Create NSImage from TIFF data
-                let ns_image: id = msg_send![class!(NSImage), alloc];
-                let ns_image: id = msg_send![ns_image, initWithData: tiff_data];
+                // Note: alloc returns +1 retained, initWithData consumes that and returns +1
+                // The object is autoreleased within this pool, which is fine since we extract
+                // the bytes before the pool drains.
+                let ns_image: *mut AnyObject = msg_send![class!(NSImage), alloc];
+                if ns_image.is_null() {
+                    return Err("Failed to allocate NSImage".into());
+                }
+                let ns_image: *mut AnyObject = msg_send![ns_image, initWithData: &*tiff_data];
 
-                if ns_image != nil {
+                if !ns_image.is_null() {
                     // Get PNG representation
-                    let tiff_rep: id = msg_send![ns_image, TIFFRepresentation];
-                    if tiff_rep != nil {
-                        let bitmap_rep: id = msg_send![class!(NSBitmapImageRep), imageRepWithData: tiff_rep];
-                        if bitmap_rep != nil {
+                    let tiff_rep: *mut AnyObject = msg_send![ns_image, TIFFRepresentation];
+                    if !tiff_rep.is_null() {
+                        let bitmap_rep: *mut AnyObject =
+                            msg_send![class!(NSBitmapImageRep), imageRepWithData: tiff_rep];
+                        if !bitmap_rep.is_null() {
                             let png_type_num: u64 = 4; // NSBitmapImageFileTypePNG
-                            let props: id = msg_send![class!(NSDictionary), dictionary];
-                            let png_data: id = msg_send![bitmap_rep, representationUsingType: png_type_num properties: props];
+                            let props: *mut AnyObject =
+                                msg_send![class!(NSDictionary), dictionary];
+                            let png_data: *mut AnyObject = msg_send![
+                                bitmap_rep,
+                                representationUsingType: png_type_num,
+                                properties: props
+                            ];
 
-                            if png_data != nil {
+                            if !png_data.is_null() {
                                 let length: usize = msg_send![png_data, length];
                                 let bytes: *const u8 = msg_send![png_data, bytes];
                                 if !bytes.is_null() && length > 0 {
@@ -205,7 +208,7 @@ mod macos {
             }
 
             Err("No image data in clipboard".into())
-        }
+        })
     }
 }
 

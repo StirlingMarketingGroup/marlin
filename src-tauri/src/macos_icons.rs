@@ -5,13 +5,17 @@ use crate::macos_security;
 #[cfg(target_os = "macos")]
 use base64::Engine as _; // bring encode() into scope
 #[cfg(target_os = "macos")]
-use cocoa::base::{id, nil};
+use objc2::class;
 #[cfg(target_os = "macos")]
-use cocoa::foundation::{NSAutoreleasePool, NSSize, NSString};
+use objc2::msg_send;
+#[cfg(target_os = "macos")]
+use objc2::rc::autoreleasepool;
+#[cfg(target_os = "macos")]
+use objc2::runtime::AnyObject;
+#[cfg(target_os = "macos")]
+use objc2_foundation::{NSSize, NSString};
 #[cfg(target_os = "macos")]
 use dirs;
-#[cfg(target_os = "macos")]
-use objc::{class, msg_send, sel, sel_impl};
 #[cfg(target_os = "macos")]
 use std::collections::hash_map::DefaultHasher;
 #[cfg(target_os = "macos")]
@@ -21,9 +25,7 @@ use std::{fs, path::Path, time::UNIX_EPOCH};
 
 #[cfg(target_os = "macos")]
 pub fn app_icon_png_base64(path: &str, size: u32) -> Result<String, String> {
-    unsafe {
-        let _pool: id = NSAutoreleasePool::new(nil);
-
+    autoreleasepool(|_| unsafe {
         let path_obj = Path::new(path);
         let _scope_guard = macos_security::retain_access(path_obj)?;
 
@@ -52,13 +54,13 @@ pub fn app_icon_png_base64(path: &str, size: u32) -> Result<String, String> {
         }
 
         // NSWorkspace.sharedWorkspace.iconForFile(path)
-        let ns_path: id = NSString::alloc(nil).init_str(path);
-        let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
-        if workspace == nil {
+        let ns_path = NSString::from_str(path);
+        let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+        if workspace.is_null() {
             return Err("NSWorkspace unavailable".into());
         }
-        let image: id = msg_send![workspace, iconForFile: ns_path];
-        if image == nil {
+        let image: *mut AnyObject = msg_send![workspace, iconForFile: &*ns_path];
+        if image.is_null() {
             return Err("iconForFile returned nil".into());
         }
 
@@ -67,21 +69,20 @@ pub fn app_icon_png_base64(path: &str, size: u32) -> Result<String, String> {
         let _: () = msg_send![image, setSize: sz];
 
         // Convert NSImage -> TIFF -> NSBitmapImageRep -> PNG (NSData)
-        let tiff: id = msg_send![image, TIFFRepresentation];
-        if tiff == nil {
+        let tiff: *mut AnyObject = msg_send![image, TIFFRepresentation];
+        if tiff.is_null() {
             return Err("TIFFRepresentation is nil".into());
         }
-        let rep_class = class!(NSBitmapImageRep);
-        let rep: id = msg_send![rep_class, imageRepWithData: tiff];
-        if rep == nil {
+        let rep: *mut AnyObject = msg_send![class!(NSBitmapImageRep), imageRepWithData: tiff];
+        if rep.is_null() {
             return Err("imageRepWithData returned nil".into());
         }
 
         // NSPNGFileType is 4 (NSBitmapImageFileType enum)
-        let dict_class = class!(NSDictionary);
-        let empty_dict: id = msg_send![dict_class, dictionary];
-        let png_data: id = msg_send![rep, representationUsingType: 4u64 properties: empty_dict];
-        if png_data == nil {
+        let empty_dict: *mut AnyObject = msg_send![class!(NSDictionary), dictionary];
+        let png_data: *mut AnyObject =
+            msg_send![rep, representationUsingType: 4u64, properties: empty_dict];
+        if png_data.is_null() {
             return Err("PNG conversion failed".into());
         }
 
@@ -100,5 +101,5 @@ pub fn app_icon_png_base64(path: &str, size: u32) -> Result<String, String> {
         macos_security::persist_bookmark(path_obj, "generating native icon");
 
         result
-    }
+    })
 }
