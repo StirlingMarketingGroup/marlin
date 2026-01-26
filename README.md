@@ -27,6 +27,8 @@ A fast, no-nonsense file browser. Gets out of your way and just does files well.
 - Copy file paths—name or full path (looking at you, Finder!)
 - Paste screenshots directly from clipboard as files
 - Trash with undo support
+- **New Folder** (Cmd/Ctrl+Shift+N): VSCode-style creation with instant rename—type `foo/bar/baz` to create nested directories in one go
+- **Rename into subdirs**: Rename any file to `subdir/filename.ext` to create the folder and move it there
 - Double-click archives to extract
 - Calculate folder sizes
 - Keyboard navigation
