@@ -333,13 +333,22 @@ jobs:
           # Small delay to ensure resources are released
           sleep 2
 
+      - name: Create SMB sidecar placeholders
+        run: |
+          # Create placeholder files for all platforms to satisfy tauri-build
+          mkdir -p src-tauri/binaries
+          touch src-tauri/binaries/marlin-smb-x86_64-unknown-linux-gnu
+          touch src-tauri/binaries/marlin-smb-aarch64-unknown-linux-gnu
+          touch src-tauri/binaries/marlin-smb-x86_64-apple-darwin
+          touch src-tauri/binaries/marlin-smb-aarch64-apple-darwin
+
       - name: Build SMB sidecar
         if: matrix.smb
         run: |
           cd src-tauri
           cargo build --release --bin marlin-smb --features smb-sidecar --target ${{ matrix.target }}
           # Copy sidecar to binaries directory with target triple suffix (Tauri convention)
-          mkdir -p binaries
+          # This overwrites the placeholder created above
           cp target/${{ matrix.target }}/release/marlin-smb binaries/marlin-smb-${{ matrix.target }}
 
       - name: Codesign SMB sidecar (macOS)
@@ -529,13 +538,22 @@ jobs:
           # Small delay to ensure resources are released
           sleep 2
 
+      - name: Create SMB sidecar placeholders
+        run: |
+          # Create placeholder files for all platforms to satisfy tauri-build
+          mkdir -p src-tauri/binaries
+          touch src-tauri/binaries/marlin-smb-x86_64-unknown-linux-gnu
+          touch src-tauri/binaries/marlin-smb-aarch64-unknown-linux-gnu
+          touch src-tauri/binaries/marlin-smb-x86_64-apple-darwin
+          touch src-tauri/binaries/marlin-smb-aarch64-apple-darwin
+
       - name: Build SMB sidecar
         if: matrix.smb
         run: |
           cd src-tauri
           cargo build --release --bin marlin-smb --features smb-sidecar --target ${{ matrix.target }}
           # Copy sidecar to binaries directory with target triple suffix (Tauri convention)
-          mkdir -p binaries
+          # This overwrites the placeholder created above
           cp target/${{ matrix.target }}/release/marlin-smb binaries/marlin-smb-${{ matrix.target }}
 
       - name: Build Tauri bundle
