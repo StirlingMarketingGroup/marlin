@@ -57,6 +57,7 @@ use bzip2::read::BzDecoder;
 use flate2::read::GzDecoder;
 use tar::Archive as TarArchive;
 use xz2::read::XzDecoder;
+use unrar::Archive as RarArchive;
 use zip::ZipArchive;
 use zstd::stream::read::Decoder as ZstdDecoder;
 
@@ -2831,6 +2832,7 @@ fn extract_zip_contents<R: Read + Seek>(
 #[derive(Debug, Clone, Copy)]
 enum ArchiveFormat {
     Zip,
+    Rar,
     Tar,
     TarGz,
     TarBz2,
@@ -2842,6 +2844,7 @@ impl ArchiveFormat {
     fn as_str(&self) -> &'static str {
         match self {
             ArchiveFormat::Zip => "zip",
+            ArchiveFormat::Rar => "rar",
             ArchiveFormat::Tar => "tar",
             ArchiveFormat::TarGz => "tar.gz",
             ArchiveFormat::TarBz2 => "tar.bz2",
@@ -2852,8 +2855,9 @@ impl ArchiveFormat {
 }
 
 fn archive_format_from_hint(hint: &str) -> Option<ArchiveFormat> {
-    match hint {
+    match hint.to_lowercase().as_str() {
         "zip" => Some(ArchiveFormat::Zip),
+        "rar" => Some(ArchiveFormat::Rar),
         "tar" => Some(ArchiveFormat::Tar),
         "tar.gz" => Some(ArchiveFormat::TarGz),
         "tar.bz2" => Some(ArchiveFormat::TarBz2),
@@ -2877,6 +2881,8 @@ fn infer_archive_format_from_name(name: &str) -> Option<ArchiveFormat> {
         Some(ArchiveFormat::Tar)
     } else if lower.ends_with(".zip") {
         Some(ArchiveFormat::Zip)
+    } else if lower.ends_with(".rar") {
+        Some(ArchiveFormat::Rar)
     } else {
         None
     }
@@ -2944,7 +2950,7 @@ fn create_tar_reader(
             })?;
             Box::new(decoder)
         }
-        ArchiveFormat::Zip => unreachable!(),
+        ArchiveFormat::Zip | ArchiveFormat::Rar => unreachable!(),
     };
 
     Ok(reader)
@@ -2959,6 +2965,7 @@ fn derive_folder_base_name(path: &Path, format: ArchiveFormat) -> Result<String,
 
     let patterns: &[&str] = match format {
         ArchiveFormat::Zip => &[".zip"],
+        ArchiveFormat::Rar => &[".rar"],
         ArchiveFormat::Tar => &[".tar"],
         ArchiveFormat::TarGz => &[".tar.gz", ".tgz"],
         ArchiveFormat::TarBz2 => &[".tar.bz2", ".tbz2", ".tbz"],
@@ -3006,104 +3013,6 @@ fn cleanup_directory(path: &Path) {
             );
         }
     }
-}
-
-#[cfg(target_os = "macos")]
-fn extract_with_system(archive_path: &Path, target_dir: &Path) -> Result<(), String> {
-    if target_dir.exists() {
-        cleanup_directory(target_dir);
-    }
-    fs::create_dir(target_dir).map_err(|err| {
-        format!(
-            "Failed to create extraction directory {} before fallback: {}",
-            target_dir.display(),
-            err
-        )
-    })?;
-
-    let status = OsCommand::new("ditto")
-        .arg("-x")
-        .arg("-k")
-        .arg(archive_path)
-        .arg(target_dir)
-        .status()
-        .map_err(|err| format!("Failed to spawn 'ditto' for fallback extraction: {}", err))?;
-
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("ditto exited with status: {}", status))
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn extract_with_system(archive_path: &Path, target_dir: &Path) -> Result<(), String> {
-    if target_dir.exists() {
-        cleanup_directory(target_dir);
-    }
-
-    let archive_str = archive_path.to_string_lossy().replace('\'', "''");
-    let target_str = target_dir.to_string_lossy().replace('\'', "''");
-    let command = format!(
-        "Expand-Archive -LiteralPath '{archive}' -DestinationPath '{destination}' -Force",
-        archive = archive_str,
-        destination = target_str
-    );
-
-    let status = OsCommand::new("powershell")
-        .args(["-NoLogo", "-NoProfile", "-Command", &command])
-        .status()
-        .map_err(|err| {
-            format!(
-                "Failed to spawn PowerShell for fallback extraction: {}",
-                err
-            )
-        })?;
-
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "PowerShell Expand-Archive exited with status: {}",
-            status
-        ))
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn extract_with_system(archive_path: &Path, target_dir: &Path) -> Result<(), String> {
-    if target_dir.exists() {
-        cleanup_directory(target_dir);
-    }
-
-    fs::create_dir_all(target_dir).map_err(|err| {
-        format!(
-            "Failed to create extraction directory {} before fallback: {}",
-            target_dir.display(),
-            err
-        )
-    })?;
-
-    let status = OsCommand::new("unzip")
-        .args([
-            "-q",
-            archive_path.to_string_lossy().as_ref(),
-            "-d",
-            target_dir.to_string_lossy().as_ref(),
-        ])
-        .status()
-        .map_err(|err| format!("Failed to spawn 'unzip' for fallback extraction: {}", err))?;
-
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("'unzip' exited with status: {}", status))
-    }
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-fn extract_with_system(_archive_path: &Path, _target_dir: &Path) -> Result<(), String> {
-    Err("System fallback extraction is not supported on this platform".to_string())
 }
 
 #[command]
@@ -3199,39 +3108,133 @@ pub async fn extract_archive(
                         })
                     })();
 
-                    match native_result {
-                        Ok(()) => {
-                            info!(
-                                "Native ZIP extraction succeeded for {} into {}",
-                                archive_for_task.display(),
-                                target_dir.display()
-                            );
-                            Ok((target_dir, false))
-                        }
-                        Err(native_err) => {
-                            warn!(
-                                "Native ZIP extraction failed for {}: {}. Attempting system fallback...",
-                                archive_for_task.display(),
-                                native_err
-                            );
+                    native_result.map_err(|err| {
+                        cleanup_directory(&target_dir);
+                        err
+                    })?;
 
-                            cleanup_directory(&target_dir);
-
-                            match extract_with_system(&archive_for_task, &target_dir) {
-                                Ok(()) => {
-                                    info!(
-                                        "System fallback extraction succeeded for {} into {}",
-                                        archive_for_task.display(),
-                                        target_dir.display()
-                                    );
-                                    Ok((target_dir, true))
-                                }
-                                Err(fallback_err) => Err(format!(
-                                    "Native extraction failed ({native_err}). System fallback failed: {fallback_err}"
-                                )),
+                    info!(
+                        "ZIP extraction succeeded for {} into {}",
+                        archive_for_task.display(),
+                        target_dir.display()
+                    );
+                    Ok((target_dir, false))
+                }
+                ArchiveFormat::Rar => {
+                    // Check for multi-volume archives
+                    let rar_archive = RarArchive::new(&archive_for_task);
+                    if rar_archive.is_multipart() {
+                        // For multipart archives, ensure we're starting from the first part
+                        if let Some(first_part) = rar_archive.first_part_option() {
+                            if first_part != archive_for_task {
+                                cleanup_directory(&target_dir);
+                                return Err(format!(
+                                    "Multi-volume RAR archive detected. Please extract starting from the first part: {}",
+                                    first_part.display()
+                                ));
                             }
                         }
                     }
+
+                    let extraction_result = (|| -> Result<(), String> {
+                        let archive = RarArchive::new(&archive_for_task)
+                            .open_for_processing()
+                            .map_err(|err| {
+                                let err_str = format!("{:?}", err);
+                                // Check for common error types and provide friendly messages
+                                if err_str.contains("MissingPassword") || err_str.contains("password") {
+                                    "This archive is password-protected. Password-protected RAR archives are not yet supported.".to_string()
+                                } else if err_str.contains("BadArchive") || err_str.contains("corrupt") {
+                                    format!("The RAR archive appears to be corrupted: {}", archive_for_task.display())
+                                } else {
+                                    format!(
+                                        "Failed to open RAR archive {}: {}",
+                                        archive_for_task.display(),
+                                        err
+                                    )
+                                }
+                            })?;
+
+                        let mut current_archive = archive;
+                        loop {
+                            match current_archive.read_header() {
+                                Ok(Some(header)) => {
+                                    let entry = header.entry();
+                                    let entry_name = entry.filename.to_string_lossy().to_string();
+
+                                    // Path traversal protection: check for dangerous path components
+                                    let entry_path = Path::new(&entry_name);
+                                    for component in entry_path.components() {
+                                        match component {
+                                            std::path::Component::ParentDir => {
+                                                return Err(format!(
+                                                    "Refusing to extract entry with path traversal: {}",
+                                                    entry_name
+                                                ));
+                                            }
+                                            std::path::Component::Prefix(_) => {
+                                                return Err(format!(
+                                                    "Refusing to extract entry with absolute path: {}",
+                                                    entry_name
+                                                ));
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    if entry_path.is_absolute() {
+                                        return Err(format!(
+                                            "Refusing to extract entry with absolute path: {}",
+                                            entry_name
+                                        ));
+                                    }
+
+                                    emit_archive_progress_update(
+                                        &app_handle,
+                                        &archive_name,
+                                        Some(&entry_name),
+                                        archive_format,
+                                        false,
+                                    );
+
+                                    // Use extract_with_base for directory extraction (not extract_to which expects a file path)
+                                    current_archive = header.extract_with_base(&target_dir).map_err(|err| {
+                                        let err_str = format!("{:?}", err);
+                                        if err_str.contains("MissingPassword") || err_str.contains("password") {
+                                            "This archive is password-protected. Password-protected RAR archives are not yet supported.".to_string()
+                                        } else {
+                                            format!("Failed to extract RAR entry {}: {}", entry_name, err)
+                                        }
+                                    })?;
+                                }
+                                Ok(None) => break,
+                                Err(err) => {
+                                    let err_str = format!("{:?}", err);
+                                    if err_str.contains("MissingPassword") || err_str.contains("password") {
+                                        return Err("This archive is password-protected. Password-protected RAR archives are not yet supported.".to_string());
+                                    }
+                                    return Err(format!(
+                                        "Failed to read RAR header in {}: {}",
+                                        archive_for_task.display(),
+                                        err
+                                    ));
+                                }
+                            }
+                        }
+
+                        Ok(())
+                    })();
+
+                    extraction_result.map_err(|err| {
+                        cleanup_directory(&target_dir);
+                        err
+                    })?;
+
+                    info!(
+                        "RAR extraction succeeded for {} into {}",
+                        archive_for_task.display(),
+                        target_dir.display()
+                    );
+                    Ok((target_dir, false))
                 }
                 ArchiveFormat::Tar
                 | ArchiveFormat::TarGz
