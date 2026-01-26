@@ -18,7 +18,14 @@ export const ARCHIVE_EXTENSIONS = new Set([
   'lzma',
 ]);
 
-export type ExtractableArchiveFormat = 'zip' | 'tar' | 'tar.gz' | 'tar.bz2' | 'tar.xz' | 'tar.zst';
+export type ExtractableArchiveFormat =
+  | 'zip'
+  | 'rar'
+  | 'tar'
+  | 'tar.gz'
+  | 'tar.bz2'
+  | 'tar.xz'
+  | 'tar.zst';
 
 const EXTRACTABLE_ARCHIVE_PATTERNS: Array<{
   format: ExtractableArchiveFormat;
@@ -30,6 +37,7 @@ const EXTRACTABLE_ARCHIVE_PATTERNS: Array<{
   { format: 'tar.zst', patterns: ['.tar.zst', '.tzst'] },
   { format: 'tar', patterns: ['.tar'] },
   { format: 'zip', patterns: ['.zip'] },
+  { format: 'rar', patterns: ['.rar'] },
 ];
 
 export function isArchiveExtension(ext?: string | null): boolean {

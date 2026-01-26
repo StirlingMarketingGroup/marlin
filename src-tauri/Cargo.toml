@@ -65,6 +65,7 @@ notify = { version = "8.2", default-features = false, features = ["macos_fsevent
 walkdir = "2.5"
 libc = "0.2"
 zip = { version = "7.0", default-features = false, features = ["deflate", "bzip2", "zstd"] }
+unrar = "0.5"
 tar = "0.4"
 flate2 = "1.0"
 bzip2 = "0.6"
