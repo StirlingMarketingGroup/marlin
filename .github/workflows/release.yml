@@ -333,6 +333,22 @@ jobs:
           # Small delay to ensure resources are released
           sleep 2
 
+      - name: Build SMB sidecar
+        if: matrix.smb
+        run: |
+          cd src-tauri
+          cargo build --release --bin marlin-smb --features smb-sidecar --target ${{ matrix.target }}
+          # Copy sidecar to binaries directory with target triple suffix (Tauri convention)
+          mkdir -p binaries
+          cp target/${{ matrix.target }}/release/marlin-smb binaries/marlin-smb-${{ matrix.target }}
+
+      - name: Codesign SMB sidecar (macOS)
+        if: matrix.smb && runner.os == 'macOS' && env.APPLE_SIGNING_IDENTITY != '-'
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '-' }}
+        run: |
+          codesign --force --options runtime --sign "$APPLE_SIGNING_IDENTITY" src-tauri/binaries/marlin-smb-${{ matrix.target }}
+
       - name: Build and publish installers
         uses: tauri-apps/tauri-action@v0
         env:
@@ -358,7 +374,7 @@ jobs:
             **macOS users**: Choose `arm64` for Apple Silicon (M1/M2/M3) or `x86_64` for Intel Macs.
           releaseDraft: false
           prerelease: ${{ startsWith(env.RELEASE_TAG, 'v0.') }}
-          args: --target ${{ matrix.target }} --verbose ${{ matrix.smb && '--features smb' || '' }} ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '--bundles deb' || '' }}
+          args: --target ${{ matrix.target }} --verbose ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '--bundles deb' || '' }}
 
   release-dry-run:
     name: Dry Run (${{ matrix.os }} • ${{ matrix.arch }})
@@ -513,10 +529,19 @@ jobs:
           # Small delay to ensure resources are released
           sleep 2
 
+      - name: Build SMB sidecar
+        if: matrix.smb
+        run: |
+          cd src-tauri
+          cargo build --release --bin marlin-smb --features smb-sidecar --target ${{ matrix.target }}
+          # Copy sidecar to binaries directory with target triple suffix (Tauri convention)
+          mkdir -p binaries
+          cp target/${{ matrix.target }}/release/marlin-smb binaries/marlin-smb-${{ matrix.target }}
+
       - name: Build Tauri bundle
         run: |
           set -euxo pipefail
-          npm run tauri build -- --ci --target ${{ matrix.target }} --verbose ${{ matrix.smb && '--features smb' || '' }} ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '--bundles deb' || '' }}
+          npm run tauri build -- --ci --target ${{ matrix.target }} --verbose ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '--bundles deb' || '' }}
         env:
           APPIMAGE_EXTRACT_AND_RUN: ${{ runner.os == 'Linux' && '1' || '0' }}
           TAURI_BUNDLE_DEBUG: '1'

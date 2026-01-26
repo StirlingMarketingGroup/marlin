@@ -13,6 +13,10 @@ mod plugins;
 mod state;
 mod thumbnails;
 
+// SMB sidecar module - only compiled for the sidecar binary
+#[cfg(feature = "smb-sidecar")]
+pub mod smb_sidecar;
+
 use state::{DirectoryStreamState, FolderSizeState, MenuState, TrashUndoState};
 use std::sync::Mutex;
 use std::sync::OnceLock;
@@ -193,6 +197,7 @@ pub fn run() {
             commands::remove_smb_server,
             commands::test_smb_connection,
             commands::download_smb_file,
+            commands::get_smb_status,
             plugins::drag_detector::enable_drag_detection,
             plugins::drag_detector::set_drop_zone,
             plugins::drag_detector::simulate_drop,

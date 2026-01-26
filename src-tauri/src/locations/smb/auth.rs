@@ -311,44 +311,39 @@ pub fn remove_smb_server(hostname: &str) -> Result<(), String> {
 }
 
 /// Test connection to an SMB server (without saving credentials)
-#[cfg(feature = "smb")]
 pub fn test_smb_connection(
     hostname: &str,
     username: &str,
     password: &str,
     domain: Option<&str>,
 ) -> Result<bool, String> {
-    use pavao::{SmbClient, SmbCredentials, SmbOptions};
+    use super::client::{self, SidecarStatus};
 
-    let _guard = super::SMB_MUTEX
-        .lock()
-        .map_err(|e| format!("SMB mutex poisoned: {}", e))?;
-
-    let smb_url = format!("smb://{}", hostname);
-
-    let mut credentials = SmbCredentials::default()
-        .server(&smb_url)
-        .share("/")
-        .username(username)
-        .password(password);
-
-    if let Some(d) = domain {
-        credentials = credentials.workgroup(d);
+    // Check sidecar availability
+    if !client::is_available() {
+        let status = client::initialize();
+        if status != SidecarStatus::Available {
+            return Err(status.error_message().unwrap_or_else(|| {
+                "SMB support is not available".to_string()
+            }));
+        }
     }
 
-    match SmbClient::new(credentials, SmbOptions::default()) {
-        Ok(_) => Ok(true),
-        Err(e) => Err(format!("Connection failed: {}", e)),
-    }
-}
+    let params = serde_json::json!({
+        "credentials": {
+            "hostname": hostname,
+            "username": username,
+            "password": password,
+            "domain": domain
+        }
+    });
 
-/// Test connection stub when SMB feature is disabled
-#[cfg(not(feature = "smb"))]
-pub fn test_smb_connection(
-    _hostname: &str,
-    _username: &str,
-    _password: &str,
-    _domain: Option<&str>,
-) -> Result<bool, String> {
-    Err("SMB support not compiled. Build with --features smb".to_string())
+    let result: serde_json::Value = client::call_method("test_connection", params)?;
+
+    let success = result
+        .get("success")
+        .and_then(|s| s.as_bool())
+        .unwrap_or(false);
+
+    Ok(success)
 }
