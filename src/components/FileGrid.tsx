@@ -251,7 +251,14 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     clipboardMode,
     clipboardPathsSet,
   } = useAppStore();
-  const { renameTargetPath, renameLoading, setRenameTarget, renameFile } = useAppStore();
+  const {
+    renameTargetPath,
+    renameLoading,
+    setRenameTarget,
+    renameFile,
+    cancelRename: cancelRenameAction,
+    justCreatedPath,
+  } = useAppStore();
   const { startNativeDrag, endNativeDrag, isDraggedDirectory } = useDragStore();
   const [renameText, setRenameText] = useState<string>('');
   const [draggedFile, setDraggedFile] = useState<string | null>(null);
@@ -652,7 +659,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     setRenameText('');
     setRenameInputWidth(undefined);
     setRenameInputOffset(0);
-    setRenameTarget(undefined);
+    void cancelRenameAction();
     // Restore on next frame after reflow
     requestAnimationFrame(() => {
       if (scroller) scroller.scrollTo({ top, left, behavior: 'auto' });
@@ -960,7 +967,15 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
                 onDragStart={(e) => {
                   e.stopPropagation();
                 }}
-                onBlur={() => !renameLoading && cancelRename()}
+                onBlur={() => {
+                  if (renameLoading) return;
+                  // Only auto-commit for newly created folders; cancel for regular renames
+                  if (justCreatedPath === file.path) {
+                    void commitRename();
+                  } else {
+                    cancelRename();
+                  }
+                }}
                 disabled={renameLoading}
                 data-tauri-drag-region={false}
                 draggable={false}

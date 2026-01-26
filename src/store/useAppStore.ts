@@ -288,6 +288,7 @@ interface AppState {
   cancelDirectoryStream: () => Promise<void>;
   openFile: (file: FileItem) => Promise<void>;
   extractArchive: (file: FileItem) => Promise<boolean>;
+  createNewFolder: () => Promise<void>;
   trashSelected: () => Promise<void>;
   deleteSelectedPermanently: () => Promise<void>;
   fetchAppIcon: (path: string, size?: number) => Promise<string | undefined>;
@@ -322,10 +323,12 @@ interface AppState {
   syncClipboardState: () => Promise<void>;
   clearClipboardState: () => void;
   // Rename UX
+  justCreatedPath?: string;
   renameTargetPath?: string;
   renameLoading: boolean;
   setRenameTarget: (path?: string) => void;
   beginRenameSelected: () => void;
+  cancelRename: () => Promise<void>;
   renameFile: (newName: string) => Promise<void>;
   pendingRevealTarget?: string;
   setPendingRevealTarget: (path?: string) => void;
@@ -538,6 +541,8 @@ export const useAppStore = create<AppState>((set, get) => ({
           historyIndex: newHistory.length - 1,
           filterText: '',
           showFilterInput: false,
+          justCreatedPath: undefined,
+          renameTargetPath: undefined,
         });
         // Explicitly refresh the directory for Google Drive URLs
         await get().refreshCurrentDirectory();
@@ -567,6 +572,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       historyIndex: newHistory.length - 1,
       filterText: '',
       showFilterInput: false,
+      justCreatedPath: undefined,
+      renameTargetPath: undefined,
     });
 
     // For URI paths (smb://, gdrive://, etc.), explicitly refresh the directory
@@ -587,6 +594,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         currentPath: newPath,
         currentLocationRaw: locationRaw,
         historyIndex: newIndex,
+        justCreatedPath: undefined,
+        renameTargetPath: undefined,
       });
       void get().refreshGitStatus({ path: newPath });
     }
@@ -602,6 +611,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         currentPath: newPath,
         currentLocationRaw: locationRaw,
         historyIndex: newIndex,
+        justCreatedPath: undefined,
+        renameTargetPath: undefined,
       });
       void get().refreshGitStatus({ path: newPath });
     }
@@ -2235,6 +2246,48 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
+  createNewFolder: async () => {
+    const state = get();
+    const toastStore = useToastStore.getState();
+    const baseDir = state.currentPath;
+
+    if (!baseDir || baseDir.includes('://')) {
+      toastStore.addToast({
+        type: 'error',
+        message: 'New folders can only be created in local directories.',
+        duration: 5000,
+      });
+      return;
+    }
+
+    // Cancel any active rename first to avoid accidental commits
+    if (state.renameTargetPath) {
+      await state.cancelRename();
+    }
+
+    try {
+      const createdPath = await invoke<string>('create_folder', { baseDir });
+      await state.refreshCurrentDirectoryStreaming();
+      set({
+        justCreatedPath: createdPath,
+        renameTargetPath: createdPath,
+        renameLoading: false,
+      });
+      state.setSelectedFiles([createdPath]);
+      state.setSelectionAnchor(createdPath);
+      state.setSelectionLead(createdPath);
+      state.setPendingRevealTarget(createdPath);
+    } catch (error) {
+      console.error('Failed to create new folder:', error);
+      const msg = error instanceof Error ? error.message : String(error);
+      toastStore.addToast({
+        type: 'error',
+        message: `Failed to create folder: ${msg}`,
+        duration: 5000,
+      });
+    }
+  },
+
   syncClipboardState: async () => {
     try {
       const clipboardInfo = await invoke<ClipboardInfo>('clipboard_get_contents');
@@ -2278,6 +2331,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   // Rename state
+  justCreatedPath: undefined,
   renameTargetPath: undefined,
   renameLoading: false,
   pendingRevealTarget: undefined,
@@ -2286,6 +2340,37 @@ export const useAppStore = create<AppState>((set, get) => ({
     const { selectedFiles } = get();
     if (!selectedFiles || selectedFiles.length === 0) return;
     set({ renameTargetPath: selectedFiles[0] });
+  },
+  cancelRename: async () => {
+    const state = get();
+    const target = state.renameTargetPath;
+    if (!target) return;
+
+    const isJustCreated = state.justCreatedPath === target;
+    set({
+      renameTargetPath: undefined,
+      renameLoading: false,
+      justCreatedPath: isJustCreated ? undefined : state.justCreatedPath,
+    });
+
+    if (!isJustCreated) return;
+
+    try {
+      const listing = await invoke<DirectoryListingResponse>('read_directory', { path: target });
+      if (listing.entries.length === 0) {
+        await invoke('delete_file', { path: target });
+        state.setSelectedFiles([]);
+        state.setSelectionAnchor(undefined);
+        state.setSelectionLead(undefined);
+        if (state.currentPath?.includes('://')) {
+          await state.refreshCurrentDirectory();
+        } else {
+          await state.refreshCurrentDirectoryStreaming();
+        }
+      }
+    } catch (error) {
+      console.warn('Failed to clean up newly created folder:', error);
+    }
   },
   renameFile: async (newName: string) => {
     const state = get();
@@ -2296,10 +2381,17 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({ renameTargetPath: undefined });
       return;
     }
-    if (/[\\/]/.test(trimmed)) {
-      // Invalid characters for a single path segment
+
+    const sep = target.includes('\\') ? '\\' : '/';
+    const lastSep = Math.max(target.lastIndexOf('/'), target.lastIndexOf('\\'));
+    const parent = lastSep >= 0 ? target.slice(0, lastSep) : state.currentPath;
+    const hasSlash = /[\\/]/.test(trimmed);
+    const isJustCreated = state.justCreatedPath === target;
+
+    // For remote paths, don't allow slashes (nested creation not supported)
+    if (hasSlash && state.currentPath?.includes('://')) {
       try {
-        await message('Name cannot contain slashes.', {
+        await message('Nested folder creation is not supported for remote paths.', {
           title: 'Invalid Name',
           kind: 'warning',
           okLabel: 'OK',
@@ -2310,19 +2402,69 @@ export const useAppStore = create<AppState>((set, get) => ({
       return;
     }
 
-    const sep = target.includes('\\') ? '\\' : '/';
-    const lastSep = Math.max(target.lastIndexOf('/'), target.lastIndexOf('\\'));
-    const parent = lastSep >= 0 ? target.slice(0, lastSep) : state.currentPath;
-    const toPath = parent ? `${parent}${sep}${trimmed}` : trimmed;
-
     // Set loading state to show feedback during rename operation
     set({ renameLoading: true });
 
     try {
-      // Tauri command args expect camelCase keys
-      await invoke('rename_file', { fromPath: target, toPath });
-      set({ renameTargetPath: undefined, renameLoading: false });
-      state.setSelectedFiles([toPath]);
+      let finalPath: string;
+
+      if (hasSlash) {
+        // VSCode-style: create nested directories
+        // Normalize to forward slashes and split
+        const normalized = trimmed.replace(/\\/g, '/');
+        const segments = normalized.split('/').filter((s) => s.trim());
+
+        if (segments.length === 0) {
+          set({ renameLoading: false });
+          return;
+        }
+
+        if (isJustCreated) {
+          // For a just-created folder with slashes: delete temp folder, create nested path
+          // First delete the temporary "New Folder"
+          try {
+            await invoke('delete_file', { path: target });
+          } catch (deleteErr) {
+            console.warn('Failed to delete temp folder during nested creation:', deleteErr);
+          }
+
+          // Create the nested directory structure
+          finalPath = await invoke<string>('create_nested_folders', {
+            baseDir: parent,
+            nestedPath: normalized,
+          });
+        } else {
+          // For existing files/folders: create parent directories and move the item
+          // The nested path is: parentSegments/finalName
+          const parentSegments = segments.slice(0, -1);
+          const finalName = segments[segments.length - 1];
+
+          // Create intermediate directories if any
+          let moveToParent = parent;
+          if (parentSegments.length > 0) {
+            moveToParent = await invoke<string>('create_nested_folders', {
+              baseDir: parent,
+              nestedPath: parentSegments.join('/'),
+            });
+          }
+
+          // Now rename/move the file to the new location
+          finalPath = moveToParent ? `${moveToParent}${sep}${finalName}` : finalName;
+          await invoke('rename_file', { fromPath: target, toPath: finalPath });
+        }
+      } else {
+        // Simple rename without slashes
+        finalPath = parent ? `${parent}${sep}${trimmed}` : trimmed;
+        await invoke('rename_file', { fromPath: target, toPath: finalPath });
+      }
+
+      set({
+        renameTargetPath: undefined,
+        renameLoading: false,
+        justCreatedPath: isJustCreated ? undefined : state.justCreatedPath,
+      });
+      state.setSelectedFiles([finalPath]);
+
       // Use non-streaming refresh for remote paths (gdrive://)
       if (state.currentPath?.includes('://')) {
         await state.refreshCurrentDirectory();

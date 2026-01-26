@@ -76,13 +76,16 @@ pub fn create_menu<R: Runtime>(
     let new_window_item = MenuItemBuilder::with_id("menu:new_window", "New Window")
         .accelerator("CmdOrCtrl+N")
         .build(app)?;
+    let new_folder_item = MenuItemBuilder::with_id("menu:new_folder", "New Folder")
+        .accelerator("CmdOrCtrl+Shift+N")
+        .build(app)?;
 
     // Create File submenu
     #[cfg(target_os = "macos")]
     let file_submenu = SubmenuBuilder::new(app, "File")
         .item(&new_window_item)
         .separator()
-        .text("menu:new_folder", "New Folder")
+        .item(&new_folder_item)
         .separator()
         .text("menu:refresh", "Refresh")
         .separator()
@@ -95,7 +98,7 @@ pub fn create_menu<R: Runtime>(
         .separator()
         .item(&preferences_item)
         .separator()
-        .text("menu:new_folder", "New Folder")
+        .item(&new_folder_item)
         .separator()
         .text("menu:refresh", "Refresh")
         .separator()

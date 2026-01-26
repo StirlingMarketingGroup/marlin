@@ -902,6 +902,9 @@ function App() {
       await register('menu:rename', () => {
         useAppStore.getState().beginRenameSelected();
       });
+      await register('menu:new_folder', () => {
+        void useAppStore.getState().createNewFolder();
+      });
       await register('menu:reveal_symlink', async () => {
         const state = useAppStore.getState();
         const selection = state.selectedFiles;
@@ -1414,9 +1417,22 @@ function App() {
       const isTauri =
         typeof (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ !==
         'undefined';
+      const isRenaming = !!useAppStore.getState().renameTargetPath;
+      const hasModal = !!document.querySelector(
+        '[role="dialog"], [aria-modal="true"], [data-modal="true"]'
+      );
+
+      // New folder: Cmd/Ctrl+Shift+N
+      if (e.shiftKey && !e.altKey && (e.key === 'n' || e.key === 'N')) {
+        if (!inEditable && !isRenaming && !hasModal) {
+          e.preventDefault();
+          void useAppStore.getState().createNewFolder();
+        }
+        return;
+      }
 
       // New window: Cmd/Ctrl+N
-      if (e.key === 'n' || e.key === 'N') {
+      if (!e.shiftKey && (e.key === 'n' || e.key === 'N')) {
         e.preventDefault();
         const currentPath = useAppStore.getState().currentPath;
         invoke('new_window', { path: currentPath }).catch((err) => {
