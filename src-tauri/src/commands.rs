@@ -1510,6 +1510,19 @@ fn validate_new_folder_name(name: &str) -> Result<(), String> {
     validate_path_segment(trimmed)
 }
 
+/// Validate a file name that does NOT allow slashes (for single file creation)
+fn validate_new_file_name(name: &str) -> Result<(), String> {
+    let trimmed = name.trim();
+    if trimmed.contains('/') || trimmed.contains('\\') {
+        return Err("File name cannot include path separators".to_string());
+    }
+    if trimmed.starts_with("\\\\") || Path::new(trimmed).is_absolute() {
+        return Err("File name must be a simple name, not a path".to_string());
+    }
+    // Reuse folder segment validation to catch reserved names/invalid chars.
+    validate_path_segment(trimmed).map_err(|err| err.replace("Folder name", "File name"))
+}
+
 #[command]
 pub fn resolve_symlink_parent_command(path: String) -> Result<SymlinkResolution, String> {
     let expanded_path = expand_path(&path)?;
@@ -1578,6 +1591,72 @@ pub fn create_folder(base_dir: String, name: Option<String>) -> Result<String, S
     }
 
     Err("Unable to create a unique folder name".to_string())
+}
+
+#[command]
+pub fn create_file(base_dir: String, name: Option<String>) -> Result<String, String> {
+    let base_dir = base_dir.trim();
+    if base_dir.is_empty() {
+        return Err("Base directory is required".to_string());
+    }
+    if base_dir.contains("://") {
+        return Err("New file creation is only supported for local paths".to_string());
+    }
+
+    let base_path = expand_path(base_dir)?;
+    if !base_path.exists() {
+        return Err(format!("Base directory does not exist: {}", base_dir));
+    }
+    if !base_path.is_dir() {
+        return Err("Base path is not a directory".to_string());
+    }
+
+    let base_canon =
+        fs::canonicalize(&base_path).map_err(|e| format!("Failed to resolve base dir: {}", e))?;
+
+    #[cfg(target_os = "macos")]
+    let _scope_guard = macos_security::retain_access(&base_canon)?;
+
+    let desired = name
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("Untitled")
+        .to_string();
+
+    validate_new_file_name(&desired)?;
+
+    for attempt in 0..1000usize {
+        let candidate_name = if attempt == 0 {
+            desired.clone()
+        } else {
+            format!("{} ({})", desired, attempt)
+        };
+        let candidate_path = base_path.join(&candidate_name);
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate_path)
+        {
+            Ok(_file) => {
+                let created_canon = fs::canonicalize(&candidate_path)
+                    .map_err(|e| format!("Failed to resolve created file: {}", e))?;
+                if !created_canon.starts_with(&base_canon) {
+                    let _ = fs::remove_file(&candidate_path);
+                    return Err("File creation escaped the base directory".to_string());
+                }
+
+                #[cfg(target_os = "macos")]
+                macos_security::persist_bookmark(&candidate_path, "creating file");
+
+                return Ok(candidate_path.to_string_lossy().to_string());
+            }
+            Err(err) if err.kind() == ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(format!("Failed to create file: {}", err)),
+        }
+    }
+
+    Err("Unable to create a unique file name".to_string())
 }
 
 /// Create nested folders from a slash-delimited path (VSCode-style).
@@ -4809,6 +4888,9 @@ pub fn show_native_context_menu(
         builder = builder.separator();
     } else {
         // Background context menu: paste into the current directory.
+        let new_file_item = MenuItemBuilder::with_id("menu:new_file", "New File")
+            .build(&app)
+            .map_err(|e| e.to_string())?;
         let new_folder_item = MenuItemBuilder::with_id("menu:new_folder", "New Folder")
             .build(&app)
             .map_err(|e| e.to_string())?;
@@ -4817,6 +4899,7 @@ pub fn show_native_context_menu(
             .build(&app)
             .map_err(|e| e.to_string())?;
         builder = builder
+            .item(&new_file_item)
             .item(&new_folder_item)
             .item(&paste_files_item)
             .separator();

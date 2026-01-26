@@ -79,12 +79,16 @@ pub fn create_menu<R: Runtime>(
     let new_folder_item = MenuItemBuilder::with_id("menu:new_folder", "New Folder")
         .accelerator("CmdOrCtrl+Shift+N")
         .build(app)?;
+    let new_file_item = MenuItemBuilder::with_id("menu:new_file", "New File")
+        .accelerator("CmdOrCtrl+Alt+N")
+        .build(app)?;
 
     // Create File submenu
     #[cfg(target_os = "macos")]
     let file_submenu = SubmenuBuilder::new(app, "File")
         .item(&new_window_item)
         .separator()
+        .item(&new_file_item)
         .item(&new_folder_item)
         .separator()
         .text("menu:refresh", "Refresh")
@@ -98,6 +102,7 @@ pub fn create_menu<R: Runtime>(
         .separator()
         .item(&preferences_item)
         .separator()
+        .item(&new_file_item)
         .item(&new_folder_item)
         .separator()
         .text("menu:refresh", "Refresh")
@@ -398,6 +403,9 @@ pub fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, event: &tauri::menu::Me
         }
         "menu:new_folder" => {
             let _ = app.emit("menu:new_folder", ());
+        }
+        "menu:new_file" => {
+            let _ = app.emit("menu:new_file", ());
         }
         "menu:new_window" => {
             let _ = app.emit("menu:new_window", ());

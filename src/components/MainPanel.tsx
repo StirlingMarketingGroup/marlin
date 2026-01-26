@@ -201,6 +201,32 @@ export default function MainPanel() {
     setSelectedFiles([]);
   };
 
+  const handleContainerBackgroundDoubleClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    const target = e.target as HTMLElement;
+    if (target.closest('[data-file-item="true"]')) return;
+    if (
+      target.closest('button, a, input, select, textarea, [role="button"], [data-prevent-deselect]')
+    )
+      return;
+
+    const active = document.activeElement as HTMLElement | null;
+    const inEditable =
+      !!active &&
+      (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable);
+    if (inEditable) return;
+
+    const hasModal = !!document.querySelector(
+      '[role="dialog"], [aria-modal="true"], [data-modal="true"]'
+    );
+    if (hasModal) return;
+
+    const state = useAppStore.getState();
+    if (state.renameTargetPath) return;
+
+    e.preventDefault();
+    void state.createNewFile();
+  };
+
   const stopAutoScroll = () => {
     if (autoScrollFrameRef.current !== null) {
       cancelAnimationFrame(autoScrollFrameRef.current);
@@ -520,6 +546,7 @@ export default function MainPanel() {
         onContextMenuCapture={handleContextMenuCapture}
         onContextMenu={handleContextMenu}
         onClick={handleContainerBackgroundClick}
+        onDoubleClick={handleContainerBackgroundDoubleClick}
         onPointerDown={startMarquee}
       >
         {/* Mask old content while loading to avoid layout flicker during view changes */}
