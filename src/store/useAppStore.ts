@@ -289,6 +289,7 @@ interface AppState {
   openFile: (file: FileItem) => Promise<void>;
   extractArchive: (file: FileItem) => Promise<boolean>;
   createNewFolder: () => Promise<void>;
+  createNewFile: () => Promise<void>;
   trashSelected: () => Promise<void>;
   deleteSelectedPermanently: () => Promise<void>;
   fetchAppIcon: (path: string, size?: number) => Promise<string | undefined>;
@@ -2288,6 +2289,48 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
+  createNewFile: async () => {
+    const state = get();
+    const toastStore = useToastStore.getState();
+    const baseDir = state.currentPath;
+
+    if (!baseDir || baseDir.includes('://')) {
+      toastStore.addToast({
+        type: 'error',
+        message: 'New files can only be created in local directories.',
+        duration: 5000,
+      });
+      return;
+    }
+
+    // Cancel any active rename first to avoid accidental commits
+    if (state.renameTargetPath) {
+      await state.cancelRename();
+    }
+
+    try {
+      const createdPath = await invoke<string>('create_file', { baseDir });
+      await state.refreshCurrentDirectoryStreaming();
+      set({
+        justCreatedPath: createdPath,
+        renameTargetPath: createdPath,
+        renameLoading: false,
+      });
+      state.setSelectedFiles([createdPath]);
+      state.setSelectionAnchor(createdPath);
+      state.setSelectionLead(createdPath);
+      state.setPendingRevealTarget(createdPath);
+    } catch (error) {
+      console.error('Failed to create new file:', error);
+      const msg = error instanceof Error ? error.message : String(error);
+      toastStore.addToast({
+        type: 'error',
+        message: `Failed to create file: ${msg}`,
+        duration: 5000,
+      });
+    }
+  },
+
   syncClipboardState: async () => {
     try {
       const clipboardInfo = await invoke<ClipboardInfo>('clipboard_get_contents');
@@ -2347,6 +2390,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (!target) return;
 
     const isJustCreated = state.justCreatedPath === target;
+    const targetItem = state.files.find((file) => file.path === target);
     set({
       renameTargetPath: undefined,
       renameLoading: false,
@@ -2356,20 +2400,40 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (!isJustCreated) return;
 
     try {
-      const listing = await invoke<DirectoryListingResponse>('read_directory', { path: target });
-      if (listing.entries.length === 0) {
-        await invoke('delete_file', { path: target });
-        state.setSelectedFiles([]);
-        state.setSelectionAnchor(undefined);
-        state.setSelectionLead(undefined);
-        if (state.currentPath?.includes('://')) {
-          await state.refreshCurrentDirectory();
+      let metadata = targetItem;
+      if (!metadata) {
+        metadata = await invoke<FileItem>('get_file_metadata', { path: target });
+      }
+      if (!metadata) {
+        return;
+      }
+
+      if (metadata.is_directory) {
+        const listing = await invoke<DirectoryListingResponse>('read_directory', { path: target });
+        if (listing.entries.length === 0) {
+          await invoke('delete_file', { path: target });
         } else {
-          await state.refreshCurrentDirectoryStreaming();
+          return;
+        }
+      } else {
+        // For files: only delete if still empty (0 bytes)
+        if (metadata.size === 0) {
+          await invoke('delete_file', { path: target });
+        } else {
+          return;
         }
       }
+
+      state.setSelectedFiles([]);
+      state.setSelectionAnchor(undefined);
+      state.setSelectionLead(undefined);
+      if (state.currentPath?.includes('://')) {
+        await state.refreshCurrentDirectory();
+      } else {
+        await state.refreshCurrentDirectoryStreaming();
+      }
     } catch (error) {
-      console.warn('Failed to clean up newly created folder:', error);
+      console.warn('Failed to clean up newly created item:', error);
     }
   },
   renameFile: async (newName: string) => {
@@ -2419,39 +2483,22 @@ export const useAppStore = create<AppState>((set, get) => ({
           return;
         }
 
-        if (isJustCreated) {
-          // For a just-created folder with slashes: delete temp folder, create nested path
-          // First delete the temporary "New Folder"
-          try {
-            await invoke('delete_file', { path: target });
-          } catch (deleteErr) {
-            console.warn('Failed to delete temp folder during nested creation:', deleteErr);
-          }
+        // The nested path is: parentSegments/finalName
+        const parentSegments = segments.slice(0, -1);
+        const finalName = segments[segments.length - 1];
 
-          // Create the nested directory structure
-          finalPath = await invoke<string>('create_nested_folders', {
+        // Create intermediate directories if any
+        let moveToParent = parent;
+        if (parentSegments.length > 0) {
+          moveToParent = await invoke<string>('create_nested_folders', {
             baseDir: parent,
-            nestedPath: normalized,
+            nestedPath: parentSegments.join('/'),
           });
-        } else {
-          // For existing files/folders: create parent directories and move the item
-          // The nested path is: parentSegments/finalName
-          const parentSegments = segments.slice(0, -1);
-          const finalName = segments[segments.length - 1];
-
-          // Create intermediate directories if any
-          let moveToParent = parent;
-          if (parentSegments.length > 0) {
-            moveToParent = await invoke<string>('create_nested_folders', {
-              baseDir: parent,
-              nestedPath: parentSegments.join('/'),
-            });
-          }
-
-          // Now rename/move the file to the new location
-          finalPath = moveToParent ? `${moveToParent}${sep}${finalName}` : finalName;
-          await invoke('rename_file', { fromPath: target, toPath: finalPath });
         }
+
+        // Now rename/move the file to the new location
+        finalPath = moveToParent ? `${moveToParent}${sep}${finalName}` : finalName;
+        await invoke('rename_file', { fromPath: target, toPath: finalPath });
       } else {
         // Simple rename without slashes
         finalPath = parent ? `${parent}${sep}${trimmed}` : trimmed;

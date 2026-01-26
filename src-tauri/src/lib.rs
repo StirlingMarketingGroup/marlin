@@ -111,6 +111,7 @@ pub fn run() {
             commands::get_file_metadata,
             commands::resolve_symlink_parent_command,
             commands::create_folder,
+            commands::create_file,
             commands::create_nested_folders,
             commands::create_directory_command,
             commands::delete_file,

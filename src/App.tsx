@@ -902,6 +902,9 @@ function App() {
       await register('menu:rename', () => {
         useAppStore.getState().beginRenameSelected();
       });
+      await register('menu:new_file', () => {
+        void useAppStore.getState().createNewFile();
+      });
       await register('menu:new_folder', () => {
         void useAppStore.getState().createNewFolder();
       });
@@ -1431,8 +1434,17 @@ function App() {
         return;
       }
 
+      // New file: Cmd/Ctrl+Alt+N
+      if (!e.shiftKey && e.altKey && (e.key === 'n' || e.key === 'N')) {
+        if (!inEditable && !isRenaming && !hasModal) {
+          e.preventDefault();
+          void useAppStore.getState().createNewFile();
+        }
+        return;
+      }
+
       // New window: Cmd/Ctrl+N
-      if (!e.shiftKey && (e.key === 'n' || e.key === 'N')) {
+      if (!e.shiftKey && !e.altKey && (e.key === 'n' || e.key === 'N')) {
         e.preventDefault();
         const currentPath = useAppStore.getState().currentPath;
         invoke('new_window', { path: currentPath }).catch((err) => {
