@@ -65,13 +65,15 @@ use zstd::stream::read::Decoder as ZstdDecoder;
 use trash::os_limited;
 
 #[cfg(target_os = "macos")]
-use cocoa::base::{id, nil, BOOL, NO};
+use objc2::class;
 #[cfg(target_os = "macos")]
-use cocoa::foundation::{NSAutoreleasePool, NSString};
+use objc2::msg_send;
 #[cfg(target_os = "macos")]
-use objc::rc::StrongPtr;
+use objc2::rc::autoreleasepool;
 #[cfg(target_os = "macos")]
-use objc::{class, msg_send, sel, sel_impl};
+use objc2::runtime::{AnyObject, Bool};
+#[cfg(target_os = "macos")]
+use objc2_foundation::NSString;
 #[cfg(target_os = "macos")]
 use std::ffi::CStr;
 #[cfg(target_os = "macos")]
@@ -255,8 +257,8 @@ fn cleanup_trash_undo_records(state: &TrashUndoState) {
 }
 
 #[cfg(target_os = "macos")]
-fn nsstring_to_string(ns_string: id) -> Option<String> {
-    if ns_string == nil {
+fn nsstring_to_string(ns_string: *mut AnyObject) -> Option<String> {
+    if ns_string.is_null() {
         return None;
     }
 
@@ -271,25 +273,25 @@ fn nsstring_to_string(ns_string: id) -> Option<String> {
 }
 
 #[cfg(target_os = "macos")]
-fn nserror_to_string(error: id) -> Option<String> {
-    if error == nil {
+fn nserror_to_string(error: *mut AnyObject) -> Option<String> {
+    if error.is_null() {
         return None;
     }
 
     unsafe {
-        let description: id = msg_send![error, localizedDescription];
+        let description: *mut AnyObject = msg_send![error, localizedDescription];
         nsstring_to_string(description)
     }
 }
 
 #[cfg(target_os = "macos")]
-fn nsurl_path(url: id) -> Option<String> {
-    if url == nil {
+fn nsurl_path(url: *mut AnyObject) -> Option<String> {
+    if url.is_null() {
         return None;
     }
 
     unsafe {
-        let path: id = msg_send![url, path];
+        let path: *mut AnyObject = msg_send![url, path];
         nsstring_to_string(path)
     }
 }
@@ -298,11 +300,10 @@ fn nsurl_path(url: id) -> Option<String> {
 fn macos_trash_items(paths: &[PathBuf]) -> Result<Vec<MacTrashUndoItem>, String> {
     use std::path::Path;
 
-    unsafe {
-        let _pool = NSAutoreleasePool::new(nil);
-        let file_manager: id = msg_send![class!(NSFileManager), defaultManager];
+    autoreleasepool(|_| unsafe {
+        let file_manager: *mut AnyObject = msg_send![class!(NSFileManager), defaultManager];
 
-        if file_manager == nil {
+        if file_manager.is_null() {
             return Err("Failed to acquire NSFileManager".to_string());
         }
 
@@ -313,34 +314,26 @@ fn macos_trash_items(paths: &[PathBuf]) -> Result<Vec<MacTrashUndoItem>, String>
 
             let _scope_guard = macos_security::retain_access(path)?;
 
-            let ns_path = NSString::alloc(nil).init_str(&original_path_str);
-            if ns_path == nil {
-                return Err(format!(
-                    "Failed to create NSString for path: {}",
-                    original_path_str
-                ));
-            }
-            let ns_path = StrongPtr::new(ns_path);
-
-            let url: id = msg_send![class!(NSURL), fileURLWithPath:*ns_path];
-            if url == nil {
+            let ns_path = NSString::from_str(&original_path_str);
+            let url: *mut AnyObject = msg_send![class!(NSURL), fileURLWithPath: &*ns_path];
+            if url.is_null() {
                 return Err(format!(
                     "Failed to create NSURL for path: {}",
                     original_path_str
                 ));
             }
-            let url = StrongPtr::retain(url);
 
-            let mut resulting_url: id = nil;
-            let mut error: id = nil;
+            let mut resulting_url: *mut AnyObject = std::ptr::null_mut();
+            let mut error: *mut AnyObject = std::ptr::null_mut();
 
-            let success: BOOL = msg_send![file_manager,
-                trashItemAtURL:*url
-                resultingItemURL:&mut resulting_url
-                error:&mut error
+            let success: Bool = msg_send![
+                file_manager,
+                trashItemAtURL: url,
+                resultingItemURL: &mut resulting_url,
+                error: &mut error
             ];
 
-            if success == NO {
+            if success.is_false() {
                 let message = nserror_to_string(error)
                     .unwrap_or_else(|| "Operation not permitted".to_string());
                 return Err(format!(
@@ -363,18 +356,17 @@ fn macos_trash_items(paths: &[PathBuf]) -> Result<Vec<MacTrashUndoItem>, String>
         }
 
         Ok(records)
-    }
+    })
 }
 
 #[cfg(target_os = "macos")]
 fn macos_restore_items(items: &[MacTrashUndoItem]) -> Result<(), String> {
     use std::path::Path;
 
-    unsafe {
-        let _pool = NSAutoreleasePool::new(nil);
-        let file_manager: id = msg_send![class!(NSFileManager), defaultManager];
+    autoreleasepool(|_| unsafe {
+        let file_manager: *mut AnyObject = msg_send![class!(NSFileManager), defaultManager];
 
-        if file_manager == nil {
+        if file_manager.is_null() {
             return Err("Failed to acquire NSFileManager".to_string());
         }
 
@@ -406,34 +398,33 @@ fn macos_restore_items(items: &[MacTrashUndoItem]) -> Result<(), String> {
             let _from_scope = macos_security::retain_access(from_path)?;
             let _to_scope = macos_security::retain_access(parent)?;
 
-            let from_ns = NSString::alloc(nil).init_str(&item.trashed_path);
-            if from_ns == nil {
+            let from_ns = NSString::from_str(&item.trashed_path);
+            let from_url: *mut AnyObject = msg_send![class!(NSURL), fileURLWithPath: &*from_ns];
+            if from_url.is_null() {
                 return Err(format!(
-                    "Failed to create NSString for trashed path: {}",
+                    "Failed to create NSURL for trashed path: {}",
                     item.trashed_path
                 ));
             }
-            let from_ns = StrongPtr::new(from_ns);
-            let from_url: id = msg_send![class!(NSURL), fileURLWithPath:*from_ns];
 
-            let to_ns = NSString::alloc(nil).init_str(&item.original_path);
-            if to_ns == nil {
+            let to_ns = NSString::from_str(&item.original_path);
+            let to_url: *mut AnyObject = msg_send![class!(NSURL), fileURLWithPath: &*to_ns];
+            if to_url.is_null() {
                 return Err(format!(
-                    "Failed to create NSString for original path: {}",
+                    "Failed to create NSURL for original path: {}",
                     item.original_path
                 ));
             }
-            let to_ns = StrongPtr::new(to_ns);
-            let to_url: id = msg_send![class!(NSURL), fileURLWithPath:*to_ns];
 
-            let mut error: id = nil;
-            let success: BOOL = msg_send![file_manager,
-                moveItemAtURL:from_url
-                toURL:to_url
-                error:&mut error
+            let mut error: *mut AnyObject = std::ptr::null_mut();
+            let success: Bool = msg_send![
+                file_manager,
+                moveItemAtURL: from_url,
+                toURL: to_url,
+                error: &mut error
             ];
 
-            if success == NO {
+            if success.is_false() {
                 let message = nserror_to_string(error)
                     .unwrap_or_else(|| "Operation not permitted".to_string());
                 return Err(format!(
@@ -446,7 +437,7 @@ fn macos_restore_items(items: &[MacTrashUndoItem]) -> Result<(), String> {
         }
 
         Ok(())
-    }
+    })
 }
 
 fn schedule_folder_size_auto_start(app: &AppHandle, request_id: String, paths: Vec<String>) {
