@@ -37,6 +37,7 @@ export default function ContextMenu({ x, y, isFileContext, onRequestClose }: Con
     copySelectedFiles,
     cutSelectedFiles,
     pasteFiles,
+    createNewFolder,
     syncClipboardState,
     canPasteFiles,
     canPasteImage,
@@ -239,6 +240,17 @@ export default function ContextMenu({ x, y, isFileContext, onRequestClose }: Con
               Cut
             </button>
           </>
+        )}
+        {!isFileContext && (
+          <button
+            className="w-full text-left px-3 py-2 hover:bg-app-light"
+            onClick={() => {
+              onRequestClose();
+              void createNewFolder();
+            }}
+          >
+            New Folder
+          </button>
         )}
         {/* Paste is always available */}
         <button

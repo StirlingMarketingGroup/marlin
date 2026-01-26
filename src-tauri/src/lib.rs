@@ -110,6 +110,8 @@ pub fn run() {
             commands::cancel_directory_stream,
             commands::get_file_metadata,
             commands::resolve_symlink_parent_command,
+            commands::create_folder,
+            commands::create_nested_folders,
             commands::create_directory_command,
             commands::delete_file,
             commands::trash_paths,

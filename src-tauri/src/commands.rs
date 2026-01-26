@@ -10,7 +10,7 @@ use std::collections::HashSet;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use std::ffi::OsString;
 use std::fs;
-use std::io::{Read, Seek, Write};
+use std::io::{ErrorKind, Read, Seek, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command as OsCommand;
@@ -1432,12 +1432,229 @@ pub async fn get_file_metadata(path: LocationInput) -> Result<FileItem, String> 
     provider.get_file_metadata(&location).await
 }
 
+/// Validate a single path segment (folder name without slashes)
+fn validate_path_segment(name: &str) -> Result<(), String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("Folder name cannot be empty".to_string());
+    }
+    if trimmed == "." || trimmed == ".." {
+        return Err("Folder name cannot be '.' or '..'".to_string());
+    }
+
+    const INVALID_CHARS: [char; 7] = ['<', '>', ':', '"', '|', '?', '*'];
+    if trimmed
+        .chars()
+        .any(|ch| ch.is_control() || INVALID_CHARS.contains(&ch))
+    {
+        return Err(format!(
+            "Folder name '{}' contains invalid characters",
+            trimmed
+        ));
+    }
+
+    if trimmed.ends_with(' ') || trimmed.ends_with('.') {
+        return Err(format!(
+            "Folder name '{}' cannot end with a space or period",
+            trimmed
+        ));
+    }
+
+    let normalized = trimmed.trim_end_matches([' ', '.']);
+    let base = normalized.split('.').next().unwrap_or(normalized);
+    let upper = base.to_ascii_uppercase();
+    let is_reserved = matches!(
+        upper.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    );
+    if is_reserved {
+        return Err(format!(
+            "Folder name '{}' is reserved by the operating system",
+            trimmed
+        ));
+    }
+
+    Ok(())
+}
+
+/// Validate a folder name that does NOT allow slashes (for single folder creation)
+fn validate_new_folder_name(name: &str) -> Result<(), String> {
+    let trimmed = name.trim();
+    if trimmed.contains('/') || trimmed.contains('\\') {
+        return Err("Folder name cannot include path separators".to_string());
+    }
+    if trimmed.starts_with("\\\\") || Path::new(trimmed).is_absolute() {
+        return Err("Folder name must be a simple name, not a path".to_string());
+    }
+    validate_path_segment(trimmed)
+}
+
 #[command]
 pub fn resolve_symlink_parent_command(path: String) -> Result<SymlinkResolution, String> {
     let expanded_path = expand_path(&path)?;
     let path = Path::new(&expanded_path);
 
     resolve_symlink_parent(path)
+}
+
+#[command]
+pub fn create_folder(base_dir: String, name: Option<String>) -> Result<String, String> {
+    let base_dir = base_dir.trim();
+    if base_dir.is_empty() {
+        return Err("Base directory is required".to_string());
+    }
+    if base_dir.contains("://") {
+        return Err("New folder creation is only supported for local paths".to_string());
+    }
+
+    let base_path = expand_path(base_dir)?;
+    if !base_path.exists() {
+        return Err(format!("Base directory does not exist: {}", base_dir));
+    }
+    if !base_path.is_dir() {
+        return Err("Base path is not a directory".to_string());
+    }
+
+    let base_canon =
+        fs::canonicalize(&base_path).map_err(|e| format!("Failed to resolve base dir: {}", e))?;
+
+    #[cfg(target_os = "macos")]
+    let _scope_guard = macos_security::retain_access(&base_canon)?;
+
+    let desired = name
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("New Folder")
+        .to_string();
+
+    validate_new_folder_name(&desired)?;
+
+    for attempt in 0..1000usize {
+        let candidate_name = if attempt == 0 {
+            desired.clone()
+        } else {
+            format!("{} ({})", desired, attempt)
+        };
+        let candidate_path = base_path.join(&candidate_name);
+        match fs::create_dir(&candidate_path) {
+            Ok(()) => {
+                let created_canon = fs::canonicalize(&candidate_path)
+                    .map_err(|e| format!("Failed to resolve created folder: {}", e))?;
+                if !created_canon.starts_with(&base_canon) {
+                    let _ = fs::remove_dir(&candidate_path);
+                    return Err("Folder creation escaped the base directory".to_string());
+                }
+
+                #[cfg(target_os = "macos")]
+                macos_security::persist_bookmark(&candidate_path, "creating directory");
+
+                return Ok(candidate_path.to_string_lossy().to_string());
+            }
+            Err(err) if err.kind() == ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(format!("Failed to create folder: {}", err)),
+        }
+    }
+
+    Err("Unable to create a unique folder name".to_string())
+}
+
+/// Create nested folders from a slash-delimited path (VSCode-style).
+/// For example, "foo/bar/baz" creates all three directories.
+/// Returns the full path to the deepest created directory.
+#[command]
+pub fn create_nested_folders(base_dir: String, nested_path: String) -> Result<String, String> {
+    let base_dir = base_dir.trim();
+    if base_dir.is_empty() {
+        return Err("Base directory is required".to_string());
+    }
+    if base_dir.contains("://") {
+        return Err("Nested folder creation is only supported for local paths".to_string());
+    }
+
+    let base_path = expand_path(base_dir)?;
+    if !base_path.exists() {
+        return Err(format!("Base directory does not exist: {}", base_dir));
+    }
+    if !base_path.is_dir() {
+        return Err("Base path is not a directory".to_string());
+    }
+
+    let base_canon =
+        fs::canonicalize(&base_path).map_err(|e| format!("Failed to resolve base dir: {}", e))?;
+
+    #[cfg(target_os = "macos")]
+    let _scope_guard = macos_security::retain_access(&base_canon)?;
+
+    // Normalize the path: replace backslashes with forward slashes and split
+    let normalized = nested_path.trim().replace('\\', "/");
+    if normalized.is_empty() {
+        return Err("Nested path cannot be empty".to_string());
+    }
+
+    // Reject absolute paths
+    if normalized.starts_with('/') || Path::new(&normalized).is_absolute() {
+        return Err("Nested path cannot be absolute".to_string());
+    }
+
+    // Split into segments and validate each
+    let segments: Vec<&str> = normalized
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if segments.is_empty() {
+        return Err("Nested path cannot be empty".to_string());
+    }
+
+    for segment in &segments {
+        validate_path_segment(segment)?;
+    }
+
+    // Build the full target path
+    let mut target_path = base_path.clone();
+    for segment in &segments {
+        target_path = target_path.join(segment.trim());
+    }
+
+    // Create all directories
+    fs::create_dir_all(&target_path)
+        .map_err(|e| format!("Failed to create nested folders: {}", e))?;
+
+    // Verify the created path is still within base_dir (prevents symlink escapes)
+    let created_canon = fs::canonicalize(&target_path)
+        .map_err(|e| format!("Failed to resolve created folder: {}", e))?;
+    if !created_canon.starts_with(&base_canon) {
+        // Attempt cleanup - remove created directories in reverse order
+        let _ = fs::remove_dir_all(&target_path);
+        return Err("Folder creation escaped the base directory".to_string());
+    }
+
+    #[cfg(target_os = "macos")]
+    macos_security::persist_bookmark(&target_path, "creating nested directories");
+
+    Ok(target_path.to_string_lossy().to_string())
 }
 
 #[command]
@@ -4592,11 +4809,17 @@ pub fn show_native_context_menu(
         builder = builder.separator();
     } else {
         // Background context menu: paste into the current directory.
+        let new_folder_item = MenuItemBuilder::with_id("menu:new_folder", "New Folder")
+            .build(&app)
+            .map_err(|e| e.to_string())?;
         let paste_files_item = MenuItemBuilder::with_id("menu:paste_files", "Paste")
             .enabled(paste_enabled)
             .build(&app)
             .map_err(|e| e.to_string())?;
-        builder = builder.item(&paste_files_item).separator();
+        builder = builder
+            .item(&new_folder_item)
+            .item(&paste_files_item)
+            .separator();
     }
 
     let ctx_menu = builder

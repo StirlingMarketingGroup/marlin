@@ -184,7 +184,14 @@ export default function FileList({ files, preferences }: FileListProps) {
     clipboardMode,
     clipboardPathsSet,
   } = useAppStore();
-  const { renameTargetPath, renameLoading, setRenameTarget, renameFile } = useAppStore();
+  const {
+    renameTargetPath,
+    renameLoading,
+    setRenameTarget,
+    renameFile,
+    cancelRename: cancelRenameAction,
+    justCreatedPath,
+  } = useAppStore();
   const { startNativeDrag, endNativeDrag, isDraggedDirectory } = useDragStore();
   const [renameText, setRenameText] = useState<string>('');
   const renameInputRef = useRef<HTMLInputElement>(null);
@@ -322,7 +329,7 @@ export default function FileList({ files, preferences }: FileListProps) {
     const top = scroller?.scrollTop ?? 0;
     const left = scroller?.scrollLeft ?? 0;
     setRenameText('');
-    setRenameTarget(undefined);
+    void cancelRenameAction();
     requestAnimationFrame(() => {
       if (scroller) scroller.scrollTo({ top, left, behavior: 'auto' });
       requestAnimationFrame(() => {
@@ -773,7 +780,15 @@ export default function FileList({ files, preferences }: FileListProps) {
                 onDragStart={(e) => {
                   e.stopPropagation();
                 }}
-                onBlur={() => !renameLoading && cancelRename()}
+                onBlur={() => {
+                  if (renameLoading) return;
+                  // Only auto-commit for newly created folders; cancel for regular renames
+                  if (justCreatedPath === file.path) {
+                    void commitRename();
+                  } else {
+                    cancelRename();
+                  }
+                }}
                 disabled={renameLoading}
                 data-tauri-drag-region={false}
                 draggable={false}
