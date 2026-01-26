@@ -26,6 +26,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "tauri": "node ./scripts/run-tauri.mjs",
+    "build:smb-sidecar": "cd src-tauri && cargo build --bin marlin-smb --features smb-sidecar && cp target/debug/marlin-smb binaries/marlin-smb-$(rustc -vV | sed -n 's/host: //p')",
+    "build:smb-sidecar-release": "cd src-tauri && cargo build --release --bin marlin-smb --features smb-sidecar && cp target/release/marlin-smb binaries/marlin-smb-$(rustc -vV | sed -n 's/host: //p')",
     "test": "vitest",
     "test:ui": "vitest --ui",
     "test:run": "vitest run",

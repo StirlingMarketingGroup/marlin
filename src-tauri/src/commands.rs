@@ -5429,9 +5429,46 @@ pub fn test_smb_connection(
     Ok(true)
 }
 
+/// SMB sidecar status response
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SmbStatusResponse {
+    pub available: bool,
+    pub reason: Option<String>,
+}
+
+/// Get SMB sidecar status
+#[cfg(not(target_os = "windows"))]
+#[command]
+pub fn get_smb_status() -> SmbStatusResponse {
+    use crate::locations::smb::client::{self, SidecarStatus};
+
+    let status = client::initialize();
+    match status {
+        SidecarStatus::Available => SmbStatusResponse {
+            available: true,
+            reason: None,
+        },
+        _ => SmbStatusResponse {
+            available: false,
+            reason: status.error_message(),
+        },
+    }
+}
+
+/// Get SMB sidecar status (Windows stub - SMB uses native UNC paths)
+#[cfg(target_os = "windows")]
+#[command]
+pub fn get_smb_status() -> SmbStatusResponse {
+    SmbStatusResponse {
+        available: true,
+        reason: Some("Windows uses native UNC paths. Navigate to \\\\server\\share directly.".to_string()),
+    }
+}
+
 /// Download an SMB file to a temporary location (for drag-out/open-in-external-app).
 /// Returns the temporary file path.
-#[cfg(all(not(target_os = "windows"), feature = "smb"))]
+#[cfg(not(target_os = "windows"))]
 #[command]
 pub async fn download_smb_file(path: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -5442,9 +5479,9 @@ pub async fn download_smb_file(path: String) -> Result<String, String> {
     .map_err(|e| format!("Task join error: {e}"))?
 }
 
-/// Download an SMB file to a temporary location (Windows / SMB-disabled stub).
-#[cfg(any(target_os = "windows", not(feature = "smb")))]
+/// Download an SMB file to a temporary location (Windows stub).
+#[cfg(target_os = "windows")]
 #[command]
 pub async fn download_smb_file(_path: String) -> Result<String, String> {
-    Err("SMB download not supported in this build".to_string())
+    Err("SMB download not supported on Windows".to_string())
 }

@@ -1,30 +1,19 @@
 mod auth;
+pub mod client;
 
 use async_trait::async_trait;
 use crate::fs_utils::FileItem;
-#[cfg(feature = "smb")]
-use crate::fs_utils::is_hidden_file;
 use crate::locations::{
-    Location, LocationCapabilities, LocationProvider, ProviderDirectoryEntries,
+    Location, LocationCapabilities, LocationProvider, LocationSummary, ProviderDirectoryEntries,
 };
-#[cfg(feature = "smb")]
-use crate::locations::LocationSummary;
-#[cfg(feature = "smb")]
-use std::sync::Mutex;
-#[cfg(feature = "smb")]
-use once_cell::sync::Lazy;
+use chrono::{DateTime, Utc};
 
 pub use auth::{
     add_smb_server, get_smb_servers, remove_smb_server, test_smb_connection,
     SmbServerInfo,
 };
-#[cfg(feature = "smb")]
 pub use auth::get_server_credentials;
-
-// Global mutex to serialize ALL SMB operations
-// libsmbclient has global state and is NOT thread-safe, even across separate connections
-#[cfg(feature = "smb")]
-pub static SMB_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+pub use client::SidecarStatus;
 
 #[derive(Default)]
 pub struct SmbProvider;
@@ -39,11 +28,20 @@ impl LocationProvider for SmbProvider {
         LocationCapabilities::new("smb", "SMB Share", true, true)
     }
 
-    #[cfg(feature = "smb")]
     async fn read_directory(
         &self,
         location: &Location,
     ) -> Result<ProviderDirectoryEntries, String> {
+        // Check sidecar availability
+        if !client::is_available() {
+            let status = client::initialize();
+            if status != SidecarStatus::Available {
+                return Err(status.error_message().unwrap_or_else(|| {
+                    "SMB support is not available".to_string()
+                }));
+            }
+        }
+
         let authority = location
             .authority()
             .ok_or_else(|| "SMB path requires server: smb://server/share/path".to_string())?
@@ -61,109 +59,77 @@ impl LocationProvider for SmbProvider {
         // Get credentials
         let creds = get_server_credentials(&hostname)?;
 
-        // Clone values for the blocking closure
-        let hostname_clone = hostname.clone();
-        let share_clone = share.clone();
-        let dir_path_clone = dir_path.clone();
+        // Build sidecar request params
+        let params = serde_json::json!({
+            "credentials": {
+                "hostname": hostname,
+                "username": creds.username,
+                "password": creds.password,
+                "domain": creds.domain
+            },
+            "share": share,
+            "path": dir_path
+        });
 
-        // Run SMB operations on a blocking thread with mutex (libsmbclient is not thread-safe)
-        let items = tokio::task::spawn_blocking(move || {
-            use chrono::{DateTime, Utc};
-            use pavao::{SmbClient, SmbCredentials, SmbDirentType, SmbOptions};
-
-            // Acquire global SMB mutex - libsmbclient has global state
-            let _guard = SMB_MUTEX.lock().map_err(|e| format!("SMB mutex poisoned: {}", e))?;
-
-            // Build connection
-            let smb_url = format!("smb://{}", hostname_clone);
-            let share_path = if share_clone.starts_with('/') {
-                share_clone.clone()
-            } else {
-                format!("/{}", share_clone)
-            };
-
-            let mut credentials = SmbCredentials::default()
-                .server(&smb_url)
-                .share(&share_path)
-                .username(&creds.username)
-                .password(&creds.password);
-
-            if let Some(domain) = &creds.domain {
-                credentials = credentials.workgroup(domain);
-            }
-
-            let client = SmbClient::new(credentials, SmbOptions::default())
-                .map_err(|e| format!("Failed to connect to SMB server: {}", e))?;
-
-            // Use list_dirplus to get file metadata (size, mtime) inline with listing
-            // This uses SMB2's enhanced directory listing - no separate stat() calls needed!
-            // Critical for performance with large directories (90k+ files)
-            let entries = client
-                .list_dirplus(&dir_path_clone)
-                .map_err(|e| format!("Failed to list directory: {}", e))?;
-
-            let mut items: Vec<FileItem> = Vec::new();
-
-            for entry in entries {
-                let name = entry.name();
-
-                // Skip . and ..
-                if name == "." || name == ".." {
-                    continue;
-                }
-
-                let full_path = if dir_path_clone == "/" {
-                    format!("smb://{}/{}/{}", hostname_clone, share_clone, name)
-                } else {
-                    format!("smb://{}/{}{}/{}", hostname_clone, share_clone, dir_path_clone, name)
-                };
-
-                // Use entry type from directory listing - no stat() calls needed!
-                let entry_type = entry.get_type();
-                let is_directory = matches!(entry_type, SmbDirentType::Dir);
-                // Note: list_dirplus doesn't distinguish symlinks via attrs, default to false
-                let is_symlink = false;
-
-                // Convert SystemTime to DateTime<Utc>
-                let modified: DateTime<Utc> = entry.mtime.into();
-
-                items.push(FileItem {
-                    name: name.to_string(),
-                    path: full_path,
-                    is_directory,
-                    is_hidden: is_hidden_file(name),
-                    size: entry.size, // Size from list_dirplus - no stat() needed!
-                    modified,         // Modified time from list_dirplus - no stat() needed!
-                    extension: if is_directory {
-                        None
-                    } else {
-                        std::path::Path::new(name)
-                            .extension()
-                            .and_then(|e| e.to_str())
-                            .map(|e| e.to_lowercase())
-                    },
-                    is_symlink,
-                    is_git_repo: false,
-                    child_count: None,
-                    image_width: None,
-                    image_height: None,
-                    remote_id: None,
-                    thumbnail_url: None,
-                    download_url: None,
-                });
-            }
-
-            // Sort: directories first, then by name
-            items.sort_by(|a, b| match (a.is_directory, b.is_directory) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-            });
-
-            Ok::<Vec<FileItem>, String>(items)
+        // Call sidecar
+        let result: serde_json::Value = tokio::task::spawn_blocking(move || {
+            client::call_method::<serde_json::Value, serde_json::Value>("read_directory", params)
         })
         .await
         .map_err(|e| format!("SMB task failed: {}", e))??;
+
+        // Parse result
+        let entries = result
+            .get("entries")
+            .and_then(|e| e.as_array())
+            .ok_or("Invalid response from sidecar")?;
+
+        let mut items: Vec<FileItem> = Vec::new();
+
+        for entry in entries {
+            let name = entry.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            let is_directory = entry.get("is_directory").and_then(|d| d.as_bool()).unwrap_or(false);
+            let is_hidden = entry.get("is_hidden").and_then(|h| h.as_bool()).unwrap_or(false);
+            let size = entry.get("size").and_then(|s| s.as_u64()).unwrap_or(0);
+            let modified_str = entry.get("modified").and_then(|m| m.as_str()).unwrap_or("");
+            let extension = entry.get("extension").and_then(|e| e.as_str()).map(String::from);
+
+            // Parse modified time
+            let modified: DateTime<Utc> = modified_str
+                .parse()
+                .unwrap_or_else(|_| Utc::now());
+
+            let full_path = if dir_path == "/" {
+                format!("smb://{}/{}/{}", hostname, share, name)
+            } else {
+                format!("smb://{}/{}{}/{}", hostname, share, dir_path, name)
+            };
+
+            items.push(FileItem {
+                name: name.to_string(),
+                path: full_path,
+                is_directory,
+                is_hidden,
+                size,
+                modified,
+                extension,
+                is_symlink: false,
+                is_git_repo: false,
+                child_count: None,
+                image_width: None,
+                image_height: None,
+                remote_id: None,
+                thumbnail_url: None,
+                download_url: None,
+            });
+        }
+
+        // Sort: directories first, then by name
+        items.sort_by(|a, b| match (a.is_directory, b.is_directory) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+        });
 
         let display_path = format!("smb://{}/{}{}", hostname, share, dir_path);
 
@@ -178,18 +144,16 @@ impl LocationProvider for SmbProvider {
         })
     }
 
-    #[cfg(not(feature = "smb"))]
-    async fn read_directory(
-        &self,
-        _location: &Location,
-    ) -> Result<ProviderDirectoryEntries, String> {
-        Err("SMB support not compiled. Build with --features smb".to_string())
-    }
-
-    #[cfg(feature = "smb")]
     async fn get_file_metadata(&self, location: &Location) -> Result<FileItem, String> {
-        use chrono::{DateTime, Utc};
-        use pavao::{SmbClient, SmbCredentials, SmbOptions};
+        // Check sidecar availability
+        if !client::is_available() {
+            let status = client::initialize();
+            if status != SidecarStatus::Available {
+                return Err(status.error_message().unwrap_or_else(|| {
+                    "SMB support is not available".to_string()
+                }));
+            }
+        }
 
         let authority = location
             .authority()
@@ -219,90 +183,64 @@ impl LocationProvider for SmbProvider {
 
         let (hostname, share, path) = parse_smb_path(authority, location.path())?;
         let creds = get_server_credentials(&hostname)?;
-
-        let hostname = hostname.to_string();
-        let share = share.to_string();
-        let path = path.to_string();
         let location_raw = location.raw().to_string();
-        let username = creds.username.clone();
-        let password = creds.password.clone();
-        let domain = creds.domain.clone();
 
-        tokio::task::spawn_blocking(move || {
-            let _guard = SMB_MUTEX
-                .lock()
-                .map_err(|e| format!("SMB mutex poisoned: {}", e))?;
+        let params = serde_json::json!({
+            "credentials": {
+                "hostname": hostname,
+                "username": creds.username,
+                "password": creds.password,
+                "domain": creds.domain
+            },
+            "share": share,
+            "path": path
+        });
 
-            let smb_url = format!("smb://{}", hostname);
-            let share_path = if share.starts_with('/') {
-                share
-            } else {
-                format!("/{}", share)
-            };
-
-            let mut credentials = SmbCredentials::default()
-                .server(&smb_url)
-                .share(&share_path)
-                .username(&username)
-                .password(&password);
-
-            if let Some(domain) = &domain {
-                credentials = credentials.workgroup(domain);
-            }
-
-            let client = SmbClient::new(credentials, SmbOptions::default())
-                .map_err(|e| format!("Failed to connect: {}", e))?;
-
-            let stat = client
-                .stat(&path)
-                .map_err(|e| format!("Failed to get file metadata: {}", e))?;
-
-            let name = std::path::Path::new(&path)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(&path)
-                .to_string();
-
-            let is_directory = stat.mode.is_dir();
-            let modified: DateTime<Utc> = stat.modified.into();
-
-            Ok::<FileItem, String>(FileItem {
-                name: name.clone(),
-                path: location_raw,
-                is_directory,
-                is_hidden: is_hidden_file(&name),
-                size: stat.size,
-                modified,
-                extension: if is_directory {
-                    None
-                } else {
-                    std::path::Path::new(&name)
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .map(|e| e.to_lowercase())
-                },
-                is_symlink: false,
-                is_git_repo: false,
-                child_count: None,
-                image_width: None,
-                image_height: None,
-                remote_id: None,
-                thumbnail_url: None,
-                download_url: None,
-            })
+        let result: serde_json::Value = tokio::task::spawn_blocking(move || {
+            client::call_method::<serde_json::Value, serde_json::Value>("get_file_metadata", params)
         })
         .await
-        .map_err(|e| format!("SMB task failed: {}", e))?
+        .map_err(|e| format!("SMB task failed: {}", e))??;
+
+        let name = result.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+        let is_directory = result.get("is_directory").and_then(|d| d.as_bool()).unwrap_or(false);
+        let is_hidden = result.get("is_hidden").and_then(|h| h.as_bool()).unwrap_or(false);
+        let size = result.get("size").and_then(|s| s.as_u64()).unwrap_or(0);
+        let modified_str = result.get("modified").and_then(|m| m.as_str()).unwrap_or("");
+        let extension = result.get("extension").and_then(|e| e.as_str()).map(String::from);
+
+        let modified: DateTime<Utc> = modified_str
+            .parse()
+            .unwrap_or_else(|_| Utc::now());
+
+        Ok(FileItem {
+            name,
+            path: location_raw,
+            is_directory,
+            is_hidden,
+            size,
+            modified,
+            extension,
+            is_symlink: false,
+            is_git_repo: false,
+            child_count: None,
+            image_width: None,
+            image_height: None,
+            remote_id: None,
+            thumbnail_url: None,
+            download_url: None,
+        })
     }
 
-    #[cfg(not(feature = "smb"))]
-    async fn get_file_metadata(&self, _location: &Location) -> Result<FileItem, String> {
-        Err("SMB support not compiled. Build with --features smb".to_string())
-    }
-
-    #[cfg(feature = "smb")]
     async fn create_directory(&self, location: &Location) -> Result<(), String> {
-        use pavao::{SmbClient, SmbCredentials, SmbMode, SmbOptions};
+        if !client::is_available() {
+            let status = client::initialize();
+            if status != SidecarStatus::Available {
+                return Err(status.error_message().unwrap_or_else(|| {
+                    "SMB support is not available".to_string()
+                }));
+            }
+        }
 
         let authority = location
             .authority()
@@ -311,54 +249,35 @@ impl LocationProvider for SmbProvider {
         let (hostname, share, path) = parse_smb_path(authority, location.path())?;
         let creds = get_server_credentials(&hostname)?;
 
-        let hostname = hostname.to_string();
-        let share = share.to_string();
-        let path = path.to_string();
-        let username = creds.username.clone();
-        let password = creds.password.clone();
-        let domain = creds.domain.clone();
+        let params = serde_json::json!({
+            "credentials": {
+                "hostname": hostname,
+                "username": creds.username,
+                "password": creds.password,
+                "domain": creds.domain
+            },
+            "share": share,
+            "path": path
+        });
 
         tokio::task::spawn_blocking(move || {
-            let _guard = SMB_MUTEX
-                .lock()
-                .map_err(|e| format!("SMB mutex poisoned: {}", e))?;
-
-            let smb_url = format!("smb://{}", hostname);
-            let share_path = if share.starts_with('/') {
-                share
-            } else {
-                format!("/{}", share)
-            };
-
-            let mut credentials = SmbCredentials::default()
-                .server(&smb_url)
-                .share(&share_path)
-                .username(&username)
-                .password(&password);
-
-            if let Some(domain) = &domain {
-                credentials = credentials.workgroup(domain);
-            }
-
-            let client = SmbClient::new(credentials, SmbOptions::default())
-                .map_err(|e| format!("Failed to connect: {}", e))?;
-
-            client
-                .mkdir(&path, SmbMode::from(0o755))
-                .map_err(|e| format!("Failed to create directory: {}", e))
+            client::call_method::<serde_json::Value, serde_json::Value>("create_directory", params)
         })
         .await
-        .map_err(|e| format!("SMB task failed: {}", e))?
+        .map_err(|e| format!("SMB task failed: {}", e))??;
+
+        Ok(())
     }
 
-    #[cfg(not(feature = "smb"))]
-    async fn create_directory(&self, _location: &Location) -> Result<(), String> {
-        Err("SMB support not compiled. Build with --features smb".to_string())
-    }
-
-    #[cfg(feature = "smb")]
     async fn delete(&self, location: &Location) -> Result<(), String> {
-        use pavao::{SmbClient, SmbCredentials, SmbOptions};
+        if !client::is_available() {
+            let status = client::initialize();
+            if status != SidecarStatus::Available {
+                return Err(status.error_message().unwrap_or_else(|| {
+                    "SMB support is not available".to_string()
+                }));
+            }
+        }
 
         let authority = location
             .authority()
@@ -367,64 +286,35 @@ impl LocationProvider for SmbProvider {
         let (hostname, share, path) = parse_smb_path(authority, location.path())?;
         let creds = get_server_credentials(&hostname)?;
 
-        let hostname = hostname.to_string();
-        let share = share.to_string();
-        let path = path.to_string();
-        let username = creds.username.clone();
-        let password = creds.password.clone();
-        let domain = creds.domain.clone();
+        let params = serde_json::json!({
+            "credentials": {
+                "hostname": hostname,
+                "username": creds.username,
+                "password": creds.password,
+                "domain": creds.domain
+            },
+            "share": share,
+            "path": path
+        });
 
         tokio::task::spawn_blocking(move || {
-            let _guard = SMB_MUTEX
-                .lock()
-                .map_err(|e| format!("SMB mutex poisoned: {}", e))?;
-
-            let smb_url = format!("smb://{}", hostname);
-            let share_path = if share.starts_with('/') {
-                share
-            } else {
-                format!("/{}", share)
-            };
-
-            let mut credentials = SmbCredentials::default()
-                .server(&smb_url)
-                .share(&share_path)
-                .username(&username)
-                .password(&password);
-
-            if let Some(domain) = &domain {
-                credentials = credentials.workgroup(domain);
-            }
-
-            let client = SmbClient::new(credentials, SmbOptions::default())
-                .map_err(|e| format!("Failed to connect: {}", e))?;
-
-            let stat = client
-                .stat(&path)
-                .map_err(|e| format!("Failed to stat path: {}", e))?;
-
-            if stat.mode.is_dir() {
-                client
-                    .rmdir(&path)
-                    .map_err(|e| format!("Failed to delete directory: {}", e))
-            } else {
-                client
-                    .unlink(&path)
-                    .map_err(|e| format!("Failed to delete file: {}", e))
-            }
+            client::call_method::<serde_json::Value, serde_json::Value>("delete", params)
         })
         .await
-        .map_err(|e| format!("SMB task failed: {}", e))?
+        .map_err(|e| format!("SMB task failed: {}", e))??;
+
+        Ok(())
     }
 
-    #[cfg(not(feature = "smb"))]
-    async fn delete(&self, _location: &Location) -> Result<(), String> {
-        Err("SMB support not compiled. Build with --features smb".to_string())
-    }
-
-    #[cfg(feature = "smb")]
     async fn rename(&self, from: &Location, to: &Location) -> Result<(), String> {
-        use pavao::{SmbClient, SmbCredentials, SmbOptions};
+        if !client::is_available() {
+            let status = client::initialize();
+            if status != SidecarStatus::Available {
+                return Err(status.error_message().unwrap_or_else(|| {
+                    "SMB support is not available".to_string()
+                }));
+            }
+        }
 
         let from_authority = from
             .authority()
@@ -446,56 +336,36 @@ impl LocationProvider for SmbProvider {
 
         let creds = get_server_credentials(&hostname)?;
 
-        let hostname = hostname.to_string();
-        let share = share.to_string();
-        let from_path = from_path.to_string();
-        let to_path = to_path.to_string();
-        let username = creds.username.clone();
-        let password = creds.password.clone();
-        let domain = creds.domain.clone();
+        let params = serde_json::json!({
+            "credentials": {
+                "hostname": hostname,
+                "username": creds.username,
+                "password": creds.password,
+                "domain": creds.domain
+            },
+            "share": share,
+            "from_path": from_path,
+            "to_path": to_path
+        });
 
         tokio::task::spawn_blocking(move || {
-            let _guard = SMB_MUTEX
-                .lock()
-                .map_err(|e| format!("SMB mutex poisoned: {}", e))?;
-
-            let smb_url = format!("smb://{}", hostname);
-            let share_path = if share.starts_with('/') {
-                share
-            } else {
-                format!("/{}", share)
-            };
-
-            let mut credentials = SmbCredentials::default()
-                .server(&smb_url)
-                .share(&share_path)
-                .username(&username)
-                .password(&password);
-
-            if let Some(domain) = &domain {
-                credentials = credentials.workgroup(domain);
-            }
-
-            let client = SmbClient::new(credentials, SmbOptions::default())
-                .map_err(|e| format!("Failed to connect: {}", e))?;
-
-            client
-                .rename(&from_path, &to_path)
-                .map_err(|e| format!("Failed to rename: {}", e))
+            client::call_method::<serde_json::Value, serde_json::Value>("rename", params)
         })
         .await
-        .map_err(|e| format!("SMB task failed: {}", e))?
+        .map_err(|e| format!("SMB task failed: {}", e))??;
+
+        Ok(())
     }
 
-    #[cfg(not(feature = "smb"))]
-    async fn rename(&self, _from: &Location, _to: &Location) -> Result<(), String> {
-        Err("SMB support not compiled. Build with --features smb".to_string())
-    }
-
-    #[cfg(feature = "smb")]
     async fn copy(&self, from: &Location, to: &Location) -> Result<(), String> {
-        use pavao::{SmbClient, SmbCredentials, SmbOpenOptions, SmbOptions};
-        use tokio::task::spawn_blocking;
+        if !client::is_available() {
+            let status = client::initialize();
+            if status != SidecarStatus::Available {
+                return Err(status.error_message().unwrap_or_else(|| {
+                    "SMB support is not available".to_string()
+                }));
+            }
+        }
 
         let from_authority = from
             .authority()
@@ -516,216 +386,58 @@ impl LocationProvider for SmbProvider {
         }
 
         let creds = get_server_credentials(&hostname)?;
-        let hostname_clone = hostname.clone();
-        let share_clone = share.clone();
-        let from_path_clone = from_path.clone();
-        let to_path_clone = to_path.clone();
-        let creds_username = creds.username.clone();
-        let creds_password = creds.password.clone();
-        let creds_domain = creds.domain.clone();
 
-        spawn_blocking(move || {
-            // Acquire global SMB mutex - libsmbclient has global state
-            let _guard = SMB_MUTEX.lock().map_err(|e| format!("SMB mutex poisoned: {}", e))?;
+        let params = serde_json::json!({
+            "credentials": {
+                "hostname": hostname,
+                "username": creds.username,
+                "password": creds.password,
+                "domain": creds.domain
+            },
+            "share": share,
+            "from_path": from_path,
+            "to_path": to_path
+        });
 
-            let smb_url = format!("smb://{}", hostname_clone);
-            let share_path = if share_clone.starts_with('/') {
-                share_clone.clone()
-            } else {
-                format!("/{}", share_clone)
-            };
-
-            let mut credentials = SmbCredentials::default()
-                .server(&smb_url)
-                .share(&share_path)
-                .username(&creds_username)
-                .password(&creds_password);
-
-            if let Some(domain) = &creds_domain {
-                credentials = credentials.workgroup(domain);
-            }
-
-            let client = SmbClient::new(credentials, SmbOptions::default())
-                .map_err(|e| format!("Failed to connect: {}", e))?;
-
-            let mut src = client
-                .open_with(&from_path_clone, SmbOpenOptions::default().read(true))
-                .map_err(|e| format!("Failed to open source: {}", e))?;
-
-            let mut dst = client
-                .open_with(
-                    &to_path_clone,
-                    SmbOpenOptions::default().write(true).create(true).truncate(true),
-                )
-                .map_err(|e| format!("Failed to open destination: {}", e))?;
-
-            std::io::copy(&mut src, &mut dst).map_err(|e| format!("Failed to copy: {}", e))?;
-            Ok::<(), String>(())
+        tokio::task::spawn_blocking(move || {
+            client::call_method::<serde_json::Value, serde_json::Value>("copy", params)
         })
         .await
-        .map_err(|e| format!("SMB copy task failed: {}", e))?
-    }
+        .map_err(|e| format!("SMB task failed: {}", e))??;
 
-    #[cfg(not(feature = "smb"))]
-    async fn copy(&self, _from: &Location, _to: &Location) -> Result<(), String> {
-        Err("SMB support not compiled. Build with --features smb".to_string())
+        Ok(())
     }
 }
 
 impl SmbProvider {
-    #[cfg(feature = "smb")]
-    fn resolve_smbclient_command() -> (std::ffi::OsString, Option<std::ffi::OsString>) {
-        use std::env;
-        use std::ffi::{OsStr, OsString};
-        use std::path::PathBuf;
-
-        fn find_in_path(program: &str, path: &OsStr) -> Option<PathBuf> {
-            env::split_paths(path)
-                .map(|dir| dir.join(program))
-                .find(|candidate| candidate.is_file())
-        }
-
-        fn join_paths_lossy(paths: &[PathBuf], fallback: OsString) -> OsString {
-            env::join_paths(paths).unwrap_or(fallback)
-        }
-
-        // Allow overriding the smbclient location when needed.
-        if let Some(smbclient_path) = env::var_os("SMBCLIENT_PATH") {
-            let smbclient_path = PathBuf::from(smbclient_path);
-            if smbclient_path.is_file() {
-                return (smbclient_path.into_os_string(), None);
-            }
-        }
-
-        let current_path = env::var_os("PATH").unwrap_or_default();
-        if let Some(found) = find_in_path("smbclient", &current_path) {
-            return (found.into_os_string(), None);
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            // Packaged macOS apps (launched from Finder) often have a very minimal PATH
-            // and won't include common Homebrew locations.
-            let mut search_paths = vec![
-                PathBuf::from("/opt/homebrew/bin"),
-                PathBuf::from("/usr/local/bin"),
-                PathBuf::from("/opt/local/bin"),
-            ];
-            search_paths.extend(env::split_paths(&current_path));
-            let augmented_path = join_paths_lossy(&search_paths, current_path);
-
-            if let Some(found) = find_in_path("smbclient", &augmented_path) {
-                return (found.into_os_string(), Some(augmented_path));
-            }
-
-            return (OsString::from("smbclient"), Some(augmented_path));
-        }
-
-        #[cfg(not(target_os = "macos"))]
-        {
-            (OsString::from("smbclient"), None)
-        }
-    }
-
-    #[cfg(feature = "smb")]
     async fn list_shares(&self, hostname: &str) -> Result<ProviderDirectoryEntries, String> {
-        use chrono::Utc;
-        use std::process::Command;
-        use uuid::Uuid;
-
         let creds = get_server_credentials(hostname)?;
         let hostname_clone = hostname.to_string();
 
-        // Run blocking smbclient operation in spawn_blocking to avoid blocking the tokio runtime
-        let output_result = tokio::task::spawn_blocking(move || {
-            // Use smbclient -L to enumerate shares (pavao doesn't support this well)
-            let (smbclient_program, augmented_path) = Self::resolve_smbclient_command();
-            let mut cmd = Command::new(smbclient_program);
-            if let Some(path_env) = augmented_path {
-                cmd.env("PATH", path_env);
+        let params = serde_json::json!({
+            "credentials": {
+                "hostname": hostname_clone,
+                "username": creds.username,
+                "password": creds.password,
+                "domain": creds.domain
             }
-            cmd.arg("-L")
-                .arg(format!("//{}", hostname_clone))
-                .arg("-g"); // Machine-readable output
+        });
 
-            // Avoid putting credentials on the process command line.
-            // smbclient supports reading auth data from an authfile via -A.
-            let auth_file_path =
-                std::env::temp_dir().join(format!("marlin-smb-auth-{}.conf", Uuid::new_v4()));
-            let auth_file_contents = {
-                let mut s =
-                    format!("username = {}\npassword = {}\n", creds.username, creds.password);
-                if let Some(domain) = &creds.domain {
-                    s.push_str(&format!("domain = {}\n", domain));
-                }
-                s
-            };
-
-            if let Err(e) = std::fs::write(&auth_file_path, auth_file_contents) {
-                return Err(format!("Failed to create smbclient auth file: {}", e));
-            }
-
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if let Ok(metadata) = std::fs::metadata(&auth_file_path) {
-                    let mut perms = metadata.permissions();
-                    perms.set_mode(0o600);
-                    let _ = std::fs::set_permissions(&auth_file_path, perms);
-                }
-            }
-
-            cmd.arg("-A").arg(&auth_file_path);
-
-            let output = cmd.output();
-            let _ = std::fs::remove_file(&auth_file_path);
-
-            output.map_err(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    "smbclient not found. Install Samba (macOS: `brew install samba`, Linux: `sudo apt-get install smbclient`). If installed, ensure `smbclient` is in your PATH.".to_string()
-                } else {
-                    format!("Failed to run smbclient: {}", e)
-                }
-            })
+        let result: serde_json::Value = tokio::task::spawn_blocking(move || {
+            client::call_method::<serde_json::Value, serde_json::Value>("list_shares", params)
         })
         .await
-        .map_err(|e| format!("Failed to spawn blocking task: {}", e))??;
+        .map_err(|e| format!("SMB task failed: {}", e))??;
 
-        if !output_result.status.success() {
-            let stderr = String::from_utf8_lossy(&output_result.stderr);
-            // Check for common errors
-            if stderr.contains("NT_STATUS_LOGON_FAILURE") {
-                return Err(
-                    "Authentication failed. Try using your full email as username (e.g., user@domain.com)".to_string(),
-                );
-            }
-            return Err(format!("Failed to list shares: {}", stderr.trim()));
-        }
+        let shares = result
+            .get("shares")
+            .and_then(|s| s.as_array())
+            .ok_or("Invalid response from sidecar")?;
 
-        let stdout = String::from_utf8_lossy(&output_result.stdout);
-
-        // Parse the -g (grep-friendly) output format: type|name|comment
-        let items: Vec<FileItem> = stdout
-            .lines()
-            .filter_map(|line| {
-                let parts: Vec<&str> = line.split('|').collect();
-                if parts.len() < 2 {
-                    return None;
-                }
-
-                let share_type = parts[0];
-                let name = parts[1];
-
-                // Only include Disk shares, skip IPC$, ADMIN$, etc.
-                if share_type != "Disk" {
-                    return None;
-                }
-
-                // Skip hidden shares (ending in $)
-                if name.ends_with('$') {
-                    return None;
-                }
-
+        let items: Vec<FileItem> = shares
+            .iter()
+            .filter_map(|share| {
+                let name = share.get("name")?.as_str()?;
                 Some(FileItem {
                     name: name.to_string(),
                     path: format!("smb://{}/{}", hostname, name),
@@ -756,16 +468,9 @@ impl SmbProvider {
             entries: items,
         })
     }
-
-    #[cfg(not(feature = "smb"))]
-    #[allow(dead_code)]
-    async fn list_shares(&self, _hostname: &str) -> Result<ProviderDirectoryEntries, String> {
-        Err("SMB support not compiled. Build with --features smb".to_string())
-    }
 }
 
 /// Parse an SMB path into (hostname, share, path)
-#[cfg(feature = "smb")]
 pub(crate) fn parse_smb_path(authority: &str, path: &str) -> Result<(String, String, String), String> {
     let hostname = authority.to_string();
 
@@ -791,7 +496,6 @@ pub(crate) fn parse_smb_path(authority: &str, path: &str) -> Result<(String, Str
 }
 
 /// Parse a full SMB URL into (hostname, share, path)
-#[cfg(feature = "smb")]
 pub fn parse_smb_url(url: &str) -> Result<(String, String, String), String> {
     // NOTE: Do not use `url::Url::parse` here.
     // Our `smb://` paths are *not* guaranteed to be RFC-3986 compliant URLs:
@@ -870,7 +574,7 @@ pub fn strip_url_credentials(url: &str) -> String {
     url.to_string()
 }
 
-#[cfg(all(test, feature = "smb"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

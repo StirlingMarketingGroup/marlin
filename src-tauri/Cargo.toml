@@ -7,12 +7,22 @@ license = "MIT"
 repository = "https://github.com/StirlingMarketingGroup/marlin"
 edition = "2021"
 rust-version = "1.77.2"
+default-run = "marlin"
 
 [features]
 default = []
 cargo-clippy = []
-# SMB support requires libsmbclient: brew install samba (macOS) or apt install libsmbclient-dev (Linux)
-smb = ["pavao"]
+# SMB sidecar binary - compiled separately with libsmbclient
+# Build with: cargo build --bin marlin-smb --features smb-sidecar
+smb-sidecar = ["pavao"]
+# Legacy feature (deprecated) - kept for compatibility but does nothing
+smb = []
+
+# SMB sidecar binary entry point
+[[bin]]
+name = "marlin-smb"
+path = "src/bin/marlin-smb.rs"
+required-features = ["smb-sidecar"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

@@ -2,7 +2,7 @@
 //!
 //! This module handles downloading SMB files to a local temp directory before
 //! generating thumbnails. Since the thumbnail generator runs in a blocking
-//! thread pool, we use blocking SMB operations here.
+//! thread pool, we use blocking SMB operations here via the sidecar.
 
 use super::{ThumbnailGenerationResult, ThumbnailRequest};
 
@@ -13,19 +13,27 @@ pub fn is_smb_path(path: &str) -> bool {
 
 /// Download an SMB file synchronously and return the local temp path.
 /// This is designed to be called from a blocking context (thread pool).
-#[cfg(feature = "smb")]
 pub fn download_smb_file_sync(smb_path: &str) -> Result<std::path::PathBuf, String> {
-    use pavao::{SmbClient, SmbCredentials, SmbOpenOptions, SmbOptions};
+    use crate::locations::smb::{client, parse_smb_url, get_server_credentials, SidecarStatus};
     use sha2::{Digest, Sha256};
-    use std::io::Write;
 
     log::debug!("download_smb_file_sync: path={}", smb_path);
 
+    // Check sidecar availability
+    if !client::is_available() {
+        let status = client::initialize();
+        if status != SidecarStatus::Available {
+            return Err(status.error_message().unwrap_or_else(|| {
+                "SMB support is not available".to_string()
+            }));
+        }
+    }
+
     // Parse the SMB URL
-    let (hostname, share, file_path) = crate::locations::smb::parse_smb_url(smb_path)?;
+    let (hostname, share, file_path) = parse_smb_url(smb_path)?;
 
     // Get credentials for this server
-    let creds = crate::locations::smb::get_server_credentials(&hostname)?;
+    let creds = get_server_credentials(&hostname)?;
 
     // Create a unique temp file path
     let temp_dir = std::env::temp_dir().join("marlin-smb-thumbnails");
@@ -52,48 +60,27 @@ pub fn download_smb_file_sync(smb_path: &str) -> Result<std::path::PathBuf, Stri
         .to_string();
 
     let temp_path = temp_dir.join(format!("{}_{}", hash_prefix, safe_name));
+    let temp_path_str = temp_path.to_string_lossy().to_string();
 
-    // Acquire global SMB mutex - libsmbclient has global state
-    let _guard = crate::locations::smb::SMB_MUTEX
-        .lock()
-        .map_err(|e| format!("SMB mutex poisoned: {}", e))?;
+    // Build sidecar request params
+    let params = serde_json::json!({
+        "credentials": {
+            "hostname": hostname,
+            "username": creds.username,
+            "password": creds.password,
+            "domain": creds.domain
+        },
+        "share": share,
+        "path": file_path,
+        "dest_path": temp_path_str
+    });
 
-    // Build connection
-    let smb_url = format!("smb://{}", hostname);
-    let share_path = if share.starts_with('/') {
-        share.clone()
-    } else {
-        format!("/{}", share)
-    };
-
-    let mut credentials = SmbCredentials::default()
-        .server(&smb_url)
-        .share(&share_path)
-        .username(&creds.username)
-        .password(&creds.password);
-
-    if let Some(domain) = &creds.domain {
-        credentials = credentials.workgroup(domain);
-    }
-
-    let client = SmbClient::new(credentials, SmbOptions::default())
-        .map_err(|e| format!("Failed to connect to SMB server: {}", e))?;
-
-    // Open the remote file for reading
-    let mut smb_file = client
-        .open_with(&file_path, SmbOpenOptions::default().read(true))
-        .map_err(|e| format!("Failed to open SMB file: {}", e))?;
-
-    // Write to temp file (streaming; avoids loading whole file into memory)
-    let mut local_file = std::fs::File::create(&temp_path)
-        .map_err(|e| format!("Failed to create temp file: {}", e))?;
-
-    std::io::copy(&mut smb_file, &mut local_file)
-        .map_err(|e| format!("Failed to copy SMB file to temp: {}", e))?;
-
-    local_file
-        .flush()
-        .map_err(|e| format!("Failed to flush temp file: {}", e))?;
+    // Call sidecar with extended timeout for file downloads
+    let _result: serde_json::Value = client::call_method_with_timeout(
+        "download_file",
+        params,
+        client::DOWNLOAD_TIMEOUT_MS,
+    )?;
 
     log::debug!(
         "Downloaded SMB file to {}",
@@ -103,66 +90,56 @@ pub fn download_smb_file_sync(smb_path: &str) -> Result<std::path::PathBuf, Stri
     Ok(temp_path)
 }
 
-/// Stub implementation when SMB feature is disabled
-#[cfg(not(feature = "smb"))]
-pub fn download_smb_file_sync(_smb_path: &str) -> Result<std::path::PathBuf, String> {
-    Err("SMB support not compiled. Build with --features smb".to_string())
-}
-
 /// Get the modified time for an SMB file.
 /// Returns 0 if the mtime cannot be determined.
-#[cfg(feature = "smb")]
 pub fn get_smb_file_mtime(smb_path: &str) -> Result<u64, String> {
-    use pavao::{SmbClient, SmbCredentials, SmbOptions};
-    use std::time::UNIX_EPOCH;
+    use crate::locations::smb::{client, parse_smb_url, get_server_credentials, SidecarStatus};
+    use chrono::{DateTime, Utc};
 
-    // Parse the SMB URL
-    let (hostname, share, file_path) = crate::locations::smb::parse_smb_url(smb_path)?;
-
-    // Get credentials for this server
-    let creds = crate::locations::smb::get_server_credentials(&hostname)?;
-
-    // Acquire global SMB mutex
-    let _guard = crate::locations::smb::SMB_MUTEX
-        .lock()
-        .map_err(|e| format!("SMB mutex poisoned: {}", e))?;
-
-    // Build connection
-    let smb_url = format!("smb://{}", hostname);
-    let share_path = if share.starts_with('/') {
-        share.clone()
-    } else {
-        format!("/{}", share)
-    };
-
-    let mut credentials = SmbCredentials::default()
-        .server(&smb_url)
-        .share(&share_path)
-        .username(&creds.username)
-        .password(&creds.password);
-
-    if let Some(domain) = &creds.domain {
-        credentials = credentials.workgroup(domain);
+    // Check sidecar availability
+    if !client::is_available() {
+        let status = client::initialize();
+        if status != SidecarStatus::Available {
+            return Err(status.error_message().unwrap_or_else(|| {
+                "SMB support is not available".to_string()
+            }));
+        }
     }
 
-    let client = SmbClient::new(credentials, SmbOptions::default())
-        .map_err(|e| format!("Failed to connect to SMB server: {}", e))?;
+    // Parse the SMB URL
+    let (hostname, share, file_path) = parse_smb_url(smb_path)?;
 
-    let stat = client
-        .stat(&file_path)
-        .map_err(|e| format!("Failed to stat SMB file: {}", e))?;
+    // Get credentials for this server
+    let creds = get_server_credentials(&hostname)?;
 
-    let system_time: std::time::SystemTime = stat.modified.into();
-    Ok(system_time
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0))
-}
+    // Build sidecar request params
+    let params = serde_json::json!({
+        "credentials": {
+            "hostname": hostname,
+            "username": creds.username,
+            "password": creds.password,
+            "domain": creds.domain
+        },
+        "share": share,
+        "path": file_path
+    });
 
-/// Stub implementation when SMB feature is disabled
-#[cfg(not(feature = "smb"))]
-pub fn get_smb_file_mtime(_smb_path: &str) -> Result<u64, String> {
-    Err("SMB support not compiled. Build with --features smb".to_string())
+    // Call sidecar
+    let result: serde_json::Value = client::call_method("get_file_metadata", params)?;
+
+    // Parse the modified time from the response
+    let modified_str = result
+        .get("modified")
+        .and_then(|m| m.as_str())
+        .ok_or("Missing modified time in response")?;
+
+    // Parse ISO 8601 timestamp
+    let modified: DateTime<Utc> = modified_str
+        .parse()
+        .map_err(|e| format!("Failed to parse modified time: {}", e))?;
+
+    // Handle negative timestamps (dates before 1970) gracefully
+    Ok(modified.timestamp().max(0) as u64)
 }
 
 /// Generate a thumbnail for an SMB file.

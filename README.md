@@ -116,9 +116,37 @@ npm run tauri dev
 npm run tauri build
 ```
 
+### SMB Support (Optional)
+
+SMB/network share support requires libsmbclient and is built as a separate sidecar binary to ensure the main app always starts even if samba isn't installed.
+
+**Install samba:**
+
+```bash
+# macOS
+brew install samba
+
+# Linux (Debian/Ubuntu)
+sudo apt install libsmbclient-dev smbclient
+```
+
+**Build the SMB sidecar (development):**
+
+```bash
+npm run build:smb-sidecar
+```
+
+**Build the SMB sidecar (release):**
+
+```bash
+npm run build:smb-sidecar-release
+```
+
+After building the sidecar, run `npm run tauri dev` or `npm run tauri build` as usual. The main app will automatically use the sidecar for SMB operations if available.
+
 ### Project Structure
 
-```
+```text
 marlin/
 ├── src/                # React frontend
 │   ├── components/

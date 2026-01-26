@@ -62,6 +62,10 @@ tauri-private-key*
 src-tauri/target/
 src-tauri/Cargo.lock
 
+# SMB sidecar binaries (built per-platform during CI/release)
+src-tauri/binaries/marlin-smb*
+!src-tauri/binaries/.gitkeep
+
 # Google OAuth credentials (sensitive)
 src-tauri/google-credentials.json
 src-tauri/service-account.json
