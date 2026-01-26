@@ -83,6 +83,17 @@ jobs:
         if: steps.changes.outputs.check == 'true'
         run: npm ci
 
+      - name: Create SMB sidecar placeholders
+        if: steps.changes.outputs.check == 'true'
+        run: |
+          # Create placeholder files for all platforms to satisfy tauri-build
+          # These are overwritten with real binaries during release builds
+          mkdir -p src-tauri/binaries
+          touch src-tauri/binaries/marlin-smb-x86_64-unknown-linux-gnu
+          touch src-tauri/binaries/marlin-smb-aarch64-unknown-linux-gnu
+          touch src-tauri/binaries/marlin-smb-x86_64-apple-darwin
+          touch src-tauri/binaries/marlin-smb-aarch64-apple-darwin
+
       - name: Run checks
         if: steps.changes.outputs.check == 'true'
         run: npm run check
