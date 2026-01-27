@@ -522,7 +522,6 @@ pub fn get_entry_metadata(
     archive_path: &Path,
     internal_path: &str,
 ) -> Result<ArchiveEntry, String> {
-    let format = determine_archive_format(archive_path)?;
     let normalized = normalize_internal_path(internal_path)?;
     let target_rel = normalized.trim_start_matches('/');
     if target_rel.is_empty() {
@@ -539,6 +538,44 @@ pub fn get_entry_metadata(
         });
     }
 
+    // Check cache first - avoids O(n) archive scan for repeated metadata lookups
+    if let Some(cached_entries) = get_cached_entries(archive_path) {
+        // Look for exact match
+        for entry in cached_entries.iter() {
+            if entry.path == target_rel {
+                return Ok(ArchiveEntry {
+                    name: Path::new(target_rel)
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or(target_rel)
+                        .to_string(),
+                    internal_path: normalized.clone(),
+                    is_directory: entry.is_directory,
+                    size: entry.size,
+                    modified: entry.modified,
+                });
+            }
+        }
+        // Check if it's an implicit directory (has children but no explicit entry)
+        let prefix = format!("{}/", target_rel);
+        if cached_entries.iter().any(|e| e.path.starts_with(&prefix)) {
+            return Ok(ArchiveEntry {
+                name: Path::new(target_rel)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(target_rel)
+                    .to_string(),
+                internal_path: normalized,
+                is_directory: true,
+                size: 0,
+                modified: Utc::now(),
+            });
+        }
+        return Err("Archive entry not found".to_string());
+    }
+
+    // Cache miss - fall back to scanning the archive
+    let format = determine_archive_format(archive_path)?;
     let mut found_dir = false;
 
     match format {

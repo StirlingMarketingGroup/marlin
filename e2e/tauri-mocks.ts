@@ -193,6 +193,7 @@ export function getTauriMockScript(): string {
                 path: path,
                 displayPath: path,
                 raw: path,
+                scheme: 'file',
               },
               capabilities: {
                 canCreate: true,
@@ -214,7 +215,7 @@ export function getTauriMockScript(): string {
           const files = getFilesForPath(path);
           return {
             entries: files,
-            location: { path, displayPath: path, raw: path },
+            location: { path, displayPath: path, raw: path, scheme: 'file' },
             capabilities: { canCreate: true, canDelete: true, canRename: true },
           };
         },
@@ -223,7 +224,7 @@ export function getTauriMockScript(): string {
           const sessionId = args?.sessionId || 'mock-session';
           scheduleDirectoryBatch(sessionId, path);
           return {
-            location: { path, displayPath: path, raw: path },
+            location: { path, displayPath: path, raw: path, scheme: 'file' },
             capabilities: { canCreate: true, canDelete: true, canRename: true },
           };
         },

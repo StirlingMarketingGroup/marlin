@@ -181,7 +181,7 @@ function getPerformanceMockScript(fileCount: number): string {
           const path = args?.path || mockHomeDir;
           return {
             entries: getFilesForPath(path),
-            location: { path, displayPath: path, raw: 'file://' + path },
+            location: { path, displayPath: path, raw: 'file://' + path, scheme: 'file' },
             capabilities: { canCreate: true, canDelete: true, canRename: true, canCreateDirectories: true },
           };
         },
@@ -191,7 +191,7 @@ function getPerformanceMockScript(fileCount: number): string {
           scheduleDirectoryBatch(sessionId, path);
           return {
             sessionId,
-            location: { path, displayPath: path, raw: 'file://' + path },
+            location: { path, displayPath: path, raw: 'file://' + path, scheme: 'file' },
             capabilities: { canCreate: true, canDelete: true, canRename: true, canCreateDirectories: true },
           };
         },
