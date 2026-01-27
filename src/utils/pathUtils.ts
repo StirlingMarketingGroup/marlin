@@ -8,3 +8,16 @@ export function basename(path: string): string {
   const segments = normalized.split('/').filter(Boolean);
   return segments.length > 0 ? segments[segments.length - 1] : path;
 }
+
+/**
+ * Extract the parent directory from a path.
+ * Handles both forward slashes and backslashes (Windows).
+ * Returns '/' for root-level files.
+ */
+export function dirname(path: string): string {
+  if (!path) return '/';
+  const normalized = path.replace(/\\+/g, '/');
+  const lastSlash = normalized.lastIndexOf('/');
+  if (lastSlash <= 0) return '/';
+  return normalized.substring(0, lastSlash);
+}

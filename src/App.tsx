@@ -14,6 +14,7 @@ import { message } from '@tauri-apps/plugin-dialog';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { platform } from '@tauri-apps/plugin-os';
 import { getEffectiveExtension } from './utils/fileTypes';
+import { dirname } from './utils/pathUtils';
 import { applyAccentVariables, DEFAULT_ACCENT, normalizeHexColor } from '@/utils/accent';
 
 import Toast from './components/Toast';
@@ -1045,13 +1046,7 @@ function App() {
         if (movedPaths.length === 0) return;
         // Refresh if current directory contained any of the moved files
         const currentDir = useAppStore.getState().currentPath;
-        const affectsCurrentDir = movedPaths.some((p) => {
-          // Handle both Unix (/) and Windows (\) path separators
-          const lastSep = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
-          // lastSep >= 0 handles root-level files (e.g., /file.txt where lastSep === 0)
-          const parent = lastSep >= 0 ? p.substring(0, lastSep) || '/' : '/';
-          return parent === currentDir;
-        });
+        const affectsCurrentDir = movedPaths.some((p) => dirname(p) === currentDir);
         if (affectsCurrentDir) {
           await useAppStore.getState().refreshCurrentDirectoryStreaming();
         }
