@@ -21,6 +21,7 @@ import {
   PasteImageResult,
 } from '../types';
 import { invoke } from '@tauri-apps/api/core';
+import { emit } from '@tauri-apps/api/event';
 import { open as openShell } from '@tauri-apps/plugin-shell';
 import { ask, message, open as openDialog } from '@tauri-apps/plugin-dialog';
 import { getExtractableArchiveFormat, isArchiveFile } from '@/utils/fileTypes';
@@ -1951,6 +1952,13 @@ export const useAppStore = create<AppState>((set, get) => ({
     const toastStore = useToastStore.getState();
     const destinationIsRemote = currentPath.includes('://');
 
+    // Helper to notify other windows when cut+paste completes
+    const emitCutComplete = (movedPaths: string[]) => {
+      emit('clipboard:cut_complete', { movedPaths }).catch((err) => {
+        console.warn('Failed to emit clipboard:cut_complete:', err);
+      });
+    };
+
     const runWithClipboardProgress = async <T>(
       task: Promise<T>,
       progress: { operation: string; destination: string; totalItems: number }
@@ -2039,12 +2047,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
 
       if (isCut && result.pastedPaths.length > 0) {
-        set({
-          clipboardMode: null,
-          clipboardPaths: [],
-          clipboardPathsSet: new Set<string>(),
-          clipboardInternalOnly: false,
-        });
+        // Capture paths before clearing state
+        const movedPaths = get().clipboardPaths;
+        get().clearClipboardState();
+        emitCutComplete(movedPaths);
       }
 
       showPasteResultToast(result);
@@ -2110,12 +2116,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
 
       if (isCut && result.pastedPaths.length > 0) {
-        set({
-          clipboardMode: null,
-          clipboardPaths: [],
-          clipboardPathsSet: new Set<string>(),
-          clipboardInternalOnly: false,
-        });
+        get().clearClipboardState();
+        emitCutComplete(sourcePaths);
       }
 
       showPasteResultToast(result);
@@ -2164,11 +2166,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
 
       if (isCut && result.pastedPaths.length > 0) {
-        set({
-          clipboardMode: null,
-          clipboardPaths: [],
-          clipboardPathsSet: new Set<string>(),
-        });
+        get().clearClipboardState();
+        emitCutComplete(clipboardInfo.filePaths);
       }
 
       showPasteResultToast(result);

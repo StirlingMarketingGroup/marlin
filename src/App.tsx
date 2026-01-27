@@ -785,6 +785,18 @@ function App() {
       }
     };
 
+    // Focused-only registration: only executes handler if this window has focus
+    // This prevents menu accelerators (Cmd+C/X/V etc) from firing in ALL windows
+    const registerFocused = async <Payload,>(
+      eventName: string,
+      handler: (evt?: Event<Payload>) => void | Promise<void>
+    ) => {
+      await register<Payload>(eventName, async (evt) => {
+        if (!document.hasFocus()) return;
+        await handler(evt);
+      });
+    };
+
     // Helpers to update preferences
     const setView = (mode: 'grid' | 'list') => {
       useAppStore
@@ -816,18 +828,18 @@ function App() {
         const nextValue = typeof event?.payload === 'boolean' ? event.payload : undefined;
         await toggleHidden(nextValue);
       };
-      await register('menu:toggle_hidden', handleToggleHidden);
-      await register('ctx:toggle_hidden', handleToggleHidden);
+      await registerFocused('menu:toggle_hidden', handleToggleHidden);
+      await registerFocused('ctx:toggle_hidden', handleToggleHidden);
 
-      await register('menu:view_list', () => setView('list'));
-      await register('menu:view_grid', () => setView('grid'));
-      await register('menu:sort_name', () => setSortBy('name'));
-      await register('menu:sort_size', () => setSortBy('size'));
-      await register('menu:sort_modified', () => setSortBy('modified'));
-      await register('menu:sort_type', () => setSortBy('type'));
-      await register('menu:sort_order_asc', () => setSortOrder('asc'));
-      await register('menu:sort_order_desc', () => setSortOrder('desc'));
-      await register('menu:preferences', () => openPreferences());
+      await registerFocused('menu:view_list', () => setView('list'));
+      await registerFocused('menu:view_grid', () => setView('grid'));
+      await registerFocused('menu:sort_name', () => setSortBy('name'));
+      await registerFocused('menu:sort_size', () => setSortBy('size'));
+      await registerFocused('menu:sort_modified', () => setSortBy('modified'));
+      await registerFocused('menu:sort_type', () => setSortBy('type'));
+      await registerFocused('menu:sort_order_asc', () => setSortOrder('asc'));
+      await registerFocused('menu:sort_order_desc', () => setSortOrder('desc'));
+      await registerFocused('menu:preferences', () => openPreferences());
 
       const handleCalculateTotalSize = async () => {
         const state = useAppStore.getState();
@@ -850,7 +862,7 @@ function App() {
         );
       };
 
-      await register('menu:calculate_total_size', () => handleCalculateTotalSize());
+      await registerFocused('menu:calculate_total_size', () => handleCalculateTotalSize());
 
       // Copy actions from context menu
       const copyToClipboard = async (text: string) => {
@@ -893,22 +905,22 @@ function App() {
         }
       };
 
-      await register('menu:copy_name', () => {
+      await registerFocused('menu:copy_name', () => {
         void copyNames(false);
       });
-      await register('menu:copy_full_name', () => {
+      await registerFocused('menu:copy_full_name', () => {
         void copyNames(true);
       });
-      await register('menu:rename', () => {
+      await registerFocused('menu:rename', () => {
         useAppStore.getState().beginRenameSelected();
       });
-      await register('menu:new_file', () => {
+      await registerFocused('menu:new_file', () => {
         void useAppStore.getState().createNewFile();
       });
-      await register('menu:new_folder', () => {
+      await registerFocused('menu:new_folder', () => {
         void useAppStore.getState().createNewFolder();
       });
-      await register('menu:reveal_symlink', async () => {
+      await registerFocused('menu:reveal_symlink', async () => {
         const state = useAppStore.getState();
         const selection = state.selectedFiles;
         if (!selection || selection.length === 0) return;
@@ -930,7 +942,7 @@ function App() {
           });
         }
       });
-      await register('menu:new_window', () => {
+      await registerFocused('menu:new_window', () => {
         // Create new window in current directory
         const currentPath = useAppStore.getState().currentPath;
         invoke('new_window', { path: currentPath }).catch((err) => {
@@ -945,10 +957,10 @@ function App() {
           toggleFoldersFirst();
         }
       };
-      await register('menu:folders_first', handleFoldersFirst);
-      await register('ctx:folders_first', handleFoldersFirst);
+      await registerFocused('menu:folders_first', handleFoldersFirst);
+      await registerFocused('ctx:folders_first', handleFoldersFirst);
 
-      await register('menu:reset_folder_defaults', async () => {
+      await registerFocused('menu:reset_folder_defaults', async () => {
         // Clear all directory preferences and persist the change
         useAppStore.getState().resetDirectoryPreferences();
         try {
@@ -958,7 +970,7 @@ function App() {
         }
       });
 
-      await register('menu:clear_thumbnail_cache', async () => {
+      await registerFocused('menu:clear_thumbnail_cache', async () => {
         // Clear the thumbnail cache
         try {
           await invoke('clear_thumbnail_cache');
@@ -1013,9 +1025,37 @@ function App() {
       };
 
       // Clipboard operations from menu (single Copy/Cut/Paste items)
-      await register('menu:copy_files', () => handleClipboardMenuAction('copy'));
-      await register('menu:cut_files', () => handleClipboardMenuAction('cut'));
-      await register('menu:paste_files', () => handleClipboardMenuAction('paste'));
+      await registerFocused('menu:copy_files', () => handleClipboardMenuAction('copy'));
+      await registerFocused('menu:cut_files', () => handleClipboardMenuAction('cut'));
+      await registerFocused('menu:paste_files', () => handleClipboardMenuAction('paste'));
+
+      // Cross-window clipboard sync: when any window completes a cut+paste,
+      // all windows must clear their clipboard state and refresh if affected.
+      // The focused window already refreshed during paste, so only unfocused
+      // windows need to refresh (to remove cut files from source directory).
+      await register<{ movedPaths: string[] }>('clipboard:cut_complete', async (evt) => {
+        // Skip entirely in focused window - it already handled everything during paste
+        if (document.hasFocus()) return;
+        // Clear clipboard state in unfocused windows
+        useAppStore.getState().clearClipboardState();
+        // Validate payload shape before processing
+        const rawPaths = evt?.payload?.movedPaths;
+        if (!Array.isArray(rawPaths)) return;
+        const movedPaths = rawPaths.filter((p): p is string => typeof p === 'string');
+        if (movedPaths.length === 0) return;
+        // Refresh if current directory contained any of the moved files
+        const currentDir = useAppStore.getState().currentPath;
+        const affectsCurrentDir = movedPaths.some((p) => {
+          // Handle both Unix (/) and Windows (\) path separators
+          const lastSep = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
+          // lastSep >= 0 handles root-level files (e.g., /file.txt where lastSep === 0)
+          const parent = lastSep >= 0 ? p.substring(0, lastSep) || '/' : '/';
+          return parent === currentDir;
+        });
+        if (affectsCurrentDir) {
+          await useAppStore.getState().refreshCurrentDirectoryStreaming();
+        }
+      });
     })();
 
     // Keyboard shortcuts as fallback (mac-like)
