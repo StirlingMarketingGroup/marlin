@@ -122,6 +122,7 @@ pub fn run() {
             commands::copy_file,
             commands::move_file,
             commands::extract_archive,
+            commands::extract_archive_entry_to_temp,
             commands::compress_to_zip,
             commands::open_path_with,
             commands::get_system_accent_color,
@@ -196,6 +197,7 @@ pub fn run() {
             commands::download_gdrive_file,
             commands::fetch_gdrive_url,
             commands::get_downloads_dir,
+            commands::get_temp_dir,
             commands::extract_gdrive_archive,
             commands::get_gdrive_folder_id,
             commands::resolve_gdrive_folder_url,
@@ -226,6 +228,10 @@ pub fn run() {
 
             // Initialize the file system watcher
             fs_watcher::init_watcher(app.handle().clone());
+
+            if let Err(err) = locations::archive::prune_archive_cache_on_startup() {
+                log::warn!("Failed to prune archive cache on startup: {err}");
+            }
 
             // Position traffic lights similar to Finder's sidebar style
             #[cfg(target_os = "macos")]

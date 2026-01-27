@@ -1541,6 +1541,7 @@ fn sanitize_filename(name: &str) -> String {
 /// This is used for opening files that need to be downloaded first
 pub async fn download_file_to_temp(email: &str, file_id: &str, file_name: &str) -> Result<String, String> {
     use std::io::Write;
+    use std::time::{Duration, SystemTime};
 
     log::info!("download_file_to_temp: email={}, file_id={}, name={}", email, file_id, file_name);
 
@@ -1555,6 +1556,22 @@ pub async fn download_file_to_temp(email: &str, file_id: &str, file_name: &str) 
     // Create temp file path with sanitized filename
     let temp_path = temp_dir.join(format!("{}_{}", file_id, safe_name));
     let temp_path_str = temp_path.to_string_lossy().to_string();
+
+    // Check if we have a recent cached version (within 1 hour)
+    // This prevents re-downloading the same archive for every directory listing
+    const CACHE_TTL: Duration = Duration::from_secs(60 * 60); // 1 hour
+    if temp_path.exists() {
+        if let Ok(metadata) = std::fs::metadata(&temp_path) {
+            if let Ok(modified) = metadata.modified() {
+                if let Ok(age) = SystemTime::now().duration_since(modified) {
+                    if age <= CACHE_TTL {
+                        log::info!("Using cached file: {} (age: {:?})", temp_path_str, age);
+                        return Ok(temp_path_str);
+                    }
+                }
+            }
+        }
+    }
 
     // Get the access token
     let access_token = ensure_valid_token(email).await?;
@@ -1767,6 +1784,7 @@ pub async fn extract_gdrive_zip(
     file_id: &str,
     file_name: &str,
     destination_folder_id: &str,
+    create_subfolder: bool,
 ) -> Result<String, String> {
     log::info!(
         "extract_gdrive_zip: email={}, file_id={}, name={}, dest={}",
@@ -1824,8 +1842,12 @@ pub async fn extract_gdrive_zip(
     let folder_name = file_name.trim_end_matches(".zip")
         .trim_end_matches(".ZIP");
 
-    // Create the destination folder in Google Drive
-    let dest_folder_id = create_gdrive_folder(email, destination_folder_id, folder_name).await?;
+    // Create the destination folder in Google Drive unless extracting directly
+    let dest_folder_id = if create_subfolder {
+        create_gdrive_folder(email, destination_folder_id, folder_name).await?
+    } else {
+        destination_folder_id.to_string()
+    };
 
     // Upload all extracted contents to Google Drive
     let entries = std::fs::read_dir(&extract_dir)

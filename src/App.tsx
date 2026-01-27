@@ -13,7 +13,7 @@ import { useDirectoryStream } from './hooks/useDirectoryStream';
 import { message } from '@tauri-apps/plugin-dialog';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { platform } from '@tauri-apps/plugin-os';
-import { getEffectiveExtension } from './utils/fileTypes';
+import { getEffectiveExtension, isArchiveFile } from './utils/fileTypes';
 import { dirname } from './utils/pathUtils';
 import { applyAccentVariables, DEFAULT_ACCENT, normalizeHexColor } from '@/utils/accent';
 import { getSuggestedZipName } from './utils/zipNaming';
@@ -943,6 +943,26 @@ function App() {
           currentPath: state.currentPath,
         });
         void state.compressSelectedToZip(suggestedName);
+      });
+      const handleExtractArchive = (createSubfolder: boolean) => {
+        const state = useAppStore.getState();
+        const selected = state.selectedFiles;
+        if (!selected || selected.length !== 1) return;
+        const map = new Map(state.files.map((f) => [f.path, f]));
+        const target = selected
+          .map((path) => map.get(path))
+          .find(
+            (file) =>
+              file &&
+              !file.is_directory &&
+              isArchiveFile(file) &&
+              !file.path.startsWith('archive://')
+          );
+        if (!target) return;
+        void state.extractArchive(target, { createSubfolder });
+      };
+      await registerFocused('menu:extract_to_folder', () => {
+        handleExtractArchive(true);
       });
       await registerFocused('menu:new_file', () => {
         void useAppStore.getState().createNewFile();

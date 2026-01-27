@@ -2,6 +2,7 @@ use base64::Engine as _;
 use image::{DynamicImage, GenericImageView, ImageFormat};
 use std::io::Cursor;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use super::{ThumbnailFormat, ThumbnailGenerationResult, ThumbnailQuality, ThumbnailRequest};
 
@@ -18,10 +19,37 @@ pub mod video;
 
 pub mod smb;
 
+/// Shared runtime for archive thumbnail extraction
+/// Using OnceLock ensures we create it only once and reuse it
+static ARCHIVE_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+
+fn get_archive_runtime() -> &'static tokio::runtime::Runtime {
+    ARCHIVE_RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("Failed to create archive thumbnail runtime")
+    })
+}
+
 pub struct ThumbnailGenerator;
 
 impl ThumbnailGenerator {
     pub fn generate(request: &ThumbnailRequest) -> Result<ThumbnailGenerationResult, String> {
+        if request.path.starts_with("archive://") {
+            // Use a shared runtime for archive extraction to avoid creating one per thumbnail
+            let archive_path = request.path.clone();
+            let runtime = get_archive_runtime();
+            let temp_path = runtime.block_on(
+                crate::locations::archive::extract_archive_entry_to_temp(&archive_path),
+            )?;
+
+            let mut temp_request = request.clone();
+            temp_request.path = temp_path.to_string_lossy().to_string();
+            return Self::generate_local(&temp_request);
+        }
+
         // Check for SMB paths and handle them specially
         if smb::is_smb_path(&request.path) {
             return smb::generate_smb_thumbnail(request);

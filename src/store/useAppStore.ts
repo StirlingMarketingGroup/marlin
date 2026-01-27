@@ -28,6 +28,7 @@ import { getExtractableArchiveFormat, isArchiveFile } from '@/utils/fileTypes';
 import { basename } from '@/utils/pathUtils';
 import { useToastStore } from './useToastStore';
 import { parseGoogleDriveUrl } from '@/utils/googleDriveUrl';
+import { getArchiveParentUri, isArchiveUri } from '@/utils/archiveUri';
 
 // Concurrency limiter for app icon generation requests (macOS)
 const __iconQueue: Array<() => void> = [];
@@ -150,6 +151,11 @@ const normalizePath = (input: string): string => {
 
   if (!normalized) return '/';
   return normalized;
+};
+
+const getUriScheme = (value: string): string | null => {
+  const match = value.match(/^([a-zA-Z][a-zA-Z0-9+.-]*):\/\//);
+  return match ? match[1].toLowerCase() : null;
 };
 
 const toFileUri = (path: string): string => {
@@ -288,7 +294,7 @@ interface AppState {
   updateFileDimensions: (path: string, width: number, height: number) => void;
   cancelDirectoryStream: () => Promise<void>;
   openFile: (file: FileItem) => Promise<void>;
-  extractArchive: (file: FileItem) => Promise<boolean>;
+  extractArchive: (file: FileItem, options?: { createSubfolder?: boolean }) => Promise<boolean>;
   createNewFolder: () => Promise<void>;
   createNewFile: () => Promise<void>;
   compressSelectedToZip: (suggestedName: string) => Promise<void>;
@@ -579,12 +585,15 @@ export const useAppStore = create<AppState>((set, get) => ({
       renameTargetPath: undefined,
     });
 
-    // For URI paths (smb://, gdrive://, etc.), explicitly refresh the directory
+    // For URI paths (smb://, gdrive://, archive://, etc.), explicitly refresh the directory
     if (isUri) {
       await get().refreshCurrentDirectory();
     }
 
-    void get().refreshGitStatus({ path: norm });
+    const scheme = getUriScheme(norm);
+    if (!scheme || scheme === 'file') {
+      void get().refreshGitStatus({ path: norm });
+    }
   },
 
   goBack: () => {
@@ -592,7 +601,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (historyIndex > 0) {
       const newIndex = historyIndex - 1;
       const newPath = pathHistory[newIndex];
-      const locationRaw = newPath.startsWith('gdrive://') ? newPath : toFileUri(newPath);
+      const isUri = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(newPath);
+      const locationRaw = isUri ? newPath : toFileUri(newPath);
       set({
         currentPath: newPath,
         currentLocationRaw: locationRaw,
@@ -600,7 +610,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         justCreatedPath: undefined,
         renameTargetPath: undefined,
       });
-      void get().refreshGitStatus({ path: newPath });
+      const scheme = getUriScheme(newPath);
+      if (!scheme || scheme === 'file') {
+        void get().refreshGitStatus({ path: newPath });
+      }
     }
   },
 
@@ -609,7 +622,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (historyIndex < pathHistory.length - 1) {
       const newIndex = historyIndex + 1;
       const newPath = pathHistory[newIndex];
-      const locationRaw = newPath.startsWith('gdrive://') ? newPath : toFileUri(newPath);
+      const isUri = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(newPath);
+      const locationRaw = isUri ? newPath : toFileUri(newPath);
       set({
         currentPath: newPath,
         currentLocationRaw: locationRaw,
@@ -617,7 +631,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         justCreatedPath: undefined,
         renameTargetPath: undefined,
       });
-      void get().refreshGitStatus({ path: newPath });
+      const scheme = getUriScheme(newPath);
+      if (!scheme || scheme === 'file') {
+        void get().refreshGitStatus({ path: newPath });
+      }
     }
   },
 
@@ -633,6 +650,13 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   goUp: () => {
     const { currentPath, navigateTo } = get();
+    if (isArchiveUri(currentPath)) {
+      const parent = getArchiveParentUri(currentPath);
+      if (parent) {
+        navigateTo(parent);
+      }
+      return;
+    }
     // Handle POSIX and basic Windows paths
     if (!currentPath || currentPath === '/') return;
     // Normalize backslashes to slashes for finding parent
@@ -649,6 +673,9 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   canGoUp: () => {
     const { currentPath } = get();
+    if (isArchiveUri(currentPath)) {
+      return Boolean(getArchiveParentUri(currentPath));
+    }
     if (!currentPath || currentPath === '/') return false;
     const normalized = currentPath.replace(/\\/g, '/').replace(/\/+$/g, '') || '/';
     if (normalized === '/') return false;
@@ -729,9 +756,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         path: currentPath,
       });
 
-      // For gdrive:// paths, use the raw URI directly; otherwise normalize the display path
-      const isGdrive = listing.location.scheme === 'gdrive';
-      const normalized = isGdrive
+      // For non-file schemes (gdrive://, smb://, archive://), keep the raw URI directly.
+      const useRawPath = listing.location.scheme !== 'file';
+      const normalized = useRawPath
         ? listing.location.raw
         : normalizePath(listing.location.displayPath || listing.location.path);
 
@@ -766,7 +793,11 @@ export const useAppStore = create<AppState>((set, get) => ({
         };
       });
 
-      void get().refreshGitStatus({ path: listing.location.path, force: true });
+      if (listing.location.scheme === 'file') {
+        void get().refreshGitStatus({ path: listing.location.path, force: true });
+      } else {
+        set({ gitStatus: null, gitStatusError: undefined });
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error('❌ refreshCurrentDirectory failed:', msg);
@@ -827,9 +858,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         { path: currentPath, sessionId }
       );
 
-      // For gdrive:// paths, use the raw URI directly; otherwise normalize the display path
-      const isGdrive = response.location.scheme === 'gdrive';
-      const normalized = isGdrive
+      // For non-file schemes, keep raw URI directly (streaming is typically local only).
+      const useRawPath = response.location.scheme !== 'file';
+      const normalized = useRawPath
         ? response.location.raw
         : normalizePath(response.location.displayPath || response.location.path);
       const locationRaw = response.location.raw;
@@ -848,7 +879,11 @@ export const useAppStore = create<AppState>((set, get) => ({
         };
       });
 
-      void get().refreshGitStatus({ path: response.location.path, force: true });
+      if (response.location.scheme === 'file') {
+        void get().refreshGitStatus({ path: response.location.path, force: true });
+      } else {
+        set({ gitStatus: null, gitStatusError: undefined });
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error('❌ refreshCurrentDirectoryStreaming failed:', msg);
@@ -1159,8 +1194,34 @@ export const useAppStore = create<AppState>((set, get) => ({
     let pathToOpen = file.path;
     let downloadToastId: string | undefined;
 
-    // Remote files: download to a temp path before opening.
-    if (file.path.startsWith('gdrive://')) {
+    if (file.path.startsWith('archive://')) {
+      try {
+        downloadToastId = toastStore.addToast({
+          type: 'info',
+          message: `Extracting ${file.name}...`,
+          duration: 0,
+        });
+
+        pathToOpen = await invoke<string>('extract_archive_entry_to_temp', {
+          archiveUri: file.path,
+        });
+      } catch (extractError) {
+        console.error('Failed to extract archive entry:', extractError);
+        const errorMessage =
+          extractError instanceof Error ? extractError.message : String(extractError);
+        toastStore.addToast({
+          type: 'error',
+          message: `Unable to open ${file.name}: ${errorMessage}`,
+          duration: 6000,
+        });
+        return;
+      } finally {
+        if (downloadToastId) {
+          toastStore.removeToast(downloadToastId);
+        }
+      }
+    } else if (file.path.startsWith('gdrive://')) {
+      // Remote files: download to a temp path before opening.
       if (!file.remote_id) {
         toastStore.addToast({
           type: 'error',
@@ -1309,13 +1370,19 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
-  extractArchive: async (file) => {
+  extractArchive: async (file, options) => {
     const state = get();
     const archivePath = file?.path;
     const destinationDir = state.currentPath;
+    const createSubfolder = options?.createSubfolder ?? true;
 
     if (!archivePath || !destinationDir) {
       console.warn('extractArchive called without a valid path or destination');
+      return false;
+    }
+
+    if (archivePath.startsWith('archive://')) {
+      await get().openFile(file);
       return false;
     }
 
@@ -1348,8 +1415,98 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     activeArchiveExtractions.add(archivePath);
 
-    // Check if this is a Google Drive file
+    const isSmbFile = archivePath.startsWith('smb://');
     const isGdriveFile = archivePath.startsWith('gdrive://');
+
+    if (isSmbFile) {
+      const progressTimer = window.setTimeout(() => {
+        void (async () => {
+          try {
+            await invoke('show_archive_progress_window', {
+              fileName: file.name,
+              destinationDir: destinationDir,
+              format: archiveFormat,
+            });
+          } catch (error) {
+            console.warn('Failed to show archive progress window:', error);
+          }
+        })();
+      }, 500);
+      let extractRoot: string | undefined;
+      let tempArchivePath: string | undefined;
+
+      try {
+        const tempRoot = await invoke<string>('get_temp_dir');
+        const trimmedRoot = tempRoot.replace(/\/+$/g, '');
+        extractRoot = `${trimmedRoot}/marlin-archive-extract-${crypto.randomUUID()}`;
+
+        await invoke('create_directory_command', { path: extractRoot });
+
+        tempArchivePath = await invoke<string>('download_smb_file', { path: archivePath });
+
+        const result = await invoke<{
+          folderPath: string;
+          usedSystemFallback?: boolean;
+          format?: string;
+        }>('extract_archive', {
+          archivePath: tempArchivePath,
+          destinationDir: extractRoot,
+          formatHint: archiveFormat,
+          createSubfolder,
+        });
+
+        const localExtractRoot = result?.folderPath || extractRoot;
+        let sourcePaths: string[] = [];
+
+        if (createSubfolder) {
+          sourcePaths = [localExtractRoot];
+        } else {
+          const listing = await invoke<DirectoryListingResponse>('read_directory', {
+            path: localExtractRoot,
+          });
+          sourcePaths = listing.entries.map((entry) => entry.path);
+        }
+
+        if (sourcePaths.length > 0) {
+          await invoke('paste_items_to_location', {
+            destination: destinationDir,
+            sourcePaths,
+            isCut: false,
+          });
+        }
+
+        await state.refreshCurrentDirectory();
+        return true;
+      } catch (error) {
+        console.error('Failed to extract SMB archive:', error);
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        try {
+          await message(`Failed to extract ${file.name}: ${errorMsg}`, {
+            title: 'Archive Extraction',
+            kind: 'error',
+          });
+        } catch (dialogError) {
+          console.warn('Failed to show extraction error dialog:', dialogError);
+        }
+        return false;
+      } finally {
+        window.clearTimeout(progressTimer);
+        if (tempArchivePath) {
+          void invoke('delete_file', { path: tempArchivePath }).catch((cleanupError) => {
+            console.warn('Failed to clean up SMB temp archive:', cleanupError);
+          });
+        }
+        if (extractRoot) {
+          void invoke('delete_file', { path: extractRoot }).catch((cleanupError) => {
+            console.warn('Failed to clean up SMB extract directory:', cleanupError);
+          });
+        }
+        void invoke('hide_archive_progress_window').catch((error) => {
+          console.warn('Failed to hide archive progress window:', error);
+        });
+        activeArchiveExtractions.delete(archivePath);
+      }
+    }
 
     if (isGdriveFile) {
       // For Google Drive files: extract and upload back to Google Drive
@@ -1405,6 +1562,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           fileId: file.remote_id,
           fileName: file.name,
           destinationFolderId: destFolderId,
+          createSubfolder,
         });
 
         console.info('[extractArchive] Google Drive extraction complete');
@@ -1470,9 +1628,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         archivePath: archivePath,
         destinationDir: destinationDir,
         formatHint: archiveFormat,
+        createSubfolder,
       });
 
-      if (result?.folderPath) {
+      if (result?.folderPath && createSubfolder) {
         set({ pendingRevealTarget: result.folderPath });
       }
 

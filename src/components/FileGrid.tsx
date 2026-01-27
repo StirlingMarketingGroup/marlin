@@ -25,6 +25,7 @@ import SymlinkBadge from '@/components/SymlinkBadge';
 import GitRepoBadge from '@/components/GitRepoBadge';
 import { normalizePreviewIcon } from '@/utils/iconSizing';
 import { isArchiveFile, isVideoExtension, isMacOSBundle } from '@/utils/fileTypes';
+import { buildArchiveUri } from '@/utils/archiveUri';
 import { isGoogleDrivePath, parseGoogleDrivePathEmail } from '@/utils/googleDriveUrl';
 import { isSmbPath } from '@/utils/smbPath';
 import { useScrollContainerRef } from '@/contexts/ScrollContext';
@@ -243,7 +244,6 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     setSelectionLead,
     pendingRevealTarget,
     setPendingRevealTarget,
-    extractArchive,
     openFile,
     isStreamingComplete,
     streamingTotalCount,
@@ -360,7 +360,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
 
     const isArchive = !file.is_directory && isArchiveFile(file);
     if (isArchive) {
-      await extractArchive(file);
+      navigateTo(buildArchiveUri(file.path, '/'));
       return;
     }
 
@@ -449,10 +449,15 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
             const dragPaths: string[] = [];
             const gdriveFiles = selected.filter((f) => isGoogleDrivePath(f.path) && f.remote_id);
             const smbFiles = selected.filter((f) => isSmbPath(f.path) && !f.is_directory);
+            const archiveFiles = selected.filter(
+              (f) => f.path.startsWith('archive://') && !f.is_directory
+            );
 
             // Show loading indicator for files being downloaded
-            if (gdriveFiles.length > 0 || smbFiles.length > 0) {
-              setDownloadingForDrag(new Set([...gdriveFiles, ...smbFiles].map((f) => f.path)));
+            if (gdriveFiles.length > 0 || smbFiles.length > 0 || archiveFiles.length > 0) {
+              setDownloadingForDrag(
+                new Set([...gdriveFiles, ...smbFiles, ...archiveFiles].map((f) => f.path))
+              );
             }
 
             try {
@@ -488,6 +493,16 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
                     dragPaths.push(tempPath);
                   } catch (downloadError) {
                     console.warn('Failed to download SMB file for drag:', f.name, downloadError);
+                    // Skip this file in the drag
+                  }
+                } else if (f.path.startsWith('archive://')) {
+                  try {
+                    const tempPath = await invoke<string>('extract_archive_entry_to_temp', {
+                      archiveUri: f.path,
+                    });
+                    dragPaths.push(tempPath);
+                  } catch (extractError) {
+                    console.warn('Failed to extract archive entry for drag:', f.name, extractError);
                     // Skip this file in the drag
                   }
                 } else {

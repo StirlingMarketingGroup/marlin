@@ -68,6 +68,23 @@ export function getExtractableArchiveFormat(
   return null;
 }
 
+export function getArchiveBaseName(name: string): string {
+  const lower = name.toLowerCase();
+  for (const candidate of EXTRACTABLE_ARCHIVE_PATTERNS) {
+    const match = candidate.patterns.find((pattern) => lower.endsWith(pattern));
+    if (match) {
+      const trimmed = name.slice(0, Math.max(0, name.length - match.length));
+      return trimmed || name;
+    }
+  }
+  const dotIndex = name.lastIndexOf('.');
+  if (dotIndex > 0) {
+    const trimmed = name.slice(0, dotIndex);
+    return trimmed || name;
+  }
+  return name;
+}
+
 export const VIDEO_EXTENSIONS = new Set([
   'mp4',
   'm4v',
