@@ -29,7 +29,7 @@ A fast, no-nonsense file browser. Gets out of your way and just does files well.
 - Trash with undo support
 - **New Folder** (Cmd/Ctrl+Shift+N): VSCode-style creation with instant rename—type `foo/bar/baz` to create nested directories in one go
 - **Rename into subdirs**: Rename any file to `subdir/filename.ext` to create the folder and move it there
-- Double-click archives to extract
+- **Browse archives**: Double-click ZIP, RAR, or TAR files to navigate into them like folders
 - Calculate folder sizes
 - Keyboard navigation
 - Dark and light themes
@@ -61,6 +61,15 @@ Image dimensions shown under thumbnails. Image-heavy folders automatically switc
 - **Blazing fast**: Handles folders with 100k+ files with ease
 - **Remote thumbnails**: Generate thumbnails for files on network shares
 - Automatic reconnection and credential management
+
+### Archive Browsing
+
+- **Navigate into archives**: Double-click to browse ZIP, RAR, TAR, TAR.GZ, TAR.BZ2, TAR.XZ, and TAR.ZST files like folders
+- **Nested archives**: Browse archives within archives
+- **Works everywhere**: Local files, SMB shares, and Google Drive
+- **Thumbnails inside archives**: Full thumbnail support for images and other files
+- **Drag files out**: Drag files from inside an archive to extract them
+- **Context menu extraction**: Right-click for "Extract Here" or "Extract to folder/"
 
 ### For Developers
 
