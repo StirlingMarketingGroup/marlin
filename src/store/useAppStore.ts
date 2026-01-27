@@ -291,6 +291,7 @@ interface AppState {
   extractArchive: (file: FileItem) => Promise<boolean>;
   createNewFolder: () => Promise<void>;
   createNewFile: () => Promise<void>;
+  compressSelectedToZip: (suggestedName: string) => Promise<void>;
   trashSelected: () => Promise<void>;
   deleteSelectedPermanently: () => Promise<void>;
   fetchAppIcon: (path: string, size?: number) => Promise<string | undefined>;
@@ -2327,6 +2328,82 @@ export const useAppStore = create<AppState>((set, get) => ({
         message: `Failed to create file: ${msg}`,
         duration: 5000,
       });
+    }
+  },
+
+  compressSelectedToZip: async (suggestedName: string) => {
+    const state = get();
+    const toastStore = useToastStore.getState();
+    const selectedPaths = state.selectedFiles.slice();
+    if (!selectedPaths.length) return;
+
+    if (state.renameTargetPath) {
+      await state.cancelRename();
+    }
+
+    // Use a cancellation flag to handle the race between timer firing and compression completing.
+    // clearTimeout won't stop the async invoke if the timer already fired.
+    let cancelled = false;
+    let progressWindowShown = false;
+    const progressTimer = window.setTimeout(() => {
+      if (cancelled) return;
+      void (async () => {
+        if (cancelled) return;
+        try {
+          await invoke('show_compress_progress_window', {
+            archiveName: suggestedName,
+            totalItems: selectedPaths.length,
+          });
+          if (!cancelled) {
+            progressWindowShown = true;
+          } else {
+            // Compression finished while we were showing the window - hide it immediately
+            void invoke('hide_compress_progress_window').catch(() => {});
+          }
+        } catch (error) {
+          console.warn('Failed to show compress progress window:', error);
+        }
+      })();
+    }, 500);
+
+    try {
+      const result = await invoke<{ path: string }>('compress_to_zip', {
+        sourcePaths: selectedPaths,
+        destinationDir: state.currentPath,
+        suggestedName,
+      });
+
+      const createdPath = result?.path;
+      if (!createdPath) {
+        throw new Error('Compression completed without returning a file path.');
+      }
+
+      if (state.currentPath.includes('://')) {
+        await state.refreshCurrentDirectory();
+      } else {
+        await state.refreshCurrentDirectoryStreaming();
+      }
+
+      state.setSelectedFiles([createdPath]);
+      state.setSelectionAnchor(createdPath);
+      state.setSelectionLead(createdPath);
+      state.setPendingRevealTarget(createdPath);
+    } catch (error) {
+      console.error('Failed to compress selection:', error);
+      const msg = error instanceof Error ? error.message : String(error);
+      toastStore.addToast({
+        type: 'error',
+        message: `Compression failed: ${msg}`,
+        duration: 6000,
+      });
+    } finally {
+      cancelled = true;
+      window.clearTimeout(progressTimer);
+      if (progressWindowShown) {
+        void invoke('hide_compress_progress_window').catch((error) => {
+          console.warn('Failed to hide compress progress window:', error);
+        });
+      }
     }
   },
 

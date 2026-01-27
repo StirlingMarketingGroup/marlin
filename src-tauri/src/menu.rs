@@ -490,6 +490,9 @@ pub fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, event: &tauri::menu::Me
         "ctx:rename" => {
             let _ = app.emit("menu:rename", ());
         }
+        "ctx:compress_to_zip" => {
+            let _ = app.emit("menu:compress_to_zip", ());
+        }
         "ctx:reveal_symlink" => {
             let _ = app.emit("menu:reveal_symlink", ());
         }

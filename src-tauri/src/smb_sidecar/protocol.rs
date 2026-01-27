@@ -203,6 +203,23 @@ pub struct DownloadFileParams {
     pub dest_path: String,
 }
 
+/// Parameters for upload_file method.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UploadFileParams {
+    pub credentials: SmbCredentials,
+    pub share: String,
+    /// Local path to read the file from.
+    pub source_path: String,
+    /// SMB path to write the file to.
+    pub dest_path: String,
+}
+
+/// Result of upload_file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UploadFileResult {
+    pub size: u64,
+}
+
 /// A directory entry returned by read_directory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirectoryEntry {
@@ -276,4 +293,5 @@ pub mod methods {
     pub const LIST_SHARES: &str = "list_shares";
     pub const TEST_CONNECTION: &str = "test_connection";
     pub const DOWNLOAD_FILE: &str = "download_file";
+    pub const UPLOAD_FILE: &str = "upload_file";
 }

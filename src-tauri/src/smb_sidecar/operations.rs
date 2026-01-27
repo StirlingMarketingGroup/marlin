@@ -7,7 +7,8 @@ use crate::smb_sidecar::protocol::{
     error_codes, CopyParams, CreateDirectoryParams, DeleteParams, DirectoryEntry,
     DownloadFileParams, DownloadFileResult, FileMetadataResult, GetFileMetadataParams,
     ListSharesParams, ListSharesResult, ReadDirectoryParams, ReadDirectoryResult, RenameParams,
-    ShareEntry, SmbCredentials, TestConnectionParams, TestConnectionResult,
+    ShareEntry, SmbCredentials, TestConnectionParams, TestConnectionResult, UploadFileParams,
+    UploadFileResult,
 };
 use once_cell::sync::Lazy;
 use pavao::{SmbClient, SmbCredentials as PavaoCredentials, SmbMode, SmbOpenOptions, SmbOptions};
@@ -461,6 +462,46 @@ pub fn download_file(params: DownloadFileParams) -> Result<DownloadFileResult, (
         path: params.dest_path,
         size,
     })
+}
+
+/// Upload a local file to SMB.
+pub fn upload_file(params: UploadFileParams) -> Result<UploadFileResult, (i32, String)> {
+    let _guard = SMB_MUTEX
+        .lock()
+        .map_err(|e| (error_codes::INTERNAL_ERROR, format!("SMB mutex poisoned: {}", e)))?;
+
+    let credentials = build_credentials(&params.credentials, &params.share);
+
+    let client = SmbClient::new(credentials, SmbOptions::default())
+        .map_err(|e| {
+            let (code, msg) = map_smb_error(&e);
+            (code, format!("Failed to connect to SMB server: {}", msg))
+        })?;
+
+    let mut local_file = std::fs::File::open(&params.source_path)
+        .map_err(|e| (error_codes::INTERNAL_ERROR, format!("Failed to open source file: {}", e)))?;
+
+    let mut smb_file = client
+        .open_with(
+            &params.dest_path,
+            SmbOpenOptions::default()
+                .write(true)
+                .create(true)
+                .exclusive(true),
+        )
+        .map_err(|e| {
+            let (code, msg) = map_smb_error(&e);
+            (code, format!("Failed to open SMB destination: {}", msg))
+        })?;
+
+    let size = std::io::copy(&mut local_file, &mut smb_file)
+        .map_err(|e| (error_codes::SMB_ERROR, format!("Failed to upload file: {}", e)))?;
+
+    smb_file
+        .flush()
+        .map_err(|e| (error_codes::SMB_ERROR, format!("Failed to flush SMB file: {}", e)))?;
+
+    Ok(UploadFileResult { size })
 }
 
 /// Resolve the smbclient command, searching common paths on macOS.

@@ -16,6 +16,7 @@ import { platform } from '@tauri-apps/plugin-os';
 import { getEffectiveExtension } from './utils/fileTypes';
 import { dirname } from './utils/pathUtils';
 import { applyAccentVariables, DEFAULT_ACCENT, normalizeHexColor } from '@/utils/accent';
+import { getSuggestedZipName } from './utils/zipNaming';
 
 import Toast from './components/Toast';
 import FilterInput from './components/FilterInput';
@@ -914,6 +915,34 @@ function App() {
       });
       await registerFocused('menu:rename', () => {
         useAppStore.getState().beginRenameSelected();
+      });
+      await registerFocused('menu:compress_to_zip', () => {
+        const state = useAppStore.getState();
+        const selected = state.selectedFiles;
+        if (!selected || selected.length === 0) return;
+        const map = new Map(state.files.map((f) => [f.path, f]));
+        const selectedItems = selected
+          .map((path) => map.get(path))
+          .filter((file): file is FileItem => Boolean(file));
+        if (selectedItems.length === 0) return;
+        const prefs = {
+          ...state.globalPreferences,
+          ...state.directoryPreferences[state.currentPath],
+        };
+        const hiddenFiltered = prefs.showHidden
+          ? state.files
+          : state.files.filter((file) => !file.is_hidden);
+        const visibleItems = state.filterText
+          ? hiddenFiltered.filter((file) =>
+              file.name.toLowerCase().includes(state.filterText.toLowerCase())
+            )
+          : hiddenFiltered;
+        const suggestedName = getSuggestedZipName({
+          selectedItems,
+          visibleItems,
+          currentPath: state.currentPath,
+        });
+        void state.compressSelectedToZip(suggestedName);
       });
       await registerFocused('menu:new_file', () => {
         void useAppStore.getState().createNewFile();
