@@ -41,9 +41,7 @@
       "icons/128x128.png",
       "icons/32x32.png"
     ],
-    "externalBin": [
-      "binaries/marlin-smb"
-    ],
+    "externalBin": ["binaries/marlin-smb"],
     "macOS": {
       "entitlements": "./Entitlements.plist",
       "signingIdentity": null
