@@ -493,6 +493,9 @@ pub fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, event: &tauri::menu::Me
         "ctx:compress_to_zip" => {
             let _ = app.emit("menu:compress_to_zip", ());
         }
+        "ctx:extract_to_folder" => {
+            let _ = app.emit("menu:extract_to_folder", ());
+        }
         "ctx:reveal_symlink" => {
             let _ = app.emit("menu:reveal_symlink", ());
         }

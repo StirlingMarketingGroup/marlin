@@ -30,6 +30,7 @@ import UpdateNotice from '@/components/UpdateNotice';
 import GitRepoBadge from '@/components/GitRepoBadge';
 import SymlinkBadge from '@/components/SymlinkBadge';
 import { useDragStore } from '@/store/useDragStore';
+import { formatArchivePathForDisplay, isArchiveUri } from '@/utils/archiveUri';
 
 const MAX_SUGGESTIONS = 8;
 
@@ -193,6 +194,10 @@ export default function PathBar() {
     setActiveSuggestion(-1);
   }, []);
 
+  const displayPath = isArchiveUri(currentPath)
+    ? formatArchivePathForDisplay(currentPath)
+    : currentPath;
+
   useEffect(() => {
     let cancelled = false;
 
@@ -247,6 +252,11 @@ export default function PathBar() {
   const handleFocus = () => {
     setIsFocused(true);
     skipNextFetchRef.current = false;
+    if (isArchiveUri(currentPath) && editPath !== currentPath) {
+      setEditPath(currentPath);
+      originalValueRef.current = currentPath;
+      return;
+    }
     originalValueRef.current = editPath;
   };
 
@@ -663,7 +673,7 @@ export default function PathBar() {
         <input
           ref={inputRef}
           type="text"
-          value={editPath}
+          value={isFocused ? editPath : displayPath}
           onChange={handleInputChange}
           onKeyDown={handleKeyDown}
           onFocus={handleFocus}

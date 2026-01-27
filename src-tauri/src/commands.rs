@@ -3847,6 +3847,7 @@ pub async fn extract_archive(
     archive_path: String,
     destination_dir: String,
     format_hint: Option<String>,
+    create_subfolder: Option<bool>,
 ) -> Result<ExtractArchiveResponse, String> {
     let expanded_archive = expand_path(&archive_path)?;
     let expanded_destination = expand_path(&destination_dir)?;
@@ -3869,7 +3870,12 @@ pub async fn extract_archive(
 
     let archive_format = determine_archive_format(&archive_path, format_hint.as_deref())?;
     let base_name = derive_folder_base_name(&archive_path, archive_format)?;
-    let allocated_folder = allocate_destination_folder(&destination_root, &base_name)?;
+    let create_subfolder = create_subfolder.unwrap_or(true);
+    let allocated_folder = if create_subfolder {
+        Some(allocate_destination_folder(&destination_root, &base_name)?)
+    } else {
+        None
+    };
 
     let archive_for_task = archive_path.clone();
     let destination_for_task = destination_root.clone();
@@ -3894,15 +3900,22 @@ pub async fn extract_archive(
     let (extracted_path, used_system_fallback) =
         tauri::async_runtime::spawn_blocking(move || -> Result<(PathBuf, bool), String> {
             let archive_name = archive_name_for_task;
-            let target_dir = destination_for_task.join(&folder_name_for_task);
+            let target_dir = if let Some(folder) = &folder_name_for_task {
+                destination_for_task.join(folder)
+            } else {
+                destination_for_task.clone()
+            };
 
-            fs::create_dir(&target_dir).map_err(|err| {
-                format!(
-                    "Failed to create extraction directory {}: {}",
-                    target_dir.display(),
-                    err
-                )
-            })?;
+            if let Some(_) = &folder_name_for_task {
+                fs::create_dir(&target_dir).map_err(|err| {
+                    format!(
+                        "Failed to create extraction directory {}: {}",
+                        target_dir.display(),
+                        err
+                    )
+                })?;
+            }
+            let should_cleanup = folder_name_for_task.is_some();
 
             match archive_format {
                 ArchiveFormat::Zip => {
@@ -3935,7 +3948,9 @@ pub async fn extract_archive(
                     })();
 
                     native_result.map_err(|err| {
-                        cleanup_directory(&target_dir);
+                        if should_cleanup {
+                            cleanup_directory(&target_dir);
+                        }
                         err
                     })?;
 
@@ -4051,7 +4066,9 @@ pub async fn extract_archive(
                     })();
 
                     extraction_result.map_err(|err| {
-                        cleanup_directory(&target_dir);
+                        if should_cleanup {
+                            cleanup_directory(&target_dir);
+                        }
                         err
                     })?;
 
@@ -4081,7 +4098,9 @@ pub async fn extract_archive(
                     })();
 
                     extraction_result.map_err(|err| {
-                        cleanup_directory(&target_dir);
+                        if should_cleanup {
+                            cleanup_directory(&target_dir);
+                        }
                         err
                     })?;
 
@@ -4113,6 +4132,13 @@ pub async fn extract_archive(
         used_system_fallback,
         format: archive_format.as_str().to_string(),
     })
+}
+
+/// Extract a single archive entry (archive:// URI) to a temporary location and return the path.
+#[command]
+pub async fn extract_archive_entry_to_temp(archive_uri: String) -> Result<String, String> {
+    let temp_path = crate::locations::archive::extract_archive_entry_to_temp(&archive_uri).await?;
+    Ok(temp_path.to_string_lossy().to_string())
 }
 
 #[command]
@@ -5672,8 +5698,11 @@ pub fn show_native_context_menu(
     has_file_context: Option<bool>,
     file_paths: Option<Vec<String>>,
     compress_suggested_name: Option<String>,
+    extract_suggested_name: Option<String>,
     selected_is_symlink: Option<bool>,
     selection_has_directory: Option<bool>,
+    selection_has_archive: Option<bool>,
+    selection_is_single_archive: Option<bool>,
 ) -> Result<(), String> {
     // Resolve window
     let webview = if let Some(label) = window_label {
@@ -5824,6 +5853,8 @@ pub fn show_native_context_menu(
     let selection_len = file_paths.as_ref().map(|v| v.len()).unwrap_or(0);
     let is_file_ctx = has_file_context.unwrap_or(false) || selection_len > 0;
     let has_directory_selection = selection_has_directory.unwrap_or(false);
+    let has_archive_selection = selection_has_archive.unwrap_or(false);
+    let single_archive_selection = selection_is_single_archive.unwrap_or(false);
     let paste_enabled = can_paste_files.unwrap_or(false)
         || can_paste_image.unwrap_or(false)
         || can_paste_internal.unwrap_or(false);
@@ -5849,12 +5880,26 @@ pub fn show_native_context_menu(
         let compress_label = compress_suggested_name
             .as_deref()
             .filter(|s| !s.trim().is_empty())
-            .map(|name| format!("Compress to {}", name))
+            .map(|name| format!("Compress to \"{}\"", name))
             .unwrap_or_else(|| "Compress to ZIP".to_string());
         let compress_item = MenuItemBuilder::with_id("ctx:compress_to_zip", compress_label)
             .enabled(selection_len > 0)
             .build(&app)
             .map_err(|e| e.to_string())?;
+        let extract_label = extract_suggested_name
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .map(|name| format!("Extract to \"{}\"", name))
+            .unwrap_or_else(|| "Extract to Folder".to_string());
+        let extract_folder_item = if has_archive_selection && single_archive_selection {
+            Some(
+                MenuItemBuilder::with_id("ctx:extract_to_folder", extract_label)
+                    .build(&app)
+                    .map_err(|e| e.to_string())?,
+            )
+        } else {
+            None
+        };
 
         let copy_name_item = MenuItemBuilder::with_id("ctx:copy_name", "Copy File Name")
             .build(&app)
@@ -5886,8 +5931,11 @@ pub fn show_native_context_menu(
             .item(&copy_files_item)
             .item(&cut_files_item)
             .item(&paste_files_item)
-            .item(&compress_item)
-            .separator()
+            .item(&compress_item);
+        if let Some(ref item) = extract_folder_item {
+            builder = builder.item(item);
+        }
+        builder = builder.separator()
             .item(&copy_name_item)
             .item(&copy_full_name_item);
         if let Some(ref item) = calculate_size_item {
@@ -6629,6 +6677,12 @@ pub fn get_downloads_dir() -> Result<String, String> {
         .ok_or_else(|| "Could not determine Downloads directory".to_string())
 }
 
+/// Get the system temp directory path
+#[command]
+pub fn get_temp_dir() -> Result<String, String> {
+    Ok(std::env::temp_dir().to_string_lossy().to_string())
+}
+
 /// Extract a zip file from Google Drive and upload contents back to Google Drive
 /// Returns the folder ID of the created folder
 #[command]
@@ -6637,8 +6691,16 @@ pub async fn extract_gdrive_archive(
     file_id: String,
     file_name: String,
     destination_folder_id: String,
+    create_subfolder: Option<bool>,
 ) -> Result<String, String> {
-    extract_gdrive_zip(&email, &file_id, &file_name, &destination_folder_id).await
+    extract_gdrive_zip(
+        &email,
+        &file_id,
+        &file_name,
+        &destination_folder_id,
+        create_subfolder.unwrap_or(true),
+    )
+    .await
 }
 
 /// Get the folder ID for a Google Drive path

@@ -79,6 +79,7 @@ flate2 = "1.0"
 bzip2 = "0.6"
 xz2 = { version = "0.1", features = ["static"] }
 zstd = "0.13"
+filetime = "0.2"
 async-trait = "0.1"
 trash = "5.2.5"
 keyring = { version = "3.6.3", default-features = false, features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust", "vendored"] }

@@ -9,6 +9,7 @@ import ContextMenu from './ContextMenu';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { invoke } from '@tauri-apps/api/core';
 import { ScrollContext } from '../contexts/ScrollContext';
+import { getArchiveBaseName, isArchiveFile } from '@/utils/fileTypes';
 
 const arraysEqual = (a: string[], b: string[]) => {
   if (a === b) return true;
@@ -131,7 +132,10 @@ export default function MainPanel() {
       let filePaths: string[] | undefined;
       let selectedIsSymlink: boolean | undefined;
       let selectionHasDirectory = false;
+      let selectionHasArchive = false;
+      let selectionIsSingleArchive = false;
       let suggestedZipName: string | undefined;
+      let extractSuggestedName: string | undefined;
       if (isFileCtx && ctxPath) {
         if (!state.selectedFiles.includes(ctxPath)) {
           setSelectedFiles([ctxPath]);
@@ -151,6 +155,18 @@ export default function MainPanel() {
           const selectedItems = activeSelection
             .map((path) => map.get(path))
             .filter((file): file is FileItem => Boolean(file));
+          const archiveItems = selectedItems.filter(
+            (file) =>
+              !file.is_directory && isArchiveFile(file) && !file.path.startsWith('archive://')
+          );
+          selectionHasArchive = archiveItems.length > 0;
+          selectionIsSingleArchive = archiveItems.length === 1 && selectedItems.length === 1;
+          if (selectionIsSingleArchive) {
+            const archiveItem = archiveItems[0];
+            if (archiveItem) {
+              extractSuggestedName = getArchiveBaseName(archiveItem.name);
+            }
+          }
           const hiddenFiltered = prefs.showHidden
             ? state.files
             : state.files.filter((file) => !file.is_hidden);
@@ -186,8 +202,11 @@ export default function MainPanel() {
         // Only send file paths when clicking on a file
         filePaths: isFileCtx ? filePaths : undefined,
         compressSuggestedName: suggestedZipName,
+        extractSuggestedName,
         selectedIsSymlink,
         selectionHasDirectory,
+        selectionHasArchive,
+        selectionIsSingleArchive,
       });
       return;
     } catch (error) {

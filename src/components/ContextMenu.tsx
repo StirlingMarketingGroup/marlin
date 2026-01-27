@@ -5,6 +5,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { useToastStore } from '@/store/useToastStore';
 import { openFolderSizeWindow } from '@/store/useFolderSizeStore';
 import { getSuggestedZipName } from '@/utils/zipNaming';
+import { getArchiveBaseName, isArchiveFile } from '@/utils/fileTypes';
 
 type SortBy = 'name' | 'size' | 'type' | 'modified';
 type SortOrder = 'asc' | 'desc';
@@ -34,6 +35,7 @@ export default function ContextMenu({ x, y, isFileContext, onRequestClose }: Con
     beginRenameSelected,
     navigateTo,
     setPendingRevealTarget,
+    extractArchive,
     trashSelected,
     deleteSelectedPermanently,
     copySelectedFiles,
@@ -133,6 +135,16 @@ export default function ContextMenu({ x, y, isFileContext, onRequestClose }: Con
   const hasDirectorySelection = selectedFileItems.some((file) => file.is_directory);
   // Copy/Cut only available when selection has at least one file (not directory)
   const hasFileSelection = selectedFileItems.some((file) => !file.is_directory);
+  const archiveSelection = selectedFileItems.filter(
+    (file) => !file.is_directory && isArchiveFile(file) && !file.path.startsWith('archive://')
+  );
+  const singleArchive =
+    archiveSelection.length === 1 && selectedFileItems.length === 1
+      ? archiveSelection[0]
+      : undefined;
+  const extractLabel = singleArchive
+    ? `Extract to "${getArchiveBaseName(singleArchive.name)}"`
+    : undefined;
   const singleSymlink =
     selectedFileItems.length === 1 && selectedFileItems[0]?.is_symlink
       ? selectedFileItems[0]
@@ -268,8 +280,21 @@ export default function ContextMenu({ x, y, isFileContext, onRequestClose }: Con
                 void compressSelectedToZip(suggestedZipName);
               }}
             >
-              Compress to {suggestedZipName}
+              Compress to &quot;{suggestedZipName}&quot;
             </button>
+            {singleArchive && (
+              <>
+                <button
+                  className="w-full text-left px-3 py-2 hover:bg-app-light"
+                  onClick={() => {
+                    onRequestClose();
+                    void extractArchive(singleArchive, { createSubfolder: true });
+                  }}
+                >
+                  {extractLabel}
+                </button>
+              </>
+            )}
           </>
         )}
         {!isFileContext && (
