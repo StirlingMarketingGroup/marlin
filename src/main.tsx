@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client';
 import App from './App';
 import FolderSizeWindow from './windows/FolderSizeWindow';
 import ArchiveProgressWindow from './windows/ArchiveProgressWindow';
+import CompressProgressWindow from './windows/CompressProgressWindow';
 import DeleteProgressWindow from './windows/DeleteProgressWindow';
 import ClipboardProgressWindow from './windows/ClipboardProgressWindow';
 import SmbConnectWindow from './windows/SmbConnectWindow';
@@ -19,17 +20,19 @@ const Root =
     ? FolderSizeWindow
     : view === 'archive-progress'
       ? ArchiveProgressWindow
-      : view === 'delete-progress'
-        ? DeleteProgressWindow
-        : view === 'clipboard-progress'
-          ? ClipboardProgressWindow
-          : view === 'smb-connect'
-            ? SmbConnectWindow
-            : view === 'permissions'
-              ? PermissionsWindow
-              : view === 'preferences'
-                ? PreferencesWindow
-                : App;
+      : view === 'compress-progress'
+        ? CompressProgressWindow
+        : view === 'delete-progress'
+          ? DeleteProgressWindow
+          : view === 'clipboard-progress'
+            ? ClipboardProgressWindow
+            : view === 'smb-connect'
+              ? SmbConnectWindow
+              : view === 'permissions'
+                ? PermissionsWindow
+                : view === 'preferences'
+                  ? PreferencesWindow
+                  : App;
 
 function ThemeBridge() {
   const preference = useThemePreference();

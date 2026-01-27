@@ -58,7 +58,7 @@ use flate2::read::GzDecoder;
 use tar::Archive as TarArchive;
 use xz2::read::XzDecoder;
 use unrar::Archive as RarArchive;
-use zip::ZipArchive;
+use zip::{ZipArchive, ZipWriter};
 use zstd::stream::read::Decoder as ZstdDecoder;
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -83,7 +83,11 @@ const FOLDER_SIZE_EVENT: &str = "folder-size-progress";
 const FOLDER_SIZE_INIT_EVENT: &str = "folder-size:init";
 const FOLDER_SIZE_WINDOW_LABEL: &str = "folder-size";
 const ARCHIVE_PROGRESS_EVENT: &str = "archive-progress:init";
+const ARCHIVE_PROGRESS_UPDATE_EVENT: &str = "archive-progress:update";
 const ARCHIVE_PROGRESS_WINDOW_LABEL: &str = "archive-progress";
+const COMPRESS_PROGRESS_INIT_EVENT: &str = "compress-progress:init";
+const COMPRESS_PROGRESS_UPDATE_EVENT: &str = "compress-progress:update";
+const COMPRESS_PROGRESS_WINDOW_LABEL: &str = "compress-progress";
 
 // Error codes for structured error handling
 // These constants define the API contract with the frontend
@@ -100,7 +104,8 @@ pub mod error_codes {
 fn format_error(code: &str, message: &str) -> String {
     format!("[{code}] {message}")
 }
-const ARCHIVE_PROGRESS_UPDATE_EVENT: &str = "archive-progress:update";
+// Always emit progress updates - even small batches of large files benefit from progress indication
+const COMPRESS_PROGRESS_ENTRY_THRESHOLD: usize = 0;
 const DELETE_PROGRESS_EVENT: &str = "delete-progress:init";
 const DELETE_PROGRESS_UPDATE_EVENT: &str = "delete-progress:update";
 const DELETE_PROGRESS_WINDOW_LABEL: &str = "delete-progress";
@@ -197,6 +202,9 @@ static FOLDER_SIZE_QUEUE: Lazy<WindowPayloadQueue<FolderSizeInitPayload>> =
     Lazy::new(|| WindowPayloadQueue::new(FOLDER_SIZE_WINDOW_LABEL, FOLDER_SIZE_INIT_EVENT));
 static ARCHIVE_PROGRESS_QUEUE: Lazy<WindowPayloadQueue<ArchiveProgressPayload>> =
     Lazy::new(|| WindowPayloadQueue::new(ARCHIVE_PROGRESS_WINDOW_LABEL, ARCHIVE_PROGRESS_EVENT));
+static COMPRESS_PROGRESS_QUEUE: Lazy<WindowPayloadQueue<CompressProgressPayload>> = Lazy::new(
+    || WindowPayloadQueue::new(COMPRESS_PROGRESS_WINDOW_LABEL, COMPRESS_PROGRESS_INIT_EVENT),
+);
 static DELETE_PROGRESS_QUEUE: Lazy<WindowPayloadQueue<DeleteProgressPayload>> =
     Lazy::new(|| WindowPayloadQueue::new(DELETE_PROGRESS_WINDOW_LABEL, DELETE_PROGRESS_EVENT));
 static CLIPBOARD_PROGRESS_QUEUE: Lazy<WindowPayloadQueue<ClipboardProgressPayload>> = Lazy::new(
@@ -218,6 +226,12 @@ fn emit_delete_progress_update(app: &AppHandle, payload: DeleteProgressUpdatePay
 fn emit_clipboard_progress_update(app: &AppHandle, payload: ClipboardProgressUpdatePayload) {
     if let Err(err) = app.emit(CLIPBOARD_PROGRESS_UPDATE_EVENT, payload) {
         warn!("Failed to emit clipboard progress update: {err}");
+    }
+}
+
+fn emit_compress_progress_update(app: &AppHandle, payload: CompressProgressPayload) {
+    if let Err(err) = app.emit(COMPRESS_PROGRESS_UPDATE_EVENT, payload) {
+        warn!("Failed to emit compress progress update: {err}");
     }
 }
 
@@ -519,6 +533,18 @@ struct ArchiveProgressUpdatePayload {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct CompressProgressPayload {
+    archive_name: String,
+    entry_name: Option<String>,
+    completed: usize,
+    total: usize,
+    finished: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ClipboardProgressPayload {
     operation: String,
     destination: String,
@@ -603,6 +629,12 @@ pub struct ExtractArchiveResponse {
     pub folder_path: String,
     pub used_system_fallback: bool,
     pub format: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CompressToZipResponse {
+    pub path: String,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -3302,6 +3334,513 @@ fn cleanup_directory(path: &Path) {
     }
 }
 
+fn is_junk_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case(".ds_store")
+        || name.eq_ignore_ascii_case("__macosx")
+        || name.eq_ignore_ascii_case("thumbs.db")
+}
+
+fn is_reserved_device_name(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    matches!(
+        upper.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    )
+}
+
+fn sanitize_zip_name(input: &str) -> String {
+    const INVALID_CHARS: [char; 7] = ['<', '>', ':', '"', '|', '?', '*'];
+
+    let base = Path::new(input.trim())
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+
+    let mut cleaned: String = base
+        .chars()
+        .map(|ch| {
+            if ch.is_control() || ch == '/' || ch == '\\' || INVALID_CHARS.contains(&ch) {
+                '_'
+            } else {
+                ch
+            }
+        })
+        .collect();
+
+    cleaned = cleaned.trim().to_string();
+    if cleaned.is_empty() {
+        cleaned = "Archive".to_string();
+    }
+
+    let lower = cleaned.to_lowercase();
+    let (stem_raw, ext) = if lower.ends_with(".zip") {
+        let stem = cleaned[..cleaned.len().saturating_sub(4)].to_string();
+        (stem, ".zip")
+    } else {
+        (cleaned, ".zip")
+    };
+
+    let mut stem = stem_raw.trim().trim_end_matches([' ', '.']).to_string();
+    stem = stem.trim_start_matches('.').to_string();
+    if stem.is_empty() {
+        stem = "Archive".to_string();
+    }
+    if is_reserved_device_name(&stem) {
+        stem = format!("{stem}_archive");
+    }
+
+    format!("{stem}{ext}")
+}
+
+fn zip_entry_name_from_path(path: &Path) -> Result<String, String> {
+    if path.as_os_str().is_empty() {
+        return Err("Empty zip entry path".to_string());
+    }
+
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                return Err("Refusing to add zip entry with '..'".to_string());
+            }
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                return Err("Refusing to add absolute zip entry path".to_string());
+            }
+            _ => {}
+        }
+    }
+
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    if normalized.is_empty() {
+        return Err("Empty zip entry path".to_string());
+    }
+
+    Ok(normalized)
+}
+
+fn ensure_safe_zip_entry_name(raw: &str) -> Result<String, String> {
+    let normalized = raw.replace('\\', "/");
+    let trimmed = normalized.trim_start_matches('/');
+    if trimmed.is_empty() {
+        return Err("Empty zip entry path".to_string());
+    }
+    for segment in trimmed.split('/') {
+        if segment == ".." {
+            return Err("Refusing to add zip entry with '..'".to_string());
+        }
+    }
+    Ok(trimmed.to_string())
+}
+
+#[derive(Debug, Clone)]
+struct LocalZipEntry {
+    source_path: PathBuf,
+    zip_path: String,
+}
+
+#[derive(Debug, Clone)]
+struct RemoteZipEntry {
+    source_path: String,
+    zip_path: String,
+    name: String,
+    remote_id: Option<String>,
+}
+
+fn numbered_name_variant(name: &str, index: usize) -> String {
+    if index <= 1 {
+        return name.to_string();
+    }
+    let path = Path::new(name);
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(name);
+    let ext = path.extension().and_then(|s| s.to_str());
+    if let Some(ext) = ext {
+        format!("{stem} ({index}).{ext}")
+    } else {
+        format!("{stem} ({index})")
+    }
+}
+
+fn collect_local_zip_entries(
+    roots: &[PathBuf],
+    strip_root: bool,
+) -> Result<(Vec<LocalZipEntry>, Vec<String>), String> {
+    let mut file_entries = Vec::new();
+    let mut all_dirs: Vec<String> = Vec::new();
+    let mut non_empty_dirs: HashSet<String> = HashSet::new();
+
+    for root in roots {
+        let root_name = root
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| format!("Unable to determine name for {}", root.display()))?;
+
+        if is_junk_name(root_name) {
+            continue;
+        }
+
+        let strip_this_root = strip_root && root.is_dir();
+        let base = if strip_this_root {
+            root.as_path()
+        } else {
+            root.parent().unwrap_or(root.as_path())
+        };
+        let walker = WalkDir::new(root)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|entry| {
+                let name = entry.file_name().to_string_lossy();
+                if is_junk_name(&name) {
+                    return false;
+                }
+                !entry.file_type().is_symlink()
+            });
+
+        for entry in walker {
+            let entry = entry.map_err(|err| {
+                format!(
+                    "Failed to walk {}: {}",
+                    root.to_string_lossy(),
+                    err
+                )
+            })?;
+
+            let file_type = entry.file_type();
+            if file_type.is_symlink() {
+                continue;
+            }
+
+            let rel = entry
+                .path()
+                .strip_prefix(base)
+                .map_err(|_| "Failed to compute zip entry path".to_string())?;
+
+            if strip_this_root && rel.as_os_str().is_empty() {
+                continue;
+            }
+
+            let zip_path = zip_entry_name_from_path(rel)?;
+
+            if file_type.is_dir() {
+                all_dirs.push(zip_path.clone());
+                if let Some(parent) = Path::new(&zip_path).parent() {
+                    let parent_str = parent.to_string_lossy().replace('\\', "/");
+                    if !parent_str.is_empty() {
+                        non_empty_dirs.insert(parent_str);
+                    }
+                }
+                continue;
+            }
+
+            file_entries.push(LocalZipEntry {
+                source_path: entry.path().to_path_buf(),
+                zip_path: zip_path.clone(),
+            });
+
+            if let Some(parent) = Path::new(&zip_path).parent() {
+                let parent_str = parent.to_string_lossy().replace('\\', "/");
+                if !parent_str.is_empty() {
+                    non_empty_dirs.insert(parent_str);
+                }
+            }
+        }
+    }
+
+    let empty_dirs = all_dirs
+        .into_iter()
+        .filter(|dir| !non_empty_dirs.contains(dir))
+        .collect();
+
+    Ok((file_entries, empty_dirs))
+}
+
+async fn collect_remote_zip_entries(
+    provider: &crate::locations::ProviderRef,
+    roots: Vec<Location>,
+    strip_root: bool,
+) -> Result<(Vec<RemoteZipEntry>, Vec<String>), String> {
+    let mut file_entries = Vec::new();
+    let mut all_dirs: Vec<String> = Vec::new();
+    let mut non_empty_dirs: HashSet<String> = HashSet::new();
+
+    let mut stack: Vec<(Location, String)> = Vec::new();
+
+    let strip_single_root = strip_root && roots.len() == 1;
+    for root in roots {
+        let metadata = provider.get_file_metadata(&root).await?;
+        if is_junk_name(&metadata.name) {
+            continue;
+        }
+
+        let root_rel = ensure_safe_zip_entry_name(&metadata.name)?;
+        if metadata.is_directory {
+            if strip_single_root {
+                stack.push((root, String::new()));
+            } else {
+                all_dirs.push(root_rel.clone());
+                stack.push((root, root_rel));
+            }
+        } else {
+            file_entries.push(RemoteZipEntry {
+                source_path: metadata.path,
+                zip_path: root_rel,
+                name: metadata.name,
+                remote_id: metadata.remote_id,
+            });
+        }
+    }
+
+    while let Some((dir_location, dir_rel)) = stack.pop() {
+        let listing = provider.read_directory(&dir_location).await?;
+        let mut has_children = false;
+
+        for entry in listing.entries {
+            if is_junk_name(&entry.name) {
+                continue;
+            }
+
+            let rel_path_raw = if dir_rel.is_empty() {
+                entry.name.clone()
+            } else {
+                format!("{dir_rel}/{}", entry.name)
+            };
+            let rel_path = ensure_safe_zip_entry_name(&rel_path_raw)?;
+
+            if entry.is_directory {
+                all_dirs.push(rel_path.clone());
+                let entry_location = LocationInput::Raw(entry.path.clone()).into_location()?;
+                stack.push((entry_location, rel_path));
+                has_children = true;
+            } else {
+                file_entries.push(RemoteZipEntry {
+                    source_path: entry.path.clone(),
+                    zip_path: rel_path,
+                    name: entry.name,
+                    remote_id: entry.remote_id,
+                });
+                has_children = true;
+            }
+        }
+
+        if has_children {
+            non_empty_dirs.insert(dir_rel);
+        }
+    }
+
+    let empty_dirs = all_dirs
+        .into_iter()
+        .filter(|dir| !non_empty_dirs.contains(dir))
+        .collect();
+
+    Ok((file_entries, empty_dirs))
+}
+
+fn write_zip_from_local_entries(
+    app: &AppHandle,
+    archive_name: &str,
+    output_path: &Path,
+    entries: &[LocalZipEntry],
+    empty_dirs: &[String],
+) -> Result<(), String> {
+    let file = fs::File::create(output_path)
+        .map_err(|err| format!("Failed to create zip file: {}", err))?;
+    let mut zip = ZipWriter::new(file);
+
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+
+    for dir in empty_dirs {
+        let dir_name = if dir.ends_with('/') {
+            dir.clone()
+        } else {
+            format!("{dir}/")
+        };
+        zip.add_directory(dir_name, options)
+            .map_err(|err| format!("Failed to add directory to zip: {}", err))?;
+    }
+
+    let total = entries.len();
+    let emit_progress = total >= COMPRESS_PROGRESS_ENTRY_THRESHOLD;
+    let mut completed = 0usize;
+
+    if emit_progress {
+        emit_compress_progress_update(
+            app,
+            CompressProgressPayload {
+                archive_name: archive_name.to_string(),
+                entry_name: None,
+                completed,
+                total,
+                finished: false,
+                error: None,
+            },
+        );
+    }
+
+    for entry in entries {
+        zip.start_file(&entry.zip_path, options)
+            .map_err(|err| format!("Failed to add zip entry: {}", err))?;
+        let mut src = fs::File::open(&entry.source_path)
+            .map_err(|err| format!("Failed to open {}: {}", entry.source_path.display(), err))?;
+        std::io::copy(&mut src, &mut zip)
+            .map_err(|err| format!("Failed to write zip entry: {}", err))?;
+
+        completed += 1;
+        if emit_progress {
+            emit_compress_progress_update(
+                app,
+                CompressProgressPayload {
+                    archive_name: archive_name.to_string(),
+                    entry_name: Some(entry.zip_path.clone()),
+                    completed,
+                    total,
+                    finished: false,
+                    error: None,
+                },
+            );
+        }
+    }
+
+    zip.finish()
+        .map_err(|err| format!("Failed to finalize zip: {}", err))?;
+
+    if emit_progress {
+        emit_compress_progress_update(
+            app,
+            CompressProgressPayload {
+                archive_name: archive_name.to_string(),
+                entry_name: None,
+                completed,
+                total,
+                finished: true,
+                error: None,
+            },
+        );
+    }
+
+    Ok(())
+}
+
+fn write_zip_from_smb_entries(
+    app: &AppHandle,
+    archive_name: &str,
+    output_path: &Path,
+    entries: &[RemoteZipEntry],
+    empty_dirs: &[String],
+) -> Result<(), String> {
+    let file = fs::File::create(output_path)
+        .map_err(|err| format!("Failed to create zip file: {}", err))?;
+    let mut zip = ZipWriter::new(file);
+
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+
+    for dir in empty_dirs {
+        let dir_name = if dir.ends_with('/') {
+            dir.clone()
+        } else {
+            format!("{dir}/")
+        };
+        zip.add_directory(dir_name, options)
+            .map_err(|err| format!("Failed to add directory to zip: {}", err))?;
+    }
+
+    let total = entries.len();
+    let emit_progress = total >= COMPRESS_PROGRESS_ENTRY_THRESHOLD;
+    let mut completed = 0usize;
+
+    if emit_progress {
+        emit_compress_progress_update(
+            app,
+            CompressProgressPayload {
+                archive_name: archive_name.to_string(),
+                entry_name: None,
+                completed,
+                total,
+                finished: false,
+                error: None,
+            },
+        );
+    }
+
+    for entry in entries {
+        let temp_path = crate::thumbnails::generators::smb::download_smb_file_sync(
+            &entry.source_path,
+        )?;
+
+        // Use a closure to ensure temp file cleanup on all paths
+        let mut add_to_zip = || -> Result<(), String> {
+            zip.start_file(&entry.zip_path, options)
+                .map_err(|err| format!("Failed to add zip entry: {}", err))?;
+            let mut src = fs::File::open(&temp_path)
+                .map_err(|err| format!("Failed to open temp file: {}", err))?;
+            std::io::copy(&mut src, &mut zip)
+                .map_err(|err| format!("Failed to write zip entry: {}", err))?;
+            Ok(())
+        };
+
+        let result = add_to_zip();
+        let _ = fs::remove_file(&temp_path);
+        result?;
+
+        completed += 1;
+        if emit_progress {
+            emit_compress_progress_update(
+                app,
+                CompressProgressPayload {
+                    archive_name: archive_name.to_string(),
+                    entry_name: Some(entry.zip_path.clone()),
+                    completed,
+                    total,
+                    finished: false,
+                    error: None,
+                },
+            );
+        }
+    }
+
+    zip.finish()
+        .map_err(|err| format!("Failed to finalize zip: {}", err))?;
+
+    if emit_progress {
+        emit_compress_progress_update(
+            app,
+            CompressProgressPayload {
+                archive_name: archive_name.to_string(),
+                entry_name: None,
+                completed,
+                total,
+                finished: true,
+                error: None,
+            },
+        );
+    }
+
+    Ok(())
+}
+
 #[command]
 pub async fn extract_archive(
     app: AppHandle,
@@ -3574,6 +4113,392 @@ pub async fn extract_archive(
         used_system_fallback,
         format: archive_format.as_str().to_string(),
     })
+}
+
+#[command]
+pub async fn compress_to_zip(
+    app: AppHandle,
+    source_paths: Vec<LocationInput>,
+    destination_dir: LocationInput,
+    suggested_name: String,
+) -> Result<CompressToZipResponse, String> {
+    if source_paths.is_empty() {
+        return Err("No source paths provided".to_string());
+    }
+
+    let (dest_provider, dest_location) = resolve_location(destination_dir)?;
+    let dest_scheme = dest_location.scheme().to_string();
+    let dest_authority = dest_location.authority().map(|s| s.to_string());
+
+    let mut source_locations: Vec<Location> = Vec::new();
+    let mut scheme: Option<String> = None;
+    let mut authority: Option<String> = None;
+
+    for input in source_paths {
+        let (_, location) = resolve_location(input)?;
+        if scheme.is_none() {
+            scheme = Some(location.scheme().to_string());
+        }
+        if scheme.as_deref() != Some(location.scheme()) {
+            return Err("Cannot compress items from multiple providers".to_string());
+        }
+        if let Some(auth) = location.authority() {
+            if let Some(existing) = authority.as_deref() {
+                if existing != auth {
+                    return Err("Cannot compress across different accounts or servers".to_string());
+                }
+            } else {
+                authority = Some(auth.to_string());
+            }
+        } else if authority.is_some() {
+            return Err("Cannot compress across different accounts or servers".to_string());
+        }
+        source_locations.push(location);
+    }
+
+    let scheme = scheme.unwrap_or_else(|| "file".to_string());
+    if dest_scheme != scheme {
+        return Err("Destination must use the same provider as the selection".to_string());
+    }
+
+    if matches!(scheme.as_str(), "gdrive" | "smb") {
+        if dest_authority != authority {
+            return Err("Destination must be on the same account or server".to_string());
+        }
+    }
+
+    let capabilities = dest_provider.capabilities(&dest_location);
+    if !capabilities.can_write {
+        return Err("Destination does not support writing".to_string());
+    }
+
+    let sanitized_name = sanitize_zip_name(&suggested_name);
+
+    match scheme.as_str() {
+        "file" => {
+            let dest_raw = dest_location.to_path_string();
+            let dest_path = expand_path(&dest_raw)?;
+            if !dest_path.exists() {
+                return Err("Destination directory does not exist".to_string());
+            }
+            if !dest_path.is_dir() {
+                return Err("Destination path is not a directory".to_string());
+            }
+
+            let mut sources: Vec<PathBuf> = Vec::new();
+            for location in &source_locations {
+                let raw = location.to_path_string();
+                let expanded = expand_path(&raw)?;
+                let path = PathBuf::from(&expanded);
+                if !path.exists() {
+                    return Err(format!("Source path does not exist: {}", raw));
+                }
+                sources.push(path);
+            }
+            let strip_root = sources.len() == 1 && sources.first().map(|p| p.is_dir()).unwrap_or(false);
+
+            let final_path = allocate_unique_path(&dest_path, &sanitized_name)?;
+            let archive_name = final_path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or(&sanitized_name)
+                .to_string();
+            let temp_path = dest_path.join(format!(".marlin-zip-{}.tmp", Uuid::new_v4()));
+
+            let app_handle = app.clone();
+            let sources_for_task = sources.clone();
+            let temp_path_for_task = temp_path.clone();
+            let final_path_for_task = final_path.clone();
+            let archive_name_for_task = archive_name.clone();
+
+            let strip_root_for_task = strip_root;
+            let created_path = tauri::async_runtime::spawn_blocking(move || -> Result<PathBuf, String> {
+                let (entries, empty_dirs) =
+                    collect_local_zip_entries(&sources_for_task, strip_root_for_task)?;
+                if entries.is_empty() && empty_dirs.is_empty() && !strip_root_for_task {
+                    return Err("No files to compress".to_string());
+                }
+                let emit_progress = entries.len() >= COMPRESS_PROGRESS_ENTRY_THRESHOLD;
+                let write_result = write_zip_from_local_entries(
+                    &app_handle,
+                    &archive_name_for_task,
+                    &temp_path_for_task,
+                    &entries,
+                    &empty_dirs,
+                );
+                if let Err(err) = write_result {
+                    if emit_progress {
+                        emit_compress_progress_update(
+                            &app_handle,
+                            CompressProgressPayload {
+                                archive_name: archive_name_for_task.clone(),
+                                entry_name: None,
+                                completed: 0,
+                                total: entries.len(),
+                                finished: true,
+                                error: Some(err.clone()),
+                            },
+                        );
+                    }
+                    let _ = fs::remove_file(&temp_path_for_task);
+                    return Err(err);
+                }
+
+                if let Err(err) = fs::rename(&temp_path_for_task, &final_path_for_task) {
+                    let _ = fs::remove_file(&temp_path_for_task);
+                    return Err(format!("Failed to finalize zip: {}", err));
+                }
+
+                Ok(final_path_for_task)
+            })
+            .await
+            .map_err(|err| format!("Failed to join compression task: {}", err))??;
+
+            Ok(CompressToZipResponse {
+                path: created_path.to_string_lossy().to_string(),
+            })
+        }
+        "smb" => {
+            dest_provider.read_directory(&dest_location).await?;
+            let strip_root = if source_locations.len() == 1 {
+                let metadata = dest_provider.get_file_metadata(&source_locations[0]).await?;
+                metadata.is_directory
+            } else {
+                false
+            };
+            let (entries, empty_dirs) = collect_remote_zip_entries(
+                &dest_provider,
+                source_locations.clone(),
+                strip_root,
+            )
+            .await?;
+            if entries.is_empty() && empty_dirs.is_empty() && !strip_root {
+                return Err("No files to compress".to_string());
+            }
+
+            let existing = dest_provider.read_directory(&dest_location).await?;
+            let existing_names: HashSet<String> =
+                existing.entries.iter().map(|item| item.name.clone()).collect();
+            let mut final_name: Option<String> = None;
+            for i in 1..1000usize {
+                let candidate = numbered_name_variant(&sanitized_name, i);
+                if !existing_names.contains(&candidate) {
+                    final_name = Some(candidate);
+                    break;
+                }
+            }
+            let final_name =
+                final_name.ok_or_else(|| "Unable to allocate a unique zip name".to_string())?;
+
+            let authority = dest_location
+                .authority()
+                .ok_or_else(|| "SMB destination missing server".to_string())?;
+            let (hostname, share, dest_rel) =
+                crate::locations::smb::parse_smb_path(authority, dest_location.path())?;
+            let dest_file_rel = if dest_rel == "/" {
+                format!("/{}", final_name)
+            } else {
+                format!("{}/{}", dest_rel.trim_end_matches('/'), final_name)
+            };
+
+            let temp_zip_path =
+                std::env::temp_dir().join(format!("marlin-zip-{}.zip", Uuid::new_v4()));
+
+            let app_handle = app.clone();
+            let entries_for_task = entries.clone();
+            let empty_dirs_for_task = empty_dirs.clone();
+            let temp_zip_for_task = temp_zip_path.clone();
+            let archive_name_for_task = final_name.clone();
+            let hostname_for_task = hostname.clone();
+            let share_for_task = share.clone();
+            let dest_file_rel_for_task = dest_file_rel.clone();
+
+            tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+                let emit_progress = entries_for_task.len() >= COMPRESS_PROGRESS_ENTRY_THRESHOLD;
+                let write_result = write_zip_from_smb_entries(
+                    &app_handle,
+                    &archive_name_for_task,
+                    &temp_zip_for_task,
+                    &entries_for_task,
+                    &empty_dirs_for_task,
+                );
+                if let Err(err) = write_result {
+                    if emit_progress {
+                        emit_compress_progress_update(
+                            &app_handle,
+                            CompressProgressPayload {
+                                archive_name: archive_name_for_task.clone(),
+                                entry_name: None,
+                                completed: 0,
+                                total: entries_for_task.len(),
+                                finished: true,
+                                error: Some(err.clone()),
+                            },
+                        );
+                    }
+                    let _ = fs::remove_file(&temp_zip_for_task);
+                    return Err(err);
+                }
+
+                use crate::locations::smb::{client, get_server_credentials, SidecarStatus};
+
+                if !client::is_available() {
+                    let status = client::initialize();
+                    if status != SidecarStatus::Available {
+                        return Err(status.error_message().unwrap_or_else(|| {
+                            "SMB support is not available".to_string()
+                        }));
+                    }
+                }
+
+                let creds = get_server_credentials(&hostname_for_task)?;
+                let params = serde_json::json!({
+                    "credentials": {
+                        "hostname": hostname_for_task,
+                        "username": creds.username,
+                        "password": creds.password,
+                        "domain": creds.domain
+                    },
+                    "share": share_for_task,
+                    "source_path": temp_zip_for_task.to_string_lossy().to_string(),
+                    "dest_path": dest_file_rel_for_task
+                });
+
+                let upload_result: Result<serde_json::Value, String> =
+                    client::call_method("upload_file", params);
+                if let Err(err) = upload_result {
+                    let _ = fs::remove_file(&temp_zip_for_task);
+                    return Err(err);
+                }
+
+                let _ = fs::remove_file(&temp_zip_for_task);
+                Ok(())
+            })
+            .await
+            .map_err(|err| format!("Failed to join compression task: {}", err))??;
+
+            let dest_dir_raw = dest_location.raw().to_string();
+            let final_path = join_dest_raw(&dest_scheme, &dest_dir_raw, &final_name);
+
+            Ok(CompressToZipResponse { path: final_path })
+        }
+        "gdrive" => {
+            dest_provider.read_directory(&dest_location).await?;
+            let strip_root = if source_locations.len() == 1 {
+                let metadata = dest_provider.get_file_metadata(&source_locations[0]).await?;
+                metadata.is_directory
+            } else {
+                false
+            };
+            let (entries, empty_dirs) = collect_remote_zip_entries(
+                &dest_provider,
+                source_locations.clone(),
+                strip_root,
+            )
+            .await?;
+            if entries.is_empty() && empty_dirs.is_empty() && !strip_root {
+                return Err("No files to compress".to_string());
+            }
+
+            let email = dest_location
+                .authority()
+                .ok_or_else(|| "Google Drive destination missing account".to_string())?;
+            let folder_id = get_folder_id_by_path(email, dest_location.path()).await?;
+
+            let mut final_name: Option<String> = None;
+            for i in 1..1000usize {
+                let candidate = numbered_name_variant(&sanitized_name, i);
+                if !name_exists_in_folder(email, &folder_id, &candidate).await? {
+                    final_name = Some(candidate);
+                    break;
+                }
+            }
+            let final_name =
+                final_name.ok_or_else(|| "Unable to allocate a unique zip name".to_string())?;
+
+            let mut local_entries: Vec<LocalZipEntry> = Vec::new();
+            for entry in &entries {
+                let file_id = entry
+                    .remote_id
+                    .as_ref()
+                    .ok_or_else(|| format!("Missing Google Drive file id for {}", entry.name))?;
+                match download_file_to_temp(email, file_id, &entry.name).await {
+                    Ok(temp_path) => {
+                        local_entries.push(LocalZipEntry {
+                            source_path: PathBuf::from(temp_path),
+                            zip_path: entry.zip_path.clone(),
+                        });
+                    }
+                    Err(err) => {
+                        for entry in &local_entries {
+                            let _ = fs::remove_file(&entry.source_path);
+                        }
+                        return Err(err);
+                    }
+                }
+            }
+
+            let temp_zip_path =
+                std::env::temp_dir().join(format!("marlin-zip-{}.zip", Uuid::new_v4()));
+
+            let app_handle = app.clone();
+            let entries_for_task = local_entries.clone();
+            let empty_dirs_for_task = empty_dirs.clone();
+            let temp_zip_for_task = temp_zip_path.clone();
+            let archive_name_for_task = final_name.clone();
+
+            tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+                let emit_progress = entries_for_task.len() >= COMPRESS_PROGRESS_ENTRY_THRESHOLD;
+                let write_result = write_zip_from_local_entries(
+                    &app_handle,
+                    &archive_name_for_task,
+                    &temp_zip_for_task,
+                    &entries_for_task,
+                    &empty_dirs_for_task,
+                );
+
+                for entry in &entries_for_task {
+                    let _ = fs::remove_file(&entry.source_path);
+                }
+
+                if let Err(err) = write_result {
+                    if emit_progress {
+                        emit_compress_progress_update(
+                            &app_handle,
+                            CompressProgressPayload {
+                                archive_name: archive_name_for_task.clone(),
+                                entry_name: None,
+                                completed: 0,
+                                total: entries_for_task.len(),
+                                finished: true,
+                                error: Some(err.clone()),
+                            },
+                        );
+                    }
+                    let _ = fs::remove_file(&temp_zip_for_task);
+                    return Err(err);
+                }
+
+                Ok(())
+            })
+            .await
+            .map_err(|err| format!("Failed to join compression task: {}", err))??;
+
+            if let Err(err) =
+                upload_file_to_gdrive(email, &temp_zip_path, &folder_id, &final_name).await
+            {
+                let _ = fs::remove_file(&temp_zip_path);
+                return Err(err);
+            }
+            let _ = fs::remove_file(&temp_zip_path);
+
+            let dest_dir_raw = dest_location.raw().to_string();
+            let final_path = join_dest_raw(&dest_scheme, &dest_dir_raw, &final_name);
+
+            Ok(CompressToZipResponse { path: final_path })
+        }
+        _ => Err("Provider not supported for compression".to_string()),
+    }
 }
 
 #[command]
@@ -4371,6 +5296,81 @@ pub fn archive_progress_window_unready() -> Result<(), String> {
 }
 
 #[command]
+pub fn show_compress_progress_window(
+    app: AppHandle,
+    archive_name: String,
+    total_items: usize,
+) -> Result<(), String> {
+    let payload = CompressProgressPayload {
+        archive_name,
+        entry_name: None,
+        completed: 0,
+        total: total_items,
+        finished: false,
+        error: None,
+    };
+
+    if let Some(existing) = app.get_webview_window(COMPRESS_PROGRESS_WINDOW_LABEL) {
+        COMPRESS_PROGRESS_QUEUE.queue(&app, payload);
+        let _ = existing.show();
+        let _ = existing.set_focus();
+        return Ok(());
+    }
+
+    let url = tauri::WebviewUrl::App("index.html?view=compress-progress".into());
+    let builder = tauri::WebviewWindowBuilder::new(&app, COMPRESS_PROGRESS_WINDOW_LABEL, url)
+        .title("Compressing Items")
+        .inner_size(420.0, 440.0)
+        .resizable(false)
+        .fullscreen(false)
+        .minimizable(true)
+        .maximizable(false)
+        .closable(true)
+        .decorations(true);
+
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true)
+        .traffic_light_position(tauri::LogicalPosition::new(14.0, 14.0));
+
+    COMPRESS_PROGRESS_QUEUE.set_ready(false);
+
+    builder
+        .build()
+        .map_err(|e| format!("Failed to create compress progress window: {}", e))?;
+
+    COMPRESS_PROGRESS_QUEUE.queue(&app, payload);
+    Ok(())
+}
+
+#[command]
+pub fn hide_compress_progress_window(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(COMPRESS_PROGRESS_WINDOW_LABEL) {
+        if let Err(err) = window.close() {
+            warn!("Failed to close compress progress window: {err}");
+        }
+    }
+
+    COMPRESS_PROGRESS_QUEUE.set_ready(false);
+    COMPRESS_PROGRESS_QUEUE.clear_pending();
+    Ok(())
+}
+
+#[command]
+pub fn compress_progress_window_ready(app: AppHandle) -> Result<(), String> {
+    COMPRESS_PROGRESS_QUEUE.set_ready(true);
+    COMPRESS_PROGRESS_QUEUE.try_emit(&app);
+    Ok(())
+}
+
+#[command]
+pub fn compress_progress_window_unready() -> Result<(), String> {
+    COMPRESS_PROGRESS_QUEUE.set_ready(false);
+    Ok(())
+}
+
+#[command]
 pub fn show_clipboard_progress_window(
     app: AppHandle,
     operation: String,
@@ -4671,6 +5671,7 @@ pub fn show_native_context_menu(
     can_paste_internal: Option<bool>,
     has_file_context: Option<bool>,
     file_paths: Option<Vec<String>>,
+    compress_suggested_name: Option<String>,
     selected_is_symlink: Option<bool>,
     selection_has_directory: Option<bool>,
 ) -> Result<(), String> {
@@ -4845,6 +5846,15 @@ pub fn show_native_context_menu(
             .enabled(paste_enabled)
             .build(&app)
             .map_err(|e| e.to_string())?;
+        let compress_label = compress_suggested_name
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .map(|name| format!("Compress to {}", name))
+            .unwrap_or_else(|| "Compress to ZIP".to_string());
+        let compress_item = MenuItemBuilder::with_id("ctx:compress_to_zip", compress_label)
+            .enabled(selection_len > 0)
+            .build(&app)
+            .map_err(|e| e.to_string())?;
 
         let copy_name_item = MenuItemBuilder::with_id("ctx:copy_name", "Copy File Name")
             .build(&app)
@@ -4876,6 +5886,7 @@ pub fn show_native_context_menu(
             .item(&copy_files_item)
             .item(&cut_files_item)
             .item(&paste_files_item)
+            .item(&compress_item)
             .separator()
             .item(&copy_name_item)
             .item(&copy_full_name_item);

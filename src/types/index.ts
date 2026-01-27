@@ -187,6 +187,15 @@ export interface ArchiveProgressUpdatePayload {
   finished?: boolean;
 }
 
+export interface CompressProgressPayload {
+  archiveName: string;
+  entryName?: string;
+  completed: number;
+  total: number;
+  finished: boolean;
+  error?: string;
+}
+
 export interface ClipboardProgressPayload {
   operation: string;
   destination: string;

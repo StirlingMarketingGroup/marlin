@@ -4,6 +4,7 @@ import { useAppStore } from '@/store/useAppStore';
 import { invoke } from '@tauri-apps/api/core';
 import { useToastStore } from '@/store/useToastStore';
 import { openFolderSizeWindow } from '@/store/useFolderSizeStore';
+import { getSuggestedZipName } from '@/utils/zipNaming';
 
 type SortBy = 'name' | 'size' | 'type' | 'modified';
 type SortOrder = 'asc' | 'desc';
@@ -26,6 +27,7 @@ export default function ContextMenu({ x, y, isFileContext, onRequestClose }: Con
     globalPreferences,
     currentPath,
     directoryPreferences,
+    filterText,
     updateDirectoryPreferences,
     toggleHiddenFiles,
     toggleFoldersFirst,
@@ -39,6 +41,7 @@ export default function ContextMenu({ x, y, isFileContext, onRequestClose }: Con
     pasteFiles,
     createNewFolder,
     createNewFile,
+    compressSelectedToZip,
     syncClipboardState,
     canPasteFiles,
     canPasteImage,
@@ -109,6 +112,23 @@ export default function ContextMenu({ x, y, isFileContext, onRequestClose }: Con
       .map((path) => map.get(path))
       .filter((file): file is (typeof files)[number] => Boolean(file));
   }, [fileSpecific, files, selectedFiles]);
+
+  const visibleItems = useMemo(() => {
+    const hiddenFiltered = prefs.showHidden ? files : files.filter((file) => !file.is_hidden);
+    if (!filterText) return hiddenFiltered;
+    const needle = filterText.toLowerCase();
+    return hiddenFiltered.filter((file) => file.name.toLowerCase().includes(needle));
+  }, [files, filterText, prefs.showHidden]);
+
+  const suggestedZipName = useMemo(
+    () =>
+      getSuggestedZipName({
+        selectedItems: selectedFileItems,
+        visibleItems,
+        currentPath,
+      }),
+    [currentPath, selectedFileItems, visibleItems]
+  );
 
   const hasDirectorySelection = selectedFileItems.some((file) => file.is_directory);
   // Copy/Cut only available when selection has at least one file (not directory)
@@ -239,6 +259,16 @@ export default function ContextMenu({ x, y, isFileContext, onRequestClose }: Con
               }}
             >
               Cut
+            </button>
+            <button
+              className={`w-full text-left px-3 py-2 hover:bg-app-light ${selectedFileItems.length === 0 ? 'text-app-muted' : ''}`}
+              disabled={selectedFileItems.length === 0}
+              onClick={() => {
+                onRequestClose();
+                void compressSelectedToZip(suggestedZipName);
+              }}
+            >
+              Compress to {suggestedZipName}
             </button>
           </>
         )}

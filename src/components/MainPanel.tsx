@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type React from 'react';
 import { useAppStore } from '../store/useAppStore';
+import type { FileItem } from '../types';
+import { getSuggestedZipName } from '../utils/zipNaming';
 import FileGrid from './FileGrid';
 import FileList from './FileList';
 import ContextMenu from './ContextMenu';
@@ -112,6 +114,7 @@ export default function MainPanel() {
       const prefs = { ...state.globalPreferences, ...state.directoryPreferences[path] };
       const sortBy = (prefs.sortBy ?? state.globalPreferences.sortBy) || 'name';
       const sortOrder = (prefs.sortOrder ?? state.globalPreferences.sortOrder) || 'asc';
+      const filterText = state.filterText;
 
       // Derive file context directly from event target for reliability
       const tgt = e.target as Element | null;
@@ -128,6 +131,7 @@ export default function MainPanel() {
       let filePaths: string[] | undefined;
       let selectedIsSymlink: boolean | undefined;
       let selectionHasDirectory = false;
+      let suggestedZipName: string | undefined;
       if (isFileCtx && ctxPath) {
         if (!state.selectedFiles.includes(ctxPath)) {
           setSelectedFiles([ctxPath]);
@@ -144,6 +148,22 @@ export default function MainPanel() {
             const file = map.get(activeSelection[0]);
             selectedIsSymlink = file?.is_symlink ?? false;
           }
+          const selectedItems = activeSelection
+            .map((path) => map.get(path))
+            .filter((file): file is FileItem => Boolean(file));
+          const hiddenFiltered = prefs.showHidden
+            ? state.files
+            : state.files.filter((file) => !file.is_hidden);
+          const visibleItems = filterText
+            ? hiddenFiltered.filter((file) =>
+                file.name.toLowerCase().includes(filterText.toLowerCase())
+              )
+            : hiddenFiltered;
+          suggestedZipName = getSuggestedZipName({
+            selectedItems,
+            visibleItems,
+            currentPath: path,
+          });
         }
       } else {
         filePaths = undefined;
@@ -165,6 +185,7 @@ export default function MainPanel() {
         hasFileContext: !!isFileCtx,
         // Only send file paths when clicking on a file
         filePaths: isFileCtx ? filePaths : undefined,
+        compressSuggestedName: suggestedZipName,
         selectedIsSymlink,
         selectionHasDirectory,
       });
