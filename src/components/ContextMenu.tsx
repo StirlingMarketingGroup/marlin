@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { useAppStore } from '@/store/useAppStore';
 import { invoke } from '@tauri-apps/api/core';
+import { useAppStore } from '@/store/useAppStore';
 import { useToastStore } from '@/store/useToastStore';
 import { openFolderSizeWindow } from '@/store/useFolderSizeStore';
 import { getSuggestedZipName } from '@/utils/zipNaming';
 import { getArchiveBaseName, isArchiveFile } from '@/utils/fileTypes';
+import { getShowInLabel, isLocalPath, revealInFileBrowser } from '@/utils/fileBrowser';
 
 type SortBy = 'name' | 'size' | 'type' | 'modified';
 type SortOrder = 'asc' | 'desc';
@@ -133,6 +134,9 @@ export default function ContextMenu({ x, y, isFileContext, onRequestClose }: Con
   );
 
   const hasDirectorySelection = selectedFileItems.some((file) => file.is_directory);
+  const showInLabel = getShowInLabel();
+  // Only show "Show in Finder/Explorer" for local filesystem paths (not archive://, smb://, etc.)
+  const canRevealInFileBrowser = selectedFiles.length > 0 && isLocalPath(selectedFiles[0]);
   // Copy/Cut only available when selection has at least one file (not directory)
   const hasFileSelection = selectedFileItems.some((file) => !file.is_directory);
   const archiveSelection = selectedFileItems.filter(
@@ -208,6 +212,19 @@ export default function ContextMenu({ x, y, isFileContext, onRequestClose }: Con
             >
               Copy Full Path
             </button>
+            {canRevealInFileBrowser && (
+              <button
+                className="w-full text-left px-3 py-2 hover:bg-app-light"
+                onClick={() => {
+                  const target = selectedFiles[0];
+                  onRequestClose();
+                  if (!target) return;
+                  void revealInFileBrowser(target);
+                }}
+              >
+                {showInLabel}
+              </button>
+            )}
             {hasDirectorySelection && (
               <button
                 className="w-full text-left px-3 py-2 hover:bg-app-light"

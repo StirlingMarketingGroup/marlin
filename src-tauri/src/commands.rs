@@ -9,6 +9,8 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use std::ffi::OsString;
+#[cfg(target_os = "linux")]
+use std::env;
 use std::fs;
 use std::io::{ErrorKind, Read, Seek, Write};
 use std::path::Path;
@@ -96,6 +98,7 @@ pub mod error_codes {
     pub const ENOENT: &str = "ENOENT"; // Path does not exist
     pub const ENOTDIR: &str = "ENOTDIR"; // Path is not a directory
     pub const EPERM: &str = "EPERM"; // Permission denied / Operation not permitted
+    pub const EOPEN: &str = "EOPEN"; // Failed to launch file browser
 }
 
 /// Format an error with a code prefix for structured error handling
@@ -5012,6 +5015,152 @@ pub async fn clear_thumbnail_cache() -> Result<(), String> {
     service.clear_cache().await
 }
 
+fn map_reveal_path_error(err: std::io::Error) -> String {
+    match err.kind() {
+        ErrorKind::NotFound => format_error(error_codes::ENOENT, "Item not found."),
+        ErrorKind::PermissionDenied => format_error(error_codes::EPERM, "Permission denied."),
+        _ => format_error(
+            error_codes::EOPEN,
+            &format!("Failed to resolve path: {}", err),
+        ),
+    }
+}
+
+#[command]
+pub fn reveal_in_file_browser(path: String) -> Result<(), String> {
+    let expanded = expand_path(&path)?;
+    // Canonicalize only the parent directory to preserve symlinks.
+    // fs::canonicalize would resolve symlinks to their target, but users expect
+    // "Show in Finder/Explorer" to reveal the symlink itself, not the target.
+    let canonical = if let Some(parent) = expanded.parent() {
+        let canonical_parent = fs::canonicalize(parent).map_err(map_reveal_path_error)?;
+        if let Some(file_name) = expanded.file_name() {
+            canonical_parent.join(file_name)
+        } else {
+            canonical_parent
+        }
+    } else {
+        // Root path or no parent - canonicalize directly
+        fs::canonicalize(&expanded).map_err(map_reveal_path_error)?
+    };
+    // Verify the path exists (for symlinks, check the link itself, not the target)
+    if !expanded.exists() && !expanded.symlink_metadata().is_ok() {
+        return Err(format_error(error_codes::ENOENT, "Item not found."));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        OsCommand::new("open")
+            .args(["-R", canonical.to_string_lossy().as_ref()])
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| {
+                format_error(
+                    error_codes::EOPEN,
+                    &format!("Failed to launch Finder: {}", e),
+                )
+            })
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let mut path_str = canonical.to_string_lossy().to_string();
+        if let Some(stripped) = path_str.strip_prefix(r"\\?\UNC\") {
+            path_str = format!(r"\\{}", stripped);
+        } else if let Some(stripped) = path_str.strip_prefix(r"\\?\") {
+            path_str = stripped.to_string();
+        }
+        let path_str = path_str.replace('/', "\\");
+        let select_arg = format!("/select,\"{}\"", path_str);
+        OsCommand::new("explorer")
+            .arg(select_arg)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| {
+                format_error(
+                    error_codes::EOPEN,
+                    &format!("Failed to launch Explorer: {}", e),
+                )
+            })
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let is_dir = canonical.is_dir();
+        let select_target = canonical.to_string_lossy().to_string();
+        let open_target = if is_dir {
+            canonical.to_string_lossy().to_string()
+        } else {
+            canonical
+                .parent()
+                .map(|parent| parent.to_string_lossy().to_string())
+                .ok_or_else(|| {
+                    format_error(
+                        error_codes::EOPEN,
+                        "Unable to resolve parent directory.",
+                    )
+                })?
+        };
+
+        let desktop = env::var("XDG_CURRENT_DESKTOP")
+            .unwrap_or_default()
+            .to_lowercase();
+
+        let mut candidates: Vec<(&str, Vec<String>)> = Vec::new();
+        if desktop.contains("kde") {
+            candidates.push((
+                "dolphin",
+                vec!["--select".to_string(), select_target.clone()],
+            ));
+        } else if desktop.contains("cinnamon") || desktop.contains("mate") {
+            candidates.push(("nemo", vec!["--select".to_string(), select_target.clone()]));
+        } else if desktop.contains("gnome")
+            || desktop.contains("unity")
+            || desktop.contains("ubuntu")
+        {
+            candidates.push((
+                "nautilus",
+                vec!["--select".to_string(), select_target.clone()],
+            ));
+        } else {
+            candidates.push((
+                "nautilus",
+                vec!["--select".to_string(), select_target.clone()],
+            ));
+            candidates.push((
+                "dolphin",
+                vec!["--select".to_string(), select_target.clone()],
+            ));
+            candidates.push(("nemo", vec!["--select".to_string(), select_target.clone()]));
+        }
+
+        for (cmd, args) in candidates {
+            if OsCommand::new(cmd).args(&args).spawn().is_ok() {
+                return Ok(());
+            }
+        }
+
+        OsCommand::new("xdg-open")
+            .arg(&open_target)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| {
+                format_error(
+                    error_codes::EOPEN,
+                    &format!("Failed to launch file manager: {}", e),
+                )
+            })
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        Err(format_error(
+            error_codes::EOPEN,
+            "Reveal in file browser is not supported on this platform.",
+        ))
+    }
+}
+
 #[command]
 pub fn open_path(path: String) -> Result<(), String> {
     // Normalize path (~ expansion is already handled on the frontend for navigation)
@@ -5907,6 +6056,39 @@ pub fn show_native_context_menu(
         let copy_full_name_item = MenuItemBuilder::with_id("ctx:copy_full_name", "Copy Full Path")
             .build(&app)
             .map_err(|e| e.to_string())?;
+        // Only show "Show in Finder/Explorer" for local filesystem paths (not archive://, smb://, etc.)
+        let first_path_is_local = file_paths
+            .as_ref()
+            .and_then(|paths| paths.first())
+            .map(|p| !p.contains("://"))
+            .unwrap_or(false);
+        let reveal_in_browser_item = if first_path_is_local {
+            let reveal_in_browser_label = {
+                #[cfg(target_os = "macos")]
+                {
+                    "Show in Finder"
+                }
+                #[cfg(target_os = "windows")]
+                {
+                    "Show in Explorer"
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    "Show in Files"
+                }
+                #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+                {
+                    "Show in File Browser"
+                }
+            };
+            Some(
+                MenuItemBuilder::with_id("ctx:reveal_in_file_browser", reveal_in_browser_label)
+                    .build(&app)
+                    .map_err(|e| e.to_string())?,
+            )
+        } else {
+            None
+        };
         let calculate_size_item = if has_directory_selection {
             Some(
                 MenuItemBuilder::with_id("ctx:calculate_total_size", "Calculate Total Size")
@@ -5935,9 +6117,13 @@ pub fn show_native_context_menu(
         if let Some(ref item) = extract_folder_item {
             builder = builder.item(item);
         }
-        builder = builder.separator()
+        builder = builder
+            .separator()
             .item(&copy_name_item)
             .item(&copy_full_name_item);
+        if let Some(ref item) = reveal_in_browser_item {
+            builder = builder.item(item);
+        }
         if let Some(ref item) = calculate_size_item {
             builder = builder.item(item);
         }
