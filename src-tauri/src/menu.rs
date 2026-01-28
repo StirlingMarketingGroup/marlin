@@ -484,6 +484,9 @@ pub fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, event: &tauri::menu::Me
         "ctx:copy_full_name" => {
             let _ = app.emit("menu:copy_full_name", ());
         }
+        "ctx:reveal_in_file_browser" => {
+            let _ = app.emit("menu:reveal_in_file_browser", ());
+        }
         "ctx:calculate_total_size" => {
             let _ = app.emit("menu:calculate_total_size", ());
         }
