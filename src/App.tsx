@@ -17,6 +17,7 @@ import { getEffectiveExtension, isArchiveFile } from './utils/fileTypes';
 import { dirname } from './utils/pathUtils';
 import { applyAccentVariables, DEFAULT_ACCENT, normalizeHexColor } from '@/utils/accent';
 import { getSuggestedZipName } from './utils/zipNaming';
+import { revealInFileBrowser } from '@/utils/fileBrowser';
 
 import Toast from './components/Toast';
 import FilterInput from './components/FilterInput';
@@ -1049,6 +1050,15 @@ function App() {
             message: 'Unable to locate the original item for this link.',
           });
         }
+      });
+      await registerFocused('menu:reveal_in_file_browser', () => {
+        const state = useAppStore.getState();
+        const selection = state.selectedFiles;
+        if (!selection || selection.length === 0) return;
+        const target = selection[0];
+        // Only reveal local filesystem paths (not archive://, smb://, etc.)
+        if (target.includes('://')) return;
+        void revealInFileBrowser(target);
       });
       await registerFocused('menu:new_window', () => {
         // Create new window in current directory
