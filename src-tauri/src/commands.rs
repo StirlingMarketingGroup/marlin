@@ -5026,6 +5026,26 @@ fn map_reveal_path_error(err: std::io::Error) -> String {
     }
 }
 
+/// Returns the platform-specific label for "Show in File Browser" menu item.
+fn get_reveal_in_browser_label() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "Show in Finder"
+    }
+    #[cfg(target_os = "windows")]
+    {
+        "Show in Explorer"
+    }
+    #[cfg(target_os = "linux")]
+    {
+        "Show in Files"
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        "Show in File Browser"
+    }
+}
+
 #[command]
 pub fn reveal_in_file_browser(path: String) -> Result<(), String> {
     let expanded = expand_path(&path)?;
@@ -5106,36 +5126,27 @@ pub fn reveal_in_file_browser(path: String) -> Result<(), String> {
             .unwrap_or_default()
             .to_lowercase();
 
-        let mut candidates: Vec<(&str, Vec<String>)> = Vec::new();
-        if desktop.contains("kde") {
-            candidates.push((
-                "dolphin",
-                vec!["--select".to_string(), select_target.clone()],
-            ));
+        let managers: Vec<&str> = if desktop.contains("kde") {
+            vec!["dolphin"]
         } else if desktop.contains("cinnamon") || desktop.contains("mate") {
-            candidates.push(("nemo", vec!["--select".to_string(), select_target.clone()]));
+            vec!["nemo"]
         } else if desktop.contains("gnome")
             || desktop.contains("unity")
             || desktop.contains("ubuntu")
         {
-            candidates.push((
-                "nautilus",
-                vec!["--select".to_string(), select_target.clone()],
-            ));
+            vec!["nautilus"]
         } else {
-            candidates.push((
-                "nautilus",
-                vec!["--select".to_string(), select_target.clone()],
-            ));
-            candidates.push((
-                "dolphin",
-                vec!["--select".to_string(), select_target.clone()],
-            ));
-            candidates.push(("nemo", vec!["--select".to_string(), select_target.clone()]));
-        }
+            // Fallback: try common file managers in order
+            vec!["nautilus", "dolphin", "nemo"]
+        };
 
-        for (cmd, args) in candidates {
-            if OsCommand::new(cmd).args(&args).spawn().is_ok() {
+        for manager in managers {
+            if OsCommand::new(manager)
+                .arg("--select")
+                .arg(&select_target)
+                .spawn()
+                .is_ok()
+            {
                 return Ok(());
             }
         }
@@ -6063,26 +6074,8 @@ pub fn show_native_context_menu(
             .map(|p| !p.contains("://"))
             .unwrap_or(false);
         let reveal_in_browser_item = if first_path_is_local {
-            let reveal_in_browser_label = {
-                #[cfg(target_os = "macos")]
-                {
-                    "Show in Finder"
-                }
-                #[cfg(target_os = "windows")]
-                {
-                    "Show in Explorer"
-                }
-                #[cfg(target_os = "linux")]
-                {
-                    "Show in Files"
-                }
-                #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-                {
-                    "Show in File Browser"
-                }
-            };
             Some(
-                MenuItemBuilder::with_id("ctx:reveal_in_file_browser", reveal_in_browser_label)
+                MenuItemBuilder::with_id("ctx:reveal_in_file_browser", get_reveal_in_browser_label())
                     .build(&app)
                     .map_err(|e| e.to_string())?,
             )
