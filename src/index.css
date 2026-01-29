@@ -253,4 +253,36 @@
   .animate-fade-out {
     animation: fade-out-toast 0.25s ease-in forwards;
   }
+
+  /* File item animation states for enter/exit transitions */
+  .file-item {
+    transition:
+      opacity 200ms ease-out,
+      transform 200ms ease-out,
+      background-color 75ms ease-out;
+  }
+
+  .file-item[data-entering='true'] {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+
+  .file-item[data-exiting='true'] {
+    opacity: 0;
+    transform: scale(0.95);
+    pointer-events: none;
+  }
+
+  /* Respect reduced motion preference */
+  @media (prefers-reduced-motion: reduce) {
+    .file-item {
+      transition: none;
+    }
+
+    .file-item[data-entering='true'],
+    .file-item[data-exiting='true'] {
+      opacity: 1;
+      transform: none;
+    }
+  }
 }
