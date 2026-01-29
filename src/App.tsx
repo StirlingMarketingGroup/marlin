@@ -22,6 +22,7 @@ import Toast from './components/Toast';
 import FilterInput from './components/FilterInput';
 import { FULL_DISK_ACCESS_DISMISSED_KEY } from '@/utils/fullDiskAccessPrompt';
 import { PREFERENCES_UPDATED_EVENT, SMB_CONNECT_SUCCESS_EVENT } from '@/utils/events';
+import { usePrefersReducedMotion } from '@/hooks/usePrefersReducedMotion';
 import type {
   DirectoryChangeEventPayload,
   DirectoryListingResponse,
@@ -78,6 +79,9 @@ function App() {
   const directoryPreferences = useAppStore((state) => state.directoryPreferences);
   const globalPreferences = useAppStore((state) => state.globalPreferences);
   const loadPinnedDirectories = useAppStore((state) => state.loadPinnedDirectories);
+
+  // Animation preference hook (reactive to system changes)
+  const prefersReducedMotion = usePrefersReducedMotion();
 
   // Set up directory streaming event listener
   useDirectoryStream();
@@ -664,10 +668,13 @@ function App() {
       const payload = event.payload;
 
       // Skip access-only changes (e.g., opening a file updates atime)
-      // Only refresh for actual content changes: create, delete, rename, write
+      // Only refresh for actual content changes: create, delete, rename, write, modify
       const changeType = (payload?.changeType || '').toLowerCase();
-      // Accept any non-empty changeType as a content change (simpler approach)
-      const isContentChange = changeType.length > 0;
+      const isContentChange =
+        changeType === 'created' ||
+        changeType === 'removed' ||
+        changeType === 'modified' ||
+        changeType === 'renamed';
 
       if (payload && payload.path === currentPath && isContentChange) {
         // Clear any existing debounce timer
@@ -684,21 +691,17 @@ function App() {
             const { files: currentFiles, selectedFiles } = state;
             const affectedFiles = payload.affectedFiles || [];
 
-            // Check for reduced motion preference
-            const prefersReducedMotion =
-              typeof window !== 'undefined' &&
-              typeof window.matchMedia === 'function' &&
-              window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-
             // For small changes, try to update locally without full refresh
             if (affectedFiles.length > 0 && affectedFiles.length <= 10) {
-              // Build paths of affected files
-              const affectedPaths = affectedFiles.map((name: string) =>
-                currentPath.endsWith('/') ? `${currentPath}${name}` : `${currentPath}/${name}`
+              // Build paths of affected files using a Set for O(1) lookups
+              const affectedPaths = new Set(
+                affectedFiles.map((name: string) =>
+                  currentPath.endsWith('/') ? `${currentPath}${name}` : `${currentPath}/${name}`
+                )
               );
 
               // Check which affected files exist in our current list (potential removals)
-              const filesToRemove = currentFiles.filter((f) => affectedPaths.includes(f.path));
+              const filesToRemove = currentFiles.filter((f) => affectedPaths.has(f.path));
 
               // Verify they're actually gone by checking if they exist on disk
               // We'll do this by checking if they're in the new file list after a quick refresh
@@ -709,8 +712,11 @@ function App() {
               if (response) {
                 const newFilePaths = new Set(response.entries.map((f: FileItem) => f.path));
                 const confirmedRemovals = filesToRemove.filter((f) => !newFilePaths.has(f.path));
+
+                // O(N+M) lookup for new files instead of O(N*M)
+                const currentFilePaths = new Set(currentFiles.map((cf) => cf.path));
                 const newFiles = response.entries.filter(
-                  (f: FileItem) => !currentFiles.some((cf) => cf.path === f.path)
+                  (f: FileItem) => !currentFilePaths.has(f.path)
                 );
 
                 // Handle removals with animation
@@ -718,9 +724,10 @@ function App() {
                   const removedPaths = confirmedRemovals.map((f) => f.path);
                   state.markFilesExiting(removedPaths);
                 } else if (confirmedRemovals.length > 0) {
-                  // Reduced motion: remove immediately
+                  // Reduced motion: remove immediately using Set for O(N+M) instead of O(N*M)
+                  const removedPathsSet = new Set(confirmedRemovals.map((r) => r.path));
                   useAppStore.setState((s) => ({
-                    files: s.files.filter((f) => !confirmedRemovals.some((r) => r.path === f.path)),
+                    files: s.files.filter((f) => !removedPathsSet.has(f.path)),
                   }));
                 }
 
@@ -787,7 +794,7 @@ function App() {
         cleanupFunction();
       }
     };
-  }, [currentPath, loading]);
+  }, [currentPath, loading, prefersReducedMotion]);
 
   // Persist only current directory prefs on change to avoid global clobbering
   useEffect(() => {
