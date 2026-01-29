@@ -234,6 +234,9 @@ function GridFilePreview({
   );
 }
 
+// Batch threshold - skip animations for operations affecting more than this many files
+const ANIMATION_BATCH_THRESHOLD = 10;
+
 export default function FileGrid({ files, preferences }: FileGridProps) {
   const {
     selectedFiles,
@@ -250,6 +253,12 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     filterText,
     clipboardMode,
     clipboardPathsSet,
+    // Animation state
+    animationState,
+    markFilesEntering,
+    clearEnteringState,
+    removeExitedFiles,
+    consumeSkipAnimationPaths,
   } = useAppStore();
   const {
     renameTargetPath,
@@ -267,6 +276,14 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
   const gridRef = useRef<HTMLDivElement>(null);
   const lastClickRef = useRef<{ path: string; time: number; x: number; y: number } | null>(null);
   const lastHandledDoubleRef = useRef<{ path: string; time: number } | null>(null);
+
+  // Animation refs
+  const prevFilesRef = useRef<Set<string>>(new Set());
+  const isInitialLoadRef = useRef(true);
+  const prefersReducedMotion =
+    typeof window !== 'undefined' &&
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   // Clean up dragged state when drag ends
   // No longer needed - native drag handles cleanup
@@ -692,13 +709,16 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
   // Use shared hook for streaming-aware sorting
   const sortedFiles = useSortedFiles(files, preferences);
 
-  const hiddenFiltered = preferences.showHidden
-    ? sortedFiles
-    : sortedFiles.filter((file) => !file.is_hidden);
+  // Memoize filtered files to avoid O(N) Set operations on every render
+  const filteredFiles = useMemo(() => {
+    const hiddenFiltered = preferences.showHidden
+      ? sortedFiles
+      : sortedFiles.filter((file) => !file.is_hidden);
 
-  const filteredFiles = filterText
-    ? hiddenFiltered.filter((file) => file.name.toLowerCase().includes(filterText.toLowerCase()))
-    : hiddenFiltered;
+    return filterText
+      ? hiddenFiltered.filter((file) => file.name.toLowerCase().includes(filterText.toLowerCase()))
+      : hiddenFiltered;
+  }, [sortedFiles, preferences.showHidden, filterText]);
 
   // Group files into rows for virtual scrolling
   const rows = useMemo(() => {
@@ -758,6 +778,75 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     setSelectionAnchor,
     setSelectionLead,
   ]);
+
+  // Animation: detect newly added files and mark them as entering
+  useEffect(() => {
+    // Skip animations if user prefers reduced motion
+    if (prefersReducedMotion) {
+      prevFilesRef.current = new Set(filteredFiles.map((f) => f.path));
+      isInitialLoadRef.current = false;
+      consumeSkipAnimationPaths(); // Clear any pending skip paths
+      return;
+    }
+
+    const currentPaths = new Set(filteredFiles.map((f) => f.path));
+    const prevPaths = prevFilesRef.current;
+
+    // Skip animations on initial load
+    if (isInitialLoadRef.current) {
+      prevFilesRef.current = currentPaths;
+      isInitialLoadRef.current = false;
+      consumeSkipAnimationPaths(); // Clear any pending skip paths
+      return;
+    }
+
+    // Get paths that should skip animation (e.g., renamed files)
+    const skipPaths = consumeSkipAnimationPaths();
+
+    // Find new files (in current but not in previous), excluding skip paths
+    const newPaths: string[] = [];
+    for (const path of currentPaths) {
+      if (!prevPaths.has(path) && !skipPaths.has(path)) {
+        newPaths.push(path);
+      }
+    }
+
+    // Skip animations for batch operations (>10 files)
+    if (newPaths.length > 0 && newPaths.length <= ANIMATION_BATCH_THRESHOLD) {
+      markFilesEntering(newPaths);
+
+      // Remove entering state on next frame to trigger the transition
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          clearEnteringState(newPaths);
+        });
+      });
+    }
+
+    // Update ref for next comparison
+    prevFilesRef.current = currentPaths;
+  }, [
+    filteredFiles,
+    prefersReducedMotion,
+    markFilesEntering,
+    clearEnteringState,
+    consumeSkipAnimationPaths,
+  ]);
+
+  // Handle transitionend for exiting files
+  const handleTransitionEnd = useCallback(
+    (e: React.TransitionEvent, filePath: string) => {
+      // Only handle opacity transitions to avoid double-firing
+      if (e.propertyName !== 'opacity') return;
+      // Ignore bubbled events from children
+      if (e.target !== e.currentTarget) return;
+      // Read fresh state to avoid stale closure issues
+      if (useAppStore.getState().animationState.exiting[filePath]) {
+        removeExitedFiles([filePath]);
+      }
+    },
+    [removeExitedFiles]
+  );
 
   if (filteredFiles.length === 0) {
     return (
@@ -868,11 +957,13 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     const isRenaming = renameTargetPath === file.path;
     const isDownloadingForDrag = downloadingForDrag.has(file.path);
     const isCutFile = clipboardMode === 'cut' && clipboardPathsSet.has(file.path);
+    const isEntering = Boolean(animationState.entering[file.path]);
+    const isExiting = Boolean(animationState.exiting[file.path]);
 
     return (
       <div
         key={file.path}
-        className={`relative flex flex-col items-center px-3 py-2 rounded-md cursor-pointer transition-all duration-75 ${
+        className={`file-item relative flex flex-col items-center px-3 py-2 rounded-md cursor-pointer ${
           isSelected || isRenaming
             ? 'bg-accent-selected z-20 overflow-visible'
             : 'hover:bg-app-light/70'
@@ -883,7 +974,10 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
         data-directory={file.is_directory ? 'true' : undefined}
         data-hidden={file.is_hidden ? 'true' : undefined}
         data-name={file.name}
+        data-entering={isEntering ? 'true' : undefined}
+        data-exiting={isExiting ? 'true' : undefined}
         data-tauri-drag-region={false}
+        onTransitionEnd={(e) => handleTransitionEnd(e, file.path)}
         onClick={(e) => {
           e.stopPropagation();
           handleFileClick(e, file);

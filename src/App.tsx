@@ -665,14 +665,9 @@ function App() {
 
       // Skip access-only changes (e.g., opening a file updates atime)
       // Only refresh for actual content changes: create, delete, rename, write
-      const changeType = payload?.changeType?.toLowerCase() || '';
-      const isContentChange =
-        changeType.includes('create') ||
-        changeType.includes('delete') ||
-        changeType.includes('remove') ||
-        changeType.includes('rename') ||
-        changeType.includes('write') ||
-        changeType.includes('modify');
+      const changeType = (payload?.changeType || '').toLowerCase();
+      // Accept any non-empty changeType as a content change (simpler approach)
+      const isContentChange = changeType.length > 0;
 
       if (payload && payload.path === currentPath && isContentChange) {
         // Clear any existing debounce timer
@@ -685,19 +680,75 @@ function App() {
           if (!isActive || loading) return;
 
           try {
-            const { refreshCurrentDirectoryStreaming, selectedFiles } = useAppStore.getState();
-            await refreshCurrentDirectoryStreaming();
+            const state = useAppStore.getState();
+            const { files: currentFiles, selectedFiles } = state;
+            const affectedFiles = payload.affectedFiles || [];
 
-            // Preserve selection if possible after refresh
-            if (selectedFiles.length > 0) {
-              const { files, setSelectedFiles } = useAppStore.getState();
-              const stillExist = selectedFiles.filter((path) => files.some((f) => f.path === path));
-              if (stillExist.length !== selectedFiles.length) {
-                setSelectedFiles(stillExist);
+            // Check for reduced motion preference
+            const prefersReducedMotion =
+              typeof window !== 'undefined' &&
+              typeof window.matchMedia === 'function' &&
+              window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+            // For small changes, try to update locally without full refresh
+            if (affectedFiles.length > 0 && affectedFiles.length <= 10) {
+              // Build paths of affected files
+              const affectedPaths = affectedFiles.map((name: string) =>
+                currentPath.endsWith('/') ? `${currentPath}${name}` : `${currentPath}/${name}`
+              );
+
+              // Check which affected files exist in our current list (potential removals)
+              const filesToRemove = currentFiles.filter((f) => affectedPaths.includes(f.path));
+
+              // Verify they're actually gone by checking if they exist on disk
+              // We'll do this by checking if they're in the new file list after a quick refresh
+              const response = await invoke<{ entries: FileItem[] }>('read_directory', {
+                path: currentPath,
+              }).catch(() => null);
+
+              if (response) {
+                const newFilePaths = new Set(response.entries.map((f: FileItem) => f.path));
+                const confirmedRemovals = filesToRemove.filter((f) => !newFilePaths.has(f.path));
+                const newFiles = response.entries.filter(
+                  (f: FileItem) => !currentFiles.some((cf) => cf.path === f.path)
+                );
+
+                // Handle removals with animation
+                if (confirmedRemovals.length > 0 && !prefersReducedMotion) {
+                  const removedPaths = confirmedRemovals.map((f) => f.path);
+                  state.markFilesExiting(removedPaths);
+                } else if (confirmedRemovals.length > 0) {
+                  // Reduced motion: remove immediately
+                  useAppStore.setState((s) => ({
+                    files: s.files.filter((f) => !confirmedRemovals.some((r) => r.path === f.path)),
+                  }));
+                }
+
+                // Handle new files - just add to list, components will handle entry animation
+                if (newFiles.length > 0) {
+                  useAppStore.setState((s) => ({
+                    files: [...s.files, ...newFiles],
+                  }));
+                }
+
+                // Update selection
+                if (selectedFiles.length > 0) {
+                  const stillExist = selectedFiles.filter((path) => newFilePaths.has(path));
+                  if (stillExist.length !== selectedFiles.length) {
+                    state.setSelectedFiles(stillExist);
+                  }
+                }
+
+                return; // Skip full refresh
               }
             }
+
+            // Fallback: full refresh for large changes or when quick check fails
+            await useAppStore.getState().refreshCurrentDirectoryStreaming();
           } catch (error) {
             console.warn('Auto-refresh failed:', error);
+            // Fallback to full refresh on error
+            void useAppStore.getState().refreshCurrentDirectoryStreaming();
           }
         }, 500); // 500ms debounce
       }

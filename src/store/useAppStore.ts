@@ -257,6 +257,14 @@ interface AppState {
   filterText: string;
   showFilterInput: boolean;
 
+  // Animation state for file enter/exit transitions
+  animationState: {
+    entering: Record<string, true>;
+    exiting: Record<string, true>;
+  };
+  _animationTimers: Record<string, number>; // Fallback timers for transitionend
+  _skipAnimationPaths: Set<string>; // Paths to skip animation for (e.g., renamed files)
+
   // Actions
   setCurrentPath: (path: string) => void;
   setHomeDir: (path: string) => void;
@@ -341,6 +349,17 @@ interface AppState {
   renameFile: (newName: string) => Promise<void>;
   pendingRevealTarget?: string;
   setPendingRevealTarget: (path?: string) => void;
+
+  // Animation actions
+  markFilesEntering: (paths: string[]) => void;
+  markFilesExiting: (paths: string[]) => void;
+  clearEnteringState: (paths: string[]) => void;
+  removeExitedFiles: (paths: string[]) => void;
+  clearAllAnimationState: () => void;
+  isFileEntering: (path: string) => boolean;
+  isFileExiting: (path: string) => boolean;
+  addSkipAnimationPath: (path: string) => void;
+  consumeSkipAnimationPaths: () => Set<string>;
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -403,6 +422,14 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   filterText: '',
   showFilterInput: false,
+
+  // Animation initial state
+  animationState: {
+    entering: {},
+    exiting: {},
+  },
+  _animationTimers: {},
+  _skipAnimationPaths: new Set<string>(),
 
   // Actions
   setCurrentPath: (path) => {
@@ -542,6 +569,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         const fullPath = `gdrive://${email}${resolvedPath}`;
         console.info('[navigateTo] Resolved Google Drive URL to:', fullPath);
 
+        // Clear animation state when navigating
+        get().clearAllAnimationState();
+
         const newHistory = [...pathHistory.slice(0, historyIndex + 1), fullPath];
         set({
           currentPath: fullPath,
@@ -574,6 +604,10 @@ export const useAppStore = create<AppState>((set, get) => ({
     const locationRaw = isUri ? norm : toFileUri(norm);
 
     const newHistory = [...pathHistory.slice(0, historyIndex + 1), norm];
+
+    // Clear animation state when navigating to a new directory
+    get().clearAllAnimationState();
+
     set({
       currentPath: norm,
       currentLocationRaw: locationRaw,
@@ -603,6 +637,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       const newPath = pathHistory[newIndex];
       const isUri = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(newPath);
       const locationRaw = isUri ? newPath : toFileUri(newPath);
+      // Clear animation state when navigating
+      get().clearAllAnimationState();
       set({
         currentPath: newPath,
         currentLocationRaw: locationRaw,
@@ -624,6 +660,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       const newPath = pathHistory[newIndex];
       const isUri = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(newPath);
       const locationRaw = isUri ? newPath : toFileUri(newPath);
+      // Clear animation state when navigating
+      get().clearAllAnimationState();
       set({
         currentPath: newPath,
         currentLocationRaw: locationRaw,
@@ -994,6 +1032,13 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     const toastStore = useToastStore.getState();
 
+    // Check if we should use animations (skip for batch operations or reduced motion)
+    const prefersReducedMotion =
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const useAnimation = selectedPaths.length <= 10 && !prefersReducedMotion;
+
     try {
       const response = await invoke<TrashPathsResponse>('trash_paths', { paths: selectedPaths });
 
@@ -1021,14 +1066,28 @@ export const useAppStore = create<AppState>((set, get) => ({
         return;
       }
 
-      await state.refreshCurrentDirectoryStreaming();
+      // Clear selection immediately
       state.setSelectedFiles([]);
 
-      const count = selectedPaths.length;
+      // Use the actual trashed paths from backend response (may be subset if some failed)
+      const trashedPaths = response.trashed;
+      const trashedCount = trashedPaths.length;
+
+      // Use animation for small batches, or refresh for large batches
+      // Also refresh if backend returned fewer files than requested (partial failure)
+      if (useAnimation && trashedCount === selectedPaths.length) {
+        // Mark files as exiting to trigger fade-out animation
+        // The removeExitedFiles action will remove them from the files array after animation
+        state.markFilesExiting(trashedPaths);
+      } else {
+        // For large batches, reduced motion, or partial failures - refresh to sync state
+        await state.refreshCurrentDirectoryStreaming();
+      }
+
       const messageText =
-        count === 1
-          ? `${selectedItems[0]?.name ?? basename(selectedPaths[0])} moved to Trash.`
-          : `${count} items moved to Trash.`;
+        trashedCount === 1
+          ? `${selectedItems[0]?.name ?? basename(trashedPaths[0])} moved to Trash.`
+          : `${trashedCount} items moved to Trash.`;
 
       const undoToken = response.undoToken;
       const isMacPlatform = typeof navigator !== 'undefined' && /mac/i.test(navigator.userAgent);
@@ -1152,19 +1211,39 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     const toastStore = useToastStore.getState();
 
+    // Check if we should use animations (skip for batch operations or reduced motion)
+    const prefersReducedMotion =
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const useAnimation = selectedPaths.length <= 10 && !prefersReducedMotion;
+
     try {
-      await invoke<DeletePathsResponse>('delete_paths_permanently', {
+      const response = await invoke<DeletePathsResponse>('delete_paths_permanently', {
         paths: selectedPaths,
         requestId,
       });
 
+      // Clear selection immediately
       state.setSelectedFiles([]);
-      await state.refreshCurrentDirectoryStreaming();
+
+      // Use the actual deleted paths from backend response (may be subset if some failed)
+      const deletedPaths = response.deleted;
+      const deletedCount = deletedPaths.length;
+
+      // Use animation for small batches, or refresh for large batches
+      // Also refresh if backend returned fewer files than requested (partial failure)
+      if (useAnimation && deletedCount === selectedPaths.length) {
+        // Mark files as exiting to trigger fade-out animation
+        state.markFilesExiting(deletedPaths);
+      } else {
+        await state.refreshCurrentDirectoryStreaming();
+      }
 
       const messageText =
-        count === 1
-          ? `${selectedItems[0]?.name ?? basename(selectedPaths[0])} deleted permanently.`
-          : `${count} items deleted permanently.`;
+        deletedCount === 1
+          ? `${selectedItems[0]?.name ?? basename(deletedPaths[0])} deleted permanently.`
+          : `${deletedCount} items deleted permanently.`;
 
       toastStore.addToast({
         type: 'success',
@@ -2747,6 +2826,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       });
       state.setSelectedFiles([finalPath]);
 
+      // Skip animation for the renamed file (it's not a new file, just renamed)
+      state.addSkipAnimationPath(finalPath);
+
       // Use non-streaming refresh for remote paths (gdrive://)
       if (state.currentPath?.includes('://')) {
         await state.refreshCurrentDirectory();
@@ -2768,4 +2850,122 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
   setPendingRevealTarget: (path?: string) => set({ pendingRevealTarget: path }),
+
+  // Animation actions
+  markFilesEntering: (paths: string[]) =>
+    set((state) => {
+      if (paths.length === 0) return state;
+      const entering = { ...state.animationState.entering };
+      const exiting = { ...state.animationState.exiting };
+      const timers = { ...state._animationTimers };
+
+      for (const path of paths) {
+        // If file was exiting (undo scenario), remove from exiting and clear its timer
+        if (exiting[path]) {
+          delete exiting[path];
+          if (timers[path]) {
+            window.clearTimeout(timers[path]);
+            delete timers[path];
+          }
+        }
+        entering[path] = true;
+      }
+      return { animationState: { entering, exiting }, _animationTimers: timers };
+    }),
+
+  markFilesExiting: (paths: string[]) =>
+    set((state) => {
+      if (paths.length === 0) return state;
+      const entering = { ...state.animationState.entering };
+      const exiting = { ...state.animationState.exiting };
+      const timers = { ...state._animationTimers };
+
+      for (const path of paths) {
+        // If file was entering, remove from entering
+        delete entering[path];
+        // Only mark as exiting if not already exiting
+        if (!exiting[path]) {
+          exiting[path] = true;
+          // Set fallback timer in case transitionend doesn't fire
+          if (timers[path]) {
+            window.clearTimeout(timers[path]);
+          }
+          timers[path] = window.setTimeout(() => {
+            useAppStore.getState().removeExitedFiles([path]);
+          }, 250);
+        }
+      }
+      return { animationState: { entering, exiting }, _animationTimers: timers };
+    }),
+
+  clearEnteringState: (paths: string[]) =>
+    set((state) => {
+      if (paths.length === 0) return state;
+      const entering = { ...state.animationState.entering };
+      for (const path of paths) {
+        delete entering[path];
+      }
+      return { animationState: { ...state.animationState, entering } };
+    }),
+
+  removeExitedFiles: (paths: string[]) =>
+    set((state) => {
+      if (paths.length === 0) return state;
+      const exiting = { ...state.animationState.exiting };
+      const timers = { ...state._animationTimers };
+      const pathSet = new Set(paths);
+
+      for (const path of paths) {
+        delete exiting[path];
+        if (timers[path]) {
+          window.clearTimeout(timers[path]);
+          delete timers[path];
+        }
+      }
+
+      // Remove files from the files array
+      const files = state.files.filter((f) => !pathSet.has(f.path));
+
+      return {
+        files,
+        animationState: { ...state.animationState, exiting },
+        _animationTimers: timers,
+      };
+    }),
+
+  clearAllAnimationState: () =>
+    set((state) => {
+      // Clear all timers
+      for (const timerId of Object.values(state._animationTimers)) {
+        window.clearTimeout(timerId);
+      }
+      return {
+        animationState: { entering: {}, exiting: {} },
+        _animationTimers: {},
+        _skipAnimationPaths: new Set<string>(),
+      };
+    }),
+
+  isFileEntering: (path: string) => {
+    return Boolean(get().animationState.entering[path]);
+  },
+
+  isFileExiting: (path: string) => {
+    return Boolean(get().animationState.exiting[path]);
+  },
+
+  addSkipAnimationPath: (path: string) =>
+    set((state) => {
+      const newSet = new Set(state._skipAnimationPaths);
+      newSet.add(path);
+      return { _skipAnimationPaths: newSet };
+    }),
+
+  consumeSkipAnimationPaths: () => {
+    const paths = get()._skipAnimationPaths;
+    if (paths.size > 0) {
+      set({ _skipAnimationPaths: new Set<string>() });
+    }
+    return paths;
+  },
 }));
