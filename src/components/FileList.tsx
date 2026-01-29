@@ -21,6 +21,7 @@ import { useThumbnail } from '@/hooks/useThumbnail';
 import { useFileIcon } from '@/hooks/useFileIcon';
 import { usePlatform } from '@/hooks/usePlatform';
 import { useVisibility } from '@/hooks/useVisibility';
+import { useFileAnimations } from '@/hooks/useFileAnimations';
 import FileNameDisplay from './FileNameDisplay';
 import SymlinkBadge from '@/components/SymlinkBadge';
 import GitRepoBadge from '@/components/GitRepoBadge';
@@ -167,9 +168,6 @@ function ListFilePreview({
   );
 }
 
-// Batch threshold - skip animations for operations affecting more than this many files
-const ANIMATION_BATCH_THRESHOLD = 10;
-
 export default function FileList({ files, preferences }: FileListProps) {
   const {
     selectedFiles,
@@ -186,12 +184,6 @@ export default function FileList({ files, preferences }: FileListProps) {
     filterText,
     clipboardMode,
     clipboardPathsSet,
-    // Animation state
-    animationState,
-    markFilesEntering,
-    clearEnteringState,
-    removeExitedFiles,
-    consumeSkipAnimationPaths,
   } = useAppStore();
   const {
     renameTargetPath,
@@ -211,14 +203,6 @@ export default function FileList({ files, preferences }: FileListProps) {
   const scrollContainerRef = useScrollContainerRef();
   const lastClickRef = useRef<{ path: string; time: number; x: number; y: number } | null>(null);
   const lastHandledDoubleRef = useRef<{ path: string; time: number } | null>(null);
-
-  // Animation refs
-  const prevFilesRef = useRef<Set<string>>(new Set());
-  const isInitialLoadRef = useRef(true);
-  const prefersReducedMotion =
-    typeof window !== 'undefined' &&
-    typeof window.matchMedia === 'function' &&
-    window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   // Row height for virtual scrolling (py-[2px] + leading-5 = ~24px)
   const ROW_HEIGHT = 24;
@@ -565,6 +549,9 @@ export default function FileList({ files, preferences }: FileListProps) {
       : hiddenFiltered;
   }, [sortedFiles, preferences.showHidden, filterText]);
 
+  // Use shared animation hook for enter/exit animations
+  const { isEntering, isExiting, handleTransitionEnd } = useFileAnimations({ filteredFiles });
+
   // Stable callback for scroll element to prevent virtualizer resets on re-render
   const getScrollElement = useCallback(
     () => scrollContainerRef?.current ?? null,
@@ -613,75 +600,6 @@ export default function FileList({ files, preferences }: FileListProps) {
     setSelectionAnchor,
     setSelectionLead,
   ]);
-
-  // Animation: detect newly added files and mark them as entering
-  useEffect(() => {
-    // Skip animations if user prefers reduced motion
-    if (prefersReducedMotion) {
-      prevFilesRef.current = new Set(filteredFiles.map((f) => f.path));
-      isInitialLoadRef.current = false;
-      consumeSkipAnimationPaths(); // Clear any pending skip paths
-      return;
-    }
-
-    const currentPaths = new Set(filteredFiles.map((f) => f.path));
-    const prevPaths = prevFilesRef.current;
-
-    // Skip animations on initial load
-    if (isInitialLoadRef.current) {
-      prevFilesRef.current = currentPaths;
-      isInitialLoadRef.current = false;
-      consumeSkipAnimationPaths(); // Clear any pending skip paths
-      return;
-    }
-
-    // Get paths that should skip animation (e.g., renamed files)
-    const skipPaths = consumeSkipAnimationPaths();
-
-    // Find new files (in current but not in previous), excluding skip paths
-    const newPaths: string[] = [];
-    for (const path of currentPaths) {
-      if (!prevPaths.has(path) && !skipPaths.has(path)) {
-        newPaths.push(path);
-      }
-    }
-
-    // Skip animations for batch operations (>10 files)
-    if (newPaths.length > 0 && newPaths.length <= ANIMATION_BATCH_THRESHOLD) {
-      markFilesEntering(newPaths);
-
-      // Remove entering state on next frame to trigger the transition
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          clearEnteringState(newPaths);
-        });
-      });
-    }
-
-    // Update ref for next comparison
-    prevFilesRef.current = currentPaths;
-  }, [
-    filteredFiles,
-    prefersReducedMotion,
-    markFilesEntering,
-    clearEnteringState,
-    consumeSkipAnimationPaths,
-  ]);
-
-  // Handle transitionend for exiting files
-  const handleTransitionEnd = useCallback(
-    (e: React.TransitionEvent, filePath: string) => {
-      // Only handle opacity transitions to avoid double-firing
-      if (e.propertyName !== 'opacity') return;
-      // Ignore bubbled events from children
-      if (e.target !== e.currentTarget) return;
-      // Read fresh state to avoid stale closure issues
-      if (useAppStore.getState().animationState.exiting[filePath]) {
-        removeExitedFiles([filePath]);
-      }
-    },
-    [removeExitedFiles]
-  );
 
   if (filteredFiles.length === 0) {
     return (
@@ -794,8 +712,8 @@ export default function FileList({ files, preferences }: FileListProps) {
     const isCutFile = clipboardMode === 'cut' && clipboardPathsSet.has(file.path);
     // Use virtual index for alternating row colors since we're virtualizing
     const isOdd = virtualIndex % 2 === 1;
-    const isEntering = Boolean(animationState.entering[file.path]);
-    const isExiting = Boolean(animationState.exiting[file.path]);
+    const fileIsEntering = isEntering(file.path);
+    const fileIsExiting = isExiting(file.path);
 
     return (
       <div
@@ -813,8 +731,8 @@ export default function FileList({ files, preferences }: FileListProps) {
         data-directory={file.is_directory ? 'true' : undefined}
         data-hidden={file.is_hidden ? 'true' : undefined}
         data-name={file.name}
-        data-entering={isEntering ? 'true' : undefined}
-        data-exiting={isExiting ? 'true' : undefined}
+        data-entering={fileIsEntering ? 'true' : undefined}
+        data-exiting={fileIsExiting ? 'true' : undefined}
         data-tauri-drag-region={false}
         onTransitionEnd={(e) => handleTransitionEnd(e, file.path)}
         onClick={(e) => {
