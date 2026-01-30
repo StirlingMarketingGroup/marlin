@@ -1,8 +1,7 @@
-import { useEffect, useRef, useCallback } from 'react';
+import { useEffect, useRef, useCallback, type TransitionEvent } from 'react';
 import { useAppStore } from '../store/useAppStore';
 import { usePrefersReducedMotion } from './usePrefersReducedMotion';
 import type { FileItem } from '../types';
-import React from 'react';
 
 // Batch threshold - skip animations for operations affecting more than this many files
 const ANIMATION_BATCH_THRESHOLD = 10;
@@ -17,7 +16,7 @@ interface UseFileAnimationsResult {
   /** Whether a file is in exiting state */
   isExiting: (path: string) => boolean;
   /** Handler for transitionend events on file items */
-  handleTransitionEnd: (e: React.TransitionEvent, filePath: string) => void;
+  handleTransitionEnd: (e: TransitionEvent, filePath: string) => void;
 }
 
 /**
@@ -27,13 +26,13 @@ interface UseFileAnimationsResult {
 export function useFileAnimations({
   filteredFiles,
 }: UseFileAnimationsOptions): UseFileAnimationsResult {
-  const {
-    animationState,
-    markFilesEntering,
-    clearEnteringState,
-    removeExitedFiles,
-    consumeSkipAnimationPaths,
-  } = useAppStore();
+  // Subscribe only to animationState to avoid re-renders from unrelated store changes
+  const animationState = useAppStore((state) => state.animationState);
+  // Actions are stable references, get them once
+  const markFilesEntering = useAppStore.getState().markFilesEntering;
+  const clearEnteringState = useAppStore.getState().clearEnteringState;
+  const removeExitedFiles = useAppStore.getState().removeExitedFiles;
+  const consumeSkipAnimationPaths = useAppStore.getState().consumeSkipAnimationPaths;
 
   const prefersReducedMotion = usePrefersReducedMotion();
 
@@ -95,7 +94,7 @@ export function useFileAnimations({
 
   // Handle transitionend for exiting files
   const handleTransitionEnd = useCallback(
-    (e: React.TransitionEvent, filePath: string) => {
+    (e: TransitionEvent, filePath: string) => {
       // Only handle opacity transitions to avoid double-firing
       if (e.propertyName !== 'opacity') return;
       // Ignore bubbled events from children
