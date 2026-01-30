@@ -62,8 +62,9 @@ function ListFilePreview({
   const isSvg = ext === 'svg';
   const isStl = ext === 'stl';
   const isVideo = isVideoExtension(ext);
+  const isFont = !!ext && ['ttf', 'otf'].includes(ext);
 
-  const isThumbnailCandidate = isImage || isPdf || isAi || isPsd || isStl || isVideo;
+  const isThumbnailCandidate = isImage || isPdf || isAi || isPsd || isStl || isVideo || isFont;
   const dpr =
     typeof window !== 'undefined' ? Math.min(2, Math.max(1, window.devicePixelRatio || 1)) : 1;
   const priority = stage === 'visible' ? 'high' : 'medium';
