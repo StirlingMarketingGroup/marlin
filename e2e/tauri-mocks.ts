@@ -38,7 +38,7 @@ export function getTestUtilsScript(): string {
           // Emit directory-changed event
           const pathParts = filePath.split('/');
           const fileName = pathParts.pop();
-          const dirPath = pathParts.join('/');
+          const dirPath = (pathParts.length === 1 && pathParts[0] === '') ? '/' : pathParts.join('/');
 
           const eventListeners = window.__TAURI_EVENT_LISTENERS__?.get('directory-changed') || [];
           const payload = {
