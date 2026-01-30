@@ -40,6 +40,8 @@
     "check": "npm run lint:changed && npm run format && npm run typecheck && npm run check:rust",
     "prepare": "husky",
     "check:rust": "cd src-tauri && RUSTFLAGS=\"-D warnings\" cargo check",
+    "install:local": "node scripts/install-local.mjs",
+    "install:local:build": "node scripts/install-local.mjs --build",
     "format": "prettier --check .",
     "format:fix": "prettier --write ."
   },
