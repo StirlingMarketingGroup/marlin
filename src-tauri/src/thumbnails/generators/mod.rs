@@ -16,6 +16,7 @@ pub mod psd;
 pub mod stl;
 pub mod svg;
 pub mod video;
+pub mod fonts;
 
 pub mod smb;
 
@@ -127,6 +128,11 @@ impl ThumbnailGenerator {
             return video::VideoGenerator::generate(request);
         }
 
+        // Check if it's a font file
+        if Self::is_font_file(path) {
+            return fonts::FontGenerator::generate(request);
+        }
+
         // TODO: Add support for documents
         Err("Unsupported file type for thumbnail generation".to_string())
     }
@@ -197,6 +203,15 @@ impl ThumbnailGenerator {
                     | "3gp"
                     | "ogv"
             )
+        } else {
+            false
+        }
+    }
+
+    fn is_font_file(path: &Path) -> bool {
+        if let Some(extension) = path.extension().and_then(|s| s.to_str()) {
+            // Only TTF and OTF are supported - ab_glyph doesn't reliably parse WOFF/WOFF2
+            matches!(extension.to_lowercase().as_str(), "ttf" | "otf")
         } else {
             false
         }
