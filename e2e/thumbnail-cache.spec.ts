@@ -31,17 +31,27 @@ test.describe('Thumbnail Cache Invalidation', () => {
 
     // Clear any existing thumbnail requests
     await page.evaluate(() => {
-      (window as unknown as { __TEST_UTILS__: { clearThumbnailRequests: () => void } }).__TEST_UTILS__.clearThumbnailRequests();
+      (
+        window as unknown as { __TEST_UTILS__: { clearThumbnailRequests: () => void } }
+      ).__TEST_UTILS__.clearThumbnailRequests();
     });
 
     // Get initial thumbnail request count for the image
     const initialRequestCount = await page.evaluate((path) => {
-      return (window as unknown as { __TEST_UTILS__: { getThumbnailRequestCount: (path: string) => number } }).__TEST_UTILS__.getThumbnailRequestCount(path);
+      return (
+        window as unknown as {
+          __TEST_UTILS__: { getThumbnailRequestCount: (path: string) => number };
+        }
+      ).__TEST_UTILS__.getThumbnailRequestCount(path);
     }, imagePath);
 
     // Simulate file modification (like rotating in Preview and saving)
     await page.evaluate((path) => {
-      (window as unknown as { __TEST_UTILS__: { simulateFileModification: (path: string) => void } }).__TEST_UTILS__.simulateFileModification(path);
+      (
+        window as unknown as {
+          __TEST_UTILS__: { simulateFileModification: (path: string) => void };
+        }
+      ).__TEST_UTILS__.simulateFileModification(path);
     }, imagePath);
 
     // Wait for the debounced refresh (500ms debounce + processing time)
@@ -49,7 +59,11 @@ test.describe('Thumbnail Cache Invalidation', () => {
 
     // Check that a new thumbnail was requested for the modified file
     const finalRequestCount = await page.evaluate((path) => {
-      return (window as unknown as { __TEST_UTILS__: { getThumbnailRequestCount: (path: string) => number } }).__TEST_UTILS__.getThumbnailRequestCount(path);
+      return (
+        window as unknown as {
+          __TEST_UTILS__: { getThumbnailRequestCount: (path: string) => number };
+        }
+      ).__TEST_UTILS__.getThumbnailRequestCount(path);
     }, imagePath);
 
     // Should have at least one more thumbnail request after modification
@@ -62,17 +76,27 @@ test.describe('Thumbnail Cache Invalidation', () => {
 
     // Clear any existing thumbnail requests
     await page.evaluate(() => {
-      (window as unknown as { __TEST_UTILS__: { clearThumbnailRequests: () => void } }).__TEST_UTILS__.clearThumbnailRequests();
+      (
+        window as unknown as { __TEST_UTILS__: { clearThumbnailRequests: () => void } }
+      ).__TEST_UTILS__.clearThumbnailRequests();
     });
 
     // Get initial request counts
     const initialUnmodifiedCount = await page.evaluate((path) => {
-      return (window as unknown as { __TEST_UTILS__: { getThumbnailRequestCount: (path: string) => number } }).__TEST_UTILS__.getThumbnailRequestCount(path);
+      return (
+        window as unknown as {
+          __TEST_UTILS__: { getThumbnailRequestCount: (path: string) => number };
+        }
+      ).__TEST_UTILS__.getThumbnailRequestCount(path);
     }, unmodifiedImagePath);
 
     // Simulate modification of only one file
     await page.evaluate((path) => {
-      (window as unknown as { __TEST_UTILS__: { simulateFileModification: (path: string) => void } }).__TEST_UTILS__.simulateFileModification(path);
+      (
+        window as unknown as {
+          __TEST_UTILS__: { simulateFileModification: (path: string) => void };
+        }
+      ).__TEST_UTILS__.simulateFileModification(path);
     }, modifiedImagePath);
 
     // Wait for the debounced refresh
@@ -80,7 +104,11 @@ test.describe('Thumbnail Cache Invalidation', () => {
 
     // Check that the unmodified file didn't get a new thumbnail request
     const finalUnmodifiedCount = await page.evaluate((path) => {
-      return (window as unknown as { __TEST_UTILS__: { getThumbnailRequestCount: (path: string) => number } }).__TEST_UTILS__.getThumbnailRequestCount(path);
+      return (
+        window as unknown as {
+          __TEST_UTILS__: { getThumbnailRequestCount: (path: string) => number };
+        }
+      ).__TEST_UTILS__.getThumbnailRequestCount(path);
     }, unmodifiedImagePath);
 
     // Unmodified file should not have additional requests
@@ -93,13 +121,19 @@ test.describe('Thumbnail Cache Invalidation', () => {
 
     // Clear any existing thumbnail requests
     await page.evaluate(() => {
-      (window as unknown as { __TEST_UTILS__: { clearThumbnailRequests: () => void } }).__TEST_UTILS__.clearThumbnailRequests();
+      (
+        window as unknown as { __TEST_UTILS__: { clearThumbnailRequests: () => void } }
+      ).__TEST_UTILS__.clearThumbnailRequests();
     });
 
     // Simulate multiple rapid modifications (like saving multiple times quickly)
     for (let i = 0; i < 3; i++) {
       await page.evaluate((path) => {
-        (window as unknown as { __TEST_UTILS__: { simulateFileModification: (path: string) => void } }).__TEST_UTILS__.simulateFileModification(path);
+        (
+          window as unknown as {
+            __TEST_UTILS__: { simulateFileModification: (path: string) => void };
+          }
+        ).__TEST_UTILS__.simulateFileModification(path);
       }, imagePath);
       await page.waitForTimeout(100); // Small delay between modifications
     }
@@ -109,7 +143,11 @@ test.describe('Thumbnail Cache Invalidation', () => {
 
     // Should have at least one thumbnail request (debouncing may combine multiple events)
     const finalRequestCount = await page.evaluate((path) => {
-      return (window as unknown as { __TEST_UTILS__: { getThumbnailRequestCount: (path: string) => number } }).__TEST_UTILS__.getThumbnailRequestCount(path);
+      return (
+        window as unknown as {
+          __TEST_UTILS__: { getThumbnailRequestCount: (path: string) => number };
+        }
+      ).__TEST_UTILS__.getThumbnailRequestCount(path);
     }, imagePath);
 
     expect(finalRequestCount).toBeGreaterThan(0);

@@ -181,6 +181,36 @@ const thumbnailPromises = new Map<string, Promise<ThumbnailResponse>>();
 // Active request IDs for cancellation
 const activeRequests = new Map<string, string>();
 
+// Cache key delimiter - use | since it's invalid in Windows paths and won't appear in ISO timestamps
+const CACHE_KEY_DELIMITER = '|';
+
+/**
+ * Build a cache key for thumbnail promises.
+ * Format: "path|size|quality|format|accentKey|mtimeKey"
+ * Uses | as delimiter since : appears in Windows paths (C:\) and ISO timestamps (T12:34:56).
+ */
+function buildCacheKey(
+  path: string,
+  size: number,
+  quality: string,
+  format: string,
+  accentKey: string,
+  mtimeKey: string
+): string {
+  return `${path}${CACHE_KEY_DELIMITER}${size}${CACHE_KEY_DELIMITER}${quality}${CACHE_KEY_DELIMITER}${format}${CACHE_KEY_DELIMITER}${accentKey}${CACHE_KEY_DELIMITER}${mtimeKey}`;
+}
+
+/**
+ * Extract the path from a cache key.
+ */
+function extractPathFromCacheKey(key: string): string {
+  // The path is everything before the first 5 delimiters (reading from the end)
+  const parts = key.split(CACHE_KEY_DELIMITER);
+  // Cache key has 6 parts: path, size, quality, format, accentKey, mtimeKey
+  // The path is everything except the last 5 parts
+  return parts.slice(0, -5).join(CACHE_KEY_DELIMITER);
+}
+
 /**
  * Invalidate cached thumbnail promises for the given paths.
  * Called when files are modified/removed to ensure fresh thumbnails on next request.
@@ -193,12 +223,7 @@ export function invalidateThumbnailsForPaths(paths: string[]): void {
 
   // Find and delete all cache keys matching the affected paths
   for (const key of thumbnailPromises.keys()) {
-    // Cache key format: "path:size:quality:format:accentKey:mtimeKey"
-    // Windows paths contain colons (e.g., "C:\Users\file.jpg"), so we can't
-    // simply split on ':' and take the first part. Instead, parse from the right:
-    // the last 5 colon-separated segments are size:quality:format:accentKey:mtimeKey.
-    const parts = key.split(':');
-    const keyPath = parts.slice(0, -5).join(':');
+    const keyPath = extractPathFromCacheKey(key);
     if (pathSet.has(keyPath)) {
       thumbnailPromises.delete(key);
     }
@@ -296,7 +321,14 @@ export function useThumbnail(path: string | undefined, options: ThumbnailOptions
       // Create cache key - includes mtime so changed files get new thumbnails
       const accentKey = accentKeyFor(requestOptions.accent);
       const mtimeKey = requestOptions.mtime || 'none';
-      const cacheKey = `${thumbnailPath}:${requestOptions.size || 128}:${requestOptions.quality || 'medium'}:${requestOptions.format || 'webp'}:${accentKey}:${mtimeKey}`;
+      const cacheKey = buildCacheKey(
+        thumbnailPath,
+        requestOptions.size || 128,
+        requestOptions.quality || 'medium',
+        requestOptions.format || 'webp',
+        accentKey,
+        mtimeKey
+      );
 
       // Check if we already have a promise for this request
       if (thumbnailPromises.has(cacheKey)) {
@@ -400,7 +432,14 @@ export function useThumbnail(path: string | undefined, options: ThumbnailOptions
       setError(undefined);
       // Force a new request by clearing the cache for this item
       const mtimeKey = mtime || 'none';
-      const cacheKey = `${path}:${size || 128}:${quality || 'medium'}:${format || 'webp'}:${effectiveAccentKey}:${mtimeKey}`;
+      const cacheKey = buildCacheKey(
+        path,
+        size || 128,
+        quality || 'medium',
+        format || 'webp',
+        effectiveAccentKey,
+        mtimeKey
+      );
       thumbnailPromises.delete(cacheKey);
 
       // Trigger re-fetch

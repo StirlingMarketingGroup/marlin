@@ -705,15 +705,11 @@ function App() {
         changeType === 'renamed' ||
         changeType === 'changed'; // Catch-all for other modification events
 
-      console.log('[fs-watcher] Directory changed event:', {
-        path: payload?.path,
-        changeType,
-        isContentChange,
-        affectedFiles: payload?.affectedFiles,
-        currentPath,
-      });
+      // Normalize paths for comparison (strip trailing slashes)
+      const normalizedPayloadPath = payload?.path?.replace(/\/+$/, '') || '';
+      const normalizedCurrentPath = currentPath.replace(/\/+$/, '');
 
-      if (payload && payload.path === currentPath && isContentChange) {
+      if (payload && normalizedPayloadPath === normalizedCurrentPath && isContentChange) {
         // Invalidate frontend thumbnail cache for modified/removed files
         // (created files don't have cached thumbnails yet)
         if (
@@ -732,11 +728,8 @@ function App() {
         // Debounce the refresh to avoid excessive reloads
         debounceTimer = window.setTimeout(async () => {
           if (!isActive || loading) {
-            console.log('[fs-watcher] Skipping refresh:', { isActive, loading });
             return;
           }
-
-          console.log('[fs-watcher] Processing refresh for:', payload.affectedFiles);
 
           try {
             const state = useAppStore.getState();
@@ -783,15 +776,8 @@ function App() {
                   const isAffected = affectedPaths.has(f.path);
 
                   // Also detect changes via mtime/size comparison
-                  const hasMetadataChange = existing.modified !== f.modified || existing.size !== f.size;
-
-                  if (isAffected) {
-                    console.log('[fs-watcher] File in affected list:', f.name, {
-                      existingModified: existing.modified,
-                      newModified: f.modified,
-                      hasMetadataChange,
-                    });
-                  }
+                  const hasMetadataChange =
+                    existing.modified !== f.modified || existing.size !== f.size;
 
                   return isAffected || hasMetadataChange;
                 });
@@ -808,7 +794,6 @@ function App() {
 
                 // Handle modified files - update metadata so thumbnails refresh
                 if (modifiedFiles.length > 0) {
-                  console.log('[fs-watcher] Updating modified files:', modifiedFiles.map((f) => f.name));
                   state.updateFiles(modifiedFiles);
                 }
 
