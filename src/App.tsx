@@ -751,18 +751,14 @@ function App() {
                   const removedPaths = confirmedRemovals.map((f) => f.path);
                   state.markFilesExiting(removedPaths);
                 } else if (confirmedRemovals.length > 0) {
-                  // Reduced motion: remove immediately using Set for O(N+M) instead of O(N*M)
+                  // Reduced motion: remove immediately using store action
                   const removedPathsSet = new Set(confirmedRemovals.map((r) => r.path));
-                  useAppStore.setState((s) => ({
-                    files: s.files.filter((f) => !removedPathsSet.has(f.path)),
-                  }));
+                  state.removeFilesByPath(removedPathsSet);
                 }
 
                 // Handle new files - just add to list, components will handle entry animation
                 if (newFiles.length > 0) {
-                  useAppStore.setState((s) => ({
-                    files: [...s.files, ...newFiles],
-                  }));
+                  state.addFiles(newFiles);
                 }
 
                 // Update selection
