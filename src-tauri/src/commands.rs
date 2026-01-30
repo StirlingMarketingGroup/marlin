@@ -113,6 +113,7 @@ const CLIPBOARD_PROGRESS_EVENT: &str = "clipboard-progress:init";
 const CLIPBOARD_PROGRESS_UPDATE_EVENT: &str = "clipboard-progress:update";
 const CLIPBOARD_PROGRESS_WINDOW_LABEL: &str = "clipboard-progress";
 const SMB_CONNECT_INIT_EVENT: &str = "smb-connect:init";
+const PINNED_DIRECTORIES_CHANGED_EVENT: &str = "pinned-directories:changed";
 const SMB_CONNECT_WINDOW_LABEL: &str = "smb-connect";
 const PERMISSIONS_WINDOW_LABEL: &str = "permissions";
 const PREFERENCES_WINDOW_LABEL: &str = "preferences";
@@ -6441,6 +6442,7 @@ pub fn get_pinned_directories() -> Result<Vec<PinnedDirectory>, String> {
 
 #[command]
 pub async fn add_pinned_directory(
+    app: AppHandle,
     path: String,
     name: Option<String>,
 ) -> Result<PinnedDirectory, String> {
@@ -6516,6 +6518,9 @@ pub async fn add_pinned_directory(
     stored_pins.push(new_stored.clone());
     save_pinned_directories(&stored_pins)?;
 
+    // Notify all windows that pinned directories changed
+    let _ = app.emit(PINNED_DIRECTORIES_CHANGED_EVENT, ());
+
     // Compute metadata for the response (only for local filesystem pins)
     let (is_git_repo, is_symlink) = local_path_opt
         .as_deref()
@@ -6532,7 +6537,7 @@ pub async fn add_pinned_directory(
 }
 
 #[command]
-pub fn remove_pinned_directory(path: String) -> Result<bool, String> {
+pub fn remove_pinned_directory(app: AppHandle, path: String) -> Result<bool, String> {
     // Handle remote URIs (smb://, gdrive://) differently from local paths
     let normalized_path = if path.starts_with("smb://") || path.starts_with("gdrive://") {
         // For remote URIs, use the path as-is (just normalize trailing slashes)
@@ -6550,6 +6555,8 @@ pub fn remove_pinned_directory(path: String) -> Result<bool, String> {
 
     if stored_pins.len() < initial_len {
         save_pinned_directories(&stored_pins)?;
+        // Notify all windows that pinned directories changed
+        let _ = app.emit(PINNED_DIRECTORIES_CHANGED_EVENT, ());
         Ok(true)
     } else {
         Ok(false)

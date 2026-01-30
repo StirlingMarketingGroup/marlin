@@ -452,6 +452,32 @@ function App() {
     loadPinnedDirectories,
   ]);
 
+  // Listen for pinned directories changes from other windows
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let isActive = true;
+
+    const setup = async () => {
+      const unlistenFn = await listen('pinned-directories:changed', () => {
+        // Reload pinned directories when another window adds/removes a pin
+        loadPinnedDirectories();
+      });
+      // If component unmounted before listen resolved, clean up immediately
+      if (!isActive) {
+        unlistenFn();
+      } else {
+        unlisten = unlistenFn;
+      }
+    };
+
+    setup();
+
+    return () => {
+      isActive = false;
+      unlisten?.();
+    };
+  }, [loadPinnedDirectories]);
+
   // Apply accent color preference (system or custom) and keep it updated.
   useEffect(() => {
     let isActive = true;
