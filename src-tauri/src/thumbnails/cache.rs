@@ -267,23 +267,28 @@ impl ThumbnailCache {
         size: u32,
         accent: Option<&AccentColor>,
     ) -> Option<String> {
-        // Handle SMB paths specially - they can't use std::path for mtime
-        let mtime = if path.starts_with("smb://") {
-            match super::generators::smb::get_smb_file_mtime(path) {
-                Ok(mtime) => mtime,
+        // Handle SMB paths specially - they can't use std::path for identity
+        let identity = if path.starts_with("smb://") {
+            match super::generators::smb::get_smb_file_identity(path) {
+                Ok(identity) => identity,
                 Err(_) => {
-                    // If we can't determine SMB mtime (transient network/auth failure),
+                    // If we can't determine SMB identity (transient network/auth failure),
                     // avoid using a constant mtime=0 which can cause indefinitely-stale cache keys.
                     // Instead, bucket to a short-lived time window.
                     let now = Utc::now().timestamp() as u64;
-                    (now / 3600) * 3600
+                    let bucketed_secs = (now / 3600) * 3600;
+                    super::FileIdentity {
+                        size: 0,
+                        mtime_ns: (bucketed_secs as u128) * 1_000_000_000,
+                        file_id: None,
+                    }
                 }
             }
         } else {
             let path_obj = Path::new(path);
-            super::get_file_mtime(path_obj)
+            super::get_file_identity(path_obj)
         };
-        Some(super::generate_cache_key(path, size, mtime, accent))
+        Some(super::generate_cache_key(path, size, &identity, accent))
     }
 
     async fn load_disk_cache_index(&mut self) -> Result<(), String> {
@@ -398,6 +403,50 @@ impl ThumbnailCache {
         stats.memory_size_bytes = memory_cache.iter().map(|(_, entry)| entry.size_bytes).sum();
 
         stats.clone()
+    }
+
+    /// Signal that the given paths have been modified/removed.
+    ///
+    /// Since cache keys are hashes that include file identity (mtime, size, inode),
+    /// we cannot reverse the hash to find entries by path. Instead, when a file changes,
+    /// the new cache key is automatically different (due to updated file identity), so
+    /// the old cached entry becomes an orphan that LRU will eventually evict.
+    ///
+    /// For bulk invalidations (e.g., `git checkout` or extracting archives), we clear
+    /// the entire memory cache to avoid accumulating many orphan entries.
+    ///
+    /// The frontend promise cache invalidation (handled separately) is more important
+    /// for immediate UI refresh, as it causes components to re-request thumbnails.
+    pub async fn invalidate_paths(&self, paths: &[String]) {
+        if paths.is_empty() {
+            return;
+        }
+
+        let paths_count = paths.len();
+        let memory_size = {
+            let memory_cache = self.memory_cache.read().await;
+            memory_cache.len()
+        };
+
+        // Clear the entire memory cache for bulk invalidations (>20% of cache size, minimum 10).
+        // This prevents integer division issues when cache is small (e.g., memory_size/5 = 0 when < 5).
+        let threshold = std::cmp::max(10, memory_size / 5);
+        if paths_count > threshold {
+            let mut memory_cache = self.memory_cache.write().await;
+            memory_cache.clear();
+            log::debug!(
+                "Cleared entire memory cache ({} entries) due to bulk invalidation ({} paths)",
+                memory_size,
+                paths_count
+            );
+        } else {
+            // For small invalidations, rely on the new cache keys with updated file identity.
+            // Old entries become orphans and are evicted by LRU.
+            log::debug!(
+                "Invalidating {} paths - relying on new cache keys with updated file identity",
+                paths_count
+            );
+        }
     }
 
     pub async fn clear(&self) -> Result<(), String> {

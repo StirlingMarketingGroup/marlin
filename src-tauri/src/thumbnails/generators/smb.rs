@@ -90,9 +90,9 @@ pub fn download_smb_file_sync(smb_path: &str) -> Result<std::path::PathBuf, Stri
     Ok(temp_path)
 }
 
-/// Get the modified time for an SMB file.
-/// Returns 0 if the mtime cannot be determined.
-pub fn get_smb_file_mtime(smb_path: &str) -> Result<u64, String> {
+/// Get file identity for an SMB file including size and mtime.
+/// Returns FileIdentity with nanosecond mtime precision.
+pub fn get_smb_file_identity(smb_path: &str) -> Result<super::super::FileIdentity, String> {
     use crate::locations::smb::{client, parse_smb_url, get_server_credentials, SidecarStatus};
     use chrono::{DateTime, Utc};
 
@@ -139,7 +139,21 @@ pub fn get_smb_file_mtime(smb_path: &str) -> Result<u64, String> {
         .map_err(|e| format!("Failed to parse modified time: {}", e))?;
 
     // Handle negative timestamps (dates before 1970) gracefully
-    Ok(modified.timestamp().max(0) as u64)
+    let mtime_secs = modified.timestamp().max(0) as u64;
+    // Convert seconds to nanoseconds for consistency with local files
+    let mtime_ns = (mtime_secs as u128) * 1_000_000_000;
+
+    // Try to get file size from the response
+    let size = result
+        .get("size")
+        .and_then(|s| s.as_u64())
+        .unwrap_or(0);
+
+    Ok(super::super::FileIdentity {
+        size,
+        mtime_ns,
+        file_id: None, // SMB doesn't provide inode-like identifiers
+    })
 }
 
 /// Generate a thumbnail for an SMB file.

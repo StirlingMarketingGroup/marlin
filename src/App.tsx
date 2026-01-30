@@ -24,6 +24,7 @@ import FilterInput from './components/FilterInput';
 import { FULL_DISK_ACCESS_DISMISSED_KEY } from '@/utils/fullDiskAccessPrompt';
 import { PREFERENCES_UPDATED_EVENT, SMB_CONNECT_SUCCESS_EVENT } from '@/utils/events';
 import { usePrefersReducedMotion } from '@/hooks/usePrefersReducedMotion';
+import { invalidateThumbnailsForPaths } from '@/hooks/useThumbnail';
 import type {
   DirectoryChangeEventPayload,
   DirectoryListingResponse,
@@ -701,9 +702,24 @@ function App() {
         changeType === 'created' ||
         changeType === 'removed' ||
         changeType === 'modified' ||
-        changeType === 'renamed';
+        changeType === 'renamed' ||
+        changeType === 'changed'; // Catch-all for other modification events
 
-      if (payload && payload.path === currentPath && isContentChange) {
+      // Normalize paths for comparison (strip trailing slashes)
+      const normalizedPayloadPath = payload?.path?.replace(/\/+$/, '') || '';
+      const normalizedCurrentPath = currentPath.replace(/\/+$/, '');
+
+      if (payload && normalizedPayloadPath === normalizedCurrentPath && isContentChange) {
+        // Invalidate frontend thumbnail cache for modified/removed files
+        // (created files don't have cached thumbnails yet)
+        if (
+          (changeType === 'modified' || changeType === 'removed') &&
+          payload.affectedPaths &&
+          payload.affectedPaths.length > 0
+        ) {
+          invalidateThumbnailsForPaths(payload.affectedPaths);
+        }
+
         // Clear any existing debounce timer
         if (debounceTimer) {
           window.clearTimeout(debounceTimer);
@@ -711,7 +727,9 @@ function App() {
 
         // Debounce the refresh to avoid excessive reloads
         debounceTimer = window.setTimeout(async () => {
-          if (!isActive || loading) return;
+          if (!isActive || loading) {
+            return;
+          }
 
           try {
             const state = useAppStore.getState();
@@ -741,10 +759,28 @@ function App() {
                 const confirmedRemovals = filesToRemove.filter((f) => !newFilePaths.has(f.path));
 
                 // O(N+M) lookup for new files instead of O(N*M)
-                const currentFilePaths = new Set(currentFiles.map((cf) => cf.path));
+                const currentFilesByPath = new Map(currentFiles.map((cf) => [cf.path, cf]));
                 const newFiles = response.entries.filter(
-                  (f: FileItem) => !currentFilePaths.has(f.path)
+                  (f: FileItem) => !currentFilesByPath.has(f.path)
                 );
+
+                // Find modified files - either:
+                // 1. Files in affectedPaths (we KNOW they changed from fs-watcher)
+                // 2. Files with different mtime/size (fallback detection)
+                const modifiedFiles = response.entries.filter((f: FileItem) => {
+                  const existing = currentFilesByPath.get(f.path);
+                  if (!existing) return false;
+
+                  // If this file is in the affected list from fs-watcher, always consider it modified
+                  // This handles cases where mtime precision might not detect the change
+                  const isAffected = affectedPaths.has(f.path);
+
+                  // Also detect changes via mtime/size comparison
+                  const hasMetadataChange =
+                    existing.modified !== f.modified || existing.size !== f.size;
+
+                  return isAffected || hasMetadataChange;
+                });
 
                 // Handle removals with animation
                 if (confirmedRemovals.length > 0 && !prefersReducedMotion) {
@@ -754,6 +790,11 @@ function App() {
                   // Reduced motion: remove immediately using store action
                   const removedPathsSet = new Set(confirmedRemovals.map((r) => r.path));
                   state.removeFilesByPath(removedPathsSet);
+                }
+
+                // Handle modified files - update metadata so thumbnails refresh
+                if (modifiedFiles.length > 0) {
+                  state.updateFiles(modifiedFiles);
                 }
 
                 // Handle new files - just add to list, components will handle entry animation

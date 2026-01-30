@@ -270,6 +270,7 @@ interface AppState {
   setHomeDir: (path: string) => void;
   setFiles: (files: FileItem[]) => void;
   addFiles: (files: FileItem[]) => void;
+  updateFiles: (files: FileItem[]) => void;
   removeFilesByPath: (paths: Set<string>) => void;
   setLoading: (loading: boolean) => void;
   setError: (error?: string) => void;
@@ -464,6 +465,27 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((state) => ({
       files: [...state.files, ...files],
     })),
+  updateFiles: (updatedFiles) =>
+    set((state) => {
+      const updateMap = new Map(updatedFiles.map((f) => [f.path, f]));
+      return {
+        files: state.files.map((f) => {
+          const updated = updateMap.get(f.path);
+          if (updated) {
+            // Merge updated file data, preserving any locally-computed fields
+            return {
+              ...f,
+              ...updated,
+              // Preserve fields that might have been computed locally
+              child_count: updated.child_count ?? f.child_count,
+              image_width: updated.image_width ?? f.image_width,
+              image_height: updated.image_height ?? f.image_height,
+            };
+          }
+          return f;
+        }),
+      };
+    }),
   removeFilesByPath: (paths) =>
     set((state) => ({
       files: state.files.filter((f) => !paths.has(f.path)),

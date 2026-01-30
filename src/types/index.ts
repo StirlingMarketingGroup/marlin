@@ -148,6 +148,8 @@ export interface DirectoryChangeEventPayload {
   path: string;
   changeType: string;
   affectedFiles: string[];
+  /** Full paths of affected files (for cache invalidation) */
+  affectedPaths?: string[];
 }
 
 export interface FolderSizeProgressPayload {

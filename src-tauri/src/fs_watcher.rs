@@ -144,11 +144,38 @@ impl FsWatcher {
                         .map(|s| s.to_string())
                         .collect();
 
-                    // Emit event to frontend
+                    // Get full paths for cache invalidation
+                    let affected_paths: Vec<String> = event
+                        .paths
+                        .iter()
+                        .filter_map(|p| p.to_str())
+                        .map(|s| s.to_string())
+                        .collect();
+
+                    // Invalidate thumbnail cache for modified/removed files
+                    // (created files don't have cached thumbnails yet)
+                    if matches!(change_type, "modified" | "removed") && !affected_paths.is_empty() {
+                        let paths_for_invalidation = affected_paths.clone();
+                        // Use Tauri's global async runtime instead of creating an ephemeral one.
+                        // This avoids resource exhaustion during bulk operations and ensures
+                        // the ThumbnailService worker tasks stay alive on the correct runtime.
+                        tauri::async_runtime::spawn(async move {
+                            if let Ok(service) = crate::commands::get_thumbnail_service().await {
+                                service.invalidate_paths(&paths_for_invalidation).await;
+                                log::debug!(
+                                    "Invalidated thumbnail cache for {} paths",
+                                    paths_for_invalidation.len()
+                                );
+                            }
+                        });
+                    }
+
+                    // Emit event to frontend with both filenames and full paths
                     let payload = serde_json::json!({
                         "path": watch_path,
                         "changeType": change_type,
-                        "affectedFiles": affected_files
+                        "affectedFiles": affected_files,
+                        "affectedPaths": affected_paths
                     });
 
                     if let Err(e) = app_handle.emit("directory-changed", payload) {
