@@ -6,6 +6,62 @@
 export const MOCK_HOME_DIR = '/Users/testuser';
 export const MOCK_DOWNLOADS_DIR = `${MOCK_HOME_DIR}/Downloads`;
 
+// For thumbnail cache test - track thumbnail request calls
+export interface ThumbnailRequestLog {
+  path: string;
+  timestamp: number;
+}
+
+// Helper script to expose test utilities on window for e2e tests
+export function getTestUtilsScript(): string {
+  return `
+    (function() {
+      // Track thumbnail requests for testing
+      window.__TEST_UTILS__ = window.__TEST_UTILS__ || {
+        thumbnailRequests: [],
+        clearThumbnailRequests: function() {
+          this.thumbnailRequests = [];
+        },
+        getThumbnailRequestCount: function(path) {
+          return this.thumbnailRequests.filter(r => r.path === path).length;
+        },
+        // Simulate file modification - updates mtime and emits directory-changed event
+        simulateFileModification: function(filePath, newMtime) {
+          // Update the mock file's modified time
+          if (window.__MOCK_FILE_STATE__) {
+            window.__MOCK_FILE_STATE__[filePath] = {
+              modified: newMtime || new Date().toISOString(),
+              version: (window.__MOCK_FILE_STATE__[filePath]?.version || 0) + 1
+            };
+          }
+
+          // Emit directory-changed event
+          const pathParts = filePath.split('/');
+          const fileName = pathParts.pop();
+          const dirPath = pathParts.join('/');
+
+          const eventListeners = window.__TAURI_EVENT_LISTENERS__?.get('directory-changed') || [];
+          const payload = {
+            path: dirPath,
+            changeType: 'modified',
+            affectedFiles: [fileName],
+            affectedPaths: [filePath]
+          };
+
+          for (const handler of eventListeners) {
+            window.__TAURI_INTERNALS__.runCallback(handler, { event: 'directory-changed', payload });
+          }
+        }
+      };
+
+      // Initialize mutable file state
+      window.__MOCK_FILE_STATE__ = window.__MOCK_FILE_STATE__ || {};
+
+      console.log('[Test Utils] Test utilities injected');
+    })();
+  `;
+}
+
 export function getTauriMockScript(): string {
   return `
     (function() {
@@ -104,19 +160,32 @@ export function getTauriMockScript(): string {
 
       function getFilesForPath(path) {
         const normalizedPath = (path || '').replace(/\\\\/g, '/').replace(/\\/+$/, '') || '/';
+        let files;
         if (normalizedPath === mockDownloadsDir || normalizedPath.endsWith('/Downloads')) {
-          return mockDownloadsFiles;
+          files = mockDownloadsFiles;
+        } else if (normalizedPath === mockHomeDir || normalizedPath === '~' || normalizedPath === '/') {
+          files = mockFiles;
+        } else {
+          console.warn('[Tauri Mock] Unhandled path in getFilesForPath, returning empty array:', path);
+          return [];
         }
-        if (normalizedPath === mockHomeDir || normalizedPath === '~' || normalizedPath === '/') {
-          return mockFiles;
-        }
-        console.warn('[Tauri Mock] Unhandled path in getFilesForPath, returning empty array:', path);
-        return [];
+
+        // Apply mutable file state overrides (for simulating file modifications)
+        return files.map(f => {
+          const state = window.__MOCK_FILE_STATE__?.[f.path];
+          if (state) {
+            return { ...f, modified: state.modified };
+          }
+          return f;
+        });
       }
 
       // Event listeners registry (based on @tauri-apps/api/mocks pattern)
       const listeners = new Map();
       const callbacks = new Map();
+
+      // Expose listeners for test utilities to emit events
+      window.__TAURI_EVENT_LISTENERS__ = listeners;
 
       function registerCallback(callback, once = false) {
         const identifier = window.crypto.getRandomValues(new Uint32Array(1))[0];
@@ -260,12 +329,18 @@ export function getTauriMockScript(): string {
         // Thumbnail service
         request_thumbnail: (args) => {
           const path = args?.path || '';
+          // Track the request for testing
+          if (window.__TEST_UTILS__) {
+            window.__TEST_UTILS__.thumbnailRequests.push({ path, timestamp: Date.now() });
+          }
           // Lookup dimensions from mock files
           const allFiles = [...mockFiles, ...mockDownloadsFiles];
           const file = allFiles.find(f => f.path === path);
-          // Generate a simple placeholder data URL
+          // Generate a placeholder data URL that changes based on file state version
+          // This allows tests to detect when a new thumbnail is requested
+          const version = window.__MOCK_FILE_STATE__?.[path]?.version || 0;
           const placeholderDataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
-          console.log('[Tauri Mock] request_thumbnail for', path, 'dimensions:', file?.image_width, 'x', file?.image_height);
+          console.log('[Tauri Mock] request_thumbnail for', path, 'version:', version, 'dimensions:', file?.image_width, 'x', file?.image_height);
           return {
             id: args?.id || 'mock-thumb-id',
             data_url: placeholderDataUrl,

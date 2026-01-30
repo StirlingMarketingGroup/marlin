@@ -702,7 +702,16 @@ function App() {
         changeType === 'created' ||
         changeType === 'removed' ||
         changeType === 'modified' ||
-        changeType === 'renamed';
+        changeType === 'renamed' ||
+        changeType === 'changed'; // Catch-all for other modification events
+
+      console.log('[fs-watcher] Directory changed event:', {
+        path: payload?.path,
+        changeType,
+        isContentChange,
+        affectedFiles: payload?.affectedFiles,
+        currentPath,
+      });
 
       if (payload && payload.path === currentPath && isContentChange) {
         // Invalidate frontend thumbnail cache for modified/removed files
@@ -722,7 +731,12 @@ function App() {
 
         // Debounce the refresh to avoid excessive reloads
         debounceTimer = window.setTimeout(async () => {
-          if (!isActive || loading) return;
+          if (!isActive || loading) {
+            console.log('[fs-watcher] Skipping refresh:', { isActive, loading });
+            return;
+          }
+
+          console.log('[fs-watcher] Processing refresh for:', payload.affectedFiles);
 
           try {
             const state = useAppStore.getState();
@@ -752,10 +766,35 @@ function App() {
                 const confirmedRemovals = filesToRemove.filter((f) => !newFilePaths.has(f.path));
 
                 // O(N+M) lookup for new files instead of O(N*M)
-                const currentFilePaths = new Set(currentFiles.map((cf) => cf.path));
+                const currentFilesByPath = new Map(currentFiles.map((cf) => [cf.path, cf]));
                 const newFiles = response.entries.filter(
-                  (f: FileItem) => !currentFilePaths.has(f.path)
+                  (f: FileItem) => !currentFilesByPath.has(f.path)
                 );
+
+                // Find modified files - either:
+                // 1. Files in affectedPaths (we KNOW they changed from fs-watcher)
+                // 2. Files with different mtime/size (fallback detection)
+                const modifiedFiles = response.entries.filter((f: FileItem) => {
+                  const existing = currentFilesByPath.get(f.path);
+                  if (!existing) return false;
+
+                  // If this file is in the affected list from fs-watcher, always consider it modified
+                  // This handles cases where mtime precision might not detect the change
+                  const isAffected = affectedPaths.has(f.path);
+
+                  // Also detect changes via mtime/size comparison
+                  const hasMetadataChange = existing.modified !== f.modified || existing.size !== f.size;
+
+                  if (isAffected) {
+                    console.log('[fs-watcher] File in affected list:', f.name, {
+                      existingModified: existing.modified,
+                      newModified: f.modified,
+                      hasMetadataChange,
+                    });
+                  }
+
+                  return isAffected || hasMetadataChange;
+                });
 
                 // Handle removals with animation
                 if (confirmedRemovals.length > 0 && !prefersReducedMotion) {
@@ -765,6 +804,12 @@ function App() {
                   // Reduced motion: remove immediately using store action
                   const removedPathsSet = new Set(confirmedRemovals.map((r) => r.path));
                   state.removeFilesByPath(removedPathsSet);
+                }
+
+                // Handle modified files - update metadata so thumbnails refresh
+                if (modifiedFiles.length > 0) {
+                  console.log('[fs-watcher] Updating modified files:', modifiedFiles.map((f) => f.name));
+                  state.updateFiles(modifiedFiles);
                 }
 
                 // Handle new files - just add to list, components will handle entry animation
