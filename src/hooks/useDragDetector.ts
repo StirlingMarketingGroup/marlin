@@ -58,6 +58,15 @@ export function useDragDetector(handlers: DragDropHandlers) {
 
       // Listen for drag-drop events from the plugin
       unlisten = await listen<DragDropEvent>('drag-drop-event', (event) => {
+        // Only handle hover/highlight events when this window is focused
+        // This prevents unfocused windows from showing dropzone highlights
+        // But allow drop events through - during cross-app drags, target window
+        // may not be focused until the actual drop occurs
+        const isDropEvent = event.payload.eventType === 'drop';
+        if (!isDropEvent && !document.hasFocus()) {
+          return;
+        }
+
         const viewportHeight = window.innerHeight;
 
         let zoneId: string | null = event.payload.location.targetId ?? null;
