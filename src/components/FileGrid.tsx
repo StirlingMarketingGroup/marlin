@@ -116,6 +116,7 @@ function GridFilePreview({
       quality: 'medium',
       priority: thumbnailPriority,
       thumbnailUrl: file.thumbnail_url,
+      mtime: file.modified,
     }
   );
 

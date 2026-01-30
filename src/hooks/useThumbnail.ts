@@ -181,14 +181,40 @@ const thumbnailPromises = new Map<string, Promise<ThumbnailResponse>>();
 // Active request IDs for cancellation
 const activeRequests = new Map<string, string>();
 
+/**
+ * Invalidate cached thumbnail promises for the given paths.
+ * Called when files are modified/removed to ensure fresh thumbnails on next request.
+ */
+export function invalidateThumbnailsForPaths(paths: string[]): void {
+  if (paths.length === 0) return;
+
+  // Convert paths to a Set for O(1) lookup
+  const pathSet = new Set(paths);
+
+  // Find and delete all cache keys matching the affected paths
+  for (const key of thumbnailPromises.keys()) {
+    // Cache key format: "path:size:quality:format:accentKey:mtimeKey"
+    // Windows paths contain colons (e.g., "C:\Users\file.jpg"), so we can't
+    // simply split on ':' and take the first part. Instead, parse from the right:
+    // the last 5 colon-separated segments are size:quality:format:accentKey:mtimeKey.
+    const parts = key.split(':');
+    const keyPath = parts.slice(0, -5).join(':');
+    if (pathSet.has(keyPath)) {
+      thumbnailPromises.delete(key);
+    }
+  }
+}
+
 export interface ThumbnailOptions extends Omit<ThumbnailRequest, 'path'> {
   /** Remote thumbnail URL (e.g., from Google Drive) - used directly instead of generating */
   thumbnailUrl?: string;
+  /** File modification time (ISO string) - used to invalidate cache when file changes */
+  mtime?: string;
 }
 
 export function useThumbnail(path: string | undefined, options: ThumbnailOptions = {}) {
   const { accent } = useAccentColor();
-  const { size, quality, priority, format, accent: accentOverride, thumbnailUrl } = options;
+  const { size, quality, priority, format, accent: accentOverride, thumbnailUrl, mtime } = options;
   const effectiveAccent = accentOverride ?? accent;
   const effectiveAccentKey = accentKeyFor(effectiveAccent);
   const [dataUrl, setDataUrl] = useState<string | undefined>(undefined);
@@ -263,10 +289,14 @@ export function useThumbnail(path: string | undefined, options: ThumbnailOptions
   }, [thumbnailUrl, path]);
 
   const fetchThumbnail = useCallback(
-    async (thumbnailPath: string, requestOptions: Omit<ThumbnailRequest, 'path'>) => {
-      // Create cache key
+    async (
+      thumbnailPath: string,
+      requestOptions: Omit<ThumbnailRequest, 'path'> & { mtime?: string }
+    ) => {
+      // Create cache key - includes mtime so changed files get new thumbnails
       const accentKey = accentKeyFor(requestOptions.accent);
-      const cacheKey = `${thumbnailPath}:${requestOptions.size || 128}:${requestOptions.quality || 'medium'}:${requestOptions.format || 'webp'}:${accentKey}`;
+      const mtimeKey = requestOptions.mtime || 'none';
+      const cacheKey = `${thumbnailPath}:${requestOptions.size || 128}:${requestOptions.quality || 'medium'}:${requestOptions.format || 'webp'}:${accentKey}:${mtimeKey}`;
 
       // Check if we already have a promise for this request
       if (thumbnailPromises.has(cacheKey)) {
@@ -320,7 +350,7 @@ export function useThumbnail(path: string | undefined, options: ThumbnailOptions
     setLoading(true);
     setError(undefined);
 
-    fetchThumbnail(path, { size, quality, priority, format, accent: effectiveAccent })
+    fetchThumbnail(path, { size, quality, priority, format, accent: effectiveAccent, mtime })
       .then((response) => {
         // Check if this is still the current request
         if (currentPathRef.current === path && !abortControllerRef.current?.signal.aborted) {
@@ -359,6 +389,7 @@ export function useThumbnail(path: string | undefined, options: ThumbnailOptions
     format,
     effectiveAccent,
     effectiveAccentKey,
+    mtime,
     fetchThumbnail,
     cancelCurrentRequest,
     updateFileDimensions,
@@ -368,12 +399,13 @@ export function useThumbnail(path: string | undefined, options: ThumbnailOptions
     if (path) {
       setError(undefined);
       // Force a new request by clearing the cache for this item
-      const cacheKey = `${path}:${size || 128}:${quality || 'medium'}:${format || 'webp'}:${effectiveAccentKey}`;
+      const mtimeKey = mtime || 'none';
+      const cacheKey = `${path}:${size || 128}:${quality || 'medium'}:${format || 'webp'}:${effectiveAccentKey}:${mtimeKey}`;
       thumbnailPromises.delete(cacheKey);
 
       // Trigger re-fetch
       setLoading(true);
-      fetchThumbnail(path, { size, quality, priority, format, accent: effectiveAccent })
+      fetchThumbnail(path, { size, quality, priority, format, accent: effectiveAccent, mtime })
         .then((response) => {
           if (currentPathRef.current === path) {
             setDataUrl(response.data_url);
@@ -406,6 +438,7 @@ export function useThumbnail(path: string | undefined, options: ThumbnailOptions
     format,
     effectiveAccent,
     effectiveAccentKey,
+    mtime,
     fetchThumbnail,
     updateFileDimensions,
   ]);
