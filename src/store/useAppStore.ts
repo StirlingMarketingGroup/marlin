@@ -269,6 +269,8 @@ interface AppState {
   setCurrentPath: (path: string) => void;
   setHomeDir: (path: string) => void;
   setFiles: (files: FileItem[]) => void;
+  addFiles: (files: FileItem[]) => void;
+  removeFilesByPath: (paths: Set<string>) => void;
   setLoading: (loading: boolean) => void;
   setError: (error?: string) => void;
   setSelectedFiles: (files: string[]) => void;
@@ -458,6 +460,14 @@ export const useAppStore = create<AppState>((set, get) => ({
 
       return { files: merged };
     }),
+  addFiles: (files) =>
+    set((state) => ({
+      files: [...state.files, ...files],
+    })),
+  removeFilesByPath: (paths) =>
+    set((state) => ({
+      files: state.files.filter((f) => !paths.has(f.path)),
+    })),
   setLoading: (loading) => set({ loading }),
   setError: (error) => set({ error }),
   setSelectedFiles: (files) => {
