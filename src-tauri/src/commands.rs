@@ -4916,7 +4916,9 @@ pub async fn eject_drive(path: String) -> Result<(), String> {
 static THUMBNAIL_SERVICE: OnceCell<Result<Arc<crate::thumbnails::ThumbnailService>, String>> =
     OnceCell::const_new();
 
-async fn get_thumbnail_service() -> Result<Arc<crate::thumbnails::ThumbnailService>, String> {
+/// Get the thumbnail service instance, initializing it if necessary.
+/// This is exported for use by other modules (e.g., fs_watcher for cache invalidation).
+pub async fn get_thumbnail_service() -> Result<Arc<crate::thumbnails::ThumbnailService>, String> {
     THUMBNAIL_SERVICE
         .get_or_init(|| async {
             crate::thumbnails::ThumbnailService::new()

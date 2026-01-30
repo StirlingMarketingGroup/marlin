@@ -24,6 +24,7 @@ import FilterInput from './components/FilterInput';
 import { FULL_DISK_ACCESS_DISMISSED_KEY } from '@/utils/fullDiskAccessPrompt';
 import { PREFERENCES_UPDATED_EVENT, SMB_CONNECT_SUCCESS_EVENT } from '@/utils/events';
 import { usePrefersReducedMotion } from '@/hooks/usePrefersReducedMotion';
+import { invalidateThumbnailsForPaths } from '@/hooks/useThumbnail';
 import type {
   DirectoryChangeEventPayload,
   DirectoryListingResponse,
@@ -704,6 +705,16 @@ function App() {
         changeType === 'renamed';
 
       if (payload && payload.path === currentPath && isContentChange) {
+        // Invalidate frontend thumbnail cache for modified/removed files
+        // (created files don't have cached thumbnails yet)
+        if (
+          (changeType === 'modified' || changeType === 'removed') &&
+          payload.affectedPaths &&
+          payload.affectedPaths.length > 0
+        ) {
+          invalidateThumbnailsForPaths(payload.affectedPaths);
+        }
+
         // Clear any existing debounce timer
         if (debounceTimer) {
           window.clearTimeout(debounceTimer);

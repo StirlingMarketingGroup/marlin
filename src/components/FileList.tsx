@@ -70,7 +70,7 @@ function ListFilePreview({
   const priority = stage === 'visible' ? 'high' : 'medium';
   const { dataUrl, loading, hasTransparency } = useThumbnail(
     isThumbnailCandidate && stage !== 'far' ? file.path : undefined,
-    { size: Math.round(64 * dpr), quality: 'medium', priority, thumbnailUrl: file.thumbnail_url }
+    { size: Math.round(64 * dpr), quality: 'medium', priority, thumbnailUrl: file.thumbnail_url, mtime: file.modified }
   );
 
   if (isMac) {
