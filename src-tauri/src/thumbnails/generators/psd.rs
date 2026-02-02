@@ -2,6 +2,7 @@ use super::super::{ThumbnailGenerationResult, ThumbnailRequest};
 use super::ThumbnailGenerator;
 use image::{DynamicImage, RgbaImage};
 use psd::Psd;
+use std::panic::AssertUnwindSafe;
 use std::path::Path;
 
 /// Maximum file size for PSD thumbnail generation (100 MB)
@@ -54,7 +55,13 @@ impl PsdGenerator {
 
         // Get the pre-flattened composite image stored in the PSD
         // This is the merged/flattened image that Photoshop stores for quick preview
-        let rgba_data = psd.rgba();
+        // Wrap in catch_unwind to handle panics from malformed PSD files gracefully
+        let rgba_data = std::panic::catch_unwind(AssertUnwindSafe(|| psd.rgba())).map_err(|_| {
+            format!(
+                "Failed to extract image data from PSD (possibly corrupt): {}",
+                path.display()
+            )
+        })?;
 
         // Create an RGBA image from the composite data
         let rgba_image = RgbaImage::from_raw(width, height, rgba_data).ok_or_else(|| {
@@ -89,12 +96,8 @@ impl PsdGenerator {
     }
 
     fn has_transparency(image: &DynamicImage) -> bool {
-        // Check if the color type supports alpha
-        if !image.color().has_alpha() {
-            return false;
-        }
-
         // Check if any pixels actually have transparency (alpha < 255)
+        // This generator always produces ImageRgba8, so we only handle that case
         match image {
             DynamicImage::ImageRgba8(img) => img.pixels().any(|pixel| pixel[3] < 255),
             _ => false,
