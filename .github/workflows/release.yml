@@ -154,24 +154,28 @@ jobs:
             arch: arm64
             rust-targets: aarch64-apple-darwin
             smb: true
+            self_hosted: true
           # macOS Intel (cross-compile from arm64 runner - no SMB due to cross-compile)
           - os: [self-hosted, macOS, ARM64]
             target: x86_64-apple-darwin
             arch: x86_64
             rust-targets: x86_64-apple-darwin
             smb: false
+            self_hosted: true
           # Linux x86_64 - self-hosted Ubuntu runner
           - os: [self-hosted, Linux, X64]
             target: x86_64-unknown-linux-gnu
             arch: x86_64
             rust-targets: x86_64-unknown-linux-gnu
             smb: true
+            self_hosted: true
           # Linux arm64 - GitHub-hosted (no self-hosted arm64 runner yet)
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             arch: arm64
             rust-targets: aarch64-unknown-linux-gnu
             smb: true
+            self_hosted: false
     permissions:
       contents: write
     env:
@@ -193,7 +197,7 @@ jobs:
           ref: ${{ env.RELEASE_REF }}
 
       - name: Install dependencies (Ubuntu)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && !matrix.self_hosted
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -221,18 +225,20 @@ jobs:
           fi
 
       - name: Setup Homebrew PATH (macOS self-hosted)
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && matrix.self_hosted
         run: |
           # Add Homebrew to PATH for Apple Silicon Macs
           echo "/opt/homebrew/bin" >> $GITHUB_PATH
           echo "/opt/homebrew/sbin" >> $GITHUB_PATH
 
       - name: Install dependencies (macOS)
-        if: runner.os == 'macOS' && matrix.smb
+        if: runner.os == 'macOS' && matrix.smb && !matrix.self_hosted
         run: |
           brew install samba
 
+      # Only needed for GitHub-hosted runners (npm cache)
       - name: Normalize npm lockfile for caching
+        if: ${{ !matrix.self_hosted }}
         run: |
           python3 - <<'PY'
           import json
@@ -252,18 +258,21 @@ jobs:
           PY
 
       - uses: actions/setup-node@v6
+        if: ${{ !matrix.self_hosted }}
         with:
           node-version: 20
           cache: 'npm'
           cache-dependency-path: package-lock.ci.json
 
       - name: Install Rust toolchain
+        if: ${{ !matrix.self_hosted }}
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
           targets: ${{ matrix.rust-targets }}
 
       - name: Cache Rust build artifacts
+        if: ${{ !matrix.self_hosted }}
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
@@ -272,12 +281,13 @@ jobs:
           cache-all-crates: true
           cache-on-failure: true
 
+      # Tauri caching only needed for GitHub-hosted runners
       - name: Prepare Tauri cache directory (Linux)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && !matrix.self_hosted
         run: mkdir -p ~/.cache/tauri
 
       - name: Cache Tauri downloads (Linux)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && !matrix.self_hosted
         uses: actions/cache@v5
         with:
           path: ~/.cache/tauri
@@ -287,11 +297,11 @@ jobs:
             tauri-${{ runner.os }}-
 
       - name: Prepare Tauri cache directory (macOS)
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && !matrix.self_hosted
         run: mkdir -p ~/Library/Caches/tauri
 
       - name: Cache Tauri downloads (macOS)
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && !matrix.self_hosted
         uses: actions/cache@v5
         with:
           path: ~/Library/Caches/tauri
@@ -408,24 +418,28 @@ jobs:
             arch: arm64
             rust-targets: aarch64-apple-darwin
             smb: true
+            self_hosted: true
           # macOS Intel (cross-compile from arm64 runner - no SMB due to cross-compile)
           - os: [self-hosted, macOS, ARM64]
             target: x86_64-apple-darwin
             arch: x86_64
             rust-targets: x86_64-apple-darwin
             smb: false
+            self_hosted: true
           # Linux x86_64 - self-hosted Ubuntu runner
           - os: [self-hosted, Linux, X64]
             target: x86_64-unknown-linux-gnu
             arch: x86_64
             rust-targets: x86_64-unknown-linux-gnu
             smb: true
+            self_hosted: true
           # Linux arm64 - GitHub-hosted (no self-hosted arm64 runner yet)
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             arch: arm64
             rust-targets: aarch64-unknown-linux-gnu
             smb: true
+            self_hosted: false
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -433,7 +447,7 @@ jobs:
           persist-credentials: false
 
       - name: Install dependencies (Ubuntu)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && !matrix.self_hosted
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -461,18 +475,20 @@ jobs:
           fi
 
       - name: Setup Homebrew PATH (macOS self-hosted)
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && matrix.self_hosted
         run: |
           # Add Homebrew to PATH for Apple Silicon Macs
           echo "/opt/homebrew/bin" >> $GITHUB_PATH
           echo "/opt/homebrew/sbin" >> $GITHUB_PATH
 
       - name: Install dependencies (macOS)
-        if: runner.os == 'macOS' && matrix.smb
+        if: runner.os == 'macOS' && matrix.smb && !matrix.self_hosted
         run: |
           brew install samba
 
+      # Only needed for GitHub-hosted runners (npm cache)
       - name: Normalize npm lockfile for caching
+        if: ${{ !matrix.self_hosted }}
         run: |
           python3 - <<'PY'
           import json
@@ -492,18 +508,21 @@ jobs:
           PY
 
       - uses: actions/setup-node@v6
+        if: ${{ !matrix.self_hosted }}
         with:
           node-version: 20
           cache: 'npm'
           cache-dependency-path: package-lock.ci.json
 
       - name: Install Rust toolchain
+        if: ${{ !matrix.self_hosted }}
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
           targets: ${{ matrix.rust-targets }}
 
       - name: Cache Rust build artifacts
+        if: ${{ !matrix.self_hosted }}
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
@@ -512,12 +531,13 @@ jobs:
           cache-all-crates: true
           cache-on-failure: true
 
+      # Tauri caching only needed for GitHub-hosted runners
       - name: Prepare Tauri cache directory (Linux)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && !matrix.self_hosted
         run: mkdir -p ~/.cache/tauri
 
       - name: Cache Tauri downloads (Linux)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && !matrix.self_hosted
         uses: actions/cache@v5
         with:
           path: ~/.cache/tauri
@@ -527,11 +547,11 @@ jobs:
             tauri-${{ runner.os }}-
 
       - name: Prepare Tauri cache directory (macOS)
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && !matrix.self_hosted
         run: mkdir -p ~/Library/Caches/tauri
 
       - name: Cache Tauri downloads (macOS)
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && !matrix.self_hosted
         uses: actions/cache@v5
         with:
           path: ~/Library/Caches/tauri
