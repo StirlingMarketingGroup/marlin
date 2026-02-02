@@ -11,7 +11,7 @@ concurrency:
 
 jobs:
   lint-typecheck-rust:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v6
         with:
@@ -39,46 +39,6 @@ jobs:
         if: steps.changes.outputs.check != 'true'
         run: echo "No relevant changes detected. Skipping lint/typecheck/rust checks."
 
-      - uses: actions/setup-node@v6
-        if: steps.changes.outputs.check == 'true'
-        with:
-          node-version: 20
-          cache: 'npm'
-          cache-dependency-path: package-lock.json
-
-      - name: Install system dependencies
-        if: steps.changes.outputs.check == 'true'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            build-essential \
-            curl \
-            wget \
-            file \
-            libssl-dev \
-            libgtk-3-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            gperf
-
-      - uses: actions-rs/toolchain@v1
-        if: steps.changes.outputs.check == 'true'
-        with:
-          toolchain: stable
-          profile: minimal
-          override: true
-
-      - name: Cache cargo build artifacts
-        if: steps.changes.outputs.check == 'true'
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            src-tauri -> target
-          shared-key: release-x86_64-unknown-linux-gnu
-          cache-all-crates: true
-          cache-on-failure: true
-
       - name: Install dependencies
         if: steps.changes.outputs.check == 'true'
         run: npm ci
@@ -99,7 +59,7 @@ jobs:
         run: npm run check
 
   e2e-tests:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v6
 
@@ -118,13 +78,6 @@ jobs:
       - name: Skip e2e tests
         if: steps.changes.outputs.e2e != 'true'
         run: echo "No relevant changes detected. Skipping e2e tests."
-
-      - uses: actions/setup-node@v6
-        if: steps.changes.outputs.e2e == 'true'
-        with:
-          node-version: 20
-          cache: 'npm'
-          cache-dependency-path: package-lock.json
 
       - name: Install dependencies
         if: steps.changes.outputs.e2e == 'true'
