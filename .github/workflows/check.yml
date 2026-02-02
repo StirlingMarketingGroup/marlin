@@ -17,6 +17,12 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Setup persistent cargo target dir
+        run: |
+          # Use persistent target dir outside workspace so it survives between different repo checkouts
+          echo "CARGO_TARGET_DIR=$HOME/.cache/cargo-target/marlin-check" >> $GITHUB_ENV
+          mkdir -p "$HOME/.cache/cargo-target/marlin-check"
+
       - name: Detect files requiring checks
         id: changes
         uses: dorny/paths-filter@v3
