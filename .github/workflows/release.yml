@@ -234,7 +234,7 @@ jobs:
 
       - name: Normalize npm lockfile for caching
         run: |
-          python - <<'PY'
+          python3 - <<'PY'
           import json
           from pathlib import Path
 
@@ -474,7 +474,7 @@ jobs:
 
       - name: Normalize npm lockfile for caching
         run: |
-          python - <<'PY'
+          python3 - <<'PY'
           import json
           from pathlib import Path
 
