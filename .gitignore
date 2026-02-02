@@ -60,7 +60,6 @@ tauri-private-key*
 
 # Tauri specific
 src-tauri/target/
-src-tauri/Cargo.lock
 
 # SMB sidecar binaries (built per-platform during CI/release)
 src-tauri/binaries/marlin-smb-*
