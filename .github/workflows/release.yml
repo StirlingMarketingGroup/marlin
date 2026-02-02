@@ -140,7 +140,7 @@ jobs:
           fi
 
   release:
-    name: Release (${{ matrix.os }} • ${{ matrix.arch }})
+    name: Release (${{ matrix.arch }}-${{ matrix.target }})
     needs: sync-version
     if: ${{ github.event_name != 'pull_request' && needs.sync-version.result == 'success' }}
     runs-on: ${{ matrix.os }}
@@ -148,23 +148,25 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macOS Apple Silicon (M1/M2/M3)
-          - os: macos-15
+          # macOS Apple Silicon (M1/M2/M3) - self-hosted Mac Mini
+          - os: [self-hosted, macOS, ARM64]
             target: aarch64-apple-darwin
             arch: arm64
             rust-targets: aarch64-apple-darwin
             smb: true
           # macOS Intel (cross-compile from arm64 runner - no SMB due to cross-compile)
-          - os: macos-15
+          - os: [self-hosted, macOS, ARM64]
             target: x86_64-apple-darwin
             arch: x86_64
             rust-targets: x86_64-apple-darwin
             smb: false
-          - os: ubuntu-latest
+          # Linux x86_64 - self-hosted Ubuntu runner
+          - os: [self-hosted, Linux, X64]
             target: x86_64-unknown-linux-gnu
             arch: x86_64
             rust-targets: x86_64-unknown-linux-gnu
             smb: true
+          # Linux arm64 - GitHub-hosted (no self-hosted arm64 runner yet)
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             arch: arm64
@@ -191,7 +193,7 @@ jobs:
           ref: ${{ env.RELEASE_REF }}
 
       - name: Install dependencies (Ubuntu)
-        if: startsWith(matrix.os, 'ubuntu')
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -386,30 +388,32 @@ jobs:
           args: --target ${{ matrix.target }} --verbose ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '--bundles deb' || '' }}
 
   release-dry-run:
-    name: Dry Run (${{ matrix.os }} • ${{ matrix.arch }})
+    name: Dry Run (${{ matrix.arch }}-${{ matrix.target }})
     if: ${{ github.event_name == 'pull_request' }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # macOS Apple Silicon (M1/M2/M3)
-          - os: macos-15
+          # macOS Apple Silicon (M1/M2/M3) - self-hosted Mac Mini
+          - os: [self-hosted, macOS, ARM64]
             target: aarch64-apple-darwin
             arch: arm64
             rust-targets: aarch64-apple-darwin
             smb: true
           # macOS Intel (cross-compile from arm64 runner - no SMB due to cross-compile)
-          - os: macos-15
+          - os: [self-hosted, macOS, ARM64]
             target: x86_64-apple-darwin
             arch: x86_64
             rust-targets: x86_64-apple-darwin
             smb: false
-          - os: ubuntu-latest
+          # Linux x86_64 - self-hosted Ubuntu runner
+          - os: [self-hosted, Linux, X64]
             target: x86_64-unknown-linux-gnu
             arch: x86_64
             rust-targets: x86_64-unknown-linux-gnu
             smb: true
+          # Linux arm64 - GitHub-hosted (no self-hosted arm64 runner yet)
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             arch: arm64
@@ -422,7 +426,7 @@ jobs:
           persist-credentials: false
 
       - name: Install dependencies (Ubuntu)
-        if: startsWith(matrix.os, 'ubuntu')
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
