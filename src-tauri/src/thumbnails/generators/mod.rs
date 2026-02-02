@@ -150,10 +150,8 @@ impl ThumbnailGenerator {
 
     fn is_psd_file(path: &Path) -> bool {
         if let Some(extension) = path.extension().and_then(|s| s.to_str()) {
-            matches!(
-                extension.to_lowercase().as_str(),
-                "psd" | "psb" // Photoshop files
-            )
+            // Note: PSB (Large Document Format) is not supported by the psd crate
+            matches!(extension.to_lowercase().as_str(), "psd")
         } else {
             false
         }
