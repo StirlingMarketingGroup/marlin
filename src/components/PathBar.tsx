@@ -32,6 +32,16 @@ import SymlinkBadge from '@/components/SymlinkBadge';
 import { useDragStore } from '@/store/useDragStore';
 import { formatArchivePathForDisplay, isArchiveUri } from '@/utils/archiveUri';
 
+/** Get parent directory path */
+const getParentPath = (path: string): string | null => {
+  if (!path || path === '/') return null;
+  // Handle trailing slash
+  const normalized = path.endsWith('/') ? path.slice(0, -1) : path;
+  const lastSlash = normalized.lastIndexOf('/');
+  if (lastSlash <= 0) return '/';
+  return normalized.slice(0, lastSlash);
+};
+
 const MAX_SUGGESTIONS = 8;
 
 interface PathSuggestion {
@@ -187,6 +197,10 @@ export default function PathBar() {
   const startNativeDrag = useDragStore((state) => state.startNativeDrag);
   const endNativeDrag = useDragStore((state) => state.endNativeDrag);
   const setInAppDropTargetId = useDragStore((state) => state.setInAppDropTargetId);
+  const dropTargetPath = useDragStore((state) => state.dropTargetPath);
+
+  const parentPath = getParentPath(currentPath);
+  const isUpButtonDropTarget = parentPath && dropTargetPath === parentPath;
 
   const clearSuggestions = useCallback(() => {
     setSuggestions([]);
@@ -632,9 +646,12 @@ export default function PathBar() {
               <button
                 onClick={() => useAppStore.getState().goUp()}
                 disabled={!useAppStore.getState().canGoUp()}
-                className="btn-icon rounded-full"
+                className={`btn-icon rounded-full transition-all ${
+                  isUpButtonDropTarget ? 'ring-2 ring-accent bg-accent-soft scale-110' : ''
+                }`}
                 title={upTitle}
                 data-tauri-drag-region={false}
+                data-folder-path={parentPath ?? undefined}
               >
                 <ArrowUp className="w-4 h-4" />
               </button>

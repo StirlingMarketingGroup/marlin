@@ -49,6 +49,7 @@ coverage/
 # Playwright test outputs
 playwright-report/
 test-results/
+e2e/screenshots/
 
 # Claude Code local settings (user-specific permissions)
 .claude/settings.local.json

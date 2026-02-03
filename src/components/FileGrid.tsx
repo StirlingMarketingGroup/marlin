@@ -265,6 +265,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     justCreatedPath,
   } = useAppStore();
   const { startNativeDrag, endNativeDrag, isDraggedDirectory } = useDragStore();
+  const dropTargetPath = useDragStore((s) => s.dropTargetPath);
   const [renameText, setRenameText] = useState<string>('');
   const [draggedFile, setDraggedFile] = useState<string | null>(null);
   const [downloadingForDrag, setDownloadingForDrag] = useState<Set<string>>(new Set());
@@ -873,6 +874,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
   // Render a single file item (extracted for reuse in virtual rows)
   const renderFileItem = (file: FileItem) => {
     const isSelected = selectedFiles.includes(file.path);
+    const isDropTarget = file.is_directory && dropTargetPath === file.path;
     const isDragged =
       (draggedFile !== null && (draggedFile === file.path || selectedFiles.includes(file.path))) ||
       isDraggedDirectory(file.path);
@@ -888,11 +890,14 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
         className={`file-item relative flex flex-col items-center px-3 py-2 rounded-md cursor-pointer ${
           isSelected || isRenaming
             ? 'bg-accent-selected z-20 overflow-visible'
-            : 'hover:bg-app-light/70'
+            : isDropTarget
+              ? 'ring-2 ring-accent bg-accent/10'
+              : 'hover:bg-app-light/70'
         } ${isDragged || isCutFile ? 'opacity-50' : ''} ${file.is_hidden ? 'opacity-60' : ''}`}
         data-testid="file-item"
         data-file-item="true"
         data-file-path={file.path}
+        data-folder-path={file.is_directory ? file.path : undefined}
         data-directory={file.is_directory ? 'true' : undefined}
         data-hidden={file.is_hidden ? 'true' : undefined}
         data-name={file.name}

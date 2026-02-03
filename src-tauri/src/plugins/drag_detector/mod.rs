@@ -20,10 +20,18 @@ pub struct DropLocation {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DragModifiers {
+    pub option_alt: bool,
+    pub cmd_ctrl: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DragDropEvent {
     pub paths: Vec<String>,
     pub location: DropLocation,
     pub event_type: DragEventType,
+    pub modifiers: DragModifiers,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,6 +105,10 @@ pub async fn simulate_drop<R: Runtime>(
             target_id,
         },
         event_type: DragEventType::Drop,
+        modifiers: DragModifiers {
+            option_alt: false,
+            cmd_ctrl: false,
+        },
     };
 
     window

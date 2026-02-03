@@ -31,22 +31,22 @@ function ToastItem({ toast, onClose }: { toast: ToastData; onClose: () => void }
     }
   };
 
-  const getBgColor = () => {
+  const getTypeStyles = () => {
     switch (toast.type) {
       case 'success':
-        return 'bg-green-500/10 border-green-500/20';
+        return 'bg-green-900/95 border-green-500/50';
       case 'error':
-        return 'bg-red-500/10 border-red-500/20';
+        return 'bg-red-900/95 border-red-500/50';
       case 'info':
-        return 'bg-blue-500/10 border-blue-500/20';
+        return 'bg-blue-900/95 border-blue-500/50';
       default:
-        return 'bg-app-panel border-app-border';
+        return 'bg-app-gray border-app-border';
     }
   };
 
   return (
     <div
-      className={`flex items-center gap-3 px-4 py-3 rounded-lg border ${getBgColor()} bg-app-dark/95 backdrop-blur-sm shadow-lg min-w-[300px] max-w-[500px] ${toast.closing ? 'animate-fade-out' : 'animate-slide-in'}`}
+      className={`flex items-center gap-3 px-4 py-3 rounded-lg border ${getTypeStyles()} backdrop-blur-sm shadow-lg min-w-[300px] max-w-[500px] ${toast.closing ? 'animate-fade-out' : 'animate-slide-in'}`}
     >
       {getIcon()}
       <div className="flex-1">

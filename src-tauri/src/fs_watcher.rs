@@ -1,10 +1,10 @@
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
-use tokio::sync::mpsc;
 
 #[cfg(target_os = "macos")]
 use crate::macos_security;
@@ -55,9 +55,9 @@ impl FsWatcher {
             }
         }
 
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel();
         let app_handle = self.app_handle.clone();
-        let debounce_map = self.debounce_map.clone();
+        let _debounce_map = self.debounce_map.clone(); // Keep for potential future use
         let watch_path = normalized_path.clone();
 
         // Create watcher with custom configuration
@@ -93,93 +93,130 @@ impl FsWatcher {
         }
 
         // Use a thread to handle events since we're not in a Tokio context yet
+        // This implementation batches events within the debounce window instead of dropping them
         std::thread::spawn(move || {
+            use std::collections::HashSet;
+
             const DEBOUNCE_DURATION: Duration = Duration::from_millis(300);
 
-            // Create a simple receiver loop
-            while let Some(event) = rx.blocking_recv() {
-                let should_emit = match event.kind {
-                    EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => true,
-                    _ => false,
-                };
+            // Pending batch of events to emit
+            let mut pending_files: HashSet<String> = HashSet::new();
+            let mut pending_paths: HashSet<String> = HashSet::new();
+            let mut has_creates = false;
+            let mut has_modifies = false;
+            let mut has_removes = false;
+            let mut batch_start: Option<Instant> = None;
 
-                if !should_emit {
-                    continue;
-                }
-
-                // Debounce rapid changes
-                let now = Instant::now();
-                let should_process = {
-                    let mut debounce = debounce_map.lock().unwrap();
-                    if let Some(last_event) = debounce.get(&watch_path) {
-                        if now.duration_since(*last_event) < DEBOUNCE_DURATION {
-                            false
-                        } else {
-                            debounce.insert(watch_path.clone(), now);
-                            true
-                        }
+            loop {
+                // Calculate timeout for recv - either wait for debounce or indefinitely
+                let recv_result = if let Some(start) = batch_start {
+                    let elapsed = start.elapsed();
+                    if elapsed >= DEBOUNCE_DURATION {
+                        // Debounce expired, process batch immediately
+                        Err(mpsc::RecvTimeoutError::Timeout)
                     } else {
-                        debounce.insert(watch_path.clone(), now);
-                        true
+                        // Wait for next event or remaining debounce time
+                        rx.recv_timeout(DEBOUNCE_DURATION - elapsed)
                     }
+                } else {
+                    // No pending batch, wait indefinitely for next event
+                    rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected)
                 };
 
-                if should_process {
-                    // Small additional delay to catch rapid consecutive changes
-                    std::thread::sleep(Duration::from_millis(100));
-
-                    // Get change details
-                    let change_type = match event.kind {
-                        EventKind::Create(_) => "created",
-                        EventKind::Modify(_) => "modified",
-                        EventKind::Remove(_) => "removed",
-                        _ => "changed",
-                    };
-
-                    let affected_files: Vec<String> = event
-                        .paths
-                        .iter()
-                        .filter_map(|p| p.file_name())
-                        .filter_map(|name| name.to_str())
-                        .map(|s| s.to_string())
-                        .collect();
-
-                    // Get full paths for cache invalidation
-                    let affected_paths: Vec<String> = event
-                        .paths
-                        .iter()
-                        .filter_map(|p| p.to_str())
-                        .map(|s| s.to_string())
-                        .collect();
-
-                    // Invalidate thumbnail cache for modified/removed files
-                    // (created files don't have cached thumbnails yet)
-                    if matches!(change_type, "modified" | "removed") && !affected_paths.is_empty() {
-                        let paths_for_invalidation = affected_paths.clone();
-                        // Use Tauri's global async runtime instead of creating an ephemeral one.
-                        // This avoids resource exhaustion during bulk operations and ensures
-                        // the ThumbnailService worker tasks stay alive on the correct runtime.
-                        tauri::async_runtime::spawn(async move {
-                            if let Ok(service) = crate::commands::get_thumbnail_service().await {
-                                service.invalidate_paths(&paths_for_invalidation).await;
-                                log::debug!(
-                                    "Invalidated thumbnail cache for {} paths",
-                                    paths_for_invalidation.len()
-                                );
+                match recv_result {
+                    Ok(event) => {
+                        // Filter for relevant event types
+                        let is_relevant = match event.kind {
+                            EventKind::Create(_) => {
+                                has_creates = true;
+                                true
                             }
-                        });
+                            EventKind::Modify(_) => {
+                                has_modifies = true;
+                                true
+                            }
+                            EventKind::Remove(_) => {
+                                has_removes = true;
+                                true
+                            }
+                            _ => false,
+                        };
+
+                        if is_relevant {
+                            // Add paths to pending batch
+                            for path in &event.paths {
+                                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                                    pending_files.insert(name.to_string());
+                                }
+                                if let Some(full_path) = path.to_str() {
+                                    pending_paths.insert(full_path.to_string());
+                                }
+                            }
+
+                            // Start debounce timer if not already started
+                            if batch_start.is_none() {
+                                batch_start = Some(Instant::now());
+                            }
+                        }
                     }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        // Debounce expired, emit the batch if we have one
+                        // Use pending_paths as trigger (pending_files may be empty for non-UTF8 filenames)
+                        if !pending_paths.is_empty() {
+                            // Determine change type (prioritize removes > modifies > creates)
+                            let change_type = if has_removes {
+                                "removed"
+                            } else if has_modifies {
+                                "modified"
+                            } else if has_creates {
+                                "created"
+                            } else {
+                                "changed"
+                            };
 
-                    // Emit event to frontend with both filenames and full paths
-                    let payload = serde_json::json!({
-                        "path": watch_path,
-                        "changeType": change_type,
-                        "affectedFiles": affected_files,
-                        "affectedPaths": affected_paths
-                    });
+                            let affected_files: Vec<String> = pending_files.drain().collect();
+                            let affected_paths: Vec<String> = pending_paths.drain().collect();
 
-                    if let Err(e) = app_handle.emit("directory-changed", payload) {
-                        eprintln!("Failed to emit directory-changed event: {}", e);
+                            // Invalidate thumbnail cache for modified/removed files
+                            if matches!(change_type, "modified" | "removed")
+                                && !affected_paths.is_empty()
+                            {
+                                let paths_for_invalidation = affected_paths.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    if let Ok(service) =
+                                        crate::commands::get_thumbnail_service().await
+                                    {
+                                        service.invalidate_paths(&paths_for_invalidation).await;
+                                        log::debug!(
+                                            "Invalidated thumbnail cache for {} paths",
+                                            paths_for_invalidation.len()
+                                        );
+                                    }
+                                });
+                            }
+
+                            // Emit batched event to frontend
+                            let payload = serde_json::json!({
+                                "path": watch_path,
+                                "changeType": change_type,
+                                "affectedFiles": affected_files,
+                                "affectedPaths": affected_paths
+                            });
+
+                            if let Err(e) = app_handle.emit("directory-changed", payload) {
+                                eprintln!("Failed to emit directory-changed event: {}", e);
+                            }
+
+                            // Reset batch state
+                            has_creates = false;
+                            has_modifies = false;
+                            has_removes = false;
+                            batch_start = None;
+                        }
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        // Channel closed, exit the loop
+                        break;
                     }
                 }
             }

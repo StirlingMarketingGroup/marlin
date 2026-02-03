@@ -8,6 +8,7 @@ import PathBar from './components/PathBar';
 import StatusBar from './components/StatusBar';
 import { useAppStore } from './store/useAppStore';
 import { useToastStore } from './store/useToastStore';
+import { useUndoStore } from './store/useUndoStore';
 import { openFolderSizeWindow } from './store/useFolderSizeStore';
 import { useDirectoryStream } from './hooks/useDirectoryStream';
 import { message } from '@tauri-apps/plugin-dialog';
@@ -1726,6 +1727,13 @@ function App() {
       const hasModal = !!document.querySelector(
         '[role="dialog"], [aria-modal="true"], [data-modal="true"]'
       );
+
+      // Undo: Cmd/Ctrl+Z
+      if (meta && !inEditable && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        void useUndoStore.getState().executeUndo();
+        return;
+      }
 
       // New folder: Cmd/Ctrl+Shift+N
       if (e.shiftKey && !e.altKey && (e.key === 'n' || e.key === 'N')) {

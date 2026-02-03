@@ -69,3 +69,8 @@ export const useToastStore = create<ToastStore>((set, get) => ({
     }, FADE_DURATION);
   },
 }));
+
+// Expose store for e2e testing (dev only)
+if (typeof window !== 'undefined' && import.meta.env.DEV) {
+  (window as unknown as { __TOAST_STORE__: typeof useToastStore }).__TOAST_STORE__ = useToastStore;
+}
