@@ -11,7 +11,7 @@
     "fs:allow-read-text-file",
     {
       "identifier": "fs:scope",
-      "allow": ["$APP_CONFIG/**", "$HOME/**"]
+      "allow": ["$APP_CONFIG/**"]
     },
     "shell:allow-open",
     "opener:allow-open-url",

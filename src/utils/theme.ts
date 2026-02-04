@@ -58,6 +58,9 @@ const slugify = (value: string) =>
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/(^-|-$)+/g, '');
 
+const extractBasename = (filePath: string | undefined, extension: RegExp): string | undefined =>
+  filePath?.split(/[\\/]/).pop()?.replace(extension, '');
+
 const inferScheme = (background: string): ThemeColorScheme =>
   luminance(background) < 0.5 ? 'dark' : 'light';
 
@@ -224,14 +227,7 @@ export const parseItermColors = (content: string, fileName?: string): ThemeDefin
   const background = parsePlistColor(data['Background Color']);
   const foreground = parsePlistColor(data['Foreground Color']);
   if (!background || !foreground) return null;
-  const nameFromFile =
-    fileName
-      ?.split('/')
-      .pop()
-      ?.replace(/\\+/g, '/')
-      .split('/')
-      .pop()
-      ?.replace(/\\.itermcolors$/i, '') ?? 'iTerm Theme';
+  const nameFromFile = extractBasename(fileName, /\.itermcolors$/i) ?? 'iTerm Theme';
   return buildThemeFromBase({
     name: nameFromFile,
     background,
@@ -253,14 +249,7 @@ export const parseThemeJson = (content: string, fileName?: string): ThemeDefinit
   } catch {
     return null;
   }
-  const fallbackName =
-    fileName
-      ?.split('/')
-      .pop()
-      ?.replace(/\\+/g, '/')
-      .split('/')
-      .pop()
-      ?.replace(/\\.json$/i, '') ?? undefined;
+  const fallbackName = extractBasename(fileName, /\.json$/i);
   return normalizeThemeDefinition(parsed, fallbackName, fallbackName);
 };
 
