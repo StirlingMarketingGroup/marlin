@@ -25,7 +25,6 @@ import { FULL_DISK_ACCESS_DISMISSED_KEY } from '@/utils/fullDiskAccessPrompt';
 import { PREFERENCES_UPDATED_EVENT, SMB_CONNECT_SUCCESS_EVENT } from '@/utils/events';
 import { usePrefersReducedMotion } from '@/hooks/usePrefersReducedMotion';
 import { invalidateThumbnailsForPaths } from '@/hooks/useThumbnail';
-import { getPlatform } from '@/hooks/usePlatform';
 import type {
   DirectoryChangeEventPayload,
   DirectoryListingResponse,
@@ -51,15 +50,13 @@ function parseErrorCode(error: unknown): string | null {
 
 const ACCENT_POLL_INTERVAL_MS = 5000;
 
-// Grid zoom constants (shared with ZoomSlider)
-const GRID_SIZE_MIN = 80;
-const GRID_SIZE_MAX = 320;
-const GRID_SIZE_DEFAULT = 120;
-const GRID_SIZE_STEP = 8;
-const ZOOM_SCROLL_THRESHOLD = 50;
-const ZOOM_BUFFER_RESET_MS = 200;
-const NAV_SCROLL_THRESHOLD = 30;
-const NAV_COOLDOWN_MS = 500;
+// Grid zoom constants (for keyboard shortcuts - wheel handler moved to MainPanel)
+import {
+  GRID_SIZE_MIN,
+  GRID_SIZE_MAX,
+  GRID_SIZE_DEFAULT,
+  GRID_SIZE_STEP,
+} from '@/utils/gridConstants';
 
 async function checkAndShowFullDiskAccessPrompt() {
   if (platform() !== 'macos') return;
@@ -113,100 +110,6 @@ function App() {
   const thumbnailPrewarmRequestedRef = useRef(false);
   const currentAccentRef = useRef<string | null>(null);
   const saveGlobalPrefsTimeoutRef = useRef<number | null>(null);
-  // Refs for wheel-based navigation and zoom
-  const navDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const zoomBufferRef = useRef(0);
-  const zoomRafRef = useRef<number | null>(null);
-  const zoomBufferResetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // Wheel handler for horizontal scroll navigation and Ctrl/Cmd+scroll zoom
-  // Uses getPlatform() for cached platform detection instead of parsing UA on every event
-  const onWheel = useCallback((e: WheelEvent) => {
-    const { isMac } = getPlatform();
-    // On Mac, use metaKey OR ctrlKey (pinch-to-zoom sets ctrlKey)
-    const modKey = isMac ? e.metaKey || e.ctrlKey : e.ctrlKey;
-
-    // Skip if target is in editable element (guard for non-Element targets)
-    const target = e.target;
-    if (!(target instanceof Element)) return;
-    if (target.closest('input, textarea, [contenteditable="true"]')) return;
-
-    // Ctrl/Cmd + vertical scroll = zoom (only in grid view)
-    if (modKey && Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
-      const state = useAppStore.getState();
-      const merged = {
-        ...state.globalPreferences,
-        ...state.directoryPreferences[state.currentPath],
-      };
-      if (merged.viewMode !== 'grid') return;
-
-      e.preventDefault();
-
-      // Reset the buffer reset timer on each scroll event
-      if (zoomBufferResetRef.current) {
-        clearTimeout(zoomBufferResetRef.current);
-      }
-      zoomBufferResetRef.current = setTimeout(() => {
-        zoomBufferRef.current = 0;
-        zoomBufferResetRef.current = null;
-      }, ZOOM_BUFFER_RESET_MS);
-
-      // Accumulate delta for smooth zooming
-      zoomBufferRef.current += e.deltaY;
-
-      if (zoomRafRef.current === null) {
-        zoomRafRef.current = requestAnimationFrame(() => {
-          const state = useAppStore.getState();
-          const merged = {
-            ...state.globalPreferences,
-            ...state.directoryPreferences[state.currentPath],
-          };
-          const current = merged.gridSize ?? GRID_SIZE_DEFAULT;
-
-          if (Math.abs(zoomBufferRef.current) > ZOOM_SCROLL_THRESHOLD) {
-            const direction = zoomBufferRef.current < 0 ? 1 : -1; // scroll up = zoom in
-            const newSize = Math.max(
-              GRID_SIZE_MIN,
-              Math.min(GRID_SIZE_MAX, current + direction * GRID_SIZE_STEP)
-            );
-            state.updateDirectoryPreferences(state.currentPath, { gridSize: newSize });
-            zoomBufferRef.current = 0;
-          }
-
-          zoomRafRef.current = null;
-        });
-      }
-      return;
-    }
-
-    // Horizontal scroll (no modifier) = back/forward navigation with debounce
-    if (
-      !modKey &&
-      Math.abs(e.deltaX) > Math.abs(e.deltaY) &&
-      Math.abs(e.deltaX) > NAV_SCROLL_THRESHOLD
-    ) {
-      if (navDebounceRef.current) return; // Still in cooldown
-
-      e.preventDefault();
-      const state = useAppStore.getState();
-
-      let didNavigate = false;
-      if (e.deltaX < 0 && state.canGoBack()) {
-        state.goBack();
-        didNavigate = true;
-      } else if (e.deltaX > 0 && state.canGoForward()) {
-        state.goForward();
-        didNavigate = true;
-      }
-
-      if (didNavigate) {
-        navDebounceRef.current = setTimeout(() => {
-          navDebounceRef.current = null;
-        }, NAV_COOLDOWN_MS);
-      }
-    }
-  }, []);
-
   const currentDirectoryPreference = directoryPreferences[currentPath];
   const pendingFileSelectionRef = useRef<string | null>(null);
   // Apply smart default view and sort preferences based on folder name or contents
@@ -989,58 +892,6 @@ function App() {
       }
     })();
   }, [currentPath, currentDirectoryPreference]);
-
-  // Wheel event listener for navigation (horizontal scroll) and zoom (Ctrl/Cmd+scroll)
-  // Uses MutationObserver to retry if MainPanel isn't mounted yet (e.g., error state)
-  useEffect(() => {
-    let container: Element | null = null;
-    let observer: MutationObserver | null = null;
-
-    const attach = () => {
-      container = document.querySelector('[data-main-content]');
-      if (container) {
-        container.addEventListener('wheel', onWheel as EventListener, { passive: false });
-        if (observer) {
-          observer.disconnect();
-          observer = null;
-        }
-        return true;
-      }
-      return false;
-    };
-
-    // Try to attach immediately
-    if (!attach()) {
-      // If not found, observe DOM for the element to appear
-      observer = new MutationObserver(() => {
-        if (attach()) {
-          observer?.disconnect();
-        }
-      });
-      observer.observe(document.body, { childList: true, subtree: true });
-    }
-
-    return () => {
-      if (container) {
-        container.removeEventListener('wheel', onWheel as EventListener);
-      }
-      if (observer) {
-        observer.disconnect();
-      }
-      if (navDebounceRef.current) {
-        clearTimeout(navDebounceRef.current);
-        navDebounceRef.current = null;
-      }
-      if (zoomRafRef.current) {
-        cancelAnimationFrame(zoomRafRef.current);
-        zoomRafRef.current = null;
-      }
-      if (zoomBufferResetRef.current) {
-        clearTimeout(zoomBufferResetRef.current);
-        zoomBufferResetRef.current = null;
-      }
-    };
-  }, [onWheel]);
 
   // View and sort controls via system menu or keyboard
   useEffect(() => {
