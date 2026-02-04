@@ -25,6 +25,7 @@ import { FULL_DISK_ACCESS_DISMISSED_KEY } from '@/utils/fullDiskAccessPrompt';
 import { PREFERENCES_UPDATED_EVENT, SMB_CONNECT_SUCCESS_EVENT } from '@/utils/events';
 import { usePrefersReducedMotion } from '@/hooks/usePrefersReducedMotion';
 import { invalidateThumbnailsForPaths } from '@/hooks/useThumbnail';
+import { getPlatform } from '@/hooks/usePlatform';
 import type {
   DirectoryChangeEventPayload,
   DirectoryListingResponse,
@@ -49,6 +50,16 @@ function parseErrorCode(error: unknown): string | null {
 }
 
 const ACCENT_POLL_INTERVAL_MS = 5000;
+
+// Grid zoom constants (shared with ZoomSlider)
+const GRID_SIZE_MIN = 80;
+const GRID_SIZE_MAX = 320;
+const GRID_SIZE_DEFAULT = 120;
+const GRID_SIZE_STEP = 8;
+const ZOOM_SCROLL_THRESHOLD = 50;
+const ZOOM_BUFFER_RESET_MS = 200;
+const NAV_SCROLL_THRESHOLD = 30;
+const NAV_COOLDOWN_MS = 500;
 
 async function checkAndShowFullDiskAccessPrompt() {
   if (platform() !== 'macos') return;
@@ -106,24 +117,39 @@ function App() {
   const navDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const zoomBufferRef = useRef(0);
   const zoomRafRef = useRef<number | null>(null);
+  const zoomBufferResetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Wheel handler for horizontal scroll navigation and Ctrl/Cmd+scroll zoom
+  // Uses getPlatform() for cached platform detection instead of parsing UA on every event
   const onWheel = useCallback((e: WheelEvent) => {
-    const uaUpper = navigator.userAgent.toUpperCase();
-    const isMac = uaUpper.includes('MAC');
-    const modKey = isMac ? e.metaKey : e.ctrlKey;
+    const { isMac } = getPlatform();
+    // On Mac, use metaKey OR ctrlKey (pinch-to-zoom sets ctrlKey)
+    const modKey = isMac ? e.metaKey || e.ctrlKey : e.ctrlKey;
 
-    // Skip if target is in editable element
-    const target = e.target as HTMLElement;
+    // Skip if target is in editable element (guard for non-Element targets)
+    const target = e.target;
+    if (!(target instanceof Element)) return;
     if (target.closest('input, textarea, [contenteditable="true"]')) return;
 
     // Ctrl/Cmd + vertical scroll = zoom (only in grid view)
     if (modKey && Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
       const state = useAppStore.getState();
-      const merged = { ...state.globalPreferences, ...state.directoryPreferences[state.currentPath] };
+      const merged = {
+        ...state.globalPreferences,
+        ...state.directoryPreferences[state.currentPath],
+      };
       if (merged.viewMode !== 'grid') return;
 
       e.preventDefault();
+
+      // Reset the buffer reset timer on each scroll event
+      if (zoomBufferResetRef.current) {
+        clearTimeout(zoomBufferResetRef.current);
+      }
+      zoomBufferResetRef.current = setTimeout(() => {
+        zoomBufferRef.current = 0;
+        zoomBufferResetRef.current = null;
+      }, ZOOM_BUFFER_RESET_MS);
 
       // Accumulate delta for smooth zooming
       zoomBufferRef.current += e.deltaY;
@@ -131,12 +157,18 @@ function App() {
       if (zoomRafRef.current === null) {
         zoomRafRef.current = requestAnimationFrame(() => {
           const state = useAppStore.getState();
-          const merged = { ...state.globalPreferences, ...state.directoryPreferences[state.currentPath] };
-          const current = merged.gridSize ?? 120;
+          const merged = {
+            ...state.globalPreferences,
+            ...state.directoryPreferences[state.currentPath],
+          };
+          const current = merged.gridSize ?? GRID_SIZE_DEFAULT;
 
-          if (Math.abs(zoomBufferRef.current) > 50) {
+          if (Math.abs(zoomBufferRef.current) > ZOOM_SCROLL_THRESHOLD) {
             const direction = zoomBufferRef.current < 0 ? 1 : -1; // scroll up = zoom in
-            const newSize = Math.max(80, Math.min(320, current + direction * 8));
+            const newSize = Math.max(
+              GRID_SIZE_MIN,
+              Math.min(GRID_SIZE_MAX, current + direction * GRID_SIZE_STEP)
+            );
             state.updateDirectoryPreferences(state.currentPath, { gridSize: newSize });
             zoomBufferRef.current = 0;
           }
@@ -148,7 +180,11 @@ function App() {
     }
 
     // Horizontal scroll (no modifier) = back/forward navigation with debounce
-    if (!modKey && Math.abs(e.deltaX) > Math.abs(e.deltaY) && Math.abs(e.deltaX) > 30) {
+    if (
+      !modKey &&
+      Math.abs(e.deltaX) > Math.abs(e.deltaY) &&
+      Math.abs(e.deltaX) > NAV_SCROLL_THRESHOLD
+    ) {
       if (navDebounceRef.current) return; // Still in cooldown
 
       e.preventDefault();
@@ -166,7 +202,7 @@ function App() {
       if (didNavigate) {
         navDebounceRef.current = setTimeout(() => {
           navDebounceRef.current = null;
-        }, 500);
+        }, NAV_COOLDOWN_MS);
       }
     }
   }, []);
@@ -955,15 +991,54 @@ function App() {
   }, [currentPath, currentDirectoryPreference]);
 
   // Wheel event listener for navigation (horizontal scroll) and zoom (Ctrl/Cmd+scroll)
+  // Uses MutationObserver to retry if MainPanel isn't mounted yet (e.g., error state)
   useEffect(() => {
-    const container = document.querySelector('[data-main-content]');
-    if (!container) return;
+    let container: Element | null = null;
+    let observer: MutationObserver | null = null;
 
-    container.addEventListener('wheel', onWheel as EventListener, { passive: false });
+    const attach = () => {
+      container = document.querySelector('[data-main-content]');
+      if (container) {
+        container.addEventListener('wheel', onWheel as EventListener, { passive: false });
+        if (observer) {
+          observer.disconnect();
+          observer = null;
+        }
+        return true;
+      }
+      return false;
+    };
+
+    // Try to attach immediately
+    if (!attach()) {
+      // If not found, observe DOM for the element to appear
+      observer = new MutationObserver(() => {
+        if (attach()) {
+          observer?.disconnect();
+        }
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+    }
+
     return () => {
-      container.removeEventListener('wheel', onWheel as EventListener);
-      if (navDebounceRef.current) clearTimeout(navDebounceRef.current);
-      if (zoomRafRef.current) cancelAnimationFrame(zoomRafRef.current);
+      if (container) {
+        container.removeEventListener('wheel', onWheel as EventListener);
+      }
+      if (observer) {
+        observer.disconnect();
+      }
+      if (navDebounceRef.current) {
+        clearTimeout(navDebounceRef.current);
+        navDebounceRef.current = null;
+      }
+      if (zoomRafRef.current) {
+        cancelAnimationFrame(zoomRafRef.current);
+        zoomRafRef.current = null;
+      }
+      if (zoomBufferResetRef.current) {
+        clearTimeout(zoomBufferResetRef.current);
+        zoomBufferResetRef.current = null;
+      }
     };
   }, [onWheel]);
 
@@ -1337,35 +1412,38 @@ function App() {
       }
 
       // Zoom shortcuts: Cmd/Ctrl + Plus/Minus/0 (only in grid view)
+      // Note: + requires Shift on most keyboards, so we allow shiftKey for zoom-in
       if ((isMac && e.metaKey) || (!isMac && e.ctrlKey)) {
-        if (!e.altKey && !e.shiftKey) {
+        if (!e.altKey) {
           const state = useAppStore.getState();
-          const merged = { ...state.globalPreferences, ...state.directoryPreferences[state.currentPath] };
+          const merged = {
+            ...state.globalPreferences,
+            ...state.directoryPreferences[state.currentPath],
+          };
 
           if (merged.viewMode === 'grid') {
-            const current = merged.gridSize ?? 120;
-            const step = 8;
+            const current = merged.gridSize ?? GRID_SIZE_DEFAULT;
 
-            // Zoom in: + or = (= is the key on US keyboards without shift)
+            // Zoom in: + (requires Shift on most keyboards) or = (without Shift)
             if (e.key === '+' || e.key === '=') {
               e.preventDefault();
-              const newSize = Math.min(320, current + step);
+              const newSize = Math.min(GRID_SIZE_MAX, current + GRID_SIZE_STEP);
               state.updateDirectoryPreferences(state.currentPath, { gridSize: newSize });
               return;
             }
 
-            // Zoom out: -
-            if (e.key === '-') {
+            // Zoom out: - (no Shift needed)
+            if (e.key === '-' && !e.shiftKey) {
               e.preventDefault();
-              const newSize = Math.max(80, current - step);
+              const newSize = Math.max(GRID_SIZE_MIN, current - GRID_SIZE_STEP);
               state.updateDirectoryPreferences(state.currentPath, { gridSize: newSize });
               return;
             }
 
-            // Reset zoom: 0
-            if (e.key === '0') {
+            // Reset zoom: 0 (no Shift needed)
+            if (e.key === '0' && !e.shiftKey) {
               e.preventDefault();
-              const defaultSize = state.globalPreferences.gridSize ?? 120;
+              const defaultSize = state.globalPreferences.gridSize ?? GRID_SIZE_DEFAULT;
               state.updateDirectoryPreferences(state.currentPath, { gridSize: defaultSize });
               return;
             }
