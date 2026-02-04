@@ -582,6 +582,7 @@ export default function MainPanel() {
       {/* File content only */}
       <div
         ref={scrollRef}
+        data-main-content
         className="relative flex-1 min-h-0 overflow-auto pb-20"
         onContextMenuCapture={handleContextMenuCapture}
         onContextMenu={handleContextMenu}

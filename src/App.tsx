@@ -102,6 +102,75 @@ function App() {
   const thumbnailPrewarmRequestedRef = useRef(false);
   const currentAccentRef = useRef<string | null>(null);
   const saveGlobalPrefsTimeoutRef = useRef<number | null>(null);
+  // Refs for wheel-based navigation and zoom
+  const navDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const zoomBufferRef = useRef(0);
+  const zoomRafRef = useRef<number | null>(null);
+
+  // Wheel handler for horizontal scroll navigation and Ctrl/Cmd+scroll zoom
+  const onWheel = useCallback((e: WheelEvent) => {
+    const uaUpper = navigator.userAgent.toUpperCase();
+    const isMac = uaUpper.includes('MAC');
+    const modKey = isMac ? e.metaKey : e.ctrlKey;
+
+    // Skip if target is in editable element
+    const target = e.target as HTMLElement;
+    if (target.closest('input, textarea, [contenteditable="true"]')) return;
+
+    // Ctrl/Cmd + vertical scroll = zoom (only in grid view)
+    if (modKey && Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+      const state = useAppStore.getState();
+      const merged = { ...state.globalPreferences, ...state.directoryPreferences[state.currentPath] };
+      if (merged.viewMode !== 'grid') return;
+
+      e.preventDefault();
+
+      // Accumulate delta for smooth zooming
+      zoomBufferRef.current += e.deltaY;
+
+      if (zoomRafRef.current === null) {
+        zoomRafRef.current = requestAnimationFrame(() => {
+          const state = useAppStore.getState();
+          const merged = { ...state.globalPreferences, ...state.directoryPreferences[state.currentPath] };
+          const current = merged.gridSize ?? 120;
+
+          if (Math.abs(zoomBufferRef.current) > 50) {
+            const direction = zoomBufferRef.current < 0 ? 1 : -1; // scroll up = zoom in
+            const newSize = Math.max(80, Math.min(320, current + direction * 8));
+            state.updateDirectoryPreferences(state.currentPath, { gridSize: newSize });
+            zoomBufferRef.current = 0;
+          }
+
+          zoomRafRef.current = null;
+        });
+      }
+      return;
+    }
+
+    // Horizontal scroll (no modifier) = back/forward navigation with debounce
+    if (!modKey && Math.abs(e.deltaX) > Math.abs(e.deltaY) && Math.abs(e.deltaX) > 30) {
+      if (navDebounceRef.current) return; // Still in cooldown
+
+      e.preventDefault();
+      const state = useAppStore.getState();
+
+      let didNavigate = false;
+      if (e.deltaX < 0 && state.canGoBack()) {
+        state.goBack();
+        didNavigate = true;
+      } else if (e.deltaX > 0 && state.canGoForward()) {
+        state.goForward();
+        didNavigate = true;
+      }
+
+      if (didNavigate) {
+        navDebounceRef.current = setTimeout(() => {
+          navDebounceRef.current = null;
+        }, 500);
+      }
+    }
+  }, []);
+
   const currentDirectoryPreference = directoryPreferences[currentPath];
   const pendingFileSelectionRef = useRef<string | null>(null);
   // Apply smart default view and sort preferences based on folder name or contents
@@ -885,6 +954,19 @@ function App() {
     })();
   }, [currentPath, currentDirectoryPreference]);
 
+  // Wheel event listener for navigation (horizontal scroll) and zoom (Ctrl/Cmd+scroll)
+  useEffect(() => {
+    const container = document.querySelector('[data-main-content]');
+    if (!container) return;
+
+    container.addEventListener('wheel', onWheel as EventListener, { passive: false });
+    return () => {
+      container.removeEventListener('wheel', onWheel as EventListener);
+      if (navDebounceRef.current) clearTimeout(navDebounceRef.current);
+      if (zoomRafRef.current) cancelAnimationFrame(zoomRafRef.current);
+    };
+  }, [onWheel]);
+
   // View and sort controls via system menu or keyboard
   useEffect(() => {
     let disposed = false;
@@ -1252,6 +1334,43 @@ function App() {
         e.preventDefault();
         openPreferences();
         return;
+      }
+
+      // Zoom shortcuts: Cmd/Ctrl + Plus/Minus/0 (only in grid view)
+      if ((isMac && e.metaKey) || (!isMac && e.ctrlKey)) {
+        if (!e.altKey && !e.shiftKey) {
+          const state = useAppStore.getState();
+          const merged = { ...state.globalPreferences, ...state.directoryPreferences[state.currentPath] };
+
+          if (merged.viewMode === 'grid') {
+            const current = merged.gridSize ?? 120;
+            const step = 8;
+
+            // Zoom in: + or = (= is the key on US keyboards without shift)
+            if (e.key === '+' || e.key === '=') {
+              e.preventDefault();
+              const newSize = Math.min(320, current + step);
+              state.updateDirectoryPreferences(state.currentPath, { gridSize: newSize });
+              return;
+            }
+
+            // Zoom out: -
+            if (e.key === '-') {
+              e.preventDefault();
+              const newSize = Math.max(80, current - step);
+              state.updateDirectoryPreferences(state.currentPath, { gridSize: newSize });
+              return;
+            }
+
+            // Reset zoom: 0
+            if (e.key === '0') {
+              e.preventDefault();
+              const defaultSize = state.globalPreferences.gridSize ?? 120;
+              state.updateDirectoryPreferences(state.currentPath, { gridSize: defaultSize });
+              return;
+            }
+          }
+        }
       }
 
       // Type-to-filter: any single printable character starts/appends to filter
