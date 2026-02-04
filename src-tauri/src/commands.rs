@@ -5805,7 +5805,7 @@ pub fn open_preferences_window(app: AppHandle) -> Result<(), String> {
         url,
     ))
     .title("Preferences")
-    .inner_size(520.0, 320.0);
+    .inner_size(520.0, 560.0);
 
     #[cfg(target_os = "macos")]
     let builder = builder

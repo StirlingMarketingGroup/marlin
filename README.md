@@ -4,11 +4,16 @@ A fast, no-nonsense file browser. Gets out of your way and just does files well.
 
 ## Screenshots
 
-![Thumbnail grid view](screenshots/thumbs.png)
-
-![List view](screenshots/list.png)
-
-![Light mode](screenshots/light.png)
+<table>
+  <tr>
+    <td><img src="screenshots/thumbs.png" width="400" alt="Thumbnail grid view"></td>
+    <td><img src="screenshots/list.png" width="400" alt="List view"></td>
+  </tr>
+  <tr>
+    <td><img src="screenshots/light.png" width="400" alt="Light mode"></td>
+    <td><img src="screenshots/colorblind.png" width="400" alt="Colorblind-friendly theme"></td>
+  </tr>
+</table>
 
 ## Features
 
@@ -81,6 +86,40 @@ Image dimensions shown under thumbnails. Image-heavy folders automatically switc
 
 - **Frontend**: React 18, TypeScript, Tailwind CSS, Zustand
 - **Backend**: Rust, Tauri 2.0, Tokio
+
+## Themes
+
+Marlin supports custom themes in JSON and iTerm2 `.itermcolors` formats. Theme files placed in the config themes folder load automatically on startup, and you can also import them from Preferences.
+
+Config themes folder:
+
+- macOS: `~/Library/Application Support/com.marlin.filebrowser/themes/`
+- Linux: `~/.config/com.marlin.filebrowser/themes/`
+- Windows: `%APPDATA%\com.marlin.filebrowser\themes\`
+
+JSON schema:
+
+```json
+{
+  "id": "my-theme",
+  "name": "My Theme",
+  "author": "Optional",
+  "colorScheme": "dark",
+  "colors": {
+    "appDark": "#1e1e1e",
+    "appDarker": "#121212",
+    "appGray": "#262626",
+    "appLight": "#2e2e2e",
+    "text": "#e6e6e7",
+    "muted": "#a1a1aa",
+    "border": "#3a3a3a",
+    "accent": "#3584e4",
+    "green": "#23a55a",
+    "red": "#e01b24",
+    "yellow": "#f6c84c"
+  }
+}
+```
 
 ## Install
 

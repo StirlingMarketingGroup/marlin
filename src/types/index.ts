@@ -89,6 +89,9 @@ export interface ViewPreferences {
   // Grid (thumbnail) view tile size in px (min column width)
   gridSize?: number;
   theme?: Theme;
+  darkThemeId?: string;
+  lightThemeId?: string;
+  customThemes?: ThemeDefinition[];
   accentColorMode?: 'system' | 'custom';
   accentColorCustom?: string;
 }
@@ -104,6 +107,28 @@ export interface DirectoryState {
 }
 
 export type Theme = 'system' | 'dark' | 'light';
+
+export type ThemeColorScheme = 'dark' | 'light';
+
+export interface ThemeDefinition {
+  id: string;
+  name: string;
+  author?: string;
+  colorScheme: ThemeColorScheme;
+  colors: {
+    appDark: string;
+    appDarker: string;
+    appGray: string;
+    appLight: string;
+    accent: string;
+    green: string;
+    red: string;
+    yellow: string;
+    text: string;
+    muted: string;
+    border: string;
+  };
+}
 
 export interface SystemDrive {
   name: string;
