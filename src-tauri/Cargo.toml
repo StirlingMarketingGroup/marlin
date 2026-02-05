@@ -84,6 +84,7 @@ filetime = "0.2"
 ab_glyph = "0.2"
 async-trait = "0.1"
 trash = "5.2.5"
+zpl-rs = "0.1"
 keyring = { version = "3.6.3", default-features = false, features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust", "vendored"] }
 
 # Google Drive integration

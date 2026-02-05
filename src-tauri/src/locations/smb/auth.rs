@@ -50,9 +50,33 @@ fn keyring_entry(hostname: &str) -> Result<keyring::Entry, String> {
 
 fn set_password(hostname: &str, password: &str) -> Result<(), String> {
     let entry = keyring_entry(hostname)?;
-    entry
-        .set_password(password)
-        .map_err(|e| format!("Failed to store password in keychain: {}", e))
+    match entry.set_password(password) {
+        Ok(()) => Ok(()),
+        Err(keyring::Error::Ambiguous(_)) => {
+            // Entry already exists with a different attribute set — delete and recreate
+            let _ = entry.delete_credential();
+            let entry = keyring_entry(hostname)?;
+            entry
+                .set_password(password)
+                .map_err(|e| format!("Failed to store password in keychain: {}", e))
+        }
+        Err(e) => {
+            // On macOS, "already exists" can surface as a platform error.
+            // Only attempt delete-then-retry for errors that look like duplicates;
+            // propagate other errors immediately to avoid accidentally deleting
+            // credentials on transient failures.
+            let msg = e.to_string().to_lowercase();
+            if msg.contains("already exists") || msg.contains("duplicate") {
+                let _ = entry.delete_credential();
+                let entry = keyring_entry(hostname)?;
+                entry.set_password(password).map_err(|retry_err| {
+                    format!("Failed to store password in keychain: {}", retry_err)
+                })
+            } else {
+                Err(format!("Failed to store password in keychain: {}", e))
+            }
+        }
+    }
 }
 
 fn get_password(hostname: &str) -> Result<String, String> {

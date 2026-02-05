@@ -68,6 +68,7 @@ function GridFilePreview({
   const isStl = ext === 'stl';
   const isVideo = isVideoExtension(ext);
   const isFont = !!ext && ['ttf', 'otf'].includes(ext);
+  const isZpl = ext === 'zpl';
   const isAppBundle = isMac && file.is_directory && file.name.toLowerCase().endsWith('.app');
 
   const badgeSize: 'sm' | 'md' | 'lg' = tile >= 200 ? 'lg' : tile >= 120 ? 'md' : 'sm';
@@ -105,7 +106,7 @@ function GridFilePreview({
     return best;
   };
 
-  const shouldLoadThumbnail = isImage || isPdf || isAi || isPsd || isStl || isVideo || isFont;
+  const shouldLoadThumbnail = isImage || isPdf || isAi || isPsd || isStl || isVideo || isFont || isZpl;
   const requestSize = pickBucket(Math.round((box - pad * 2) * dpr));
   const thumbnailPriority = stage === 'visible' ? 'high' : 'medium';
 

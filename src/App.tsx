@@ -1231,6 +1231,19 @@ function App() {
           await useAppStore.getState().refreshCurrentDirectoryStreaming();
         }
       });
+
+      // Cross-window clipboard sync: when any window copies remote files
+      // (which can't be written to the OS clipboard), broadcast the paths
+      // so other windows can paste them.
+      await register<{ paths: string[]; mode: string }>('clipboard:internal_copy', (evt) => {
+        if (document.hasFocus()) return; // Source window already has the state
+        const rawPaths = evt?.payload?.paths;
+        if (!Array.isArray(rawPaths) || rawPaths.length === 0) return;
+        const paths = rawPaths.filter((p): p is string => typeof p === 'string');
+        if (paths.length === 0) return;
+        const mode = evt?.payload?.mode === 'cut' ? 'cut' : 'copy';
+        useAppStore.getState().setClipboardState(paths, mode);
+      });
     })();
 
     // Keyboard shortcuts as fallback (mac-like)

@@ -342,6 +342,7 @@ interface AppState {
   pasteFiles: () => Promise<void>;
   syncClipboardState: () => Promise<void>;
   clearClipboardState: () => void;
+  setClipboardState: (paths: string[], mode: string) => void;
   // Rename UX
   justCreatedPath?: string;
   renameTargetPath?: string;
@@ -2100,6 +2101,11 @@ export const useAppStore = create<AppState>((set, get) => ({
         clipboardInternalOnly: true,
       });
 
+      // Broadcast to other windows so they can paste too
+      emit('clipboard:internal_copy', { paths: filePaths, mode: 'copy' }).catch((err) => {
+        console.warn('Failed to emit clipboard:internal_copy:', err);
+      });
+
       const count = filePaths.length;
       let message = count === 1 ? 'File copied.' : `${count} files copied.`;
       if (skippedFolders > 0) {
@@ -2172,6 +2178,11 @@ export const useAppStore = create<AppState>((set, get) => ({
         clipboardPaths: filePaths,
         clipboardPathsSet: new Set(filePaths),
         clipboardInternalOnly: true,
+      });
+
+      // Broadcast to other windows so they can paste too
+      emit('clipboard:internal_copy', { paths: filePaths, mode: 'cut' }).catch((err) => {
+        console.warn('Failed to emit clipboard:internal_copy:', err);
       });
 
       const count = filePaths.length;
@@ -2281,9 +2292,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
 
       if (skippedCount > 0) {
+        const detail = result.errorMessage ? `: ${result.errorMessage}` : '.';
         toastStore.addToast({
           type: 'info',
-          message: `${skippedCount} files could not be pasted.`,
+          message: `${skippedCount} file${skippedCount > 1 ? 's' : ''} could not be pasted${detail}`,
           duration: 5000,
         });
       }
@@ -2349,16 +2361,26 @@ export const useAppStore = create<AppState>((set, get) => ({
     };
 
     const pasteToRemoteDestination = async (clipboardInfo: ClipboardInfo) => {
-      if (clipboardInfo.hasImage && !clipboardInfo.hasFiles) {
+      // When the internal clipboard has files (remote copies like gdrive), prefer
+      // those over anything in the OS clipboard (which may be stale or an image).
+      const hasInternalClipboard =
+        state.clipboardInternalOnly && state.clipboardPaths.length > 0;
+
+      if (!hasInternalClipboard && clipboardInfo.hasImage && !clipboardInfo.hasFiles) {
         await pasteRemoteImage();
         return;
       }
 
-      const sourcePaths =
-        clipboardInfo.hasFiles && clipboardInfo.filePaths.length > 0
+      const sourcePaths = hasInternalClipboard
+        ? state.clipboardPaths
+        : clipboardInfo.hasFiles && clipboardInfo.filePaths.length > 0
           ? clipboardInfo.filePaths
           : state.clipboardPaths;
-      const isCut = clipboardInfo.hasFiles ? clipboardInfo.isCut : state.clipboardMode === 'cut';
+      const isCut = hasInternalClipboard
+        ? state.clipboardMode === 'cut'
+        : clipboardInfo.hasFiles
+          ? clipboardInfo.isCut
+          : state.clipboardMode === 'cut';
 
       if (!sourcePaths || sourcePaths.length === 0) {
         toastStore.addToast({
@@ -2716,6 +2738,15 @@ export const useAppStore = create<AppState>((set, get) => ({
       clipboardPaths: [],
       clipboardPathsSet: new Set<string>(),
       clipboardInternalOnly: false,
+    });
+  },
+
+  setClipboardState: (paths: string[], mode: string) => {
+    set({
+      clipboardMode: mode === 'cut' ? 'cut' : 'copy',
+      clipboardPaths: paths,
+      clipboardPathsSet: new Set(paths),
+      clipboardInternalOnly: true,
     });
   },
 

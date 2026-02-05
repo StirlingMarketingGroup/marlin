@@ -2316,6 +2316,7 @@ pub async fn paste_items_to_location(
 
         emit_clipboard_progress_item(&app, Some(name.clone()), completed, total_items, None);
 
+        log::debug!("paste_items_to_location: source_scheme={}, dest_scheme={}, name={}", source_scheme, dest_scheme, name);
         let result: Result<Option<String>, String> = match (source_scheme.as_str(), dest_scheme.as_str()) {
             ("file", "file") => {
                 let Some(dest_dir) = dest_dir_path.as_ref() else {
@@ -2331,201 +2332,6 @@ pub async fn paste_items_to_location(
                 } else {
                     source_provider.copy(&source_location, &dest_item_location).await?;
                 }
-                Ok(Some(dest_raw))
-            }
-            #[cfg(all(feature = "smb", not(target_os = "windows")))]
-            ("smb", "smb") => {
-                use crate::locations::smb::get_server_credentials;
-                use crate::locations::smb::SMB_MUTEX;
-                use pavao::{SmbClient, SmbCredentials, SmbOpenOptions, SmbOptions};
-                use std::io::ErrorKind;
-
-                let from_authority = source_location
-                    .authority()
-                    .ok_or_else(|| "SMB source missing server".to_string())?;
-                let to_authority = dest_location
-                    .authority()
-                    .ok_or_else(|| "SMB destination missing server".to_string())?;
-
-                if from_authority != to_authority {
-                    return Err("Cannot paste across different SMB servers".to_string());
-                }
-
-                let (hostname, share, from_rel) =
-                    crate::locations::smb::parse_smb_path(from_authority, source_location.path())?;
-                let (_, to_share, to_dir_rel) =
-                    crate::locations::smb::parse_smb_path(to_authority, dest_location.path())?;
-
-                if share != to_share {
-                    return Err("Cannot paste across different SMB shares".to_string());
-                }
-
-                let creds = get_server_credentials(&hostname)?;
-                let hostname_clone = hostname.clone();
-                let share_clone = share.clone();
-                let to_dir_rel_clone = to_dir_rel.clone();
-                let from_rel_clone = from_rel.clone();
-                let creds_username = creds.username.clone();
-                let creds_password = creds.password.clone();
-                let creds_domain = creds.domain.clone();
-                let name_clone = name.clone();
-                let is_cut_local = is_cut;
-
-                let pasted_name = tokio::task::spawn_blocking(move || -> Result<String, String> {
-                    use std::sync::atomic::{AtomicU64, Ordering};
-                    static FALLBACK_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-                    let _guard = SMB_MUTEX
-                        .lock()
-                        .map_err(|e| format!("SMB mutex poisoned: {e}"))?;
-
-                    let smb_url = format!("smb://{}", hostname_clone);
-                    let share_path = if share_clone.starts_with('/') {
-                        share_clone.clone()
-                    } else {
-                        format!("/{}", share_clone)
-                    };
-
-                    let mut credentials = SmbCredentials::default()
-                        .server(&smb_url)
-                        .share(&share_path)
-                        .username(&creds_username)
-                        .password(&creds_password);
-
-                    if let Some(domain) = &creds_domain {
-                        credentials = credentials.workgroup(domain);
-                    }
-
-                    let client = SmbClient::new(credentials, SmbOptions::default())
-                        .map_err(|e| format!("Failed to connect: {e}"))?;
-
-                    let (stem, ext) = {
-                        let p = Path::new(&name_clone);
-                        let stem = p
-                            .file_stem()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or(&name_clone)
-                            .to_string();
-                        let ext = p.extension().and_then(|e| e.to_str()).map(|s| s.to_string());
-                        (stem, ext)
-                    };
-
-                    // Allocate a unique destination name without overwriting.
-                    for i in 1..1000usize {
-                        let candidate = if i == 1 {
-                            name_clone.clone()
-                        } else if let Some(ref e) = ext {
-                            format!("{stem} ({i}).{e}")
-                        } else {
-                            format!("{stem} ({i})")
-                        };
-
-                        let dest_rel = if to_dir_rel_clone == "/" {
-                            format!("/{}", candidate)
-                        } else {
-                            format!("{}/{}", to_dir_rel_clone.trim_end_matches('/'), candidate)
-                        };
-
-                        if is_cut_local {
-                            // Rename (move) without overwriting.
-                            match client.rename(&from_rel_clone, &dest_rel) {
-                                Ok(()) => return Ok(candidate),
-                                Err(pavao::SmbError::Io(io))
-                                    if io.kind() == ErrorKind::AlreadyExists =>
-                                {
-                                    continue;
-                                }
-                                Err(e) => return Err(format!("Failed to move: {e}")),
-                            }
-                        } else {
-                            // Copy: create destination exclusively, then stream bytes.
-                            let mut src = client
-                                .open_with(&from_rel_clone, SmbOpenOptions::default().read(true))
-                                .map_err(|e| format!("Failed to open source: {e}"))?;
-
-                            let options = SmbOpenOptions::default()
-                                .write(true)
-                                .create(true)
-                                .exclusive(true);
-                            match client.open_with(&dest_rel, options) {
-                                Ok(mut dest) => {
-                                    std::io::copy(&mut src, &mut dest)
-                                        .map_err(|e| format!("Failed to copy: {e}"))?;
-                                    dest.flush().map_err(|e| format!("Failed to flush: {e}"))?;
-                                    return Ok(candidate);
-                                }
-                                Err(pavao::SmbError::Io(io))
-                                    if io.kind() == ErrorKind::AlreadyExists =>
-                                {
-                                    continue;
-                                }
-                                Err(e) => return Err(format!("Failed to create destination: {e}")),
-                            }
-                        }
-                    }
-
-                    // Fallback with high-resolution timestamp + counter
-                    let nanos = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_nanos())
-                        .unwrap_or(0);
-
-                    for _ in 0..128u32 {
-                        let counter = FALLBACK_COUNTER.fetch_add(1, Ordering::Relaxed);
-                        let candidate = if let Some(ref e) = ext {
-                            format!("{stem}_{nanos}_{counter}.{e}")
-                        } else {
-                            format!("{stem}_{nanos}_{counter}")
-                        };
-
-                        let dest_rel = if to_dir_rel_clone == "/" {
-                            format!("/{}", candidate)
-                        } else {
-                            format!("{}/{}", to_dir_rel_clone.trim_end_matches('/'), candidate)
-                        };
-
-                        if is_cut_local {
-                            match client.rename(&from_rel_clone, &dest_rel) {
-                                Ok(()) => return Ok(candidate),
-                                Err(pavao::SmbError::Io(io))
-                                    if io.kind() == ErrorKind::AlreadyExists =>
-                                {
-                                    continue;
-                                }
-                                Err(e) => return Err(format!("Failed to move: {e}")),
-                            }
-                        } else {
-                            let mut src = client
-                                .open_with(&from_rel_clone, SmbOpenOptions::default().read(true))
-                                .map_err(|e| format!("Failed to open source: {e}"))?;
-
-                            let options = SmbOpenOptions::default()
-                                .write(true)
-                                .create(true)
-                                .exclusive(true);
-                            match client.open_with(&dest_rel, options) {
-                                Ok(mut dest) => {
-                                    std::io::copy(&mut src, &mut dest)
-                                        .map_err(|e| format!("Failed to copy: {e}"))?;
-                                    dest.flush().map_err(|e| format!("Failed to flush: {e}"))?;
-                                    return Ok(candidate);
-                                }
-                                Err(pavao::SmbError::Io(io))
-                                    if io.kind() == ErrorKind::AlreadyExists =>
-                                {
-                                    continue;
-                                }
-                                Err(e) => return Err(format!("Failed to create destination: {e}")),
-                            }
-                        }
-                    }
-
-                    Err("Unable to allocate unique destination name".to_string())
-                })
-                .await
-                .map_err(|e| format!("Task failed: {e}"))??;
-
-                let dest_raw = join_dest_raw(&dest_scheme, &dest_dir_raw, &pasted_name);
                 Ok(Some(dest_raw))
             }
             (src, dst) if src == dst => {
@@ -2568,20 +2374,20 @@ pub async fn paste_items_to_location(
                 let temp_path = download_file_to_temp(email, &file_id, &name).await?;
 
                 let dest_path = allocate_unique_path(dest_dir.as_path(), &name)?;
-                crate::fs_utils::copy_file_or_directory(Path::new(&temp_path), &dest_path)?;
+                let copy_result = crate::fs_utils::copy_file_or_directory(Path::new(&temp_path), &dest_path);
+
+                // Clean up temp file regardless of copy outcome
+                let _ = fs::remove_file(Path::new(&temp_path));
+
+                copy_result?;
                 let out = dest_path.to_string_lossy().to_string();
                 if is_cut {
                     let _ = source_provider.delete(&source_location).await;
                 }
                 Ok(Some(out))
             }
-            #[cfg(all(feature = "smb", not(target_os = "windows")))]
+            #[cfg(not(target_os = "windows"))]
             ("smb", "file") => {
-                use crate::locations::smb::get_server_credentials;
-                use crate::locations::smb::SMB_MUTEX;
-                use pavao::{SmbClient, SmbCredentials, SmbOpenOptions, SmbOptions};
-                use std::fs::OpenOptions;
-
                 let Some(dest_dir) = dest_dir_path.as_ref() else {
                     return Err("Local destination directory is required".to_string());
                 };
@@ -2591,169 +2397,53 @@ pub async fn paste_items_to_location(
                     .ok_or_else(|| "SMB source missing server".to_string())?;
                 let (hostname, share, from_rel) =
                     crate::locations::smb::parse_smb_path(from_authority, source_location.path())?;
-                let creds = get_server_credentials(&hostname)?;
 
                 let dest_path = allocate_unique_path(dest_dir.as_path(), &name)?;
                 let dest_path_string = dest_path.to_string_lossy().to_string();
-                let dest_path_string_for_task = dest_path_string.clone();
-
+                let dest_path_clone = dest_path.clone();
                 let hostname_clone = hostname.clone();
                 let share_clone = share.clone();
                 let from_rel_clone = from_rel.clone();
-                let creds_username = creds.username.clone();
-                let creds_password = creds.password.clone();
-                let creds_domain = creds.domain.clone();
-                let is_cut_local = is_cut;
 
                 tokio::task::spawn_blocking(move || -> Result<(), String> {
-                    let _guard = SMB_MUTEX
-                        .lock()
-                        .map_err(|e| format!("SMB mutex poisoned: {e}"))?;
-
-                    let smb_url = format!("smb://{}", hostname_clone);
-                    let share_path = if share_clone.starts_with('/') {
-                        share_clone.clone()
-                    } else {
-                        format!("/{}", share_clone)
-                    };
-
-                    let mut credentials = SmbCredentials::default()
-                        .server(&smb_url)
-                        .share(&share_path)
-                        .username(&creds_username)
-                        .password(&creds_password);
-
-                    if let Some(domain) = &creds_domain {
-                        credentials = credentials.workgroup(domain);
-                    }
-
-                    let client = SmbClient::new(credentials, SmbOptions::default())
-                        .map_err(|e| format!("Failed to connect: {e}"))?;
-
-                    let mut src = client
-                        .open_with(&from_rel_clone, SmbOpenOptions::default().read(true))
-                        .map_err(|e| format!("Failed to open source: {e}"))?;
-
-                    let mut dst = OpenOptions::new()
-                        .write(true)
-                        .create_new(true)
-                        .open(&dest_path_string_for_task)
-                        .map_err(|e| format!("Failed to create destination: {e}"))?;
-
-                    std::io::copy(&mut src, &mut dst).map_err(|e| format!("Failed to copy: {e}"))?;
-
-                    if is_cut_local {
-                        let _ = client.unlink(&from_rel_clone);
-                    }
-
-                    Ok(())
+                    crate::locations::smb::download_file_from_smb(
+                        &hostname_clone,
+                        &share_clone,
+                        &from_rel_clone,
+                        &dest_path_clone,
+                    )
                 })
                 .await
                 .map_err(|e| format!("Task failed: {e}"))??;
 
+                if is_cut {
+                    let _ = source_provider.delete(&source_location).await;
+                }
                 Ok(Some(dest_path_string))
             }
-            #[cfg(all(feature = "smb", not(target_os = "windows")))]
+            #[cfg(not(target_os = "windows"))]
             ("file", "smb") => {
-                use crate::locations::smb::get_server_credentials;
-                use crate::locations::smb::SMB_MUTEX;
-                use pavao::{SmbClient, SmbCredentials, SmbOpenOptions, SmbOptions};
-                use std::io::ErrorKind;
-
                 let dest_authority = dest_location
                     .authority()
                     .ok_or_else(|| "SMB destination missing server".to_string())?;
                 let (hostname, share, dir_path) =
                     crate::locations::smb::parse_smb_path(dest_authority, dest_location.path())?;
-                let creds = get_server_credentials(&hostname)?;
 
                 let local_path = PathBuf::from(source_location.to_path_string());
                 if !local_path.exists() || !local_path.is_file() {
                     Ok(None)
                 } else {
-                    let hostname_clone = hostname.clone();
-                    let share_clone = share.clone();
-                    let dir_path_clone = dir_path.clone();
-                    let creds_username = creds.username.clone();
-                    let creds_password = creds.password.clone();
-                    let creds_domain = creds.domain.clone();
                     let name_clone = name.clone();
                     let local_path_for_task = local_path.clone();
 
                     let uploaded_name = tokio::task::spawn_blocking(move || -> Result<String, String> {
-                        let _guard = SMB_MUTEX
-                            .lock()
-                            .map_err(|e| format!("SMB mutex poisoned: {e}"))?;
-
-                        let smb_url = format!("smb://{}", hostname_clone);
-                        let share_path = if share_clone.starts_with('/') {
-                            share_clone.clone()
-                        } else {
-                            format!("/{}", share_clone)
-                        };
-
-                        let mut credentials = SmbCredentials::default()
-                            .server(&smb_url)
-                            .share(&share_path)
-                            .username(&creds_username)
-                            .password(&creds_password);
-
-                        if let Some(domain) = &creds_domain {
-                            credentials = credentials.workgroup(domain);
-                        }
-
-                        let client = SmbClient::new(credentials, SmbOptions::default())
-                            .map_err(|e| format!("Failed to connect: {e}"))?;
-
-                        let mut source_file =
-                            fs::File::open(&local_path_for_task).map_err(|e| format!("Failed to open source: {e}"))?;
-
-                        let (stem, ext) = {
-                            let p = Path::new(&name_clone);
-                            let stem = p
-                                .file_stem()
-                                .and_then(|s| s.to_str())
-                                .unwrap_or(&name_clone)
-                                .to_string();
-                            let ext = p.extension().and_then(|e| e.to_str()).map(|s| s.to_string());
-                            (stem, ext)
-                        };
-
-                        for i in 1..1000usize {
-                            let candidate = if i == 1 {
-                                name_clone.clone()
-                            } else if let Some(ref e) = ext {
-                                format!("{stem} ({i}).{e}")
-                            } else {
-                                format!("{stem} ({i})")
-                            };
-
-                            let dest_rel = if dir_path_clone == "/" {
-                                format!("/{}", candidate)
-                            } else {
-                                format!("{}/{}", dir_path_clone.trim_end_matches('/'), candidate)
-                            };
-
-                            let options = SmbOpenOptions::default()
-                                .write(true)
-                                .create(true)
-                                .exclusive(true);
-                            match client.open_with(&dest_rel, options) {
-                                Ok(mut dest_file) => {
-                                    std::io::copy(&mut source_file, &mut dest_file)
-                                        .map_err(|e| format!("Failed to upload: {e}"))?;
-                                    return Ok(candidate);
-                                }
-                                Err(pavao::SmbError::Io(io))
-                                    if io.kind() == ErrorKind::AlreadyExists =>
-                                {
-                                    continue;
-                                }
-                                Err(e) => return Err(format!("Failed to create destination: {e}")),
-                            }
-                        }
-
-                        Err("Unable to allocate unique destination name".to_string())
+                        crate::locations::smb::upload_file_to_smb(
+                            &local_path_for_task,
+                            &hostname,
+                            &share,
+                            &dir_path,
+                            &name_clone,
+                        )
                     })
                     .await
                     .map_err(|e| format!("Task failed: {e}"))??;
@@ -2767,8 +2457,52 @@ pub async fn paste_items_to_location(
                     Ok(Some(dest_raw))
                 }
             }
-            #[cfg(not(all(feature = "smb", not(target_os = "windows"))))]
-            ("file", "smb") => Err("SMB support not compiled. Build with --features smb".to_string()),
+            #[cfg(target_os = "windows")]
+            ("file", "smb") => Err("SMB support is not available on Windows".to_string()),
+            #[cfg(not(target_os = "windows"))]
+            ("gdrive", "smb") => {
+                // Download from Google Drive to temp, then upload to SMB
+                log::debug!("gdrive→smb: starting for name={}", name);
+                let email = source_location
+                    .authority()
+                    .ok_or_else(|| "Google Drive source missing account".to_string())?;
+                let file_id = get_file_id_by_path(email, source_location.path()).await?;
+                let temp_path = download_file_to_temp(email, &file_id, &name).await?;
+                log::debug!("gdrive→smb: downloaded to temp_path={}", temp_path);
+                let local_path = PathBuf::from(&temp_path);
+
+                let dest_authority = dest_location
+                    .authority()
+                    .ok_or_else(|| "SMB destination missing server".to_string())?;
+                let (hostname, share, dir_path) =
+                    crate::locations::smb::parse_smb_path(dest_authority, dest_location.path())?;
+
+                let name_clone = name.clone();
+                let local_path_clone = local_path.clone();
+                let uploaded_name = tokio::task::spawn_blocking(move || -> Result<String, String> {
+                    crate::locations::smb::upload_file_to_smb(
+                        &local_path_clone,
+                        &hostname,
+                        &share,
+                        &dir_path,
+                        &name_clone,
+                    )
+                })
+                .await
+                .map_err(|e| format!("Task failed: {e}"));
+
+                // Clean up temp file regardless of upload outcome
+                let _ = fs::remove_file(&local_path);
+
+                let uploaded_name = uploaded_name??;
+                let dest_raw = join_dest_raw(&dest_scheme, &dest_dir_raw, &uploaded_name);
+                if is_cut {
+                    let _ = source_provider.delete(&source_location).await;
+                }
+                Ok(Some(dest_raw))
+            }
+            #[cfg(target_os = "windows")]
+            ("gdrive", "smb") => Err("SMB support is not available on Windows".to_string()),
             _ => Err("Pasting across providers is not supported for these locations yet".to_string()),
         };
 
