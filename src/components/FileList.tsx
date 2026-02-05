@@ -65,7 +65,8 @@ function ListFilePreview({
   const isFont = !!ext && ['ttf', 'otf'].includes(ext);
   const isZpl = ext === 'zpl';
 
-  const isThumbnailCandidate = isImage || isPdf || isAi || isPsd || isStl || isVideo || isFont || isZpl;
+  const isThumbnailCandidate =
+    isImage || isPdf || isAi || isPsd || isStl || isVideo || isFont || isZpl;
   const dpr =
     typeof window !== 'undefined' ? Math.min(2, Math.max(1, window.devicePixelRatio || 1)) : 1;
   const priority = stage === 'visible' ? 'high' : 'medium';

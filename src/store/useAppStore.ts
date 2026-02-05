@@ -2363,8 +2363,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     const pasteToRemoteDestination = async (clipboardInfo: ClipboardInfo) => {
       // When the internal clipboard has files (remote copies like gdrive), prefer
       // those over anything in the OS clipboard (which may be stale or an image).
-      const hasInternalClipboard =
-        state.clipboardInternalOnly && state.clipboardPaths.length > 0;
+      const hasInternalClipboard = state.clipboardInternalOnly && state.clipboardPaths.length > 0;
 
       if (!hasInternalClipboard && clipboardInfo.hasImage && !clipboardInfo.hasFiles) {
         await pasteRemoteImage();

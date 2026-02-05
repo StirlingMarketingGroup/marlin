@@ -106,7 +106,8 @@ function GridFilePreview({
     return best;
   };
 
-  const shouldLoadThumbnail = isImage || isPdf || isAi || isPsd || isStl || isVideo || isFont || isZpl;
+  const shouldLoadThumbnail =
+    isImage || isPdf || isAi || isPsd || isStl || isVideo || isFont || isZpl;
   const requestSize = pickBucket(Math.round((box - pad * 2) * dpr));
   const thumbnailPriority = stage === 'visible' ? 'high' : 'medium';
 
