@@ -57,7 +57,14 @@ fn setup_libzpl() {
     // Find libzpl in any zpl-rs build output directory
     let mut found = false;
     if let Ok(entries) = std::fs::read_dir(build_dir) {
-        for entry in entries.flatten() {
+        for entry_result in entries {
+            let entry = match entry_result {
+                Ok(e) => e,
+                Err(e) => {
+                    println!("cargo:warning=libzpl: error reading build dir entry: {e}");
+                    continue;
+                }
+            };
             let name = entry.file_name();
             if name.to_string_lossy().starts_with("zpl-rs-") {
                 let lib_path = entry.path().join("out").join("lib").join(lib_name);
