@@ -223,6 +223,10 @@ impl ThumbnailService {
         self.worker.cancel_request(id).await
     }
 
+    pub fn cancel_all(&self) -> bool {
+        self.worker.cancel_all()
+    }
+
     pub async fn get_cache_stats(&self) -> cache::CacheStats {
         self.cache.get_stats().await
     }

@@ -1,6 +1,6 @@
 use rayon::ThreadPool;
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashMap};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{mpsc, oneshot, Semaphore};
@@ -43,6 +43,7 @@ impl PartialOrd for PriorityRequest {
 enum WorkerMessage {
     Request(PriorityRequest),
     Cancel(String),
+    CancelAll,
 }
 
 pub struct ThumbnailWorker {
@@ -92,6 +93,8 @@ impl ThumbnailWorker {
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
             let mut request_queue = BinaryHeap::new();
+            // Track spawned tasks so we can abort them on cancellation
+            let mut in_flight: HashMap<String, JoinHandle<()>> = HashMap::new();
 
             log::info!("Thumbnail worker {} started", worker_id);
 
@@ -103,7 +106,7 @@ impl ThumbnailWorker {
                             request_queue.push(priority_request);
                         }
                         WorkerMessage::Cancel(request_id) => {
-                            // Remove from queue (expensive, but cancellation should be rare)
+                            // Remove from queue
                             let mut new_queue = BinaryHeap::new();
                             while let Some(req) = request_queue.pop() {
                                 if req.request.id != request_id {
@@ -111,9 +114,26 @@ impl ThumbnailWorker {
                                 }
                             }
                             request_queue = new_queue;
+
+                            // Abort spawned task if still running
+                            if let Some(handle) = in_flight.remove(&request_id) {
+                                handle.abort();
+                            }
+                        }
+                        WorkerMessage::CancelAll => {
+                            // Clear the entire queue
+                            request_queue.clear();
+
+                            // Abort all in-flight tasks
+                            for (_, handle) in in_flight.drain() {
+                                handle.abort();
+                            }
                         }
                     }
                 }
+
+                // Prune finished tasks from in_flight map
+                in_flight.retain(|_, handle| !handle.is_finished());
 
                 // Launch as many tasks as we have permits and queued work
                 loop {
@@ -130,20 +150,40 @@ impl ThumbnailWorker {
                     };
 
                     let request = priority_request.request;
+                    let request_id = request.id.clone();
                     let response_sender = priority_request.response_sender;
                     let cache_clone = cache.clone();
                     let thread_pool_clone = thread_pool.clone();
 
                     // Spawn an async task to process this request; permit is dropped on completion
-                    tokio::spawn(async move {
+                    let handle = tokio::spawn(async move {
                         let start_time = Instant::now();
-                        // Generate thumbnail using thread pool
-                        let req_for_pool = request.clone();
+
+                        // Phase 1: Async pre-processing (downloads remote files without blocking threads)
+                        let prepared = match ThumbnailGenerator::prepare(request.clone()).await {
+                            Ok(p) => p,
+                            Err(e) => {
+                                log::warn!("THUMBNAIL PREPARE FAILED: path={}, error={}", request.path, e);
+                                let _ = response_sender.send(Err(format!("Thumbnail preparation failed: {}", e)));
+                                drop(permit);
+                                return;
+                            }
+                        };
+
+                        let temp_file = prepared.temp_file.clone();
+                        let req_for_pool = prepared.request;
+
+                        // Phase 2: CPU-bound generation in blocking thread pool (fast, no network I/O)
                         let result = tokio::task::spawn_blocking(move || {
                             thread_pool_clone
                                 .install(|| ThumbnailGenerator::generate(&req_for_pool))
                         })
                         .await;
+
+                        // Clean up any temp files from remote downloads
+                        if let Some(temp) = temp_file {
+                            let _ = std::fs::remove_file(&temp);
+                        }
 
                         let response = match result {
                             Ok(Ok(gen_result)) => {
@@ -199,6 +239,8 @@ impl ThumbnailWorker {
                         // Release permit at end of task
                         drop(permit);
                     });
+
+                    in_flight.insert(request_id, handle);
                 }
 
                 // Idle briefly to avoid tight-looping when queue is empty or saturated
@@ -235,5 +277,9 @@ impl ThumbnailWorker {
         self.sender
             .send(WorkerMessage::Cancel(request_id.to_string()))
             .is_ok()
+    }
+
+    pub fn cancel_all(&self) -> bool {
+        self.sender.send(WorkerMessage::CancelAll).is_ok()
     }
 }

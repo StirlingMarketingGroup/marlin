@@ -22,7 +22,11 @@ import { revealInFileBrowser } from '@/utils/fileBrowser';
 import Toast from './components/Toast';
 import FilterInput from './components/FilterInput';
 import { FULL_DISK_ACCESS_DISMISSED_KEY } from '@/utils/fullDiskAccessPrompt';
-import { PREFERENCES_UPDATED_EVENT, SMB_CONNECT_SUCCESS_EVENT } from '@/utils/events';
+import {
+  PREFERENCES_UPDATED_EVENT,
+  SMB_CONNECT_SUCCESS_EVENT,
+  SFTP_CONNECT_SUCCESS_EVENT,
+} from '@/utils/events';
 import { usePrefersReducedMotion } from '@/hooks/usePrefersReducedMotion';
 import { invalidateThumbnailsForPaths } from '@/hooks/useThumbnail';
 import type {
@@ -31,6 +35,7 @@ import type {
   FileItem,
   PersistedPreferences,
   SmbConnectSuccessPayload,
+  SftpConnectSuccessPayload,
   ViewPreferences,
 } from './types';
 
@@ -289,6 +294,46 @@ function App() {
         );
       } catch (error) {
         console.warn('Failed to listen for SMB connect success:', error);
+      }
+    })();
+
+    return () => {
+      if (unlisten) {
+        unlisten();
+      }
+    };
+  }, []);
+
+  // Handle SFTP connect flow coming from the SFTP connect window
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+
+    (async () => {
+      try {
+        unlisten = await listen<SftpConnectSuccessPayload>(
+          SFTP_CONNECT_SUCCESS_EVENT,
+          async (evt) => {
+            const payload = evt.payload;
+            if (!payload?.hostname) return;
+
+            const state = useAppStore.getState();
+            try {
+              await state.loadSftpServers();
+            } catch (error) {
+              console.warn('Failed to refresh SFTP server list after connect:', error);
+            }
+
+            state.setPendingSftpCredentialRequest(null);
+
+            const portSuffix = payload.port === 22 ? '' : `:${payload.port}`;
+            await state.navigateTo(
+              payload.targetPath ||
+                `sftp://${payload.username}@${payload.hostname}${portSuffix}/`
+            );
+          }
+        );
+      } catch (error) {
+        console.warn('Failed to listen for SFTP connect success:', error);
       }
     })();
 
@@ -1163,52 +1208,9 @@ function App() {
         }
       });
 
-      const execDocumentCommand = (command: 'copy' | 'cut' | 'paste') => {
-        try {
-          document.execCommand(command);
-        } catch (error) {
-          console.warn(`document.execCommand(${command}) failed`, error);
-        }
-      };
-
-      const handleClipboardMenuAction = (action: 'copy' | 'cut' | 'paste') => {
-        const state = useAppStore.getState();
-        const active = document.activeElement as HTMLElement | null;
-        const inEditable =
-          !!active &&
-          (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable);
-
-        if (inEditable) {
-          execDocumentCommand(action);
-          return;
-        }
-
-        if (action === 'copy') {
-          if (state.selectedFiles.length > 0) {
-            void state.copySelectedFiles();
-          } else {
-            execDocumentCommand('copy');
-          }
-          return;
-        }
-
-        if (action === 'cut') {
-          if (state.selectedFiles.length > 0) {
-            void state.cutSelectedFiles();
-          } else {
-            execDocumentCommand('cut');
-          }
-          return;
-        }
-
-        // paste
-        void state.pasteFiles();
-      };
-
-      // Clipboard operations from menu (single Copy/Cut/Paste items)
-      await registerFocused('menu:copy_files', () => handleClipboardMenuAction('copy'));
-      await registerFocused('menu:cut_files', () => handleClipboardMenuAction('cut'));
-      await registerFocused('menu:paste_files', () => handleClipboardMenuAction('paste'));
+      // Clipboard operations are handled entirely via JS keydown events.
+      // The Edit menu uses native PredefinedMenuItem (cut/copy/paste) so
+      // text input fields work correctly without execCommand hacks.
 
       // Cross-window clipboard sync: when any window completes a cut+paste,
       // all windows must clear their clipboard state and refresh if affected.
@@ -1645,9 +1647,6 @@ function App() {
 
       const meta = e.metaKey || e.ctrlKey;
       if (!meta) return;
-      const isTauri =
-        typeof (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ !==
-        'undefined';
       const isRenaming = !!useAppStore.getState().renameTargetPath;
       const hasModal = !!document.querySelector(
         '[role="dialog"], [aria-modal="true"], [data-modal="true"]'
@@ -1682,12 +1681,12 @@ function App() {
       }
 
       // Clipboard shortcuts (Cmd/Ctrl+C, X, V)
-      // In the native app, let menu accelerators handle these so we don't double-trigger.
-      if (!isTauri) {
-        // Only handle when not in editable element and files are selected (for C/X)
+      // The Edit menu uses native PredefinedMenuItem, so when focused in a text
+      // input the OS handles copy/cut/paste natively. Here we only intercept
+      // when NOT in an editable field to do file operations instead.
+      {
         const keyLc = e.key.toLowerCase();
 
-        // Copy: Cmd/Ctrl+C
         if (keyLc === 'c' && !inEditable) {
           const state = useAppStore.getState();
           if (state.selectedFiles.length > 0) {
@@ -1695,10 +1694,8 @@ function App() {
             void state.copySelectedFiles();
             return;
           }
-          // If no files selected, allow default browser copy (text selection)
         }
 
-        // Cut: Cmd/Ctrl+X
         if (keyLc === 'x' && !inEditable) {
           const state = useAppStore.getState();
           if (state.selectedFiles.length > 0) {
@@ -1706,10 +1703,8 @@ function App() {
             void state.cutSelectedFiles();
             return;
           }
-          // If no files selected, allow default browser cut
         }
 
-        // Paste: Cmd/Ctrl+V
         if (keyLc === 'v' && !inEditable) {
           e.preventDefault();
           void useAppStore.getState().pasteFiles();

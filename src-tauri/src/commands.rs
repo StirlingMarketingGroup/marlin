@@ -116,8 +116,10 @@ const CLIPBOARD_PROGRESS_EVENT: &str = "clipboard-progress:init";
 const CLIPBOARD_PROGRESS_UPDATE_EVENT: &str = "clipboard-progress:update";
 const CLIPBOARD_PROGRESS_WINDOW_LABEL: &str = "clipboard-progress";
 const SMB_CONNECT_INIT_EVENT: &str = "smb-connect:init";
+const SFTP_CONNECT_INIT_EVENT: &str = "sftp-connect:init";
 const PINNED_DIRECTORIES_CHANGED_EVENT: &str = "pinned-directories:changed";
 const SMB_CONNECT_WINDOW_LABEL: &str = "smb-connect";
+const SFTP_CONNECT_WINDOW_LABEL: &str = "sftp-connect";
 const PERMISSIONS_WINDOW_LABEL: &str = "permissions";
 const PREFERENCES_WINDOW_LABEL: &str = "preferences";
 
@@ -216,6 +218,8 @@ static CLIPBOARD_PROGRESS_QUEUE: Lazy<WindowPayloadQueue<ClipboardProgressPayloa
 );
 static SMB_CONNECT_QUEUE: Lazy<WindowPayloadQueue<SmbConnectInitPayload>> =
     Lazy::new(|| WindowPayloadQueue::new(SMB_CONNECT_WINDOW_LABEL, SMB_CONNECT_INIT_EVENT));
+static SFTP_CONNECT_QUEUE: Lazy<WindowPayloadQueue<SftpConnectInitPayload>> =
+    Lazy::new(|| WindowPayloadQueue::new(SFTP_CONNECT_WINDOW_LABEL, SFTP_CONNECT_INIT_EVENT));
 
 const FOLDER_SIZE_WINDOW_READY_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const FOLDER_SIZE_WINDOW_READY_POLL_ATTEMPTS: u32 = 40;
@@ -575,6 +579,15 @@ struct ClipboardProgressUpdatePayload {
 #[serde(rename_all = "camelCase")]
 struct SmbConnectInitPayload {
     initial_hostname: Option<String>,
+    target_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SftpConnectInitPayload {
+    initial_hostname: Option<String>,
+    initial_port: Option<u16>,
+    initial_username: Option<String>,
     target_path: Option<String>,
 }
 
@@ -2503,6 +2516,217 @@ pub async fn paste_items_to_location(
             }
             #[cfg(target_os = "windows")]
             ("gdrive", "smb") => Err("SMB support is not available on Windows".to_string()),
+            // SFTP cross-provider paste
+            ("sftp", "file") => {
+                let Some(dest_dir) = dest_dir_path.as_ref() else {
+                    return Err("Local destination directory is required".to_string());
+                };
+
+                let (_, sftp_host, sftp_port, sftp_remote_path) =
+                    crate::locations::sftp::parse_sftp_url(source_location.raw())?;
+
+                let dest_path = allocate_unique_path(dest_dir.as_path(), &name)?;
+                let dest_path_string = dest_path.to_string_lossy().to_string();
+
+                crate::locations::sftp::download_file_from_sftp(
+                    &sftp_host,
+                    sftp_port,
+                    &sftp_remote_path,
+                    &dest_path,
+                )
+                .await?;
+
+                if is_cut {
+                    let _ = source_provider.delete(&source_location).await;
+                }
+                Ok(Some(dest_path_string))
+            }
+            ("file", "sftp") => {
+                let (_, sftp_host, sftp_port, sftp_dir_path) =
+                    crate::locations::sftp::parse_sftp_url(dest_location.raw())?;
+
+                let local_path = PathBuf::from(source_location.to_path_string());
+                if !local_path.exists() || !local_path.is_file() {
+                    Ok(None)
+                } else {
+                    let uploaded_name = crate::locations::sftp::upload_file_to_sftp(
+                        &local_path,
+                        &sftp_host,
+                        sftp_port,
+                        &sftp_dir_path,
+                        &name,
+                    )
+                    .await?;
+
+                    let dest_raw = join_dest_raw(&dest_scheme, &dest_dir_raw, &uploaded_name);
+                    if is_cut {
+                        if let Err(e) = fs::remove_file(&local_path) {
+                            last_error = Some(format!("Uploaded but failed to delete source: {e}"));
+                        }
+                    }
+                    Ok(Some(dest_raw))
+                }
+            }
+            ("gdrive", "sftp") => {
+                let email = source_location
+                    .authority()
+                    .ok_or_else(|| "Google Drive source missing account".to_string())?;
+                let file_id = get_file_id_by_path(email, source_location.path()).await?;
+                let temp_path_str = download_file_to_temp(email, &file_id, &name).await?;
+                let local_path = PathBuf::from(&temp_path_str);
+
+                let (_, sftp_host, sftp_port, sftp_dir_path) =
+                    crate::locations::sftp::parse_sftp_url(dest_location.raw())?;
+
+                let upload_result = crate::locations::sftp::upload_file_to_sftp(
+                    &local_path,
+                    &sftp_host,
+                    sftp_port,
+                    &sftp_dir_path,
+                    &name,
+                )
+                .await;
+
+                let _ = fs::remove_file(&local_path);
+
+                let uploaded_name = upload_result?;
+                let dest_raw = join_dest_raw(&dest_scheme, &dest_dir_raw, &uploaded_name);
+                if is_cut {
+                    let _ = source_provider.delete(&source_location).await;
+                }
+                Ok(Some(dest_raw))
+            }
+            ("sftp", "gdrive") => {
+                let (_, sftp_host, sftp_port, sftp_remote_path) =
+                    crate::locations::sftp::parse_sftp_url(source_location.raw())?;
+
+                let temp_dir = std::env::temp_dir().join("marlin-sftp-paste");
+                tokio::fs::create_dir_all(&temp_dir)
+                    .await
+                    .map_err(|e| format!("Failed to create temp dir: {e}"))?;
+                let temp_path = temp_dir.join(format!("{}_{}", uuid::Uuid::new_v4(), name));
+
+                crate::locations::sftp::download_file_from_sftp(
+                    &sftp_host,
+                    sftp_port,
+                    &sftp_remote_path,
+                    &temp_path,
+                )
+                .await?;
+
+                let email = dest_location
+                    .authority()
+                    .ok_or_else(|| "Google Drive destination missing account".to_string())?;
+                let folder_id = get_folder_id_by_path(email, dest_location.path()).await?;
+                let upload_result = upload_file_to_gdrive(email, &temp_path, &folder_id, &name).await;
+
+                let _ = tokio::fs::remove_file(&temp_path).await;
+
+                upload_result?;
+                let dest_raw = join_dest_raw(&dest_scheme, &dest_dir_raw, &name);
+                if is_cut {
+                    let _ = source_provider.delete(&source_location).await;
+                }
+                Ok(Some(dest_raw))
+            }
+            #[cfg(not(target_os = "windows"))]
+            ("smb", "sftp") => {
+                let from_authority = source_location
+                    .authority()
+                    .ok_or_else(|| "SMB source missing server".to_string())?;
+                let (smb_host, smb_share, smb_path) =
+                    crate::locations::smb::parse_smb_path(from_authority, source_location.path())?;
+
+                let temp_dir = std::env::temp_dir().join("marlin-cross-paste");
+                tokio::fs::create_dir_all(&temp_dir)
+                    .await
+                    .map_err(|e| format!("Failed to create temp dir: {e}"))?;
+                let temp_path = temp_dir.join(format!("{}_{}", uuid::Uuid::new_v4(), name));
+
+                let temp_path_clone = temp_path.clone();
+                let smb_host_clone = smb_host.clone();
+                let smb_share_clone = smb_share.clone();
+                let smb_path_clone = smb_path.clone();
+                tokio::task::spawn_blocking(move || {
+                    crate::locations::smb::download_file_from_smb(
+                        &smb_host_clone,
+                        &smb_share_clone,
+                        &smb_path_clone,
+                        &temp_path_clone,
+                    )
+                })
+                .await
+                .map_err(|e| format!("Task failed: {e}"))??;
+
+                let (_, sftp_host, sftp_port, sftp_dir_path) =
+                    crate::locations::sftp::parse_sftp_url(dest_location.raw())?;
+
+                let upload_result = crate::locations::sftp::upload_file_to_sftp(
+                    &temp_path,
+                    &sftp_host,
+                    sftp_port,
+                    &sftp_dir_path,
+                    &name,
+                )
+                .await;
+
+                let _ = tokio::fs::remove_file(&temp_path).await;
+
+                let uploaded_name = upload_result?;
+                let dest_raw = join_dest_raw(&dest_scheme, &dest_dir_raw, &uploaded_name);
+                if is_cut {
+                    let _ = source_provider.delete(&source_location).await;
+                }
+                Ok(Some(dest_raw))
+            }
+            #[cfg(not(target_os = "windows"))]
+            ("sftp", "smb") => {
+                let (_, sftp_host, sftp_port, sftp_remote_path) =
+                    crate::locations::sftp::parse_sftp_url(source_location.raw())?;
+
+                let temp_dir = std::env::temp_dir().join("marlin-cross-paste");
+                tokio::fs::create_dir_all(&temp_dir)
+                    .await
+                    .map_err(|e| format!("Failed to create temp dir: {e}"))?;
+                let temp_path = temp_dir.join(format!("{}_{}", uuid::Uuid::new_v4(), name));
+
+                crate::locations::sftp::download_file_from_sftp(
+                    &sftp_host,
+                    sftp_port,
+                    &sftp_remote_path,
+                    &temp_path,
+                )
+                .await?;
+
+                let dest_authority = dest_location
+                    .authority()
+                    .ok_or_else(|| "SMB destination missing server".to_string())?;
+                let (smb_host, smb_share, smb_dir_path) =
+                    crate::locations::smb::parse_smb_path(dest_authority, dest_location.path())?;
+
+                let name_clone = name.clone();
+                let temp_path_clone = temp_path.clone();
+                let upload_result = tokio::task::spawn_blocking(move || {
+                    crate::locations::smb::upload_file_to_smb(
+                        &temp_path_clone,
+                        &smb_host,
+                        &smb_share,
+                        &smb_dir_path,
+                        &name_clone,
+                    )
+                })
+                .await
+                .map_err(|e| format!("Task failed: {e}"));
+
+                let _ = tokio::fs::remove_file(&temp_path).await;
+
+                let uploaded_name = upload_result??;
+                let dest_raw = join_dest_raw(&dest_scheme, &dest_dir_raw, &uploaded_name);
+                if is_cut {
+                    let _ = source_provider.delete(&source_location).await;
+                }
+                Ok(Some(dest_raw))
+            }
             _ => Err("Pasting across providers is not supported for these locations yet".to_string()),
         };
 
@@ -2755,6 +2979,52 @@ pub async fn clipboard_paste_image_to_location(
             format!("{}{}", dest_location.raw(), candidate_name)
         } else {
             format!("{}/{}", dest_location.raw(), candidate_name)
+        };
+        let result = PasteImageResult { path: dest_raw };
+        emit_clipboard_progress_update(
+            &app,
+            ClipboardProgressUpdatePayload {
+                operation: None,
+                destination: None,
+                current_item: None,
+                completed: 1,
+                total: 1,
+                finished: true,
+                error: None,
+            },
+        );
+        return Ok(result);
+    }
+
+    if dest_scheme == "sftp" {
+        let (_, sftp_host, sftp_port, sftp_dir_path) =
+            crate::locations::sftp::parse_sftp_url(dest_location.raw())?;
+
+        // Write image to temp file
+        let temp_dir = std::env::temp_dir().join("marlin-clipboard-cache");
+        std::fs::create_dir_all(&temp_dir)
+            .map_err(|e| format!("Failed to create temp directory: {e}"))?;
+        let temp_path = temp_dir.join(format!("sftp_upload_{}", uuid::Uuid::new_v4()));
+        std::fs::write(&temp_path, &image_bytes)
+            .map_err(|e| format!("Failed to write temp file: {e}"))?;
+
+        let uploaded_name = crate::locations::sftp::upload_file_to_sftp(
+            &temp_path,
+            &sftp_host,
+            sftp_port,
+            &sftp_dir_path,
+            &base_name,
+        )
+        .await;
+
+        let _ = std::fs::remove_file(&temp_path);
+
+        let uploaded_name = uploaded_name?;
+
+        let dest_raw = if dest_location.raw().ends_with('/') {
+            format!("{}{}", dest_location.raw(), uploaded_name)
+        } else {
+            format!("{}/{}", dest_location.raw(), uploaded_name)
         };
         let result = PasteImageResult { path: dest_raw };
         emit_clipboard_progress_update(
@@ -4741,6 +5011,12 @@ pub async fn cancel_thumbnail(request_id: String) -> Result<bool, String> {
 }
 
 #[tauri::command]
+pub async fn cancel_all_thumbnails() -> Result<bool, String> {
+    let service = get_thumbnail_service().await?;
+    Ok(service.cancel_all())
+}
+
+#[tauri::command]
 pub async fn get_thumbnail_cache_stats() -> Result<crate::thumbnails::cache::CacheStats, String> {
     let service = get_thumbnail_service().await?;
     Ok(service.get_cache_stats().await)
@@ -5413,16 +5689,24 @@ pub fn show_delete_progress_window(
     Ok(())
 }
 
-fn configure_modal_utility_window<'a, R: tauri::Runtime, M: tauri::Manager<R>>(
-    builder: tauri::WebviewWindowBuilder<'a, R, M>,
-) -> tauri::WebviewWindowBuilder<'a, R, M> {
-    builder
+fn configure_modal_utility_window<'a>(
+    app: &'a AppHandle,
+    builder: tauri::WebviewWindowBuilder<'a, tauri::Wry, AppHandle>,
+) -> tauri::WebviewWindowBuilder<'a, tauri::Wry, AppHandle> {
+    let builder = builder
         .resizable(false)
         .fullscreen(false)
         .minimizable(false)
         .maximizable(false)
         .closable(true)
-        .decorations(true)
+        .decorations(true);
+
+    // Give child windows a native Edit menu so Cmd+C/X/V work in text inputs
+    // instead of being intercepted by the main window's custom accelerators.
+    match crate::menu::create_child_window_menu(app) {
+        Ok(menu) => builder.menu(menu),
+        Err(_) => builder,
+    }
 }
 
 #[command]
@@ -5444,7 +5728,7 @@ pub fn open_smb_connect_window(
     }
 
     let url = tauri::WebviewUrl::App("index.html?view=smb-connect".into());
-    let builder = configure_modal_utility_window(tauri::WebviewWindowBuilder::new(
+    let builder = configure_modal_utility_window(&app, tauri::WebviewWindowBuilder::new(
         &app,
         SMB_CONNECT_WINDOW_LABEL,
         url,
@@ -5503,7 +5787,7 @@ pub fn open_permissions_window(app: AppHandle) -> Result<(), String> {
     }
 
     let url = tauri::WebviewUrl::App("index.html?view=permissions".into());
-    let builder = configure_modal_utility_window(tauri::WebviewWindowBuilder::new(
+    let builder = configure_modal_utility_window(&app, tauri::WebviewWindowBuilder::new(
         &app,
         PERMISSIONS_WINDOW_LABEL,
         url,
@@ -5533,7 +5817,7 @@ pub fn open_preferences_window(app: AppHandle) -> Result<(), String> {
     }
 
     let url = tauri::WebviewUrl::App("index.html?view=preferences".into());
-    let builder = configure_modal_utility_window(tauri::WebviewWindowBuilder::new(
+    let builder = configure_modal_utility_window(&app, tauri::WebviewWindowBuilder::new(
         &app,
         PREFERENCES_WINDOW_LABEL,
         url,
@@ -6776,4 +7060,142 @@ pub async fn download_smb_file(path: String) -> Result<String, String> {
 #[command]
 pub async fn download_smb_file(_path: String) -> Result<String, String> {
     Err("SMB download not supported on Windows".to_string())
+}
+
+// SFTP Server Commands
+// ============================================================================
+
+/// Get all connected SFTP servers
+#[command]
+pub fn get_sftp_servers() -> Result<Vec<crate::locations::sftp::SftpServerInfo>, String> {
+    crate::locations::sftp::get_sftp_servers()
+}
+
+/// Add a new SFTP server
+#[command]
+pub fn add_sftp_server(
+    hostname: String,
+    port: u16,
+    username: String,
+    password: Option<String>,
+    auth_method: String,
+    key_path: Option<String>,
+) -> Result<crate::locations::sftp::SftpServerInfo, String> {
+    crate::locations::sftp::add_sftp_server(hostname, port, username, password, auth_method, key_path)
+}
+
+/// Remove an SFTP server
+#[command]
+pub async fn remove_sftp_server(hostname: String, port: u16) -> Result<(), String> {
+    crate::locations::sftp::remove_sftp_server(&hostname, port)?;
+    // Drop any cached SFTP sessions for this server
+    crate::locations::sftp::pool::drop_connections(&hostname, port).await;
+    Ok(())
+}
+
+/// Test connection to an SFTP server
+#[command]
+pub async fn test_sftp_connection(
+    hostname: String,
+    port: u16,
+    username: String,
+    password: Option<String>,
+    auth_method: String,
+    key_path: Option<String>,
+) -> Result<bool, String> {
+    crate::locations::sftp::pool::test_connection(
+        &hostname,
+        port,
+        &username,
+        password.as_deref(),
+        &auth_method,
+        key_path.as_deref(),
+    )
+    .await
+}
+
+/// Download an SFTP file to a temporary location (for drag-out/open-in-external-app).
+/// Returns the temporary file path.
+#[command]
+pub async fn download_sftp_file(path: String) -> Result<String, String> {
+    crate::locations::sftp::download_sftp_file_to_temp(&path)
+        .await
+        .map(|p| p.to_string_lossy().to_string())
+}
+
+/// Open the SFTP connect window
+#[command]
+pub fn open_sftp_connect_window(
+    app: AppHandle,
+    initial_hostname: Option<String>,
+    initial_port: Option<u16>,
+    initial_username: Option<String>,
+    target_path: Option<String>,
+) -> Result<(), String> {
+    let payload = SftpConnectInitPayload {
+        initial_hostname,
+        initial_port,
+        initial_username,
+        target_path,
+    };
+
+    if let Some(existing) = app.get_webview_window(SFTP_CONNECT_WINDOW_LABEL) {
+        SFTP_CONNECT_QUEUE.queue(&app, payload);
+        let _ = existing.show();
+        let _ = existing.set_focus();
+        return Ok(());
+    }
+
+    let url = tauri::WebviewUrl::App("index.html?view=sftp-connect".into());
+    let builder = configure_modal_utility_window(&app, tauri::WebviewWindowBuilder::new(
+        &app,
+        SFTP_CONNECT_WINDOW_LABEL,
+        url,
+    ))
+        .title("Add SFTP Server")
+        .inner_size(460.0, 600.0);
+
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true)
+        .traffic_light_position(tauri::LogicalPosition::new(14.0, 14.0));
+
+    SFTP_CONNECT_QUEUE.set_ready(false);
+
+    builder
+        .build()
+        .map_err(|e| format!("Failed to create SFTP connect window: {}", e))?;
+
+    SFTP_CONNECT_QUEUE.queue(&app, payload);
+    Ok(())
+}
+
+/// Close the SFTP connect window
+#[command]
+pub fn hide_sftp_connect_window(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(SFTP_CONNECT_WINDOW_LABEL) {
+        if let Err(err) = window.close() {
+            warn!("Failed to close SFTP connect window: {err}");
+        }
+    }
+
+    SFTP_CONNECT_QUEUE.set_ready(false);
+    SFTP_CONNECT_QUEUE.clear_pending();
+    Ok(())
+}
+
+/// Mark SFTP connect window as ready
+#[command]
+pub fn sftp_connect_window_ready(app: AppHandle) -> Result<(), String> {
+    SFTP_CONNECT_QUEUE.set_ready(true);
+    SFTP_CONNECT_QUEUE.try_emit(&app);
+    Ok(())
+}
+
+/// Mark SFTP connect window as not ready
+#[command]
+pub fn sftp_connect_window_unready() -> Result<(), String> {
+    SFTP_CONNECT_QUEUE.set_ready(false);
+    Ok(())
 }

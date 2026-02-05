@@ -2,8 +2,6 @@ use base64::Engine as _;
 use image::{DynamicImage, GenericImageView, ImageFormat};
 use std::io::Cursor;
 use std::path::Path;
-use std::sync::OnceLock;
-
 use super::{ThumbnailFormat, ThumbnailGenerationResult, ThumbnailQuality, ThumbnailRequest};
 
 #[cfg(target_os = "macos")]
@@ -19,77 +17,84 @@ pub mod video;
 pub mod fonts;
 pub mod zpl;
 
+pub mod sftp;
 pub mod smb;
-
-/// Shared runtime for async thumbnail operations (archive extraction, Google Drive download, etc.)
-/// Using OnceLock ensures we create it only once and reuse it
-static ASYNC_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-
-fn get_async_runtime() -> &'static tokio::runtime::Runtime {
-    ASYNC_RUNTIME.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .expect("Failed to create thumbnail async runtime")
-    })
-}
 
 pub struct ThumbnailGenerator;
 
+/// Result of async pre-processing: a local file path ready for CPU-bound generation,
+/// plus an optional temp file to clean up after.
+pub struct PreparedRequest {
+    pub request: ThumbnailRequest,
+    pub temp_file: Option<std::path::PathBuf>,
+}
+
 impl ThumbnailGenerator {
-    pub fn generate(request: &ThumbnailRequest) -> Result<ThumbnailGenerationResult, String> {
+    /// Async pre-processing phase: downloads remote files to local temp paths.
+    /// This runs in the async context (no thread blocking) and must be called
+    /// BEFORE `generate()` which runs in `spawn_blocking`.
+    pub async fn prepare(request: ThumbnailRequest) -> Result<PreparedRequest, String> {
         if request.path.starts_with("archive://") {
-            let archive_path = request.path.clone();
-            let runtime = get_async_runtime();
-            let temp_path = runtime.block_on(
-                crate::locations::archive::extract_archive_entry_to_temp(&archive_path),
-            )?;
-
-            let mut temp_request = request.clone();
-            temp_request.path = temp_path.to_string_lossy().to_string();
-            return Self::generate_local(&temp_request);
+            let temp_path =
+                crate::locations::archive::extract_archive_entry_to_temp(&request.path).await?;
+            let mut prepared = request;
+            prepared.path = temp_path.to_string_lossy().to_string();
+            return Ok(PreparedRequest {
+                request: prepared,
+                temp_file: Some(temp_path),
+            });
         }
 
-        // Download Google Drive files to a local temp path before generating thumbnails
         if request.path.starts_with("gdrive://") {
-            return Self::generate_gdrive(request);
+            let (email, path) = parse_gdrive_path(&request.path)?;
+            let file_name = std::path::Path::new(&path)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("file")
+                .to_string();
+
+            let file_id =
+                crate::locations::gdrive::provider::get_file_id_by_path(&email, &path).await?;
+            let temp_path =
+                crate::locations::gdrive::provider::download_file_to_temp(&email, &file_id, &file_name)
+                    .await?;
+
+            let mut prepared = request;
+            prepared.path = temp_path.clone();
+            return Ok(PreparedRequest {
+                request: prepared,
+                temp_file: Some(std::path::PathBuf::from(temp_path)),
+            });
         }
 
+        if sftp::is_sftp_path(&request.path) {
+            let temp_path = sftp::download_sftp_file_async(&request.path).await?;
+            let mut prepared = request;
+            prepared.path = temp_path.to_string_lossy().to_string();
+            return Ok(PreparedRequest {
+                request: prepared,
+                temp_file: Some(temp_path),
+            });
+        }
+
+        // SMB and local files: no async pre-processing needed
+        Ok(PreparedRequest {
+            request,
+            temp_file: None,
+        })
+    }
+
+    /// Synchronous generation phase: CPU-bound image processing only.
+    /// Remote files should already be downloaded via `prepare()`.
+    /// This is safe to call from `spawn_blocking`.
+    pub fn generate(request: &ThumbnailRequest) -> Result<ThumbnailGenerationResult, String> {
         // Check for SMB paths and handle them specially
         if smb::is_smb_path(&request.path) {
             return smb::generate_smb_thumbnail(request);
         }
 
-        // Handle local files
+        // All other paths (local, or remote files already downloaded by prepare())
         Self::generate_local(request)
-    }
-
-    /// Download a Google Drive file to temp and generate a thumbnail from the local copy.
-    fn generate_gdrive(request: &ThumbnailRequest) -> Result<ThumbnailGenerationResult, String> {
-        let (email, path) = parse_gdrive_path(&request.path)?;
-        let file_name = std::path::Path::new(&path)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("file");
-
-        let runtime = get_async_runtime();
-        let file_id = runtime.block_on(
-            crate::locations::gdrive::provider::get_file_id_by_path(&email, &path),
-        )?;
-
-        let temp_path = runtime.block_on(
-            crate::locations::gdrive::provider::download_file_to_temp(&email, &file_id, file_name),
-        )?;
-
-        let mut temp_request = request.clone();
-        temp_request.path = temp_path.clone();
-        let result = Self::generate_local(&temp_request);
-
-        // Clean up temp file regardless of outcome
-        let _ = std::fs::remove_file(&temp_path);
-
-        result
     }
 
     /// Generate a thumbnail from a local file path.

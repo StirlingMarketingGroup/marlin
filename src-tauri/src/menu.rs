@@ -1,10 +1,34 @@
 use tauri::{
-    menu::{AboutMetadata, CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder},
+    menu::{AboutMetadata, CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder, SubmenuBuilder},
     AppHandle, Emitter, Manager, Runtime,
 };
 use tauri_plugin_opener::OpenerExt;
 
 const GITHUB_REPO_URL: &str = "https://github.com/StirlingMarketingGroup/marlin";
+
+/// Create a minimal menu with native Edit items for child/utility windows.
+/// Uses PredefinedMenuItem so Cmd+C/X/V/A work natively in text inputs
+/// without being intercepted by the main window's custom accelerators.
+pub fn create_child_window_menu<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<tauri::menu::Menu<R>, tauri::Error> {
+    let edit_submenu = SubmenuBuilder::new(app, "Edit")
+        .undo()
+        .redo()
+        .separator()
+        .cut()
+        .copy()
+        .paste()
+        .separator()
+        .select_all()
+        .build()?;
+
+    let menu = MenuBuilder::new(app)
+        .item(&edit_submenu)
+        .build()?;
+
+    Ok(menu)
+}
 
 pub fn create_menu<R: Runtime>(
     app: &AppHandle<R>,
@@ -110,27 +134,19 @@ pub fn create_menu<R: Runtime>(
         .close_window()
         .build()?;
 
-    // Custom clipboard items (frontend decides between text vs file operations)
-    let copy_files_item = MenuItemBuilder::with_id("menu:copy_files", "Copy")
-        .accelerator("CmdOrCtrl+C")
-        .build(app)?;
-    let cut_files_item = MenuItemBuilder::with_id("menu:cut_files", "Cut")
-        .accelerator("CmdOrCtrl+X")
-        .build(app)?;
-    let paste_files_item = MenuItemBuilder::with_id("menu:paste_files", "Paste")
-        .accelerator("CmdOrCtrl+V")
-        .build(app)?;
-
-    // Create Edit submenu
+    // Use native PredefinedMenuItem for clipboard operations so that text
+    // paste/copy/cut work correctly in input fields (WebKit's WKWebView
+    // doesn't support document.execCommand('paste')). File clipboard
+    // operations (Cmd+C/X/V on selected files) are handled in JS keydown.
     let edit_submenu = SubmenuBuilder::new(app, "Edit")
         .undo()
         .redo()
         .separator()
-        .item(&cut_files_item)
-        .item(&copy_files_item)
-        .item(&paste_files_item)
+        .cut()
+        .copy()
+        .paste()
         .separator()
-        .item(&PredefinedMenuItem::select_all(app, None)?)
+        .select_all()
         .build()?;
 
     // Create the Show Hidden Files checkbox with explicit unchecked state
@@ -525,15 +541,6 @@ pub fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, event: &tauri::menu::Me
         }
         "menu:clear_thumbnail_cache" => {
             let _ = app.emit("menu:clear_thumbnail_cache", ());
-        }
-        "menu:copy_files" => {
-            let _ = app.emit("menu:copy_files", ());
-        }
-        "menu:cut_files" => {
-            let _ = app.emit("menu:cut_files", ());
-        }
-        "menu:paste_files" => {
-            let _ = app.emit("menu:paste_files", ());
         }
         _ => {}
     }

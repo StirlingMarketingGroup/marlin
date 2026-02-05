@@ -87,6 +87,10 @@ trash = "5.2.5"
 zpl-rs = "0.1"
 keyring = { version = "3.6.3", default-features = false, features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust", "vendored"] }
 
+# SFTP integration (russh 0.57 includes keys module, no separate russh-keys needed)
+russh = "0.57"
+russh-sftp = "2.1"
+
 # Google Drive integration
 google-drive3 = "7"
 yup-oauth2 = "12"
