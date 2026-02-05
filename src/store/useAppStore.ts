@@ -2172,9 +2172,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       });
       set((state) => ({
         sftpServers: [
-          ...state.sftpServers.filter(
-            (s) => !(s.hostname === hostname && s.port === port)
-          ),
+          ...state.sftpServers.filter((s) => !(s.hostname === hostname && s.port === port)),
           newServer,
         ],
       }));
@@ -2189,9 +2187,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     try {
       await invoke('remove_sftp_server', { hostname, port });
       set((state) => ({
-        sftpServers: state.sftpServers.filter(
-          (s) => !(s.hostname === hostname && s.port === port)
-        ),
+        sftpServers: state.sftpServers.filter((s) => !(s.hostname === hostname && s.port === port)),
       }));
     } catch (error) {
       console.error('Failed to remove SFTP server:', error);

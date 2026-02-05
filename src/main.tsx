@@ -32,10 +32,10 @@ const Root =
               : view === 'sftp-connect'
                 ? SftpConnectWindow
                 : view === 'permissions'
-                ? PermissionsWindow
-                : view === 'preferences'
-                  ? PreferencesWindow
-                  : App;
+                  ? PermissionsWindow
+                  : view === 'preferences'
+                    ? PreferencesWindow
+                    : App;
 
 function ThemeBridge() {
   const preference = useThemePreference();

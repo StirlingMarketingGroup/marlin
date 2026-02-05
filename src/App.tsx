@@ -327,8 +327,7 @@ function App() {
 
             const portSuffix = payload.port === 22 ? '' : `:${payload.port}`;
             await state.navigateTo(
-              payload.targetPath ||
-                `sftp://${payload.username}@${payload.hostname}${portSuffix}/`
+              payload.targetPath || `sftp://${payload.username}@${payload.hostname}${portSuffix}/`
             );
           }
         );

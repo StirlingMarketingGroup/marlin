@@ -26,7 +26,13 @@ import type { IconProps } from 'phosphor-react';
 import { useAppStore } from '../store/useAppStore';
 import { useCallback, useEffect, useState, MouseEvent, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { SystemDrive, PinnedDirectory, GoogleAccountInfo, SmbServerInfo, SftpServerInfo } from '../types';
+import {
+  SystemDrive,
+  PinnedDirectory,
+  GoogleAccountInfo,
+  SmbServerInfo,
+  SftpServerInfo,
+} from '../types';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useToastStore } from '../store/useToastStore';
 import { useDragStore } from '../store/useDragStore';
@@ -745,14 +751,20 @@ export default function Sidebar() {
         {sftpServers.map((server) => {
           const portSuffix = server.port === 22 ? '' : `:${server.port}`;
           const sftpPath = `sftp://${server.username}@${server.hostname}${portSuffix}/`;
-          const isActive = currentPath.startsWith(sftpPath) || currentPath.startsWith(`sftp://${server.username}@${server.hostname}:${server.port}/`);
+          const isActive =
+            currentPath.startsWith(sftpPath) ||
+            currentPath.startsWith(`sftp://${server.username}@${server.hostname}:${server.port}/`);
           const serverKey = `${server.hostname}:${server.port}`;
           const isDisconnecting = disconnectingSftpServers.has(serverKey);
-          const displayName = server.port === 22
-            ? `${server.hostname} (${server.username})`
-            : `${server.hostname}:${server.port} (${server.username})`;
+          const displayName =
+            server.port === 22
+              ? `${server.hostname} (${server.username})`
+              : `${server.hostname}:${server.port} (${server.username})`;
           return (
-            <QuickTooltip key={serverKey} text={`${server.username}@${server.hostname}${portSuffix}`}>
+            <QuickTooltip
+              key={serverKey}
+              text={`${server.username}@${server.hostname}${portSuffix}`}
+            >
               {({ onBlur, onFocus, onMouseEnter, onMouseLeave, ref }) => (
                 <div
                   ref={ref}

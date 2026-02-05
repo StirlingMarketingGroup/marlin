@@ -115,7 +115,8 @@ export default function SftpConnectWindow() {
     try {
       const trimmedHostname = hostname.trim();
       const trimmedUsername = username.trim();
-      const effectivePassword = authMethod === 'password' ? password : authMethod === 'key' ? password || null : null;
+      const effectivePassword =
+        authMethod === 'password' ? password : authMethod === 'key' ? password || null : null;
       const effectiveKeyPath = authMethod === 'key' ? keyPath.trim() : null;
 
       // Test the connection BEFORE saving credentials
