@@ -97,6 +97,33 @@ impl ThumbnailGenerator {
         Self::generate_local(request)
     }
 
+    /// Download a Google Drive file to temp and generate a thumbnail from the local copy.
+    fn generate_gdrive(request: &ThumbnailRequest) -> Result<ThumbnailGenerationResult, String> {
+        let (email, path) = parse_gdrive_path(&request.path)?;
+        let file_name = std::path::Path::new(&path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("file");
+
+        let runtime = get_async_runtime();
+        let file_id = runtime.block_on(
+            crate::locations::gdrive::provider::get_file_id_by_path(&email, &path),
+        )?;
+
+        let temp_path = runtime.block_on(
+            crate::locations::gdrive::provider::download_file_to_temp(&email, &file_id, file_name),
+        )?;
+
+        let mut temp_request = request.clone();
+        temp_request.path = temp_path.clone();
+        let result = Self::generate_local(&temp_request);
+
+        // Clean up temp file regardless of outcome
+        let _ = std::fs::remove_file(&temp_path);
+
+        result
+    }
+
     /// Generate a thumbnail from a local file path.
     /// This is called directly for local files, or after downloading remote files.
     pub fn generate_local(request: &ThumbnailRequest) -> Result<ThumbnailGenerationResult, String> {
