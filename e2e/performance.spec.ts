@@ -223,6 +223,7 @@ function getPerformanceMockScript(fileCount: number): string {
         get_system_drives: () => [],
         get_google_accounts: () => [],
         get_smb_servers: () => [],
+        get_sftp_servers: () => [],
         get_disk_usage: () => ({ total: 1000000000, free: 500000000 }),
         enable_drag_detection: () => undefined,
         set_drop_zone: () => undefined,
