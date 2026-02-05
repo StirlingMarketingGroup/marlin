@@ -107,6 +107,17 @@ pub fn create_menu<R: Runtime>(
         .accelerator("CmdOrCtrl+Alt+N")
         .build(app)?;
 
+    // Get Info / Properties menu item
+    #[cfg(target_os = "macos")]
+    let get_info_item = MenuItemBuilder::with_id("menu:get_info", "Get Info")
+        .accelerator("CmdOrCtrl+I")
+        .build(app)?;
+
+    #[cfg(not(target_os = "macos"))]
+    let get_info_item = MenuItemBuilder::with_id("menu:get_info", "Properties")
+        .accelerator("CmdOrCtrl+I")
+        .build(app)?;
+
     // Create File submenu
     #[cfg(target_os = "macos")]
     let file_submenu = SubmenuBuilder::new(app, "File")
@@ -114,6 +125,8 @@ pub fn create_menu<R: Runtime>(
         .separator()
         .item(&new_file_item)
         .item(&new_folder_item)
+        .separator()
+        .item(&get_info_item)
         .separator()
         .text("menu:refresh", "Refresh")
         .separator()
@@ -128,6 +141,8 @@ pub fn create_menu<R: Runtime>(
         .separator()
         .item(&new_file_item)
         .item(&new_folder_item)
+        .separator()
+        .item(&get_info_item)
         .separator()
         .text("menu:refresh", "Refresh")
         .separator()
@@ -502,6 +517,9 @@ pub fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, event: &tauri::menu::Me
         }
         "ctx:reveal_in_file_browser" => {
             let _ = app.emit("menu:reveal_in_file_browser", ());
+        }
+        "menu:get_info" | "ctx:get_info" => {
+            let _ = app.emit("menu:get_info", ());
         }
         "ctx:calculate_total_size" => {
             let _ = app.emit("menu:calculate_total_size", ());

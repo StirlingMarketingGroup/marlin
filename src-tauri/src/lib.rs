@@ -220,6 +220,7 @@ pub fn run() {
             commands::hide_sftp_connect_window,
             commands::sftp_connect_window_ready,
             commands::sftp_connect_window_unready,
+            commands::show_file_properties,
             plugins::drag_detector::enable_drag_detection,
             plugins::drag_detector::set_drop_zone,
             plugins::drag_detector::simulate_drop,
