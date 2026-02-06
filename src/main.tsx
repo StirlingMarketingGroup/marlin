@@ -39,7 +39,7 @@ const Root =
                     ? PreferencesWindow
                     : view === 'conflict'
                       ? ConflictWindow
-                    : App;
+                      : App;
 
 function ThemeBridge() {
   const preference = useThemePreference();
