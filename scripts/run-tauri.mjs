@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs/promises';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 
 const args = process.argv.slice(2);
 const env = { ...process.env };
@@ -30,6 +30,14 @@ const LINUXDEPLOY_PLUGIN_OVERRIDES = {
     versionLabel: '1-alpha-20230713-1',
   },
 };
+
+// Atomically write a file by writing to a temp path then renaming.
+// This avoids ETXTBSY when the target is being executed by a concurrent CI job.
+async function atomicWriteFile(targetPath, buffer, mode) {
+  const tmpPath = `${targetPath}.${randomBytes(6).toString('hex')}.tmp`;
+  await fs.writeFile(tmpPath, buffer, { mode });
+  await fs.rename(tmpPath, targetPath);
+}
 
 async function ensureLinuxdeployBinary() {
   const override = LINUXDEPLOY_OVERRIDES[process.arch];
@@ -71,7 +79,7 @@ async function ensureLinuxdeployBinary() {
         `linuxdeploy checksum mismatch (expected ${override.sha256}, received ${digest}).`
       );
     }
-    await fs.writeFile(targetPath, buffer, { mode: 0o770 });
+    await atomicWriteFile(targetPath, buffer, 0o770);
   }
 
   const zsyncPath = `${targetPath}.zsync`;
@@ -128,7 +136,7 @@ async function ensureLinuxdeployPlugin() {
         `linuxdeploy AppImage plugin checksum mismatch (expected ${override.sha256}, received ${digest}).`
       );
     }
-    await fs.writeFile(targetPath, buffer, { mode: 0o770 });
+    await atomicWriteFile(targetPath, buffer, 0o770);
   }
 
   try {
