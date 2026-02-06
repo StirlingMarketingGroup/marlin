@@ -3,7 +3,13 @@ import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { X } from 'phosphor-react';
-import type { ConflictPayload, ConflictAction, ConflictResolution, ConflictFileInfo, FileItem } from '@/types';
+import type {
+  ConflictPayload,
+  ConflictAction,
+  ConflictResolution,
+  ConflictFileInfo,
+  FileItem,
+} from '@/types';
 import { useConflictStore } from '@/store/useConflictStore';
 import { useThumbnail } from '@/hooks/useThumbnail';
 import { useFileIcon } from '@/hooks/useFileIcon';
@@ -15,7 +21,16 @@ import { WINDOW_CONTENT_TOP_PADDING } from '@/windows/windowLayout';
 const CONFLICT_INIT_EVENT = 'conflict:init';
 
 const THUMBNAIL_IMAGE_EXTS = new Set([
-  'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'tiff', 'tga', 'ico', 'svg',
+  'jpg',
+  'jpeg',
+  'png',
+  'gif',
+  'webp',
+  'bmp',
+  'tiff',
+  'tga',
+  'ico',
+  'svg',
 ]);
 
 function shouldLoadThumbnail(ext?: string | null): boolean {
@@ -24,10 +39,13 @@ function shouldLoadThumbnail(ext?: string | null): boolean {
   return (
     THUMBNAIL_IMAGE_EXTS.has(e) ||
     e === 'pdf' ||
-    e === 'ai' || e === 'eps' ||
-    e === 'psd' || e === 'psb' ||
+    e === 'ai' ||
+    e === 'eps' ||
+    e === 'psd' ||
+    e === 'psb' ||
     e === 'stl' ||
-    e === 'ttf' || e === 'otf' ||
+    e === 'ttf' ||
+    e === 'otf' ||
     isVideoExtension(e)
   );
 }
@@ -62,16 +80,19 @@ function FilePreview({ info }: { info: ConflictFileInfo }) {
   const { isMac } = usePlatform();
   const getFileIcon = useFileIcon('large', isMac);
 
-  const ext = info.extension?.toLowerCase() ??
+  const ext =
+    info.extension?.toLowerCase() ??
     (info.name.includes('.') ? info.name.split('.').pop()?.toLowerCase() : undefined);
   const loadThumbnail = !info.isDirectory && shouldLoadThumbnail(ext);
 
-  const { dataUrl, loading } = useThumbnail(
-    loadThumbnail ? info.path : undefined,
-    { size: 96, quality: 'medium', priority: 'high' }
-  );
+  const { dataUrl, loading } = useThumbnail(loadThumbnail ? info.path : undefined, {
+    size: 96,
+    quality: 'medium',
+    priority: 'high',
+  });
 
-  const containerClass = 'flex h-20 w-20 items-center justify-center rounded-lg bg-app-gray/20 border border-app-border/30';
+  const containerClass =
+    'flex h-20 w-20 items-center justify-center rounded-lg bg-app-gray/20 border border-app-border/30';
 
   if (loadThumbnail && loading) {
     return (
@@ -89,11 +110,7 @@ function FilePreview({ info }: { info: ConflictFileInfo }) {
     );
   }
 
-  return (
-    <div className={containerClass}>
-      {getFileIcon(toFileItem(info))}
-    </div>
-  );
+  return <div className={containerClass}>{getFileIcon(toFileItem(info))}</div>;
 }
 
 interface FileComparisonProps {
@@ -283,12 +300,12 @@ export default function ConflictWindow() {
         className="flex shrink-0 items-center justify-between pl-20 pr-3"
         style={{ height: WINDOW_CONTENT_TOP_PADDING }}
       >
-        <h1 className="text-sm font-semibold" data-tauri-drag-region>{heading}</h1>
+        <h1 className="text-sm font-semibold" data-tauri-drag-region>
+          {heading}
+        </h1>
         <div className="flex items-center gap-3" data-tauri-drag-region>
           {conflict.remainingItems > 0 && (
-            <span className="text-xs text-app-muted">
-              {conflict.remainingItems} remaining
-            </span>
+            <span className="text-xs text-app-muted">{conflict.remainingItems} remaining</span>
           )}
           <button
             type="button"

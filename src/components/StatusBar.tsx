@@ -15,7 +15,6 @@ interface CacheEntry {
   data: DiskUsage;
 }
 
-
 function formatPercent(value: number): string {
   if (!Number.isFinite(value)) {
     return '0%';

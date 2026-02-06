@@ -25,7 +25,8 @@ export const useConflictStore = create<ConflictState>((set) => ({
       conflict: payload,
       customName: payload.source.name,
       // Pre-select merge when both are directories, replace for files
-      selectedAction: payload.source.isDirectory && payload.destination.isDirectory ? 'merge' : 'replace',
+      selectedAction:
+        payload.source.isDirectory && payload.destination.isDirectory ? 'merge' : 'replace',
     }),
 
   setCustomName: (name) => set({ customName: name }),
