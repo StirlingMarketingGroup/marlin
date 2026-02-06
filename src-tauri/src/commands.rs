@@ -2663,7 +2663,10 @@ pub async fn paste_items_to_location(
                     } else {
                         conflict_index += 1;
                         let remaining = total_items.saturating_sub(completed + 1);
-                        let source_info = build_local_conflict_info(Path::new(&temp_path))?;
+                        let mut source_info = build_local_conflict_info(Path::new(&temp_path))?;
+                        // Override temp filename/path with real Google Drive name
+                        source_info.name = name.clone();
+                        source_info.path = source_location.raw().to_string();
                         let dest_info = build_local_conflict_info(&candidate)?;
                         match ask_user_about_conflict(
                             &app, source_info, dest_info,
@@ -7704,7 +7707,8 @@ pub fn conflict_window_unready() -> Result<(), String> {
 #[command]
 pub fn resolve_conflict(resolution: ConflictResolution) -> Result<(), String> {
     // Validate that the resolution matches the pending conflict
-    if let Ok(guard) = CONFLICT_PENDING_PAYLOAD.lock() {
+    {
+        let guard = CONFLICT_PENDING_PAYLOAD.lock().map_err(|e| format!("Lock failed: {e}"))?;
         if let Some(ref pending) = *guard {
             if pending.conflict_id != resolution.conflict_id {
                 return Err(format!(
@@ -7907,15 +7911,10 @@ async fn execute_local_conflict_action(
                 }
                 Ok(Some(dest_path.to_string_lossy().to_string()))
             } else {
-                // Merge only makes sense for directories; treat as Replace for files
-                let dest_path_target = dest_dir.join(name);
-                let source_canon = fs::canonicalize(source_path).unwrap_or_else(|_| source_path.to_path_buf());
-                let dest_canon = fs::canonicalize(&dest_path_target).unwrap_or_else(|_| dest_path_target.clone());
-                if source_canon == dest_canon {
-                    return Ok(Some(dest_path_target.to_string_lossy().to_string()));
-                }
-                delete_file_or_directory(&dest_path_target)?;
-                let dest_raw = dest_path_target.to_string_lossy().to_string();
+                // Merge only makes sense for directories; use KeepBoth for files
+                // to avoid destructive replace when apply_to_all_action is Merge
+                let unique_path = allocate_unique_path(dest_dir, name)?;
+                let dest_raw = unique_path.to_string_lossy().to_string();
                 let (_, dest_item_location) = resolve_location(LI::Raw(dest_raw.clone()))?;
                 if is_cut {
                     source_provider.move_item(source_location, &dest_item_location).await?;
