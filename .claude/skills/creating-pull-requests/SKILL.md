@@ -121,7 +121,51 @@ List ALL changed files grouped by purpose. Example:
 - How to verify the changes work
 - Any manual testing steps required
 
-### Step 6: Self-Review Checklist
+### Step 6: Check Documentation for Needed Updates
+
+**Before creating the PR, review all documentation that may need updating based on your changes.**
+
+Run these commands to find documentation files in the repo:
+
+```bash
+# Find all README and documentation files
+git ls-files '*.md' 'CLAUDE.md' 'AGENTS.md' '**/*.md'
+
+# See which docs are near the files you changed
+git diff --name-only $(git merge-base HEAD main)..HEAD | xargs -I{} dirname {} | sort -u | while read dir; do
+  ls "$dir"/*.md "$dir"/README* 2>/dev/null
+done
+```
+
+**For each documentation file found, check whether your changes require updates to:**
+
+- **README files** - Do new features, config changes, or API changes need documenting?
+- **CLAUDE.md / AGENTS.md** - Do new patterns, commands, or conventions need recording?
+- **Inline docs** (e.g., `docs/`, `references/`) - Are there guides that reference changed behavior?
+- **Skill files** (`.claude/skills/`) - Do any skills reference patterns or code you changed?
+- **Config examples** - Do example configs (`.example`, `.sample`) need updating to reflect new options?
+- **API documentation** - Do endpoint docs match the current request/response shape?
+
+**What to look for in the diff vs docs:**
+
+- New environment variables or config options → documented somewhere?
+- Changed function signatures or API endpoints → docs still accurate?
+- New commands or CLI flags → added to usage instructions?
+- Renamed or moved files → links and references still valid?
+- Changed behavior or defaults → docs describe current behavior?
+- New dependencies or setup steps → installation/setup docs updated?
+
+**If documentation updates are needed:**
+1. Make the updates in the same PR (don't leave docs stale)
+2. List doc updates in the PR description under a "Documentation" category
+3. If unsure whether a doc change is needed, ASK THE USER
+
+**Common rationalization to avoid:**
+> "The docs are close enough" or "someone else will update the docs later"
+
+Stale documentation is worse than no documentation. If your code changes make any doc inaccurate, fix it now.
+
+### Step 7: Self-Review Checklist
 
 Before creating the PR, verify:
 
@@ -131,6 +175,7 @@ Before creating the PR, verify:
 - [ ] Any breaking changes or migration steps are clearly documented
 - [ ] **Issue search completed** - You searched GitHub issues with relevant keywords
 - [ ] **Issue linking resolved** - Either: (a) PR includes `Closes #XXX` for found issues, OR (b) You asked the user and confirmed no issue exists
+- [ ] **Documentation checked** - You reviewed README files, CLAUDE.md, AGENTS.md, and other docs near changed files for anything that needs updating based on the diff
 
 ## Common Mistakes to Avoid
 
@@ -200,3 +245,15 @@ If you catch yourself thinking any of these, STOP. You are rationalizing skippin
 | "I already know what the PR is about" | You might miss related issues. Search. |
 
 **All of these mean: Run `gh issue list --search` before creating the PR.**
+
+## Rationalizations That Mean You're About to Skip Documentation Review
+
+| Excuse | Reality |
+|--------|---------|
+| "These are just code changes" | Code changes often affect documented behavior, commands, or patterns. Check. |
+| "The docs are close enough" | Stale docs are worse than no docs. If anything is inaccurate, fix it now. |
+| "Someone else will update the docs" | No they won't. You're already here with full context. Update them. |
+| "It's just a small change" | Small changes to defaults, env vars, or flags are exactly what gets missed in docs. Check. |
+| "The README doesn't cover this area" | Maybe it should now. Or maybe nearby docs do. Search. |
+
+**All of these mean: Review docs near changed files and update anything that's now inaccurate.**
