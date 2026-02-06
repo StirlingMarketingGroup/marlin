@@ -50,6 +50,14 @@ function parseErrorCode(error: unknown): string | null {
 
 const ACCENT_POLL_INTERVAL_MS = 5000;
 
+// Grid zoom constants (for keyboard shortcuts - wheel handler moved to MainPanel)
+import {
+  GRID_SIZE_MIN,
+  GRID_SIZE_MAX,
+  GRID_SIZE_DEFAULT,
+  GRID_SIZE_STEP,
+} from '@/utils/gridConstants';
+
 async function checkAndShowFullDiskAccessPrompt() {
   if (platform() !== 'macos') return;
   if (localStorage.getItem(FULL_DISK_ACCESS_DISMISSED_KEY) === 'true') return;
@@ -1252,6 +1260,46 @@ function App() {
         e.preventDefault();
         openPreferences();
         return;
+      }
+
+      // Zoom shortcuts: Cmd/Ctrl + Plus/Minus/0 (only in grid view)
+      // Note: + requires Shift on most keyboards, so we allow shiftKey for zoom-in
+      if ((isMac && e.metaKey) || (!isMac && e.ctrlKey)) {
+        if (!e.altKey) {
+          const state = useAppStore.getState();
+          const merged = {
+            ...state.globalPreferences,
+            ...state.directoryPreferences[state.currentPath],
+          };
+
+          if (merged.viewMode === 'grid') {
+            const current = merged.gridSize ?? GRID_SIZE_DEFAULT;
+
+            // Zoom in: + (requires Shift on most keyboards) or = (without Shift)
+            if (e.key === '+' || e.key === '=') {
+              e.preventDefault();
+              const newSize = Math.min(GRID_SIZE_MAX, current + GRID_SIZE_STEP);
+              state.updateDirectoryPreferences(state.currentPath, { gridSize: newSize });
+              return;
+            }
+
+            // Zoom out: - (no Shift needed)
+            if (e.key === '-' && !e.shiftKey) {
+              e.preventDefault();
+              const newSize = Math.max(GRID_SIZE_MIN, current - GRID_SIZE_STEP);
+              state.updateDirectoryPreferences(state.currentPath, { gridSize: newSize });
+              return;
+            }
+
+            // Reset zoom: 0 (no Shift needed)
+            if (e.key === '0' && !e.shiftKey) {
+              e.preventDefault();
+              const defaultSize = state.globalPreferences.gridSize ?? GRID_SIZE_DEFAULT;
+              state.updateDirectoryPreferences(state.currentPath, { gridSize: defaultSize });
+              return;
+            }
+          }
+        }
       }
 
       // Type-to-filter: any single printable character starts/appends to filter

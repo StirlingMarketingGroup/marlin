@@ -10,6 +10,17 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { invoke } from '@tauri-apps/api/core';
 import { ScrollContext } from '../contexts/ScrollContext';
 import { getArchiveBaseName, isArchiveFile } from '@/utils/fileTypes';
+import { getPlatform } from '@/hooks/usePlatform';
+import {
+  GRID_SIZE_MIN,
+  GRID_SIZE_MAX,
+  GRID_SIZE_DEFAULT,
+  GRID_SIZE_STEP,
+  ZOOM_SCROLL_THRESHOLD,
+  ZOOM_BUFFER_RESET_MS,
+  NAV_SCROLL_THRESHOLD,
+  NAV_COOLDOWN_MS,
+} from '@/utils/gridConstants';
 
 const arraysEqual = (a: string[], b: string[]) => {
   if (a === b) return true;
@@ -48,6 +59,123 @@ export default function MainPanel() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileCtxCaptureRef = useRef<boolean>(false);
   const fileCtxPathRef = useRef<string | null>(null);
+
+  // Refs for wheel-based navigation and zoom
+  const navDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const zoomBufferRef = useRef(0);
+  const zoomRafRef = useRef<number | null>(null);
+  const zoomBufferResetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Wheel handler for horizontal scroll navigation and Ctrl/Cmd+scroll zoom
+  const onWheel = useCallback((e: WheelEvent) => {
+    const { isMac } = getPlatform();
+    // On Mac, use metaKey OR ctrlKey (pinch-to-zoom sets ctrlKey)
+    const modKey = isMac ? e.metaKey || e.ctrlKey : e.ctrlKey;
+
+    // Skip if target is in editable element (guard for non-Element targets)
+    const target = e.target;
+    if (!(target instanceof Element)) return;
+    if (target.closest('input, textarea, [contenteditable="true"]')) return;
+
+    // Ctrl/Cmd + vertical scroll = zoom (only in grid view)
+    if (modKey && Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+      const state = useAppStore.getState();
+      const merged = {
+        ...state.globalPreferences,
+        ...state.directoryPreferences[state.currentPath],
+      };
+      if (merged.viewMode !== 'grid') return;
+
+      e.preventDefault();
+
+      // Reset the buffer reset timer on each scroll event
+      if (zoomBufferResetRef.current) {
+        clearTimeout(zoomBufferResetRef.current);
+      }
+      zoomBufferResetRef.current = setTimeout(() => {
+        zoomBufferRef.current = 0;
+        zoomBufferResetRef.current = null;
+      }, ZOOM_BUFFER_RESET_MS);
+
+      // Accumulate delta for smooth zooming
+      zoomBufferRef.current += e.deltaY;
+
+      if (zoomRafRef.current === null) {
+        zoomRafRef.current = requestAnimationFrame(() => {
+          const state = useAppStore.getState();
+          const merged = {
+            ...state.globalPreferences,
+            ...state.directoryPreferences[state.currentPath],
+          };
+          const current = merged.gridSize ?? GRID_SIZE_DEFAULT;
+
+          if (Math.abs(zoomBufferRef.current) > ZOOM_SCROLL_THRESHOLD) {
+            const direction = zoomBufferRef.current < 0 ? 1 : -1; // scroll up = zoom in
+            const newSize = Math.max(
+              GRID_SIZE_MIN,
+              Math.min(GRID_SIZE_MAX, current + direction * GRID_SIZE_STEP)
+            );
+            state.updateDirectoryPreferences(state.currentPath, { gridSize: newSize });
+            zoomBufferRef.current = 0;
+          }
+
+          zoomRafRef.current = null;
+        });
+      }
+      return;
+    }
+
+    // Horizontal scroll (no modifier) = back/forward navigation with debounce
+    if (
+      !modKey &&
+      Math.abs(e.deltaX) > Math.abs(e.deltaY) &&
+      Math.abs(e.deltaX) > NAV_SCROLL_THRESHOLD
+    ) {
+      if (navDebounceRef.current) return; // Still in cooldown
+
+      e.preventDefault();
+      const state = useAppStore.getState();
+
+      let didNavigate = false;
+      if (e.deltaX < 0 && state.canGoBack()) {
+        state.goBack();
+        didNavigate = true;
+      } else if (e.deltaX > 0 && state.canGoForward()) {
+        state.goForward();
+        didNavigate = true;
+      }
+
+      if (didNavigate) {
+        navDebounceRef.current = setTimeout(() => {
+          navDebounceRef.current = null;
+        }, NAV_COOLDOWN_MS);
+      }
+    }
+  }, []);
+
+  // Attach wheel event listener to scrollRef
+  useEffect(() => {
+    const container = scrollRef.current;
+    if (!container) return;
+
+    container.addEventListener('wheel', onWheel, { passive: false });
+
+    return () => {
+      container.removeEventListener('wheel', onWheel);
+      if (navDebounceRef.current) {
+        clearTimeout(navDebounceRef.current);
+        navDebounceRef.current = null;
+      }
+      if (zoomRafRef.current) {
+        cancelAnimationFrame(zoomRafRef.current);
+        zoomRafRef.current = null;
+      }
+      if (zoomBufferResetRef.current) {
+        clearTimeout(zoomBufferResetRef.current);
+        zoomBufferResetRef.current = null;
+      }
+    };
+  }, [onWheel]);
   const [fallbackCtx, setFallbackCtx] = useState<{
     x: number;
     y: number;
@@ -582,6 +710,7 @@ export default function MainPanel() {
       {/* File content only */}
       <div
         ref={scrollRef}
+        data-main-content
         className="relative flex-1 min-h-0 overflow-auto pb-20"
         onContextMenuCapture={handleContextMenuCapture}
         onContextMenu={handleContextMenu}
