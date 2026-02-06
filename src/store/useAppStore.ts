@@ -29,6 +29,7 @@ import { basename } from '@/utils/pathUtils';
 import { useToastStore } from './useToastStore';
 import { parseGoogleDriveUrl } from '@/utils/googleDriveUrl';
 import { getArchiveParentUri, isArchiveUri } from '@/utils/archiveUri';
+import { DEFAULT_THEME_IDS } from '@/themes';
 
 // Concurrency limiter for app icon generation requests (macOS)
 const __iconQueue: Array<() => void> = [];
@@ -398,6 +399,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     foldersFirst: true,
     gridSize: 120,
     theme: 'system',
+    darkThemeId: DEFAULT_THEME_IDS.dark,
+    lightThemeId: DEFAULT_THEME_IDS.light,
+    customThemes: [],
     accentColorMode: 'system',
     accentColorCustom: '#3584e4',
   },

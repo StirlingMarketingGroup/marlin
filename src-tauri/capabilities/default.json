@@ -7,6 +7,12 @@
     "core:default",
     "core:window:allow-start-dragging",
     "dialog:default",
+    "fs:allow-read-dir",
+    "fs:allow-read-text-file",
+    {
+      "identifier": "fs:scope",
+      "allow": ["$APP_CONFIG/**"]
+    },
     "shell:allow-open",
     "opener:allow-open-url",
     "opener:allow-reveal-item-in-dir",
