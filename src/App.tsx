@@ -1175,16 +1175,9 @@ function App() {
         if (target.includes('://')) return;
         void revealInFileBrowser(target);
       });
-      const showFileProperties = () => {
-        const selection = useAppStore.getState().selectedFiles;
-        if (selection.length === 0) return;
-        const localPaths = selection.filter((p) => !p.includes('://'));
-        if (localPaths.length === 0) return;
-        invoke('show_file_properties', { paths: localPaths }).catch((err) => {
-          console.error('Failed to show file properties:', err);
-        });
-      };
-      await registerFocused('menu:get_info', showFileProperties);
+      await registerFocused('menu:get_info', () => {
+        showFileProperties();
+      });
       await registerFocused('menu:new_window', () => {
         // Create new window in current directory
         const currentPath = useAppStore.getState().currentPath;
@@ -1265,6 +1258,17 @@ function App() {
       });
     })();
 
+    const showFileProperties = (): boolean => {
+      const selection = useAppStore.getState().selectedFiles;
+      if (selection.length === 0) return false;
+      const localPaths = selection.filter((p) => !p.includes('://'));
+      if (localPaths.length === 0) return false;
+      invoke('show_file_properties', { paths: localPaths }).catch((err) => {
+        console.error('Failed to show file properties:', err);
+      });
+      return true;
+    };
+
     // Keyboard shortcuts as fallback (mac-like)
     const onKey = (e: KeyboardEvent) => {
       const uaUpper = navigator.userAgent.toUpperCase();
@@ -1334,13 +1338,8 @@ function App() {
         !e.shiftKey &&
         e.key === 'i'
       ) {
-        const selection = useAppStore.getState().selectedFiles;
-        const localPaths = selection.filter((p) => !p.includes('://'));
-        if (localPaths.length > 0) {
+        if (showFileProperties()) {
           e.preventDefault();
-          invoke('show_file_properties', { paths: localPaths }).catch((err) => {
-            console.error('Failed to show file properties:', err);
-          });
         }
         return;
       }

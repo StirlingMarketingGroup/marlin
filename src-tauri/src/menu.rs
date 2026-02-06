@@ -108,13 +108,12 @@ pub fn create_menu<R: Runtime>(
         .build(app)?;
 
     // Get Info / Properties menu item
-    #[cfg(target_os = "macos")]
-    let get_info_item = MenuItemBuilder::with_id("menu:get_info", "Get Info")
-        .accelerator("CmdOrCtrl+I")
-        .build(app)?;
-
-    #[cfg(not(target_os = "macos"))]
-    let get_info_item = MenuItemBuilder::with_id("menu:get_info", "Properties")
+    let get_info_label = if cfg!(target_os = "macos") {
+        "Get Info"
+    } else {
+        "Properties"
+    };
+    let get_info_item = MenuItemBuilder::with_id("menu:get_info", get_info_label)
         .accelerator("CmdOrCtrl+I")
         .build(app)?;
 

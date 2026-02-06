@@ -8134,11 +8134,10 @@ pub async fn show_file_properties(paths: Vec<String>) -> Result<(), String> {
                 .to_string()
                 .replace(',', "%2C");
 
-            let launched = if desktop.contains("kde") {
+            let result = if desktop.contains("kde") {
                 OsCommand::new("kioclient5")
                     .args(["exec", &format!("properties:{}", file_uri)])
                     .spawn()
-                    .is_ok()
             } else {
                 // Use the freedesktop FileManager1 DBus interface
                 // (works for GNOME/Nautilus, Cinnamon/Nemo, MATE/Caja, and others)
@@ -8153,14 +8152,14 @@ pub async fn show_file_properties(paths: Vec<String>) -> Result<(), String> {
                         "string:",
                     ])
                     .spawn()
-                    .is_ok()
             };
 
-            if !launched {
-                return Err(format_error(
-                    error_codes::EOPEN,
-                    "No supported file manager found for showing properties.",
-                ));
+            if let Err(e) = result {
+                warn!(
+                    "Failed to launch properties for '{}': {}",
+                    expanded.display(),
+                    e
+                );
             }
         }
         Ok(())
