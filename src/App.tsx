@@ -1746,12 +1746,13 @@ function App() {
 
     // Mouse back/forward side buttons (buttons 3/4)
     const onMouseDown = (e: globalThis.MouseEvent) => {
-      if (e.button === 3) {
+      const state = useAppStore.getState();
+      if (e.button === 3 && state.canGoBack()) {
         e.preventDefault();
-        useAppStore.getState().goBack();
-      } else if (e.button === 4) {
+        state.goBack();
+      } else if (e.button === 4 && state.canGoForward()) {
         e.preventDefault();
-        useAppStore.getState().goForward();
+        state.goForward();
       }
     };
     window.addEventListener('mousedown', onMouseDown);
