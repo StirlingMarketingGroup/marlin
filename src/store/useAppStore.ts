@@ -2380,18 +2380,20 @@ export const useAppStore = create<AppState>((set, get) => ({
       task: Promise<T>,
       progress: { operation: string; destination: string; totalItems: number }
     ): Promise<T> => {
-      let shown = false;
+      let showPromise: Promise<void> | undefined;
       const timer = window.setTimeout(() => {
-        shown = true;
-        void invoke('show_clipboard_progress_window', progress).catch((e) => {
+        showPromise = invoke('show_clipboard_progress_window', progress).catch((e) => {
           console.warn('Failed to show clipboard progress window:', e);
-        });
+        }) as Promise<void>;
       }, 1000);
       try {
         return await task;
       } finally {
         window.clearTimeout(timer);
-        if (shown) {
+        if (showPromise) {
+          // Wait for the show to complete before hiding, otherwise the hide
+          // can arrive while the window is still being created (race condition).
+          await showPromise;
           void invoke('hide_clipboard_progress_window').catch((e) => {
             console.warn('Failed to hide clipboard progress window:', e);
           });
@@ -2417,6 +2419,19 @@ export const useAppStore = create<AppState>((set, get) => ({
       const pastedCount = result.pastedPaths.length;
       const skippedCount = result.skippedCount;
 
+      if (result.cancelled) {
+        if (pastedCount > 0) {
+          toastStore.addToast({
+            type: 'info',
+            message: `Paste canceled. ${pastedCount} ${pastedCount === 1 ? 'file' : 'files'} pasted before canceling.`,
+            duration: 4000,
+          });
+        } else {
+          toastStore.addToast({ type: 'info', message: 'Paste canceled.', duration: 3000 });
+        }
+        return;
+      }
+
       if (pastedCount > 0) {
         let message = pastedCount === 1 ? '1 file pasted.' : `${pastedCount} files pasted.`;
         if (skippedCount > 0) {
@@ -2427,10 +2442,13 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
 
       if (skippedCount > 0) {
-        const detail = result.errorMessage ? `: ${result.errorMessage}` : '.';
+        let message = `${skippedCount} file${skippedCount > 1 ? 's' : ''} could not be pasted.`;
+        if (result.errorMessage) {
+          message += ` ${result.errorMessage}`;
+        }
         toastStore.addToast({
           type: 'info',
-          message: `${skippedCount} file${skippedCount > 1 ? 's' : ''} could not be pasted${detail}`,
+          message,
           duration: 5000,
         });
       }
@@ -2472,6 +2490,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
 
       showPasteResultToast(result);
+      if (result.errorMessage) {
+        console.warn('Paste error:', result.errorMessage);
+      }
     };
 
     const pasteRemoteImage = async () => {
@@ -2581,9 +2602,15 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
 
       const isCut = clipboardInfo.isCut;
-      const result = await invoke<PasteResult>('clipboard_paste_files', {
+      const task = invoke<PasteResult>('paste_items_to_location', {
         destination: currentPath,
+        sourcePaths: clipboardInfo.filePaths,
         isCut,
+      });
+      const result = await runWithClipboardProgress(task, {
+        operation: isCut ? 'Moving items' : 'Copying items',
+        destination: currentPath,
+        totalItems: clipboardInfo.filePaths.length,
       });
 
       await state.refreshCurrentDirectoryStreaming();

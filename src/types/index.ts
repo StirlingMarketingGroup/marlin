@@ -339,8 +339,37 @@ export interface PasteResult {
   pastedPaths: string[];
   skippedCount: number;
   errorMessage?: string | null;
+  cancelled: boolean;
 }
 
 export interface PasteImageResult {
   path: string;
+}
+
+// Conflict Resolution Types
+export interface ConflictFileInfo {
+  name: string;
+  path: string;
+  size: number;
+  modified: string;
+  isDirectory: boolean;
+  extension?: string | null;
+}
+
+export interface ConflictPayload {
+  conflictId: string;
+  source: ConflictFileInfo;
+  destination: ConflictFileInfo;
+  conflictIndex: number;
+  remainingItems: number;
+  operation: string;
+}
+
+export type ConflictAction = 'replace' | 'skip' | 'keepBoth' | 'rename' | 'merge';
+
+export interface ConflictResolution {
+  conflictId: string;
+  action: ConflictAction;
+  customName?: string | null;
+  applyToAll: boolean;
 }

@@ -18,6 +18,7 @@ import { createDragImageForSelection, createDragImageForSelectionAsync } from '@
 import { invoke } from '@tauri-apps/api/core';
 // no direct invoke here; background opens the menu
 import { useThumbnail } from '@/hooks/useThumbnail';
+import { formatBytes } from '@/utils/formatBytes';
 import { useFileIcon } from '@/hooks/useFileIcon';
 import { usePlatform } from '@/hooks/usePlatform';
 import { useVisibility } from '@/hooks/useVisibility';
@@ -854,7 +855,7 @@ export default function FileList({ files, preferences }: FileListProps) {
             ? file.child_count != null
               ? `${file.child_count} item${file.child_count !== 1 ? 's' : ''}`
               : '—'
-            : formatFileSize(file.size)}
+            : formatBytes(file.size)}
         </div>
 
         {/* Type column */}
@@ -982,16 +983,6 @@ export default function FileList({ files, preferences }: FileListProps) {
       </div>
     </div>
   );
-}
-
-function formatFileSize(bytes: number): string {
-  if (bytes === 0) return '0 B';
-
-  const k = 1024;
-  const sizes = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
 
 function formatDateFull(dateString: string): string {
