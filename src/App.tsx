@@ -1744,6 +1744,19 @@ function App() {
     window.addEventListener('keydown', onKey);
     unsubs.push(() => window.removeEventListener('keydown', onKey));
 
+    // Mouse back/forward side buttons (buttons 3/4)
+    const onMouseDown = (e: globalThis.MouseEvent) => {
+      if (e.button === 3) {
+        e.preventDefault();
+        useAppStore.getState().goBack();
+      } else if (e.button === 4) {
+        e.preventDefault();
+        useAppStore.getState().goForward();
+      }
+    };
+    window.addEventListener('mousedown', onMouseDown);
+    unsubs.push(() => window.removeEventListener('mousedown', onMouseDown));
+
     const onKeyUp = (e: KeyboardEvent) => {
       if (e.key === 'Alt') {
         const uaUpper = navigator.userAgent.toUpperCase();
