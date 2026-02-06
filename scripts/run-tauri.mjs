@@ -35,8 +35,13 @@ const LINUXDEPLOY_PLUGIN_OVERRIDES = {
 // This avoids ETXTBSY when the target is being executed by a concurrent CI job.
 async function atomicWriteFile(targetPath, buffer, mode) {
   const tmpPath = `${targetPath}.${randomBytes(6).toString('hex')}.tmp`;
-  await fs.writeFile(tmpPath, buffer, { mode });
-  await fs.rename(tmpPath, targetPath);
+  try {
+    await fs.writeFile(tmpPath, buffer, { mode });
+    await fs.rename(tmpPath, targetPath);
+  } catch (error) {
+    await fs.unlink(tmpPath).catch(() => {});
+    throw error;
+  }
 }
 
 async function ensureLinuxdeployBinary() {
