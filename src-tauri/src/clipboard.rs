@@ -28,6 +28,7 @@ pub struct PasteResult {
     pub pasted_paths: Vec<String>,
     pub skipped_count: usize,
     pub error_message: Option<String>,
+    pub cancelled: bool,
 }
 
 /// Result of pasting an image
@@ -834,6 +835,7 @@ pub fn paste_files(destination: &str, is_cut: bool) -> Result<PasteResult, Strin
         pasted_paths,
         skipped_count,
         error_message: last_error,
+        cancelled: false,
     })
 }
 

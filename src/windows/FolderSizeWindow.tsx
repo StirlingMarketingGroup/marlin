@@ -6,14 +6,7 @@ import { CheckCircle, WarningCircle, XCircle } from 'phosphor-react';
 import { FolderSizeInitPayload, FolderSizeProgressPayload } from '@/types';
 import { useFolderSizeStore } from '@/store/useFolderSizeStore';
 import { WINDOW_CONTENT_TOP_PADDING } from '@/windows/windowLayout';
-
-const formatBytes = (bytes: number): string => {
-  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
-  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB'];
-  const exponent = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
-  const value = bytes / Math.pow(1024, exponent);
-  return `${value.toFixed(value >= 10 || exponent === 0 ? 0 : 1)} ${units[exponent]}`;
-};
+import { formatBytes } from '@/utils/formatBytes';
 
 const formatNumber = (value: number): string =>
   new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(value);

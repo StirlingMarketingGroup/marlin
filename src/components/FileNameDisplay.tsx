@@ -4,6 +4,7 @@ import { FileItem } from '../types';
 import QuickTooltip from './QuickTooltip';
 import { truncateTextToWidth } from '@/utils/textMeasure';
 import { truncateToTwoLines } from '@/utils/multiLineTruncate';
+import { formatBytes } from '@/utils/formatBytes';
 
 interface FileNameDisplayProps {
   file: FileItem;
@@ -175,16 +176,6 @@ function FileNameDisplayInner({
     }
   }, [displayName, variant, isSelected]);
 
-  const formatFileSize = (bytes: number): string => {
-    if (bytes === 0) return '0 B';
-
-    const k = 1024;
-    const sizes = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
-  };
-
   const combinedStyle = maxWidth != null ? { ...style, maxWidth } : style;
 
   return (
@@ -289,7 +280,7 @@ function FileNameDisplayInner({
                 ? file.child_count != null
                   ? `${file.child_count} item${file.child_count !== 1 ? 's' : ''}`
                   : null
-                : formatFileSize(file.size)}
+                : formatBytes(file.size)}
             </div>
           )}
           {file.image_width != null && file.image_height != null && (

@@ -10,6 +10,7 @@ import SmbConnectWindow from './windows/SmbConnectWindow';
 import SftpConnectWindow from './windows/SftpConnectWindow';
 import PermissionsWindow from './windows/PermissionsWindow';
 import PreferencesWindow from './windows/PreferencesWindow';
+import ConflictWindow from './windows/ConflictWindow';
 import { useThemePreference, useThemeSync } from '@/hooks/useTheme';
 import { useThemeRegistry } from '@/hooks/useThemeRegistry';
 import './index.css';
@@ -36,6 +37,8 @@ const Root =
                   ? PermissionsWindow
                   : view === 'preferences'
                     ? PreferencesWindow
+                    : view === 'conflict'
+                      ? ConflictWindow
                     : App;
 
 function ThemeBridge() {

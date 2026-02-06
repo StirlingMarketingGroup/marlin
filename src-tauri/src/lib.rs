@@ -223,6 +223,10 @@ pub fn run() {
             plugins::drag_detector::enable_drag_detection,
             plugins::drag_detector::set_drop_zone,
             plugins::drag_detector::simulate_drop,
+            // Conflict resolution
+            commands::conflict_window_ready,
+            commands::conflict_window_unready,
+            commands::resolve_conflict,
             // Clipboard operations
             clipboard::clipboard_copy_files,
             clipboard::clipboard_get_contents,

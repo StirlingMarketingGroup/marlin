@@ -122,6 +122,8 @@ const SMB_CONNECT_WINDOW_LABEL: &str = "smb-connect";
 const SFTP_CONNECT_WINDOW_LABEL: &str = "sftp-connect";
 const PERMISSIONS_WINDOW_LABEL: &str = "permissions";
 const PREFERENCES_WINDOW_LABEL: &str = "preferences";
+const CONFLICT_INIT_EVENT: &str = "conflict:init";
+const CONFLICT_WINDOW_LABEL: &str = "conflict-dialog";
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -220,6 +222,14 @@ static SMB_CONNECT_QUEUE: Lazy<WindowPayloadQueue<SmbConnectInitPayload>> =
     Lazy::new(|| WindowPayloadQueue::new(SMB_CONNECT_WINDOW_LABEL, SMB_CONNECT_INIT_EVENT));
 static SFTP_CONNECT_QUEUE: Lazy<WindowPayloadQueue<SftpConnectInitPayload>> =
     Lazy::new(|| WindowPayloadQueue::new(SFTP_CONNECT_WINDOW_LABEL, SFTP_CONNECT_INIT_EVENT));
+static CONFLICT_QUEUE: Lazy<WindowPayloadQueue<ConflictPayload>> =
+    Lazy::new(|| WindowPayloadQueue::new(CONFLICT_WINDOW_LABEL, CONFLICT_INIT_EVENT));
+static CONFLICT_SENDER: Lazy<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<ConflictResolution>>>> =
+    Lazy::new(|| std::sync::Mutex::new(None));
+/// Stores the last conflict payload for re-delivery when React StrictMode
+/// remounts the conflict window component (mount→unmount→remount in dev).
+static CONFLICT_PENDING_PAYLOAD: Lazy<std::sync::Mutex<Option<ConflictPayload>>> =
+    Lazy::new(|| std::sync::Mutex::new(None));
 
 const FOLDER_SIZE_WINDOW_READY_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const FOLDER_SIZE_WINDOW_READY_POLL_ATTEMPTS: u32 = 40;
@@ -589,6 +599,50 @@ struct SftpConnectInitPayload {
     initial_port: Option<u16>,
     initial_username: Option<String>,
     target_path: Option<String>,
+}
+
+// --- Conflict Resolution Types ---
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConflictFileInfo {
+    name: String,
+    path: String,
+    size: u64,
+    modified: String,
+    is_directory: bool,
+    extension: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConflictPayload {
+    conflict_id: String,
+    source: ConflictFileInfo,
+    destination: ConflictFileInfo,
+    conflict_index: usize,
+    remaining_items: usize,
+    operation: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum ConflictAction {
+    Replace,
+    Skip,
+    KeepBoth,
+    Rename,
+    Merge,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConflictResolution {
+    #[allow(dead_code)]
+    conflict_id: String,
+    action: ConflictAction,
+    custom_name: Option<String>,
+    apply_to_all: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2255,6 +2309,7 @@ pub async fn paste_items_to_location(
             pasted_paths: vec![],
             skipped_count: 0,
             error_message: Some("No source paths provided".to_string()),
+            cancelled: false,
         });
     }
 
@@ -2293,8 +2348,18 @@ pub async fn paste_items_to_location(
     let mut skipped_count = 0usize;
     let mut completed = 0usize;
     let mut last_error: Option<String> = None;
+    let mut apply_to_all_action: Option<ConflictAction> = None;
+    let mut conflict_index = 0usize;
+    let mut cancelled = false;
+    let operation_str = if is_cut { "move" } else { "copy" };
 
     for input in source_paths {
+        if cancelled {
+            skipped_count += 1;
+            completed += 1;
+            emit_clipboard_progress_item(&app, None, completed, total_items, None);
+            continue;
+        }
         let (source_provider, source_location) = match resolve_location(input) {
             Ok(v) => v,
             Err(e) => {
@@ -2335,27 +2400,231 @@ pub async fn paste_items_to_location(
                 let Some(dest_dir) = dest_dir_path.as_ref() else {
                     return Err("Local destination directory is required".to_string());
                 };
-                let dest_path = allocate_unique_path(dest_dir.as_path(), &name)?;
-                let dest_raw = dest_path.to_string_lossy().to_string();
-                let (_, dest_item_location) = resolve_location(LI::Raw(dest_raw.clone()))?;
-                if is_cut {
-                    source_provider
-                        .move_item(&source_location, &dest_item_location)
-                        .await?;
+                let candidate = dest_dir.join(&name);
+                let source_path = PathBuf::from(source_location.to_path_string());
+
+                if candidate.exists() {
+                    // Conflict detected — resolve it
+                    let (action, custom_name) = if let Some(ref stored) = apply_to_all_action {
+                        (stored.clone(), None)
+                    } else {
+                        conflict_index += 1;
+                        let remaining = total_items.saturating_sub(completed + 1);
+                        let source_info = build_local_conflict_info(&source_path)?;
+                        let dest_info = build_local_conflict_info(&candidate)?;
+                        match ask_user_about_conflict(
+                            &app, source_info, dest_info,
+                            conflict_index, remaining, operation_str,
+                        ).await {
+                            Ok(resolution) => {
+                                let a = resolution.action.clone();
+                                let cn = resolution.custom_name.clone();
+                                if resolution.apply_to_all {
+                                    apply_to_all_action = Some(resolution.action);
+                                }
+                                (a, cn)
+                            }
+                            Err(e) if e == "CONFLICT_CANCELLED" => {
+                                cancelled = true;
+                                skipped_count += 1;
+                                completed += 1;
+                                emit_clipboard_progress_item(&app, None, completed, total_items, None);
+                                continue;
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    };
+
+                    execute_local_conflict_action(
+                        &action,
+                        custom_name.as_deref(),
+                        &source_path,
+                        dest_dir,
+                        &name,
+                        is_cut,
+                        source_provider.as_ref(),
+                        &source_location,
+                    ).await
                 } else {
-                    source_provider.copy(&source_location, &dest_item_location).await?;
+                    // No conflict — proceed normally
+                    let dest_raw = candidate.to_string_lossy().to_string();
+                    let (_, dest_item_location) = resolve_location(LI::Raw(dest_raw.clone()))?;
+                    if is_cut {
+                        source_provider.move_item(&source_location, &dest_item_location).await?;
+                    } else {
+                        source_provider.copy(&source_location, &dest_item_location).await?;
+                    }
+                    Ok(Some(dest_raw))
                 }
-                Ok(Some(dest_raw))
             }
             (src, dst) if src == dst => {
                 let dest_raw = join_dest_raw(&dest_scheme, &dest_dir_raw, &name);
-                let (_, dest_item_location) = resolve_location(LI::Raw(dest_raw.clone()))?;
-                let op = if is_cut {
-                    source_provider.move_item(&source_location, &dest_item_location).await
+                let (dest_provider, dest_item_location) = resolve_location(LI::Raw(dest_raw.clone()))?;
+
+                // Check if destination already exists via provider metadata — reuse result for conflict info
+                let dest_meta_result = dest_provider.get_file_metadata(&dest_item_location).await;
+                let dest_exists = dest_meta_result.is_ok();
+
+                if dest_exists {
+                    let (action, custom_name) = if let Some(ref stored) = apply_to_all_action {
+                        (stored.clone(), None)
+                    } else {
+                        conflict_index += 1;
+                        let remaining = total_items.saturating_sub(completed + 1);
+                        // Build source info from provider metadata
+                        let source_meta = source_provider.get_file_metadata(&source_location).await;
+                        let source_info = match source_meta {
+                            Ok(meta) => ConflictFileInfo {
+                                name: meta.name.clone(),
+                                path: source_location.raw().to_string(),
+                                size: meta.size,
+                                modified: meta.modified.to_rfc3339(),
+                                is_directory: meta.is_directory,
+                                extension: meta.extension.clone(),
+                            },
+                            Err(_) => ConflictFileInfo {
+                                name: name.clone(),
+                                path: source_location.raw().to_string(),
+                                size: 0,
+                                modified: String::new(),
+                                is_directory: false,
+                                extension: Path::new(&name).extension().and_then(|e| e.to_str()).map(|s| s.to_string()),
+                            },
+                        };
+                        // Reuse the metadata we already fetched for existence check
+                        let dest_info = match dest_meta_result {
+                            Ok(ref meta) => ConflictFileInfo {
+                                name: meta.name.clone(),
+                                path: dest_raw.clone(),
+                                size: meta.size,
+                                modified: meta.modified.to_rfc3339(),
+                                is_directory: meta.is_directory,
+                                extension: meta.extension.clone(),
+                            },
+                            Err(_) => ConflictFileInfo {
+                                name: name.clone(),
+                                path: dest_raw.clone(),
+                                size: 0,
+                                modified: String::new(),
+                                is_directory: false,
+                                extension: Path::new(&name).extension().and_then(|e| e.to_str()).map(|s| s.to_string()),
+                            },
+                        };
+                        match ask_user_about_conflict(
+                            &app, source_info, dest_info,
+                            conflict_index, remaining, operation_str,
+                        ).await {
+                            Ok(res) => {
+                                let a = res.action.clone();
+                                let cn = res.custom_name.clone();
+                                if res.apply_to_all { apply_to_all_action = Some(res.action); }
+                                (a, cn)
+                            }
+                            Err(e) if e == "CONFLICT_CANCELLED" => {
+                                cancelled = true;
+                                skipped_count += 1;
+                                completed += 1;
+                                emit_clipboard_progress_item(&app, None, completed, total_items, None);
+                                continue;
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    };
+                    match action {
+                        ConflictAction::Skip => Ok(None),
+                        // Merge not supported for remote providers — fall back to KeepBoth
+                        // to avoid destructive replace behavior
+                        ConflictAction::Merge => {
+                            let stem = Path::new(&name).file_stem().and_then(|s| s.to_str()).unwrap_or(&name);
+                            let ext = Path::new(&name).extension().and_then(|e| e.to_str());
+                            let mut resolved: Option<String> = None;
+                            for i in 2..1000usize {
+                                let candidate_name = if let Some(e) = ext {
+                                    format!("{stem} ({i}).{e}")
+                                } else {
+                                    format!("{stem} ({i})")
+                                };
+                                let candidate_raw = join_dest_raw(&dest_scheme, &dest_dir_raw, &candidate_name);
+                                let (_, candidate_loc) = resolve_location(LI::Raw(candidate_raw.clone()))?;
+                                if dest_provider.get_file_metadata(&candidate_loc).await.is_err() {
+                                    let op = if is_cut {
+                                        source_provider.move_item(&source_location, &candidate_loc).await
+                                    } else {
+                                        source_provider.copy(&source_location, &candidate_loc).await
+                                    };
+                                    op.map(|()| { resolved = Some(candidate_raw); })?;
+                                    break;
+                                }
+                            }
+                            resolved.map(Some).ok_or_else(|| "Unable to allocate unique name".to_string())
+                        }
+                        ConflictAction::Replace => {
+                            // Guard: don't delete+copy if source and dest are the same location
+                            if source_location.raw() == dest_item_location.raw() {
+                                Ok(Some(dest_raw))
+                            } else {
+                                let _ = dest_provider.delete(&dest_item_location).await;
+                                let op = if is_cut {
+                                    source_provider.move_item(&source_location, &dest_item_location).await
+                                } else {
+                                    source_provider.copy(&source_location, &dest_item_location).await
+                                };
+                                op.map(|()| Some(dest_raw))
+                            }
+                        }
+                        ConflictAction::KeepBoth => {
+                            let stem = Path::new(&name).file_stem().and_then(|s| s.to_str()).unwrap_or(&name);
+                            let ext = Path::new(&name).extension().and_then(|e| e.to_str());
+                            let mut resolved: Option<String> = None;
+                            for i in 2..1000usize {
+                                let candidate_name = if let Some(e) = ext {
+                                    format!("{stem} ({i}).{e}")
+                                } else {
+                                    format!("{stem} ({i})")
+                                };
+                                let candidate_raw = join_dest_raw(&dest_scheme, &dest_dir_raw, &candidate_name);
+                                let (cp, cl) = resolve_location(LI::Raw(candidate_raw.clone()))?;
+                                if cp.get_file_metadata(&cl).await.is_err() {
+                                    let op = if is_cut {
+                                        source_provider.move_item(&source_location, &cl).await
+                                    } else {
+                                        source_provider.copy(&source_location, &cl).await
+                                    };
+                                    op?;
+                                    resolved = Some(candidate_raw);
+                                    break;
+                                }
+                            }
+                            match resolved {
+                                Some(path) => Ok(Some(path)),
+                                None => Err("Unable to allocate unique destination name after 999 attempts".to_string()),
+                            }
+                        }
+                        ConflictAction::Rename => {
+                            let raw_name = custom_name.ok_or("Rename requires a custom name")?;
+                            let safe_name = sanitize_conflict_name(&raw_name)?;
+                            let renamed_raw = join_dest_raw(&dest_scheme, &dest_dir_raw, &safe_name);
+                            let (rp, renamed_location) = resolve_location(LI::Raw(renamed_raw.clone()))?;
+                            // Check if the renamed target already exists
+                            if rp.get_file_metadata(&renamed_location).await.is_ok() {
+                                return Err(format!("A file named '{safe_name}' already exists"));
+                            }
+                            let op = if is_cut {
+                                source_provider.move_item(&source_location, &renamed_location).await
+                            } else {
+                                source_provider.copy(&source_location, &renamed_location).await
+                            };
+                            op.map(|()| Some(renamed_raw))
+                        }
+                    }
                 } else {
-                    source_provider.copy(&source_location, &dest_item_location).await
-                };
-                op.map(|()| Some(dest_raw)).map_err(|e| e)
+                    let op = if is_cut {
+                        source_provider.move_item(&source_location, &dest_item_location).await
+                    } else {
+                        source_provider.copy(&source_location, &dest_item_location).await
+                    };
+                    op.map(|()| Some(dest_raw))
+                }
             }
             ("file", "gdrive") => {
                 let email = dest_location
@@ -2386,18 +2655,91 @@ pub async fn paste_items_to_location(
                 let file_id = get_file_id_by_path(email, source_location.path()).await?;
                 let temp_path = download_file_to_temp(email, &file_id, &name).await?;
 
-                let dest_path = allocate_unique_path(dest_dir.as_path(), &name)?;
-                let copy_result = crate::fs_utils::copy_file_or_directory(Path::new(&temp_path), &dest_path);
+                let candidate = dest_dir.join(&name);
+                let op_result = if candidate.exists() {
+                    // Conflict
+                    let (action, custom_name) = if let Some(ref stored) = apply_to_all_action {
+                        (stored.clone(), None)
+                    } else {
+                        conflict_index += 1;
+                        let remaining = total_items.saturating_sub(completed + 1);
+                        let source_info = build_local_conflict_info(Path::new(&temp_path))?;
+                        let dest_info = build_local_conflict_info(&candidate)?;
+                        match ask_user_about_conflict(
+                            &app, source_info, dest_info,
+                            conflict_index, remaining, operation_str,
+                        ).await {
+                            Ok(res) => {
+                                let a = res.action.clone();
+                                let cn = res.custom_name.clone();
+                                if res.apply_to_all { apply_to_all_action = Some(res.action); }
+                                (a, cn)
+                            }
+                            Err(e) if e == "CONFLICT_CANCELLED" => {
+                                let _ = fs::remove_file(&temp_path);
+                                cancelled = true;
+                                skipped_count += 1;
+                                completed += 1;
+                                emit_clipboard_progress_item(&app, None, completed, total_items, None);
+                                continue;
+                            }
+                            Err(e) => {
+                                let _ = fs::remove_file(&temp_path);
+                                return Err(e);
+                            }
+                        }
+                    };
+                    match action {
+                        ConflictAction::Skip => {
+                            let _ = fs::remove_file(&temp_path);
+                            skipped_count += 1;
+                            completed += 1;
+                            emit_clipboard_progress_item(&app, None, completed, total_items, None);
+                            continue;
+                        }
+                        ConflictAction::Replace => {
+                            delete_file_or_directory(&candidate)?;
+                            crate::fs_utils::copy_file_or_directory(Path::new(&temp_path), &candidate)?;
+                            Ok(Some(candidate.to_string_lossy().to_string()))
+                        }
+                        // Merge not supported for cross-provider — use KeepBoth
+                        ConflictAction::KeepBoth | ConflictAction::Merge => {
+                            let dest_path = allocate_unique_path(dest_dir.as_path(), &name)?;
+                            crate::fs_utils::copy_file_or_directory(Path::new(&temp_path), &dest_path)?;
+                            Ok(Some(dest_path.to_string_lossy().to_string()))
+                        }
+                        ConflictAction::Rename => {
+                            let raw_name = custom_name.as_deref().ok_or("Rename requires a custom name")?;
+                            let safe_name = sanitize_conflict_name(raw_name)?;
+                            let dest_path = dest_dir.join(&safe_name);
+                            if dest_path.exists() {
+                                Err(format!("A file named '{safe_name}' already exists"))
+                            } else {
+                                crate::fs_utils::copy_file_or_directory(Path::new(&temp_path), &dest_path)?;
+                                Ok(Some(dest_path.to_string_lossy().to_string()))
+                            }
+                        }
+                    }
+                } else {
+                    crate::fs_utils::copy_file_or_directory(Path::new(&temp_path), &candidate)?;
+                    Ok(Some(candidate.to_string_lossy().to_string()))
+                };
 
-                // Clean up temp file regardless of copy outcome
-                let _ = fs::remove_file(Path::new(&temp_path));
+                // Ensure temp file is removed after copy/move logic
+                let _ = fs::remove_file(&temp_path);
 
-                copy_result?;
-                let out = dest_path.to_string_lossy().to_string();
-                if is_cut {
-                    let _ = source_provider.delete(&source_location).await;
+                match op_result {
+                    Ok(Some(out)) => {
+                        if is_cut {
+                             if let Err(e) = source_provider.delete(&source_location).await {
+                                 last_error = Some(format!("Moved but failed to delete source: {e}"));
+                             }
+                        }
+                        Ok(Some(out))
+                    }
+                    Ok(None) => Ok(None),
+                    Err(e) => Err(e),
                 }
-                Ok(Some(out))
             }
             #[cfg(not(target_os = "windows"))]
             ("smb", "file") => {
@@ -2411,7 +2753,72 @@ pub async fn paste_items_to_location(
                 let (hostname, share, from_rel) =
                     crate::locations::smb::parse_smb_path(from_authority, source_location.path())?;
 
-                let dest_path = allocate_unique_path(dest_dir.as_path(), &name)?;
+                let candidate = dest_dir.join(&name);
+                let resolved_dest: Result<PathBuf, String> = if candidate.exists() {
+                    let (action, custom_name) = if let Some(ref stored) = apply_to_all_action {
+                        (stored.clone(), None)
+                    } else {
+                        conflict_index += 1;
+                        let remaining = total_items.saturating_sub(completed + 1);
+                        // We don't have local source info for SMB, so build dest info only
+                        let dest_info = build_local_conflict_info(&candidate)?;
+                        let source_info = ConflictFileInfo {
+                            name: name.clone(),
+                            path: source_location.raw().to_string(),
+                            size: 0, // SMB file size not easily available here
+                            modified: String::new(),
+                            is_directory: false,
+                            extension: Path::new(&name).extension().and_then(|e| e.to_str()).map(|s| s.to_string()),
+                        };
+                        match ask_user_about_conflict(
+                            &app, source_info, dest_info,
+                            conflict_index, remaining, operation_str,
+                        ).await {
+                            Ok(res) => {
+                                let a = res.action.clone();
+                                let cn = res.custom_name.clone();
+                                if res.apply_to_all { apply_to_all_action = Some(res.action); }
+                                (a, cn)
+                            }
+                            Err(e) if e == "CONFLICT_CANCELLED" => {
+                                cancelled = true;
+                                skipped_count += 1;
+                                completed += 1;
+                                emit_clipboard_progress_item(&app, None, completed, total_items, None);
+                                continue;
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    };
+                    match action {
+                        ConflictAction::Skip => { skipped_count += 1; completed += 1; emit_clipboard_progress_item(&app, None, completed, total_items, None); continue; }
+                        ConflictAction::Replace => {
+                            delete_file_or_directory(&candidate)?;
+                            Ok(candidate)
+                        }
+                        // Merge not supported for cross-provider — use KeepBoth
+                        ConflictAction::KeepBoth | ConflictAction::Merge => Ok(allocate_unique_path(dest_dir.as_path(), &name)?),
+                        ConflictAction::Rename => {
+                            let raw_name = custom_name.as_deref().ok_or("Rename requires a custom name")?;
+                            let safe_name = sanitize_conflict_name(raw_name)?;
+                            let dest_path = dest_dir.join(&safe_name);
+                            if dest_path.exists() {
+                                Err(format!("A file named '{safe_name}' already exists"))
+                            } else {
+                                Ok(dest_path)
+                            }
+                        }
+                    }
+                } else {
+                    Ok(candidate)
+                };
+                let dest_path = match resolved_dest {
+                    Ok(p) => p,
+                    Err(e) => {
+                        // Item-level error — record and continue
+                        Err(e)?
+                    }
+                };
                 let dest_path_string = dest_path.to_string_lossy().to_string();
                 let dest_path_clone = dest_path.clone();
                 let hostname_clone = hostname.clone();
@@ -2749,6 +3156,9 @@ pub async fn paste_items_to_location(
         );
     }
 
+    // Clean up: hide the conflict dialog if it was shown
+    hide_conflict_window(&app);
+
     emit_clipboard_progress_finish(
         &app,
         operation_label,
@@ -2762,6 +3172,7 @@ pub async fn paste_items_to_location(
         pasted_paths,
         skipped_count,
         error_message: last_error,
+        cancelled,
     })
 }
 
@@ -5576,6 +5987,12 @@ pub fn show_clipboard_progress_window(
     destination: String,
     total_items: usize,
 ) -> Result<(), String> {
+    // Don't show the progress window while the conflict dialog is open —
+    // it would overlap and steal focus from the conflict resolution UI.
+    if app.get_webview_window(CONFLICT_WINDOW_LABEL).is_some() {
+        return Ok(());
+    }
+
     let payload = ClipboardProgressPayload {
         operation,
         destination,
@@ -7197,5 +7614,423 @@ pub fn sftp_connect_window_ready(app: AppHandle) -> Result<(), String> {
 #[command]
 pub fn sftp_connect_window_unready() -> Result<(), String> {
     SFTP_CONNECT_QUEUE.set_ready(false);
+    Ok(())
+}
+
+// --- Conflict Resolution Window Commands ---
+
+fn show_conflict_window_internal(app: &AppHandle) -> Result<(), String> {
+    if let Some(existing) = app.get_webview_window(CONFLICT_WINDOW_LABEL) {
+        let _ = existing.show();
+        let _ = existing.set_focus();
+        return Ok(());
+    }
+
+    let url = tauri::WebviewUrl::App("index.html?view=conflict".into());
+    let builder = configure_modal_utility_window(tauri::WebviewWindowBuilder::new(
+        app,
+        CONFLICT_WINDOW_LABEL,
+        url,
+    ))
+    .title("File Conflict")
+    .inner_size(520.0, 600.0);
+
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true);
+
+    CONFLICT_QUEUE.set_ready(false);
+
+    let window = builder
+        .build()
+        .map_err(|e| format!("Failed to create conflict window: {e}"))?;
+
+    // Apply traffic light position via decorum plugin so it matches the
+    // global on_window_event handler in lib.rs (which reapplies on focus).
+    #[cfg(target_os = "macos")]
+    {
+        use tauri_plugin_decorum::WebviewWindowExt;
+        let _ = window.set_traffic_lights_inset(16.0, 24.0);
+    }
+
+    // Drop the oneshot sender when the window is actually destroyed.
+    // This handles all close scenarios (Cancel button, OS close, app quit)
+    // without being affected by React StrictMode's development double-mount.
+    window.on_window_event(|event| {
+        if matches!(event, tauri::WindowEvent::Destroyed) {
+            if let Ok(mut guard) = CONFLICT_SENDER.lock() {
+                guard.take();
+            }
+            if let Ok(mut p) = CONFLICT_PENDING_PAYLOAD.lock() {
+                *p = None;
+            }
+        }
+    });
+
+    Ok(())
+}
+
+#[command]
+pub fn conflict_window_ready(app: AppHandle) -> Result<(), String> {
+    CONFLICT_QUEUE.set_ready(true);
+    CONFLICT_QUEUE.try_emit(&app);
+
+    // Re-deliver the pending payload directly. This handles React StrictMode's
+    // development double-mount: the queue payload is consumed on first mount,
+    // then the component unmounts and remounts without receiving it again.
+    // Re-emitting is idempotent (Zustand setConflict overwrites with same data).
+    if let Ok(guard) = CONFLICT_PENDING_PAYLOAD.lock() {
+        if let Some(ref payload) = *guard {
+            if let Some(window) = app.get_webview_window(CONFLICT_WINDOW_LABEL) {
+                let _ = window.emit(CONFLICT_INIT_EVENT, payload);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[command]
+pub fn conflict_window_unready() -> Result<(), String> {
+    CONFLICT_QUEUE.set_ready(false);
+    // NOTE: We intentionally do NOT drop the sender here. React StrictMode
+    // double-mounts effects in development (mount→unmount→remount), and
+    // dropping the sender during the fake unmount would cancel the conflict.
+    // The sender is dropped by the window's Destroyed event handler instead.
+    Ok(())
+}
+
+#[command]
+pub fn resolve_conflict(resolution: ConflictResolution) -> Result<(), String> {
+    // Validate that the resolution matches the pending conflict
+    if let Ok(guard) = CONFLICT_PENDING_PAYLOAD.lock() {
+        if let Some(ref pending) = *guard {
+            if pending.conflict_id != resolution.conflict_id {
+                return Err(format!(
+                    "Conflict ID mismatch: expected {}, got {}",
+                    pending.conflict_id, resolution.conflict_id
+                ));
+            }
+        }
+    }
+
+    let sender = {
+        let mut guard = CONFLICT_SENDER.lock().map_err(|e| format!("Lock failed: {e}"))?;
+        guard.take()
+    };
+    match sender {
+        Some(tx) => {
+            let _ = tx.send(resolution);
+            Ok(())
+        }
+        None => Err("No pending conflict to resolve".to_string()),
+    }
+}
+
+/// Build a ConflictFileInfo from local file metadata.
+fn build_local_conflict_info(path: &Path) -> Result<ConflictFileInfo, String> {
+    let meta = fs::metadata(path).map_err(|e| format!("Failed to stat {}: {e}", path.display()))?;
+    let modified = meta
+        .modified()
+        .map(|t| {
+            let dt: DateTime<Utc> = t.into();
+            dt.to_rfc3339()
+        })
+        .unwrap_or_default();
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_string();
+    let extension = path.extension().and_then(|e| e.to_str()).map(|s| s.to_string());
+    Ok(ConflictFileInfo {
+        name,
+        path: path.to_string_lossy().to_string(),
+        size: meta.len(),
+        modified,
+        is_directory: meta.is_dir(),
+        extension,
+    })
+}
+
+/// Ask the user how to resolve a file conflict via the conflict dialog window.
+/// Creates a oneshot channel, stores the sender globally, emits the payload to
+/// the conflict window, and awaits the user's response.
+async fn ask_user_about_conflict(
+    app: &AppHandle,
+    source: ConflictFileInfo,
+    destination: ConflictFileInfo,
+    conflict_index: usize,
+    remaining: usize,
+    operation: &str,
+) -> Result<ConflictResolution, String> {
+    let conflict_id = Uuid::new_v4().to_string();
+    let (tx, rx) = tokio::sync::oneshot::channel::<ConflictResolution>();
+
+    // Store the sender
+    {
+        let mut guard = CONFLICT_SENDER
+            .lock()
+            .map_err(|e| format!("Lock failed: {e}"))?;
+        *guard = Some(tx);
+    }
+
+    // Show/create the conflict window
+    show_conflict_window_internal(app)?;
+
+    // Emit the conflict payload
+    let payload = ConflictPayload {
+        conflict_id,
+        source,
+        destination,
+        conflict_index,
+        remaining_items: remaining,
+        operation: operation.to_string(),
+    };
+
+    // Store for re-delivery on React StrictMode remount
+    if let Ok(mut p) = CONFLICT_PENDING_PAYLOAD.lock() {
+        *p = Some(payload.clone());
+    }
+
+    CONFLICT_QUEUE.queue(app, payload);
+
+    // Wait for user response (blocks until user picks an action or closes window)
+    rx.await
+        .map_err(|_| "CONFLICT_CANCELLED".to_string())
+}
+
+/// Hide the conflict dialog window.
+fn hide_conflict_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window(CONFLICT_WINDOW_LABEL) {
+        let _ = window.close();
+    }
+    CONFLICT_QUEUE.set_ready(false);
+    CONFLICT_QUEUE.clear_pending();
+    if let Ok(mut p) = CONFLICT_PENDING_PAYLOAD.lock() {
+        *p = None;
+    }
+}
+
+/// Sanitize a user-provided conflict rename to prevent path traversal.
+/// Returns just the filename component, stripping any path separators or traversal.
+fn sanitize_conflict_name(name: &str) -> Result<String, String> {
+    let sanitized = Path::new(name)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| format!("Invalid rename target: '{name}'"))?;
+    if sanitized.is_empty() || sanitized == "." || sanitized == ".." {
+        return Err("Invalid file name".to_string());
+    }
+    Ok(sanitized)
+}
+
+/// Execute the resolved conflict action for a local-to-local file operation.
+/// Returns Ok(Some(dest_path)) on success, Ok(None) if skipped.
+async fn execute_local_conflict_action(
+    action: &ConflictAction,
+    custom_name: Option<&str>,
+    source_path: &Path,
+    dest_dir: &Path,
+    name: &str,
+    is_cut: bool,
+    source_provider: &dyn crate::locations::LocationProvider,
+    source_location: &Location,
+) -> Result<Option<String>, String> {
+    use crate::locations::LocationInput as LI;
+
+    match action {
+        ConflictAction::Skip => Ok(None),
+        ConflictAction::Replace => {
+            let dest_path = dest_dir.join(name);
+            // Guard: don't delete+copy if source IS the destination (same-folder paste)
+            // Use canonicalize to handle case-insensitivity on macOS/Windows
+            let source_canon = fs::canonicalize(source_path).unwrap_or_else(|_| source_path.to_path_buf());
+            let dest_canon = fs::canonicalize(&dest_path).unwrap_or_else(|_| dest_path.clone());
+
+            if source_canon == dest_canon {
+                return Ok(Some(dest_path.to_string_lossy().to_string()));
+            }
+            // Delete the existing destination
+            delete_file_or_directory(&dest_path)?;
+            let dest_raw = dest_path.to_string_lossy().to_string();
+            let (_, dest_item_location) = resolve_location(LI::Raw(dest_raw.clone()))?;
+            if is_cut {
+                source_provider.move_item(source_location, &dest_item_location).await?;
+            } else {
+                source_provider.copy(source_location, &dest_item_location).await?;
+            }
+            Ok(Some(dest_raw))
+        }
+        ConflictAction::KeepBoth => {
+            let dest_path = allocate_unique_path(dest_dir, name)?;
+            let dest_raw = dest_path.to_string_lossy().to_string();
+            let (_, dest_item_location) = resolve_location(LI::Raw(dest_raw.clone()))?;
+            if is_cut {
+                source_provider.move_item(source_location, &dest_item_location).await?;
+            } else {
+                source_provider.copy(source_location, &dest_item_location).await?;
+            }
+            Ok(Some(dest_raw))
+        }
+        ConflictAction::Rename => {
+            let raw_name = custom_name.ok_or("Rename requires a custom name")?;
+            let safe_name = sanitize_conflict_name(raw_name)?;
+            let dest_path = dest_dir.join(&safe_name);
+            if dest_path.exists() {
+                return Err(format!("A file named '{safe_name}' already exists"));
+            }
+            let dest_raw = dest_path.to_string_lossy().to_string();
+            let (_, dest_item_location) = resolve_location(LI::Raw(dest_raw.clone()))?;
+            if is_cut {
+                source_provider.move_item(source_location, &dest_item_location).await?;
+            } else {
+                source_provider.copy(source_location, &dest_item_location).await?;
+            }
+            Ok(Some(dest_raw))
+        }
+        ConflictAction::Merge => {
+            let dest_path = dest_dir.join(name);
+            if source_path.is_dir() && dest_path.is_dir() {
+                // Guard: don't merge a directory into itself
+                let source_canon = fs::canonicalize(source_path).unwrap_or_else(|_| source_path.to_path_buf());
+                let dest_canon = fs::canonicalize(&dest_path).unwrap_or_else(|_| dest_path.clone());
+                if source_canon == dest_canon {
+                    return Ok(Some(dest_path.to_string_lossy().to_string()));
+                }
+                merge_local_directory(source_path, &dest_path, is_cut)?;
+                if is_cut {
+                    // Source directory should be empty after merge
+                    let _ = fs::remove_dir(source_path);
+                }
+                Ok(Some(dest_path.to_string_lossy().to_string()))
+            } else {
+                // Merge only makes sense for directories; treat as Replace for files
+                let dest_path_target = dest_dir.join(name);
+                let source_canon = fs::canonicalize(source_path).unwrap_or_else(|_| source_path.to_path_buf());
+                let dest_canon = fs::canonicalize(&dest_path_target).unwrap_or_else(|_| dest_path_target.clone());
+                if source_canon == dest_canon {
+                    return Ok(Some(dest_path_target.to_string_lossy().to_string()));
+                }
+                delete_file_or_directory(&dest_path_target)?;
+                let dest_raw = dest_path_target.to_string_lossy().to_string();
+                let (_, dest_item_location) = resolve_location(LI::Raw(dest_raw.clone()))?;
+                if is_cut {
+                    source_provider.move_item(source_location, &dest_item_location).await?;
+                } else {
+                    source_provider.copy(source_location, &dest_item_location).await?;
+                }
+                Ok(Some(dest_raw))
+            }
+        }
+    }
+}
+
+fn copy_symlink(src: &Path, dst: &Path) -> Result<(), String> {
+    let target = fs::read_link(src).map_err(|e| format!("Failed to read link: {e}"))?;
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, dst).map_err(|e| format!("Failed to create symlink: {e}"))
+    }
+    #[cfg(windows)]
+    {
+        if src.is_dir() {
+            std::os::windows::fs::symlink_dir(target, dst).map_err(|e| format!("Failed to create symlink: {e}"))
+        } else {
+            std::os::windows::fs::symlink_file(target, dst).map_err(|e| format!("Failed to create symlink: {e}"))
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        Err("Symlinks not supported on this platform".to_string())
+    }
+}
+
+/// Recursively merge a source directory into an existing destination directory.
+/// Files that don't conflict are copied/moved directly.
+/// Files that conflict are auto-renamed with (N) suffix (same as KeepBoth for inner items).
+fn merge_local_directory(source: &Path, dest: &Path, is_cut: bool) -> Result<(), String> {
+    let entries = fs::read_dir(source)
+        .map_err(|e| format!("Failed to read directory {}: {e}", source.display()))?;
+
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Failed to read entry: {e}"))?;
+        let entry_path = entry.path();
+        let entry_name = entry
+            .file_name()
+            .to_string_lossy()
+            .to_string();
+        let dest_path = dest.join(&entry_name);
+
+        let file_type = entry.file_type().map_err(|e| format!("Failed to get file type: {e}"))?;
+
+        if file_type.is_symlink() {
+             if dest_path.exists() {
+                 let unique = allocate_unique_path(dest, &entry_name)?;
+                 if is_cut {
+                    fs::rename(&entry_path, &unique)
+                        .map_err(|e| format!("Failed to move {}: {e}", entry_path.display()))?;
+                 } else {
+                    copy_symlink(&entry_path, &unique)?;
+                 }
+             } else {
+                 if is_cut {
+                    fs::rename(&entry_path, &dest_path)
+                        .map_err(|e| format!("Failed to move {}: {e}", entry_path.display()))?;
+                 } else {
+                    copy_symlink(&entry_path, &dest_path)?;
+                 }
+             }
+        } else if file_type.is_dir() {
+            if dest_path.exists() && dest_path.is_dir() {
+                // Recursively merge subdirectories
+                merge_local_directory(&entry_path, &dest_path, is_cut)?;
+                if is_cut {
+                    let _ = fs::remove_dir(&entry_path);
+                }
+            } else if dest_path.exists() {
+                // Name conflict with a file — auto-rename the directory
+                let unique = allocate_unique_path(dest, &entry_name)?;
+                if is_cut {
+                    fs::rename(&entry_path, &unique)
+                        .map_err(|e| format!("Failed to move {}: {e}", entry_path.display()))?;
+                } else {
+                    fs_utils::copy_file_or_directory(&entry_path, &unique)?;
+                }
+            } else {
+                // No conflict
+                if is_cut {
+                    fs::rename(&entry_path, &dest_path)
+                        .map_err(|e| format!("Failed to move {}: {e}", entry_path.display()))?;
+                } else {
+                    fs_utils::copy_file_or_directory(&entry_path, &dest_path)?;
+                }
+            }
+        } else {
+            // File
+            if dest_path.exists() {
+                // File conflict inside merge — auto-rename (KeepBoth semantics)
+                let unique = allocate_unique_path(dest, &entry_name)?;
+                if is_cut {
+                    fs::rename(&entry_path, &unique)
+                        .map_err(|e| format!("Failed to move {}: {e}", entry_path.display()))?;
+                } else {
+                    fs::copy(&entry_path, &unique)
+                        .map_err(|e| format!("Failed to copy {}: {e}", entry_path.display()))?;
+                }
+            } else {
+                if is_cut {
+                    fs::rename(&entry_path, &dest_path)
+                        .map_err(|e| format!("Failed to move {}: {e}", entry_path.display()))?;
+                } else {
+                    fs::copy(&entry_path, &dest_path)
+                        .map_err(|e| format!("Failed to copy {}: {e}", entry_path.display()))?;
+                }
+            }
+        }
+    }
+
     Ok(())
 }
