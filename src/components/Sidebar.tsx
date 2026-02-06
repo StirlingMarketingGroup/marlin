@@ -18,6 +18,7 @@ import {
   Plus,
   SignOut,
   ShareNetwork,
+  Terminal,
 } from 'phosphor-react';
 import GitRepoBadge from './GitRepoBadge';
 import SymlinkBadge from './SymlinkBadge';
@@ -25,7 +26,13 @@ import type { IconProps } from 'phosphor-react';
 import { useAppStore } from '../store/useAppStore';
 import { useCallback, useEffect, useState, MouseEvent, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { SystemDrive, PinnedDirectory, GoogleAccountInfo, SmbServerInfo } from '../types';
+import {
+  SystemDrive,
+  PinnedDirectory,
+  GoogleAccountInfo,
+  SmbServerInfo,
+  SftpServerInfo,
+} from '../types';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useToastStore } from '../store/useToastStore';
 import { useDragStore } from '../store/useDragStore';
@@ -59,6 +66,11 @@ export default function Sidebar() {
     removeSmbServer,
     pendingSmbCredentialRequest,
     setPendingSmbCredentialRequest,
+    sftpServers,
+    loadSftpServers,
+    removeSftpServer,
+    pendingSftpCredentialRequest,
+    setPendingSftpCredentialRequest,
   } = useAppStore();
 
   const [systemDrives, setSystemDrives] = useState<SystemDrive[]>([]);
@@ -67,6 +79,7 @@ export default function Sidebar() {
   const [addingGoogleAccount, setAddingGoogleAccount] = useState(false);
   const [disconnectingAccounts, setDisconnectingAccounts] = useState<Set<string>>(new Set());
   const [disconnectingSmbServers, setDisconnectingSmbServers] = useState<Set<string>>(new Set());
+  const [disconnectingSftpServers, setDisconnectingSftpServers] = useState<Set<string>>(new Set());
   const inAppDropTargetId = useDragStore((state) => state.inAppDropTargetId);
   const sidebarRef = useRef<HTMLDivElement>(null);
   const isProcessingDropRef = useRef(false);
@@ -112,6 +125,24 @@ export default function Sidebar() {
       }
     })();
   }, [pendingSmbCredentialRequest, setPendingSmbCredentialRequest]);
+
+  useEffect(() => {
+    if (!pendingSftpCredentialRequest) return;
+
+    (async () => {
+      try {
+        await invoke('open_sftp_connect_window', {
+          initialHostname: pendingSftpCredentialRequest.hostname,
+          initialPort: pendingSftpCredentialRequest.port,
+          initialUsername: pendingSftpCredentialRequest.username,
+          targetPath: pendingSftpCredentialRequest.targetPath,
+        });
+        setPendingSftpCredentialRequest(null);
+      } catch (error) {
+        console.warn('Failed to open SFTP connect window:', error);
+      }
+    })();
+  }, [pendingSftpCredentialRequest, setPendingSftpCredentialRequest]);
 
   useSidebarDropZone(
     async (paths) => {
@@ -207,7 +238,8 @@ export default function Sidebar() {
     fetchSystemDrives();
     loadGoogleAccounts();
     loadSmbServers();
-  }, [loadGoogleAccounts, loadSmbServers]);
+    loadSftpServers();
+  }, [loadGoogleAccounts, loadSmbServers, loadSftpServers]);
 
   const fetchSystemDrives = async () => {
     try {
@@ -321,6 +353,36 @@ export default function Sidebar() {
       setDisconnectingSmbServers((prev) => {
         const newSet = new Set(prev);
         newSet.delete(server.hostname);
+        return newSet;
+      });
+    }
+  };
+
+  const handleDisconnectSftpServer = async (server: SftpServerInfo, event: React.MouseEvent) => {
+    event.stopPropagation();
+    const { addToast } = useToastStore.getState();
+    const serverKey = `${server.hostname}:${server.port}`;
+
+    setDisconnectingSftpServers((prev) => new Set(prev).add(serverKey));
+
+    try {
+      await removeSftpServer(server.hostname, server.port);
+      addToast({
+        type: 'success',
+        message: `Disconnected from ${server.hostname}`,
+        duration: 3000,
+      });
+    } catch (error) {
+      console.error('Failed to disconnect SFTP server:', error);
+      addToast({
+        type: 'error',
+        message: 'Failed to disconnect from server',
+        duration: 5000,
+      });
+    } finally {
+      setDisconnectingSftpServers((prev) => {
+        const newSet = new Set(prev);
+        newSet.delete(serverKey);
         return newSet;
       });
     }
@@ -683,6 +745,78 @@ export default function Sidebar() {
         >
           <Plus className="w-5 h-5" weight="regular" />
           <span className="truncate">Add Network Share...</span>
+        </button>
+
+        {/* SFTP Servers */}
+        {sftpServers.map((server) => {
+          const portSuffix = server.port === 22 ? '' : `:${server.port}`;
+          const sftpPath = `sftp://${server.username}@${server.hostname}${portSuffix}/`;
+          const isActive =
+            currentPath.startsWith(sftpPath) ||
+            currentPath.startsWith(`sftp://${server.username}@${server.hostname}:${server.port}/`);
+          const serverKey = `${server.hostname}:${server.port}`;
+          const isDisconnecting = disconnectingSftpServers.has(serverKey);
+          const displayName =
+            server.port === 22
+              ? `${server.hostname} (${server.username})`
+              : `${server.hostname}:${server.port} (${server.username})`;
+          return (
+            <QuickTooltip
+              key={serverKey}
+              text={`${server.username}@${server.hostname}${portSuffix}`}
+            >
+              {({ onBlur, onFocus, onMouseEnter, onMouseLeave, ref }) => (
+                <div
+                  ref={ref}
+                  onMouseEnter={onMouseEnter}
+                  onMouseLeave={onMouseLeave}
+                  onFocus={onFocus}
+                  onBlur={onBlur}
+                  className={`w-full flex items-center gap-2 px-1.5 py-1 rounded-md text-left leading-5 text-[13px] group ${
+                    isActive ? 'bg-app-light' : 'hover:bg-app-light/70'
+                  }`}
+                >
+                  <button
+                    onClick={() => navigateTo(sftpPath)}
+                    className="flex items-center gap-2 flex-1 min-w-0"
+                    data-tauri-drag-region={false}
+                  >
+                    <Terminal
+                      className={`w-5 h-5 flex-shrink-0 ${isActive ? 'text-accent' : ''}`}
+                      weight="fill"
+                    />
+                    <span className={`truncate ${isActive ? 'text-accent' : ''}`}>
+                      {displayName}
+                    </span>
+                  </button>
+
+                  <button
+                    onClick={(e) => handleDisconnectSftpServer(server, e)}
+                    disabled={isDisconnecting}
+                    className="ml-auto p-0.5 rounded hover:bg-app-light/50 text-app-muted hover:text-accent transition-colors cursor-pointer opacity-0 group-hover:opacity-100"
+                    title={isDisconnecting ? 'Disconnecting...' : 'Disconnect server'}
+                    data-tauri-drag-region={false}
+                  >
+                    {isDisconnecting ? (
+                      <CircleNotch className="w-3.5 h-3.5 animate-spin" weight="regular" />
+                    ) : (
+                      <SignOut className="w-3.5 h-3.5" weight="regular" />
+                    )}
+                  </button>
+                </div>
+              )}
+            </QuickTooltip>
+          );
+        })}
+
+        {/* Add SFTP Server button */}
+        <button
+          onClick={() => void invoke('open_sftp_connect_window', {})}
+          className="w-full flex items-center gap-2 px-1.5 py-1 rounded-md text-left leading-5 text-[13px] text-app-muted hover:bg-app-light/70 hover:text-app-text transition-colors"
+          data-tauri-drag-region={false}
+        >
+          <Plus className="w-5 h-5" weight="regular" />
+          <span className="truncate">Add SFTP Server...</span>
         </button>
 
         {/* Locations section */}

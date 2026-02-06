@@ -10,12 +10,14 @@ use crate::fs_utils::FileItem;
 mod file;
 pub mod archive;
 pub mod gdrive;
+pub mod sftp;
 #[cfg(not(target_os = "windows"))]
 pub mod smb;
 
 pub use file::FileSystemProvider;
 pub use archive::ArchiveProvider;
 pub use gdrive::GoogleDriveProvider;
+pub use sftp::SftpProvider;
 #[cfg(not(target_os = "windows"))]
 pub use smb::SmbProvider;
 
@@ -31,6 +33,8 @@ static REGISTRY: Lazy<RwLock<ProviderMap>> = Lazy::new(|| {
     map.insert(archive_provider.scheme().to_string(), archive_provider);
     let gdrive_provider: ProviderRef = Arc::new(GoogleDriveProvider::default());
     map.insert(gdrive_provider.scheme().to_string(), gdrive_provider);
+    let sftp_provider: ProviderRef = Arc::new(SftpProvider::default());
+    map.insert(sftp_provider.scheme().to_string(), sftp_provider);
     #[cfg(not(target_os = "windows"))]
     {
         let smb_provider: ProviderRef = Arc::new(SmbProvider::default());

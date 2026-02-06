@@ -574,6 +574,127 @@ pub fn strip_url_credentials(url: &str) -> String {
     url.to_string()
 }
 
+/// Upload a local file to an SMB share via the sidecar, handling name collisions.
+/// Returns the final filename used on the SMB share.
+pub fn upload_file_to_smb(
+    local_path: &std::path::Path,
+    hostname: &str,
+    share: &str,
+    dest_dir: &str,
+    preferred_name: &str,
+) -> Result<String, String> {
+    use client::SidecarStatus;
+    use std::path::Path;
+
+    // Ensure sidecar is running
+    if !client::is_available() {
+        let status = client::initialize();
+        if status != SidecarStatus::Available {
+            return Err(status.error_message().unwrap_or_else(|| {
+                "SMB support is not available".to_string()
+            }));
+        }
+    }
+
+    let creds = get_server_credentials(hostname)?;
+
+    // Split name into stem + extension for collision avoidance
+    let p = Path::new(preferred_name);
+    let stem = p
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(preferred_name)
+        .to_string();
+    let ext = p.extension().and_then(|e| e.to_str()).map(|s| s.to_string());
+
+    for i in 1..1000usize {
+        let candidate = if i == 1 {
+            preferred_name.to_string()
+        } else if let Some(ref e) = ext {
+            format!("{stem} ({i}).{e}")
+        } else {
+            format!("{stem} ({i})")
+        };
+
+        let dest_rel = if dest_dir == "/" {
+            format!("/{}", candidate)
+        } else {
+            format!("{}/{}", dest_dir.trim_end_matches('/'), candidate)
+        };
+
+        let params = serde_json::json!({
+            "credentials": {
+                "hostname": hostname,
+                "username": creds.username,
+                "password": creds.password,
+                "domain": creds.domain
+            },
+            "share": share,
+            "source_path": local_path.to_string_lossy(),
+            "dest_path": dest_rel
+        });
+
+        match client::call_method_with_timeout::<_, serde_json::Value>(
+            "upload_file",
+            params,
+            client::DOWNLOAD_TIMEOUT_MS,
+        ) {
+            Ok(_) => return Ok(candidate),
+            Err(e) => {
+                // If the file already exists, try the next name
+                let lower = e.to_lowercase();
+                if lower.contains("exist") || lower.contains("eexist") {
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+    }
+
+    Err("Unable to allocate unique destination name on SMB share".to_string())
+}
+
+/// Download an SMB file to a local path via the sidecar.
+pub fn download_file_from_smb(
+    hostname: &str,
+    share: &str,
+    file_path: &str,
+    dest_path: &std::path::Path,
+) -> Result<(), String> {
+    use client::SidecarStatus;
+
+    if !client::is_available() {
+        let status = client::initialize();
+        if status != SidecarStatus::Available {
+            return Err(status.error_message().unwrap_or_else(|| {
+                "SMB support is not available".to_string()
+            }));
+        }
+    }
+
+    let creds = get_server_credentials(hostname)?;
+
+    let params = serde_json::json!({
+        "credentials": {
+            "hostname": hostname,
+            "username": creds.username,
+            "password": creds.password,
+            "domain": creds.domain
+        },
+        "share": share,
+        "path": file_path,
+        "dest_path": dest_path.to_string_lossy()
+    });
+
+    let _result: serde_json::Value = client::call_method_with_timeout(
+        "download_file",
+        params,
+        client::DOWNLOAD_TIMEOUT_MS,
+    )?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

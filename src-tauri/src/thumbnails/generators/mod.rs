@@ -2,8 +2,6 @@ use base64::Engine as _;
 use image::{DynamicImage, GenericImageView, ImageFormat};
 use std::io::Cursor;
 use std::path::Path;
-use std::sync::OnceLock;
-
 use super::{ThumbnailFormat, ThumbnailGenerationResult, ThumbnailQuality, ThumbnailRequest};
 
 #[cfg(target_os = "macos")]
@@ -17,46 +15,85 @@ pub mod stl;
 pub mod svg;
 pub mod video;
 pub mod fonts;
+pub mod zpl;
 
+pub mod sftp;
 pub mod smb;
-
-/// Shared runtime for archive thumbnail extraction
-/// Using OnceLock ensures we create it only once and reuse it
-static ARCHIVE_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-
-fn get_archive_runtime() -> &'static tokio::runtime::Runtime {
-    ARCHIVE_RUNTIME.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .expect("Failed to create archive thumbnail runtime")
-    })
-}
 
 pub struct ThumbnailGenerator;
 
-impl ThumbnailGenerator {
-    pub fn generate(request: &ThumbnailRequest) -> Result<ThumbnailGenerationResult, String> {
-        if request.path.starts_with("archive://") {
-            // Use a shared runtime for archive extraction to avoid creating one per thumbnail
-            let archive_path = request.path.clone();
-            let runtime = get_archive_runtime();
-            let temp_path = runtime.block_on(
-                crate::locations::archive::extract_archive_entry_to_temp(&archive_path),
-            )?;
+/// Result of async pre-processing: a local file path ready for CPU-bound generation,
+/// plus an optional temp file to clean up after.
+pub struct PreparedRequest {
+    pub request: ThumbnailRequest,
+    pub temp_file: Option<std::path::PathBuf>,
+}
 
-            let mut temp_request = request.clone();
-            temp_request.path = temp_path.to_string_lossy().to_string();
-            return Self::generate_local(&temp_request);
+impl ThumbnailGenerator {
+    /// Async pre-processing phase: downloads remote files to local temp paths.
+    /// This runs in the async context (no thread blocking) and must be called
+    /// BEFORE `generate()` which runs in `spawn_blocking`.
+    pub async fn prepare(request: ThumbnailRequest) -> Result<PreparedRequest, String> {
+        if request.path.starts_with("archive://") {
+            let temp_path =
+                crate::locations::archive::extract_archive_entry_to_temp(&request.path).await?;
+            let mut prepared = request;
+            prepared.path = temp_path.to_string_lossy().to_string();
+            return Ok(PreparedRequest {
+                request: prepared,
+                temp_file: Some(temp_path),
+            });
         }
 
+        if request.path.starts_with("gdrive://") {
+            let (email, path) = parse_gdrive_path(&request.path)?;
+            let file_name = std::path::Path::new(&path)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("file")
+                .to_string();
+
+            let file_id =
+                crate::locations::gdrive::provider::get_file_id_by_path(&email, &path).await?;
+            let temp_path =
+                crate::locations::gdrive::provider::download_file_to_temp(&email, &file_id, &file_name)
+                    .await?;
+
+            let mut prepared = request;
+            prepared.path = temp_path.clone();
+            return Ok(PreparedRequest {
+                request: prepared,
+                temp_file: Some(std::path::PathBuf::from(temp_path)),
+            });
+        }
+
+        if sftp::is_sftp_path(&request.path) {
+            let temp_path = sftp::download_sftp_file_async(&request.path).await?;
+            let mut prepared = request;
+            prepared.path = temp_path.to_string_lossy().to_string();
+            return Ok(PreparedRequest {
+                request: prepared,
+                temp_file: Some(temp_path),
+            });
+        }
+
+        // SMB and local files: no async pre-processing needed
+        Ok(PreparedRequest {
+            request,
+            temp_file: None,
+        })
+    }
+
+    /// Synchronous generation phase: CPU-bound image processing only.
+    /// Remote files should already be downloaded via `prepare()`.
+    /// This is safe to call from `spawn_blocking`.
+    pub fn generate(request: &ThumbnailRequest) -> Result<ThumbnailGenerationResult, String> {
         // Check for SMB paths and handle them specially
         if smb::is_smb_path(&request.path) {
             return smb::generate_smb_thumbnail(request);
         }
 
-        // Handle local files
+        // All other paths (local, or remote files already downloaded by prepare())
         Self::generate_local(request)
     }
 
@@ -131,6 +168,11 @@ impl ThumbnailGenerator {
         // Check if it's a font file
         if Self::is_font_file(path) {
             return fonts::FontGenerator::generate(request);
+        }
+
+        // Check if it's a ZPL label file
+        if Self::is_zpl_file(path) {
+            return zpl::ZplGenerator::generate(request);
         }
 
         // TODO: Add support for documents
@@ -212,6 +254,13 @@ impl ThumbnailGenerator {
             matches!(extension.to_lowercase().as_str(), "ttf" | "otf")
         } else {
             false
+        }
+    }
+
+    fn is_zpl_file(path: &Path) -> bool {
+        match path.extension().and_then(|s| s.to_str()) {
+            Some(ext) => ext.eq_ignore_ascii_case("zpl"),
+            None => false,
         }
     }
 
@@ -314,5 +363,78 @@ impl ThumbnailGenerator {
                 }
             }
         }
+    }
+}
+
+/// Parse a `gdrive://user@domain/path` URI into (email, decoded_path).
+fn parse_gdrive_path(raw: &str) -> Result<(String, String), String> {
+    // gdrive://brian@smg.gg/My Drive/file.zpl
+    // The url crate treats this as scheme=gdrive, username=brian, host=smg.gg,
+    // path=/My%20Drive/file.zpl (percent-encoded).
+    let url =
+        url::Url::parse(raw).map_err(|e| format!("Invalid Google Drive path: {e}"))?;
+
+    let host = url
+        .host_str()
+        .ok_or_else(|| "Google Drive path missing account".to_string())?;
+
+    let email = if url.username().is_empty() {
+        host.to_string()
+    } else {
+        format!("{}@{}", url.username(), host)
+    };
+
+    // url.path() returns percent-encoded; decode it back to the original path
+    let path = urlencoding::decode(url.path())
+        .map_err(|e| format!("Invalid UTF-8 in Google Drive path: {e}"))?
+        .into_owned();
+
+    Ok((email, path))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_gdrive_path_basic() {
+        let (email, path) =
+            parse_gdrive_path("gdrive://brian@smg.gg/My Drive/file.zpl").unwrap();
+        assert_eq!(email, "brian@smg.gg");
+        assert_eq!(path, "/My Drive/file.zpl");
+    }
+
+    #[test]
+    fn test_parse_gdrive_path_spaces() {
+        let (email, path) = parse_gdrive_path(
+            "gdrive://brian@smg.gg/My Drive/shipping-label-fedex real test.zpl",
+        )
+        .unwrap();
+        assert_eq!(email, "brian@smg.gg");
+        assert_eq!(path, "/My Drive/shipping-label-fedex real test.zpl");
+    }
+
+    #[test]
+    fn test_parse_gdrive_path_shared() {
+        let (email, path) =
+            parse_gdrive_path("gdrive://user@example.com/Shared with me/doc.pdf").unwrap();
+        assert_eq!(email, "user@example.com");
+        assert_eq!(path, "/Shared with me/doc.pdf");
+    }
+
+    #[test]
+    fn test_parse_gdrive_path_nested() {
+        let (email, path) = parse_gdrive_path(
+            "gdrive://a@b.co/My Drive/folder/sub folder/file name.png",
+        )
+        .unwrap();
+        assert_eq!(email, "a@b.co");
+        assert_eq!(path, "/My Drive/folder/sub folder/file name.png");
+    }
+
+    #[test]
+    fn test_parse_gdrive_path_invalid() {
+        assert!(parse_gdrive_path("not-a-url").is_err());
+        assert!(parse_gdrive_path("gdrive:///no-host").is_err());
     }
 }

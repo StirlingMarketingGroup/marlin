@@ -284,6 +284,19 @@ impl ThumbnailCache {
                     }
                 }
             }
+        } else if path.starts_with("sftp://") {
+            match super::generators::sftp::get_sftp_file_identity_async(path).await {
+                Ok(identity) => identity,
+                Err(_) => {
+                    let now = Utc::now().timestamp() as u64;
+                    let bucketed_secs = (now / 3600) * 3600;
+                    super::FileIdentity {
+                        size: 0,
+                        mtime_ns: (bucketed_secs as u128) * 1_000_000_000,
+                        file_id: None,
+                    }
+                }
+            }
         } else {
             let path_obj = Path::new(path);
             super::get_file_identity(path_obj)

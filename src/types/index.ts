@@ -304,6 +304,29 @@ export interface SmbConnectSuccessPayload {
   targetPath?: string | null;
 }
 
+// SFTP Server Types
+export interface SftpServerInfo {
+  hostname: string;
+  port: number;
+  username: string;
+  authMethod: string;
+  keyPath?: string | null;
+}
+
+export interface SftpConnectInitPayload {
+  initialHostname?: string | null;
+  initialPort?: number | null;
+  initialUsername?: string | null;
+  targetPath?: string | null;
+}
+
+export interface SftpConnectSuccessPayload {
+  hostname: string;
+  port: number;
+  username: string;
+  targetPath?: string | null;
+}
+
 // Clipboard Types
 export interface ClipboardInfo {
   hasFiles: boolean;

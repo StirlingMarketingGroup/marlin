@@ -7,6 +7,7 @@ import CompressProgressWindow from './windows/CompressProgressWindow';
 import DeleteProgressWindow from './windows/DeleteProgressWindow';
 import ClipboardProgressWindow from './windows/ClipboardProgressWindow';
 import SmbConnectWindow from './windows/SmbConnectWindow';
+import SftpConnectWindow from './windows/SftpConnectWindow';
 import PermissionsWindow from './windows/PermissionsWindow';
 import PreferencesWindow from './windows/PreferencesWindow';
 import { useThemePreference, useThemeSync } from '@/hooks/useTheme';
@@ -29,11 +30,13 @@ const Root =
             ? ClipboardProgressWindow
             : view === 'smb-connect'
               ? SmbConnectWindow
-              : view === 'permissions'
-                ? PermissionsWindow
-                : view === 'preferences'
-                  ? PreferencesWindow
-                  : App;
+              : view === 'sftp-connect'
+                ? SftpConnectWindow
+                : view === 'permissions'
+                  ? PermissionsWindow
+                  : view === 'preferences'
+                    ? PreferencesWindow
+                    : App;
 
 function ThemeBridge() {
   const preference = useThemePreference();

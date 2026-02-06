@@ -16,6 +16,7 @@ import {
   DeleteItemPayload,
   GoogleAccountInfo,
   SmbServerInfo,
+  SftpServerInfo,
   ClipboardInfo,
   PasteResult,
   PasteImageResult,
@@ -238,6 +239,15 @@ interface AppState {
   // Pending credential request (when navigating to an SMB path without stored credentials)
   pendingSmbCredentialRequest: { hostname: string; targetPath: string } | null;
 
+  // SFTP servers
+  sftpServers: SftpServerInfo[];
+  pendingSftpCredentialRequest: {
+    hostname: string;
+    port: number;
+    username?: string;
+    targetPath: string;
+  } | null;
+
   // Clipboard state
   clipboardMode: 'copy' | 'cut' | null;
   clipboardPaths: string[];
@@ -337,12 +347,27 @@ interface AppState {
   setPendingSmbCredentialRequest: (
     request: { hostname: string; targetPath: string } | null
   ) => void;
+  // SFTP servers
+  loadSftpServers: () => Promise<void>;
+  addSftpServer: (
+    hostname: string,
+    port: number,
+    username: string,
+    password: string | null,
+    authMethod: string,
+    keyPath: string | null
+  ) => Promise<SftpServerInfo>;
+  removeSftpServer: (hostname: string, port: number) => Promise<void>;
+  setPendingSftpCredentialRequest: (
+    request: { hostname: string; port: number; username?: string; targetPath: string } | null
+  ) => void;
   // Clipboard actions
   copySelectedFiles: () => Promise<void>;
   cutSelectedFiles: () => Promise<void>;
   pasteFiles: () => Promise<void>;
   syncClipboardState: () => Promise<void>;
   clearClipboardState: () => void;
+  setClipboardState: (paths: string[], mode: string) => void;
   // Rename UX
   justCreatedPath?: string;
   renameTargetPath?: string;
@@ -412,6 +437,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   googleAccounts: [],
   smbServers: [],
   pendingSmbCredentialRequest: null,
+  sftpServers: [],
+  pendingSftpCredentialRequest: null,
 
   // Clipboard initial state
   clipboardMode: null,
@@ -578,6 +605,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     }),
 
   navigateTo: async (path) => {
+    // Cancel any in-flight thumbnail generation from the previous directory
+    void invoke('cancel_all_thumbnails');
+
     const { pathHistory, historyIndex, googleAccounts } = get();
     const trimmed = path.trim();
 
@@ -667,6 +697,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   goBack: () => {
+    // Cancel any in-flight thumbnail generation from the current directory
+    void invoke('cancel_all_thumbnails');
+
     const { pathHistory, historyIndex } = get();
     if (historyIndex > 0) {
       const newIndex = historyIndex - 1;
@@ -690,6 +723,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   goForward: () => {
+    // Cancel any in-flight thumbnail generation from the current directory
+    void invoke('cancel_all_thumbnails');
+
     const { pathHistory, historyIndex } = get();
     if (historyIndex < pathHistory.length - 1) {
       const newIndex = historyIndex + 1;
@@ -886,6 +922,21 @@ export const useAppStore = create<AppState>((set, get) => ({
           set({
             pendingSmbCredentialRequest: { hostname, targetPath: currentPath },
             error: undefined, // Don't show error, we'll show the dialog instead
+          });
+          return;
+        }
+      }
+
+      // Check if this is an SFTP "no credentials" error
+      if (msg.includes('[SFTP_NO_CREDENTIALS]')) {
+        const sftpMatch = currentPath.match(/^sftp:\/\/(?:([^@]+)@)?([^/:]+)(?::(\d+))?/);
+        if (sftpMatch) {
+          const username = sftpMatch[1] || undefined;
+          const hostname = sftpMatch[2];
+          const port = sftpMatch[3] ? parseInt(sftpMatch[3], 10) : 22;
+          set({
+            pendingSftpCredentialRequest: { hostname, port, username, targetPath: currentPath },
+            error: undefined,
           });
           return;
         }
@@ -1389,6 +1440,30 @@ export const useAppStore = create<AppState>((set, get) => ({
         pathToOpen = await invoke<string>('download_smb_file', { path: file.path });
       } catch (downloadError) {
         console.error('Failed to download SMB file:', downloadError);
+        const errorMessage =
+          downloadError instanceof Error ? downloadError.message : String(downloadError);
+        toastStore.addToast({
+          type: 'error',
+          message: `Unable to open ${file.name}: ${errorMessage}`,
+          duration: 6000,
+        });
+        return;
+      } finally {
+        if (downloadToastId) {
+          toastStore.removeToast(downloadToastId);
+        }
+      }
+    } else if (file.path.startsWith('sftp://') && !file.is_directory) {
+      try {
+        downloadToastId = toastStore.addToast({
+          type: 'info',
+          message: `Downloading ${file.name}...`,
+          duration: 0,
+        });
+
+        pathToOpen = await invoke<string>('download_sftp_file', { path: file.path });
+      } catch (downloadError) {
+        console.error('Failed to download SFTP file:', downloadError);
         const errorMessage =
           downloadError instanceof Error ? downloadError.message : String(downloadError);
         toastStore.addToast({
@@ -2071,6 +2146,63 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ pendingSmbCredentialRequest: request });
   },
 
+  // SFTP servers
+  loadSftpServers: async () => {
+    try {
+      const servers = await invoke<SftpServerInfo[]>('get_sftp_servers');
+      set({ sftpServers: servers });
+    } catch (error) {
+      console.error('Failed to load SFTP servers:', error);
+      set({ sftpServers: [] });
+    }
+  },
+
+  addSftpServer: async (
+    hostname: string,
+    port: number,
+    username: string,
+    password: string | null,
+    authMethod: string,
+    keyPath: string | null
+  ) => {
+    try {
+      const newServer = await invoke<SftpServerInfo>('add_sftp_server', {
+        hostname,
+        port,
+        username,
+        password,
+        authMethod,
+        keyPath,
+      });
+      set((state) => ({
+        sftpServers: [
+          ...state.sftpServers.filter((s) => !(s.hostname === hostname && s.port === port)),
+          newServer,
+        ],
+      }));
+      return newServer;
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      throw new Error(errorMessage);
+    }
+  },
+
+  removeSftpServer: async (hostname: string, port: number) => {
+    try {
+      await invoke('remove_sftp_server', { hostname, port });
+      set((state) => ({
+        sftpServers: state.sftpServers.filter((s) => !(s.hostname === hostname && s.port === port)),
+      }));
+    } catch (error) {
+      console.error('Failed to remove SFTP server:', error);
+      throw error;
+    }
+  },
+
+  setPendingSftpCredentialRequest: (request) => {
+    set({ pendingSftpCredentialRequest: request });
+  },
+
   // Clipboard actions
   copySelectedFiles: async () => {
     const { selectedFiles, files, currentPath } = get();
@@ -2102,6 +2234,11 @@ export const useAppStore = create<AppState>((set, get) => ({
         clipboardPaths: filePaths,
         clipboardPathsSet: new Set(filePaths),
         clipboardInternalOnly: true,
+      });
+
+      // Broadcast to other windows so they can paste too
+      emit('clipboard:internal_copy', { paths: filePaths, mode: 'copy' }).catch((err) => {
+        console.warn('Failed to emit clipboard:internal_copy:', err);
       });
 
       const count = filePaths.length;
@@ -2176,6 +2313,11 @@ export const useAppStore = create<AppState>((set, get) => ({
         clipboardPaths: filePaths,
         clipboardPathsSet: new Set(filePaths),
         clipboardInternalOnly: true,
+      });
+
+      // Broadcast to other windows so they can paste too
+      emit('clipboard:internal_copy', { paths: filePaths, mode: 'cut' }).catch((err) => {
+        console.warn('Failed to emit clipboard:internal_copy:', err);
       });
 
       const count = filePaths.length;
@@ -2285,9 +2427,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
 
       if (skippedCount > 0) {
+        const detail = result.errorMessage ? `: ${result.errorMessage}` : '.';
         toastStore.addToast({
           type: 'info',
-          message: `${skippedCount} files could not be pasted.`,
+          message: `${skippedCount} file${skippedCount > 1 ? 's' : ''} could not be pasted${detail}`,
           duration: 5000,
         });
       }
@@ -2353,16 +2496,25 @@ export const useAppStore = create<AppState>((set, get) => ({
     };
 
     const pasteToRemoteDestination = async (clipboardInfo: ClipboardInfo) => {
-      if (clipboardInfo.hasImage && !clipboardInfo.hasFiles) {
+      // When the internal clipboard has files (remote copies like gdrive), prefer
+      // those over anything in the OS clipboard (which may be stale or an image).
+      const hasInternalClipboard = state.clipboardInternalOnly && state.clipboardPaths.length > 0;
+
+      if (!hasInternalClipboard && clipboardInfo.hasImage && !clipboardInfo.hasFiles) {
         await pasteRemoteImage();
         return;
       }
 
-      const sourcePaths =
-        clipboardInfo.hasFiles && clipboardInfo.filePaths.length > 0
+      const sourcePaths = hasInternalClipboard
+        ? state.clipboardPaths
+        : clipboardInfo.hasFiles && clipboardInfo.filePaths.length > 0
           ? clipboardInfo.filePaths
           : state.clipboardPaths;
-      const isCut = clipboardInfo.hasFiles ? clipboardInfo.isCut : state.clipboardMode === 'cut';
+      const isCut = hasInternalClipboard
+        ? state.clipboardMode === 'cut'
+        : clipboardInfo.hasFiles
+          ? clipboardInfo.isCut
+          : state.clipboardMode === 'cut';
 
       if (!sourcePaths || sourcePaths.length === 0) {
         toastStore.addToast({
@@ -2720,6 +2872,15 @@ export const useAppStore = create<AppState>((set, get) => ({
       clipboardPaths: [],
       clipboardPathsSet: new Set<string>(),
       clipboardInternalOnly: false,
+    });
+  },
+
+  setClipboardState: (paths: string[], mode: string) => {
+    set({
+      clipboardMode: mode === 'cut' ? 'cut' : 'copy',
+      clipboardPaths: paths,
+      clipboardPathsSet: new Set(paths),
+      clipboardInternalOnly: true,
     });
   },
 
