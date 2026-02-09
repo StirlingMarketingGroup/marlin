@@ -335,11 +335,19 @@ jobs:
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
-          # Import certificate
+          # Download Apple Developer ID intermediate certificates for chain verification
+          curl -sL "https://www.apple.com/certificateauthority/DeveloperIDCA.cer" -o $RUNNER_TEMP/DeveloperIDCA.cer
+          curl -sL "https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer" -o $RUNNER_TEMP/DeveloperIDG2CA.cer
+          security import $RUNNER_TEMP/DeveloperIDCA.cer -k "$KEYCHAIN_PATH" -T /usr/bin/codesign || true
+          security import $RUNNER_TEMP/DeveloperIDG2CA.cer -k "$KEYCHAIN_PATH" -T /usr/bin/codesign || true
+          rm -f $RUNNER_TEMP/DeveloperIDCA.cer $RUNNER_TEMP/DeveloperIDG2CA.cer
+
+          # Import signing certificate
           echo "$APPLE_CERTIFICATE" | base64 --decode > $RUNNER_TEMP/certificate.p12
           security import $RUNNER_TEMP/certificate.p12 -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
-          # Add temp keychain to search list while preserving existing keychains (login.keychain has Apple's root CAs)
-          security list-keychain -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+
+          # Reset keychain search list to only login + temp keychain (clean up stale entries from previous runs)
+          security list-keychain -d user -s "$KEYCHAIN_PATH" "$HOME/Library/Keychains/login.keychain-db"
 
           # Allow codesign to access keychain
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
@@ -400,6 +408,8 @@ jobs:
           TAURI_LOG: trace
           RUST_LOG: tauri_bundler=debug
           TAURI_BUNDLE_LINUX_APPIMAGE_ARGS: ${{ runner.os == 'Linux' && '--verbosity=2' || '' }}
+          # linuxdeploy needs to find libzpl.so when bundling the AppImage
+          LD_LIBRARY_PATH: ${{ runner.os == 'Linux' && format('{0}/{1}/release', env.CARGO_TARGET_DIR || 'src-tauri/target', matrix.target) || '' }}
           # Apple code signing (use ad-hoc signing with '-' if secrets not configured)
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '-' }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
