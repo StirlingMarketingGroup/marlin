@@ -28,7 +28,7 @@ import { ask, message, open as openDialog } from '@tauri-apps/plugin-dialog';
 import { getExtractableArchiveFormat, isArchiveFile } from '@/utils/fileTypes';
 import { basename } from '@/utils/pathUtils';
 import { useToastStore } from './useToastStore';
-import { useUndoStore } from './useUndoStore';
+import { useUndoStore, pushUndoAndShowToast } from './useUndoStore';
 import { parseGoogleDriveUrl } from '@/utils/googleDriveUrl';
 import { getArchiveParentUri, isArchiveUri } from '@/utils/archiveUri';
 import { DEFAULT_THEME_IDS } from '@/themes';
@@ -2461,48 +2461,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
         // Push to undo stack and show toast with Undo button
         if (undoInfo && result.pastedPaths.length > 0) {
-          const undoStore = useUndoStore.getState();
-          let undoId: string;
-          let undoRecord: Parameters<typeof undoStore.executeUndoRecord>[0];
-
-          if (undoInfo.isCut) {
-            // For move operations, track original and current paths
-            // Handle case where some files may be skipped - match by filename
-            const files: Array<{ originalPath: string; currentPath: string }> = [];
-            for (const originalPath of undoInfo.sourcePaths) {
-              const fileName = originalPath.split('/').pop() ?? originalPath;
-              const matchingPasted = result.pastedPaths.find((p) => p.endsWith('/' + fileName));
-              if (matchingPasted) {
-                files.push({ originalPath, currentPath: matchingPasted });
-              }
-            }
-            undoRecord = { type: 'move', files };
-            undoId = undoStore.pushUndo(undoRecord, messageText);
-          } else {
-            // For copy operations, track the copied paths (will be trashed on undo)
-            undoRecord = { type: 'copy', copiedPaths: result.pastedPaths };
-            undoId = undoStore.pushUndo(undoRecord, messageText);
-          }
-
-          let toastId = '';
-          toastId = toastStore.addToast({
-            type: 'success',
-            message: messageText,
-            duration: 8000,
-            action: {
-              label: 'Undo',
-              onClick: () => {
-                toastStore.removeToast(toastId);
-                // Get fresh state when clicked
-                const freshUndoStore = useUndoStore.getState();
-                const entry = freshUndoStore.stack.find((e) => e.id === undoId);
-                if (entry) {
-                  freshUndoStore.removeById(undoId);
-                  void freshUndoStore.executeUndoRecord(entry.record);
-                }
-              },
-            },
-          });
+          pushUndoAndShowToast(result, undoInfo.isCut, undoInfo.sourcePaths, toastStore);
         } else {
           toastStore.addToast({ type: 'success', message: messageText, duration: 4000 });
         }
@@ -3128,16 +3087,30 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (!isJustCreated) {
         const originalName = basename(target);
         const newNameForDesc = basename(finalPath);
-        useUndoStore
+        const undoId = useUndoStore
           .getState()
           .pushUndo(
             { type: 'rename', originalPath: target, newPath: finalPath },
             `Rename ${originalName} to ${newNameForDesc}`
           );
-        useToastStore.getState().addToast({
+        const renameToastStore = useToastStore.getState();
+        let renameToastId = '';
+        renameToastId = renameToastStore.addToast({
           type: 'success',
           message: `Renamed to ${newNameForDesc}`,
-          duration: 4000,
+          duration: 8000,
+          action: {
+            label: 'Undo',
+            onClick: () => {
+              renameToastStore.removeToast(renameToastId);
+              const freshUndoStore = useUndoStore.getState();
+              const entry = freshUndoStore.stack.find((e) => e.id === undoId);
+              if (entry) {
+                freshUndoStore.removeById(undoId);
+                void freshUndoStore.executeUndoRecord(entry.record);
+              }
+            },
+          },
         });
       }
 

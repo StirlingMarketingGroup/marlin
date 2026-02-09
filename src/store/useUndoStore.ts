@@ -3,9 +3,6 @@ import { invoke } from '@tauri-apps/api/core';
 import { useToastStore } from './useToastStore';
 import type { UndoTrashResponse } from '../types';
 
-// Types for undo records
-export type UndoOperationType = 'move' | 'copy' | 'rename' | 'trash';
-
 export interface UndoMoveRecord {
   type: 'move';
   files: Array<{ originalPath: string; currentPath: string }>;
@@ -91,6 +88,79 @@ async function executeUndoRecordInternal(record: UndoRecord): Promise<string[]> 
   }
 }
 
+// Shared helper: execute undo record + refresh directory + select restored files
+async function executeUndoRecordAndRefresh(record: UndoRecord): Promise<void> {
+  const restoredPaths = await executeUndoRecordInternal(record);
+
+  // Dynamically import useAppStore to avoid circular dependency
+  const { useAppStore } = await import('./useAppStore');
+  const appStore = useAppStore.getState();
+
+  if (appStore.currentPath?.includes('://')) {
+    await appStore.refreshCurrentDirectory();
+  } else {
+    await appStore.refreshCurrentDirectoryStreaming();
+  }
+
+  if (restoredPaths.length > 0) {
+    appStore.setSelectedFiles(restoredPaths);
+  }
+}
+
+/**
+ * Shared helper for building an undo record from paste/drop results and showing
+ * a toast with an Undo button. Fixes duplicate-basename matching by consuming
+ * matched paths so each source maps to exactly one destination.
+ */
+export function pushUndoAndShowToast(
+  result: { pastedPaths: string[] },
+  isCut: boolean,
+  sourcePaths: string[],
+  toastStore: ReturnType<typeof useToastStore.getState>
+): void {
+  const count = result.pastedPaths.length;
+  const verb = isCut ? 'Moved' : 'Copied';
+  const messageText = `${verb} ${count} item${count !== 1 ? 's' : ''}`;
+
+  const undoStore = useUndoStore.getState();
+  let undoId: string;
+
+  if (isCut) {
+    const files: Array<{ originalPath: string; currentPath: string }> = [];
+    const available = [...result.pastedPaths];
+    for (const originalPath of sourcePaths) {
+      const fileName = originalPath.split('/').pop() ?? originalPath;
+      const idx = available.findIndex((p) => p.endsWith('/' + fileName));
+      if (idx !== -1) {
+        files.push({ originalPath, currentPath: available[idx] });
+        available.splice(idx, 1);
+      }
+    }
+    undoId = undoStore.pushUndo({ type: 'move', files }, messageText);
+  } else {
+    undoId = undoStore.pushUndo({ type: 'copy', copiedPaths: result.pastedPaths }, messageText);
+  }
+
+  let toastId = '';
+  toastId = toastStore.addToast({
+    type: 'success',
+    message: messageText,
+    duration: 8000,
+    action: {
+      label: 'Undo',
+      onClick: () => {
+        toastStore.removeToast(toastId);
+        const freshUndoStore = useUndoStore.getState();
+        const entry = freshUndoStore.stack.find((e) => e.id === undoId);
+        if (entry) {
+          freshUndoStore.removeById(undoId);
+          void freshUndoStore.executeUndoRecord(entry.record);
+        }
+      },
+    },
+  });
+}
+
 export const useUndoStore = create<UndoState>((set, get) => ({
   stack: [],
   undoInProgress: false,
@@ -157,54 +227,36 @@ export const useUndoStore = create<UndoState>((set, get) => ({
     const state = get();
     const toastStore = useToastStore.getState();
 
-    // Prevent double-undo
-    if (state.undoInProgress) {
+    if (state.undoInProgress) return;
+
+    // Peek at the most recent valid entry without removing it
+    const validStack = state.getValidStack();
+    if (validStack.length === 0) {
+      set({ stack: [] });
+      toastStore.addToast({ type: 'info', message: 'Nothing to undo.', duration: 3000 });
       return;
     }
 
-    const entry = state.popUndo();
-    if (!entry) {
-      toastStore.addToast({
-        type: 'info',
-        message: 'Nothing to undo.',
-        duration: 3000,
-      });
-      return;
-    }
+    const entry = validStack[validStack.length - 1];
 
-    set({ undoInProgress: true });
+    // Remove and execute — on failure, push back
+    set((s) => ({
+      undoInProgress: true,
+      stack: s.stack.filter((e) => e.id !== entry.id),
+    }));
 
     try {
-      const restoredPaths = await executeUndoRecordInternal(entry.record);
-
-      // Dynamically import useAppStore to avoid circular dependency
-      const { useAppStore } = await import('./useAppStore');
-      const appStore = useAppStore.getState();
-
-      // Refresh the current directory to show changes
-      if (appStore.currentPath?.includes('://')) {
-        await appStore.refreshCurrentDirectory();
-      } else {
-        await appStore.refreshCurrentDirectoryStreaming();
-      }
-
-      // Select restored files if any
-      if (restoredPaths.length > 0) {
-        appStore.setSelectedFiles(restoredPaths);
-      }
-
+      await executeUndoRecordAndRefresh(entry.record);
       toastStore.addToast({
         type: 'success',
         message: `Undone: ${entry.description}`,
         duration: 4000,
       });
     } catch (error) {
+      // Restore the entry so user can retry
+      set((s) => ({ stack: [...s.stack, entry] }));
       const message = error instanceof Error ? error.message : String(error);
-      toastStore.addToast({
-        type: 'error',
-        message: `Undo failed: ${message}`,
-        duration: 6000,
-      });
+      toastStore.addToast({ type: 'error', message: `Undo failed: ${message}`, duration: 6000 });
     } finally {
       set({ undoInProgress: false });
     }
@@ -213,46 +265,18 @@ export const useUndoStore = create<UndoState>((set, get) => ({
   // Execute a specific undo record (called from toast action buttons)
   executeUndoRecord: async (record: UndoRecord) => {
     const state = get();
-    const toastStore = useToastStore.getState();
-
-    // Prevent double-undo
-    if (state.undoInProgress) {
-      return;
-    }
+    if (state.undoInProgress) return;
 
     set({ undoInProgress: true });
 
     try {
-      const restoredPaths = await executeUndoRecordInternal(record);
-
-      // Dynamically import useAppStore to avoid circular dependency
-      const { useAppStore } = await import('./useAppStore');
-      const appStore = useAppStore.getState();
-
-      // Refresh the current directory to show changes
-      if (appStore.currentPath?.includes('://')) {
-        await appStore.refreshCurrentDirectory();
-      } else {
-        await appStore.refreshCurrentDirectoryStreaming();
-      }
-
-      // Select restored files if any
-      if (restoredPaths.length > 0) {
-        appStore.setSelectedFiles(restoredPaths);
-      }
-
-      toastStore.addToast({
-        type: 'success',
-        message: 'Undone',
-        duration: 4000,
-      });
+      await executeUndoRecordAndRefresh(record);
+      useToastStore.getState().addToast({ type: 'success', message: 'Undone', duration: 4000 });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      toastStore.addToast({
-        type: 'error',
-        message: `Undo failed: ${message}`,
-        duration: 6000,
-      });
+      useToastStore
+        .getState()
+        .addToast({ type: 'error', message: `Undo failed: ${message}`, duration: 6000 });
     } finally {
       set({ undoInProgress: false });
     }

@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { useDragStore } from '@/store/useDragStore';
 import { useToastStore } from '@/store/useToastStore';
-import { useUndoStore } from '@/store/useUndoStore';
+import { pushUndoAndShowToast } from '@/store/useUndoStore';
 
 export interface DragModifiers {
   optionAlt: boolean;
@@ -390,53 +390,9 @@ export function useFilePanelDropZone(
               return;
             }
 
-            const count = result.pastedPaths.length;
-            const verb = isCut ? 'Moved' : 'Copied';
-
-            if (count > 0) {
-              // Push to undo stack
-              const undoStore = useUndoStore.getState();
-              const messageText = `${verb} ${count} item${count !== 1 ? 's' : ''}`;
-              let undoId: string;
-              if (isCut) {
-                // For move operations, track original and current paths
-                // Handle case where some files may be skipped - match by filename
-                const files: Array<{ originalPath: string; currentPath: string }> = [];
-                for (const originalPath of sourcePaths) {
-                  const fileName = originalPath.split('/').pop() ?? originalPath;
-                  const matchingPasted = result.pastedPaths.find((p) => p.endsWith('/' + fileName));
-                  if (matchingPasted) {
-                    files.push({ originalPath, currentPath: matchingPasted });
-                  }
-                }
-                undoId = undoStore.pushUndo({ type: 'move', files }, messageText);
-              } else {
-                // For copy operations, track the copied paths (will be trashed on undo)
-                undoId = undoStore.pushUndo(
-                  { type: 'copy', copiedPaths: result.pastedPaths },
-                  messageText
-                );
-              }
-
-              let toastId = '';
-              toastId = toastStore.addToast({
-                type: 'success',
-                message: messageText,
-                duration: 8000,
-                action: {
-                  label: 'Undo',
-                  onClick: () => {
-                    toastStore.removeToast(toastId);
-                    // Get fresh state when clicked
-                    const freshUndoStore = useUndoStore.getState();
-                    const entry = freshUndoStore.stack.find((e) => e.id === undoId);
-                    if (entry) {
-                      freshUndoStore.removeById(undoId);
-                      void freshUndoStore.executeUndoRecord(entry.record);
-                    }
-                  },
-                },
-              });
+            if (result.pastedPaths.length > 0) {
+              // Push to undo stack and show toast with Undo button
+              pushUndoAndShowToast(result, isCut, sourcePaths, toastStore);
             }
 
             if (result.skippedCount > 0) {

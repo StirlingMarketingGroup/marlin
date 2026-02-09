@@ -31,15 +31,15 @@ import GitRepoBadge from '@/components/GitRepoBadge';
 import SymlinkBadge from '@/components/SymlinkBadge';
 import { useDragStore } from '@/store/useDragStore';
 import { formatArchivePathForDisplay, isArchiveUri } from '@/utils/archiveUri';
+import { dirname } from '@/utils/pathUtils';
 
-/** Get parent directory path */
+/** Get parent directory path — returns null for root */
 const getParentPath = (path: string): string | null => {
   if (!path || path === '/') return null;
-  // Handle trailing slash
-  const normalized = path.endsWith('/') ? path.slice(0, -1) : path;
-  const lastSlash = normalized.lastIndexOf('/');
-  if (lastSlash <= 0) return '/';
-  return normalized.slice(0, lastSlash);
+  const parent = dirname(path);
+  // dirname returns '/' for root-level files, which is fine;
+  // but if the input was already root-level, nothing to go up to.
+  return parent === path ? null : parent;
 };
 
 const MAX_SUGGESTIONS = 8;

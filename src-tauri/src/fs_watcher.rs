@@ -12,7 +12,6 @@ use crate::macos_security;
 #[derive(Debug)]
 pub struct FsWatcher {
     watchers: Arc<Mutex<HashMap<String, RecommendedWatcher>>>,
-    debounce_map: Arc<Mutex<HashMap<String, Instant>>>,
     app_handle: AppHandle,
     #[cfg(target_os = "macos")]
     scope_tokens: Arc<Mutex<HashMap<String, macos_security::AccessToken>>>,
@@ -22,7 +21,6 @@ impl FsWatcher {
     pub fn new(app_handle: AppHandle) -> Self {
         Self {
             watchers: Arc::new(Mutex::new(HashMap::new())),
-            debounce_map: Arc::new(Mutex::new(HashMap::new())),
             app_handle,
             #[cfg(target_os = "macos")]
             scope_tokens: Arc::new(Mutex::new(HashMap::new())),
@@ -57,7 +55,6 @@ impl FsWatcher {
 
         let (tx, rx) = mpsc::channel();
         let app_handle = self.app_handle.clone();
-        let _debounce_map = self.debounce_map.clone(); // Keep for potential future use
         let watch_path = normalized_path.clone();
 
         // Create watcher with custom configuration
@@ -161,7 +158,6 @@ impl FsWatcher {
                     }
                     Err(mpsc::RecvTimeoutError::Timeout) => {
                         // Debounce expired, emit the batch if we have one
-                        // Use pending_paths as trigger (pending_files may be empty for non-UTF8 filenames)
                         if !pending_paths.is_empty() {
                             // Determine change type (prioritize removes > modifies > creates)
                             let change_type = if has_removes {
@@ -211,8 +207,9 @@ impl FsWatcher {
                             has_creates = false;
                             has_modifies = false;
                             has_removes = false;
-                            batch_start = None;
                         }
+                        // Always reset timer to prevent busy-loop on non-UTF8 events
+                        batch_start = None;
                     }
                     Err(mpsc::RecvTimeoutError::Disconnected) => {
                         // Channel closed, exit the loop
@@ -233,10 +230,6 @@ impl FsWatcher {
 
         let mut watchers = self.watchers.lock().unwrap();
         if watchers.remove(&normalized_path).is_some() {
-            // Also clean up debounce entry
-            let mut debounce = self.debounce_map.lock().unwrap();
-            debounce.remove(&normalized_path);
-
             #[cfg(target_os = "macos")]
             {
                 let mut tokens = self.scope_tokens.lock().unwrap();
@@ -251,9 +244,6 @@ impl FsWatcher {
     pub fn stop_all_watchers(&self) {
         let mut watchers = self.watchers.lock().unwrap();
         watchers.clear();
-
-        let mut debounce = self.debounce_map.lock().unwrap();
-        debounce.clear();
 
         #[cfg(target_os = "macos")]
         {
