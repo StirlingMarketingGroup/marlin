@@ -11,7 +11,7 @@ concurrency:
 
 jobs:
   lint-typecheck-rust:
-    runs-on: self-hosted
+    runs-on: [self-hosted, medium]
     steps:
       - uses: actions/checkout@v6
         with:
@@ -65,7 +65,7 @@ jobs:
         run: npm run check
 
   e2e-tests:
-    runs-on: self-hosted
+    runs-on: [self-hosted, medium]
     steps:
       - uses: actions/checkout@v6
 
