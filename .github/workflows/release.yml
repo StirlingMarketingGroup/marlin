@@ -149,21 +149,21 @@ jobs:
       matrix:
         include:
           # macOS Apple Silicon (M1/M2/M3) - self-hosted Mac Mini
-          - os: [self-hosted, macOS, ARM64]
+          - os: [self-hosted, macOS, ARM64, medium]
             target: aarch64-apple-darwin
             arch: arm64
             rust-targets: aarch64-apple-darwin
             smb: true
             self_hosted: true
           # macOS Intel (cross-compile from arm64 runner - no SMB due to cross-compile)
-          - os: [self-hosted, macOS, ARM64]
+          - os: [self-hosted, macOS, ARM64, medium]
             target: x86_64-apple-darwin
             arch: x86_64
             rust-targets: x86_64-apple-darwin
             smb: false
             self_hosted: true
-          # Linux x86_64 - self-hosted Ubuntu runner
-          - os: [self-hosted, Linux, X64]
+          # Linux x86_64
+          - os: [self-hosted, Linux, X64, medium]
             target: x86_64-unknown-linux-gnu
             arch: x86_64
             rust-targets: x86_64-unknown-linux-gnu
@@ -418,21 +418,21 @@ jobs:
       matrix:
         include:
           # macOS Apple Silicon (M1/M2/M3) - self-hosted Mac Mini
-          - os: [self-hosted, macOS, ARM64]
+          - os: [self-hosted, macOS, ARM64, medium]
             target: aarch64-apple-darwin
             arch: arm64
             rust-targets: aarch64-apple-darwin
             smb: true
             self_hosted: true
           # macOS Intel (cross-compile from arm64 runner - no SMB due to cross-compile)
-          - os: [self-hosted, macOS, ARM64]
+          - os: [self-hosted, macOS, ARM64, medium]
             target: x86_64-apple-darwin
             arch: x86_64
             rust-targets: x86_64-apple-darwin
             smb: false
             self_hosted: true
-          # Linux x86_64 - self-hosted Ubuntu runner
-          - os: [self-hosted, Linux, X64]
+          # Linux x86_64
+          - os: [self-hosted, Linux, X64, medium]
             target: x86_64-unknown-linux-gnu
             arch: x86_64
             rust-targets: x86_64-unknown-linux-gnu
