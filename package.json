@@ -50,7 +50,7 @@
     "@iconify-json/vscode-icons": "^1.2.30",
     "@iconify/react": "^6.0.1",
     "@tanstack/react-virtual": "^3.13.12",
-    "@tauri-apps/api": "^2.9.1",
+    "@tauri-apps/api": "^2.10.1",
     "@tauri-apps/plugin-dialog": "^2.6.0",
     "@tauri-apps/plugin-fs": "^2.0.0",
     "@tauri-apps/plugin-opener": "^2.0.0",
