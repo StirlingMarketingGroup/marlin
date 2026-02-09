@@ -14,13 +14,16 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Runtime, Window};
 
-use super::{DragDropEvent, DragEventType, DropLocation, DropZoneConfig};
+use super::{DragDropEvent, DragEventType, DropLocation, DropZoneConfig, DragModifiers};
 
 type DragHandler = dyn Fn(DragDropEvent) + 'static;
 
 type NSDragOperation = NSUInteger;
 const NS_DRAG_OPERATION_NONE: NSDragOperation = 0;
 const NS_DRAG_OPERATION_COPY: NSDragOperation = 1;
+
+const NS_EVENT_MODIFIER_FLAG_OPTION: NSUInteger = 1 << 19;
+const NS_EVENT_MODIFIER_FLAG_COMMAND: NSUInteger = 1 << 20;
 
 type Id = *mut AnyObject;
 
@@ -220,6 +223,29 @@ unsafe fn get_dragged_paths(sender: Id) -> Vec<String> {
     paths
 }
 
+unsafe fn get_drag_modifiers() -> DragModifiers {
+    let app: Id = msg_send![class!(NSApplication), sharedApplication];
+    if app.is_null() {
+        return DragModifiers {
+            option_alt: false,
+            cmd_ctrl: false,
+        };
+    }
+    let event: Id = msg_send![app, currentEvent];
+    if event.is_null() {
+        return DragModifiers {
+            option_alt: false,
+            cmd_ctrl: false,
+        };
+    }
+    let flags: NSUInteger = msg_send![event, modifierFlags];
+
+    DragModifiers {
+        option_alt: (flags & NS_EVENT_MODIFIER_FLAG_OPTION) != 0,
+        cmd_ctrl: (flags & NS_EVENT_MODIFIER_FLAG_COMMAND) != 0,
+    }
+}
+
 fn resolve_target(point: NSPoint) -> Option<String> {
     if point.x < 0.0 || point.y < 0.0 {
         return None;
@@ -237,9 +263,9 @@ fn resolve_target(point: NSPoint) -> Option<String> {
         }
     }
 
-    if let Some(zone) = zones.get("file-grid") {
+    if let Some(zone) = zones.get("file-panel") {
         if zone.enabled {
-            return Some("file-grid".to_string());
+            return Some("file-panel".to_string());
         }
     }
 
@@ -290,6 +316,7 @@ unsafe fn compose_event(sender: Id, event_type: DragEventType) -> (DragDropEvent
         DragEventType::DragLeave => None,
         _ => resolve_target(point),
     };
+    let modifiers = get_drag_modifiers();
 
     (
         DragDropEvent {
@@ -300,6 +327,7 @@ unsafe fn compose_event(sender: Id, event_type: DragEventType) -> (DragDropEvent
                 target_id: target_id.clone(),
             },
             event_type,
+            modifiers,
         },
         target_id,
     )

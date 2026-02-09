@@ -191,6 +191,7 @@ pub fn run() {
             commands::reorder_pinned_directories,
             commands::paste_items_to_location,
             commands::clipboard_paste_image_to_location,
+            commands::resolve_drop_operation,
             // Google Drive integration
             commands::get_google_accounts,
             commands::add_google_account,

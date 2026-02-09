@@ -24,6 +24,37 @@ use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 #[cfg(target_os = "macos")]
 use crate::macos_security;
 
+#[cfg(target_os = "macos")]
+pub fn get_fs_info(path: &Path) -> Result<(u64, String), String> {
+    use std::mem;
+
+    let path_str = path.to_string_lossy();
+    let c_path = CString::new(path_str.as_bytes()).map_err(|e| e.to_string())?;
+
+    unsafe {
+        let mut stats: libc::statfs = mem::zeroed();
+        if libc::statfs(c_path.as_ptr(), &mut stats) == 0 {
+            // fsid_t has a private __fsid_val field, so use transmute to access its bytes
+            let fsid_bytes: [i32; 2] = mem::transmute(stats.f_fsid);
+            let id = (fsid_bytes[0] as u64) << 32 | (fsid_bytes[1] as u32 as u64);
+
+            let type_name_ptr = stats.f_fstypename.as_ptr();
+            let type_name = std::ffi::CStr::from_ptr(type_name_ptr)
+                .to_string_lossy()
+                .into_owned();
+
+            Ok((id, type_name))
+        } else {
+            Err("statfs failed".to_string())
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn get_fs_info(_path: &Path) -> Result<(u64, String), String> {
+    Ok((0, "unknown".to_string()))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileItem {
     pub name: String,

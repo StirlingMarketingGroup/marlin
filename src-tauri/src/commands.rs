@@ -1349,6 +1349,114 @@ pub fn get_home_directory() -> Result<String, String> {
         .ok_or_else(|| "Could not determine home directory".to_string())
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DropOperationInfo {
+    pub operation: String,
+    pub is_remote: bool,
+    pub valid: bool,
+    pub reason: Option<String>,
+}
+
+fn is_remote_fs(fs_type: &str) -> bool {
+    let lower = fs_type.to_lowercase();
+    lower.contains("smb") || lower.contains("nfs") || lower.contains("afp") || lower.contains("webdav")
+}
+
+#[command]
+pub async fn resolve_drop_operation(
+    sources: Vec<String>,
+    destination: String,
+    modifier_option: bool,
+    modifier_cmd: bool,
+) -> Result<DropOperationInfo, String> {
+    let dest_path_buf = fs_utils::expand_path(&destination)?;
+    let dest_path = dest_path_buf.as_path();
+
+    if !dest_path.exists() {
+        return Err("Destination path does not exist".to_string());
+    }
+
+    // Validation
+    let dest_canon = dest_path.canonicalize().ok();
+    
+    if let Some(ref d_canon) = dest_canon {
+        for source in &sources {
+            let source_path_buf = match fs_utils::expand_path(source) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            
+            if let Ok(s_canon) = source_path_buf.canonicalize() {
+                // Cannot drop item onto itself
+                if s_canon == *d_canon {
+                     return Ok(DropOperationInfo {
+                         operation: "none".to_string(),
+                         is_remote: false,
+                         valid: false,
+                         reason: Some("Cannot drop item onto itself".to_string()),
+                     });
+                }
+                
+                // Cannot drop folder into itself or descendant
+                if source_path_buf.is_dir() && d_canon.starts_with(&s_canon) {
+                      return Ok(DropOperationInfo {
+                         operation: "none".to_string(),
+                         is_remote: false,
+                         valid: false,
+                         reason: Some("Cannot drop folder into itself".to_string()),
+                     });
+                }
+            }
+        }
+    }
+
+    let (dest_volume, dest_fs_type) = fs_utils::get_fs_info(dest_path)?;
+    let is_dest_remote = is_remote_fs(&dest_fs_type);
+
+    let mut is_source_remote = false;
+    let mut different_volume = false;
+
+    for source in &sources {
+        let source_path_buf = fs_utils::expand_path(source)?;
+        let source_path = source_path_buf.as_path();
+
+        if !source_path.exists() {
+            continue;
+        }
+
+        let (source_volume, source_fs_type) = fs_utils::get_fs_info(source_path)?;
+        if is_remote_fs(&source_fs_type) {
+            is_source_remote = true;
+        }
+
+        if source_volume != dest_volume {
+            different_volume = true;
+        }
+    }
+
+    let is_remote = is_dest_remote || is_source_remote;
+
+    let operation = if modifier_option {
+        "copy"
+    } else if modifier_cmd {
+        "move"
+    } else if is_remote {
+        "copy"
+    } else if different_volume {
+        "copy"
+    } else {
+        "move"
+    };
+
+    Ok(DropOperationInfo {
+        operation: operation.to_string(),
+        is_remote,
+        valid: true,
+        reason: None,
+    })
+}
+
 #[command]
 pub fn get_disk_usage(path: String) -> Result<DiskUsageResponse, String> {
     let expanded_path = expand_path(&path)?;

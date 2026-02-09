@@ -204,6 +204,7 @@ export default function FileList({ files, preferences }: FileListProps) {
     justCreatedPath,
   } = useAppStore();
   const { startNativeDrag, endNativeDrag, isDraggedDirectory } = useDragStore();
+  const dropTargetPath = useDragStore((s) => s.dropTargetPath);
   const [renameText, setRenameText] = useState<string>('');
   const renameInputRef = useRef<HTMLInputElement>(null);
   const { fetchAppIcon } = useAppStore();
@@ -715,6 +716,7 @@ export default function FileList({ files, preferences }: FileListProps) {
   // Render a single file row (extracted for reuse in virtual rows)
   const renderFileRow = (file: FileItem, virtualIndex: number) => {
     const isSelected = selectedFiles.includes(file.path);
+    const isDropTarget = file.is_directory && dropTargetPath === file.path;
     const isDragged =
       (draggedFile !== null && (draggedFile === file.path || selectedFiles.includes(file.path))) ||
       isDraggedDirectory(file.path);
@@ -731,13 +733,16 @@ export default function FileList({ files, preferences }: FileListProps) {
         className={`file-item relative grid grid-cols-12 gap-3 py-[2px] leading-5 text-[13px] cursor-pointer rounded-full ${
           isSelected
             ? 'bg-accent-selected text-white'
-            : isOdd
-              ? 'bg-app-gray hover:bg-app-light'
-              : 'hover:bg-app-light'
+            : isDropTarget
+              ? 'ring-2 ring-accent bg-accent/10'
+              : isOdd
+                ? 'bg-app-gray hover:bg-app-light'
+                : 'hover:bg-app-light'
         } ${isDragged || isCutFile ? 'opacity-50' : ''} ${file.is_hidden ? 'opacity-60' : ''}`}
         data-testid="file-item"
         data-file-item="true"
         data-file-path={file.path}
+        data-folder-path={file.is_directory ? file.path : undefined}
         data-directory={file.is_directory ? 'true' : undefined}
         data-hidden={file.is_hidden ? 'true' : undefined}
         data-name={file.name}

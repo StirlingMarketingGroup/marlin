@@ -28,6 +28,7 @@ import { ask, message, open as openDialog } from '@tauri-apps/plugin-dialog';
 import { getExtractableArchiveFormat, isArchiveFile } from '@/utils/fileTypes';
 import { basename } from '@/utils/pathUtils';
 import { useToastStore } from './useToastStore';
+import { useUndoStore, pushUndoAndShowToast } from './useUndoStore';
 import { parseGoogleDriveUrl } from '@/utils/googleDriveUrl';
 import { getArchiveParentUri, isArchiveUri } from '@/utils/archiveUri';
 import { DEFAULT_THEME_IDS } from '@/themes';
@@ -1182,6 +1183,15 @@ export const useAppStore = create<AppState>((set, get) => ({
         undoToken || !isMacPlatform ? messageText : `${messageText} Restore via Finder if needed.`;
 
       if (undoToken) {
+        // Push to undo stack for Cmd+Z support
+        const undoDescription =
+          trashedCount === 1
+            ? `Trash ${selectedItems[0]?.name ?? basename(trashedPaths[0])}`
+            : `Trash ${trashedCount} items`;
+        const undoId = useUndoStore
+          .getState()
+          .pushUndo({ type: 'trash', undoToken, trashedPaths }, undoDescription);
+
         let toastId = '';
         toastId = toastStore.addToast({
           type: 'info',
@@ -1191,32 +1201,39 @@ export const useAppStore = create<AppState>((set, get) => ({
             label: 'Undo',
             onClick: () => {
               toastStore.removeToast(toastId);
-              void (async () => {
-                try {
-                  const undoResult = await invoke<UndoTrashResponse>('undo_trash', {
-                    token: undoToken,
-                  });
-                  await state.refreshCurrentDirectoryStreaming();
-                  if (Array.isArray(undoResult.restored) && undoResult.restored.length > 0) {
-                    state.setSelectedFiles(undoResult.restored);
+              // Remove from undo stack and execute directly
+              const undoStore = useUndoStore.getState();
+              const entry = undoStore.stack.find((e) => e.id === undoId);
+              if (entry) {
+                undoStore.removeById(undoId);
+                void (async () => {
+                  try {
+                    const undoResult = await invoke<UndoTrashResponse>('undo_trash', {
+                      token: undoToken,
+                    });
+                    await state.refreshCurrentDirectoryStreaming();
+                    if (Array.isArray(undoResult.restored) && undoResult.restored.length > 0) {
+                      state.setSelectedFiles(undoResult.restored);
+                    }
+                    toastStore.addToast({
+                      type: 'success',
+                      message:
+                        undoResult.restored.length <= 1
+                          ? 'Item restored from Trash.'
+                          : `${undoResult.restored.length} items restored from Trash.`,
+                      duration: 5000,
+                    });
+                  } catch (undoErr) {
+                    const undoMessage =
+                      undoErr instanceof Error ? undoErr.message : String(undoErr);
+                    toastStore.addToast({
+                      type: 'error',
+                      message: `Undo failed: ${undoMessage}`,
+                      duration: 6000,
+                    });
                   }
-                  toastStore.addToast({
-                    type: 'success',
-                    message:
-                      undoResult.restored.length <= 1
-                        ? 'Item restored from Trash.'
-                        : `${undoResult.restored.length} items restored from Trash.`,
-                    duration: 5000,
-                  });
-                } catch (undoErr) {
-                  const undoMessage = undoErr instanceof Error ? undoErr.message : String(undoErr);
-                  toastStore.addToast({
-                    type: 'error',
-                    message: `Undo failed: ${undoMessage}`,
-                    duration: 6000,
-                  });
-                }
-              })();
+                })();
+              }
             },
           },
         });
@@ -2415,7 +2432,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
     };
 
-    const showPasteResultToast = (result: PasteResult) => {
+    const showPasteResultToast = (
+      result: PasteResult,
+      undoInfo?: { isCut: boolean; sourcePaths: string[] }
+    ) => {
       const pastedCount = result.pastedPaths.length;
       const skippedCount = result.skippedCount;
 
@@ -2433,11 +2453,18 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
 
       if (pastedCount > 0) {
-        let message = pastedCount === 1 ? '1 file pasted.' : `${pastedCount} files pasted.`;
+        const verb = undoInfo?.isCut ? 'Moved' : 'Copied';
+        let messageText = pastedCount === 1 ? `${verb} 1 item` : `${verb} ${pastedCount} items`;
         if (skippedCount > 0) {
-          message += ` (${skippedCount} skipped)`;
+          messageText += ` (${skippedCount} skipped)`;
         }
-        toastStore.addToast({ type: 'success', message, duration: 4000 });
+
+        // Push to undo stack and show toast with Undo button
+        if (undoInfo && result.pastedPaths.length > 0) {
+          pushUndoAndShowToast(result, undoInfo.isCut, undoInfo.sourcePaths, toastStore);
+        } else {
+          toastStore.addToast({ type: 'success', message: messageText, duration: 4000 });
+        }
         return;
       }
 
@@ -2465,15 +2492,16 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
 
       const isCut = state.clipboardMode === 'cut';
+      const sourcePaths = state.clipboardPaths.slice();
       const task = invoke<PasteResult>('paste_items_to_location', {
         destination: currentPath,
-        sourcePaths: state.clipboardPaths,
+        sourcePaths,
         isCut,
       });
       const result = await runWithClipboardProgress(task, {
         operation: isCut ? 'Moving items' : 'Copying items',
         destination: currentPath,
-        totalItems: state.clipboardPaths.length,
+        totalItems: sourcePaths.length,
       });
 
       await state.refreshCurrentDirectoryStreaming();
@@ -2489,7 +2517,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         emitCutComplete(movedPaths);
       }
 
-      showPasteResultToast(result);
+      showPasteResultToast(result, { isCut, sourcePaths });
       if (result.errorMessage) {
         console.warn('Paste error:', result.errorMessage);
       }
@@ -2568,7 +2596,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         emitCutComplete(sourcePaths);
       }
 
-      showPasteResultToast(result);
+      showPasteResultToast(result, { isCut, sourcePaths });
       if (result.errorMessage) {
         console.warn('Paste error:', result.errorMessage);
       }
@@ -2602,6 +2630,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
 
       const isCut = clipboardInfo.isCut;
+      const sourcePaths = clipboardInfo.filePaths.slice();
       const task = invoke<PasteResult>('paste_items_to_location', {
         destination: currentPath,
         sourcePaths: clipboardInfo.filePaths,
@@ -2621,10 +2650,10 @@ export const useAppStore = create<AppState>((set, get) => ({
 
       if (isCut && result.pastedPaths.length > 0) {
         get().clearClipboardState();
-        emitCutComplete(clipboardInfo.filePaths);
+        emitCutComplete(sourcePaths);
       }
 
-      showPasteResultToast(result);
+      showPasteResultToast(result, { isCut, sourcePaths });
       if (result.errorMessage) {
         console.warn('Paste error:', result.errorMessage);
       }
@@ -3052,6 +3081,38 @@ export const useAppStore = create<AppState>((set, get) => ({
 
       // Skip animation for the renamed file (it's not a new file, just renamed)
       state.addSkipAnimationPath(finalPath);
+
+      // Push to undo stack (only for actual renames, not for newly created files)
+      // For newly created files, we don't support undo since the old path didn't exist before
+      if (!isJustCreated) {
+        const originalName = basename(target);
+        const newNameForDesc = basename(finalPath);
+        const undoId = useUndoStore
+          .getState()
+          .pushUndo(
+            { type: 'rename', originalPath: target, newPath: finalPath },
+            `Rename ${originalName} to ${newNameForDesc}`
+          );
+        const renameToastStore = useToastStore.getState();
+        let renameToastId = '';
+        renameToastId = renameToastStore.addToast({
+          type: 'success',
+          message: `Renamed to ${newNameForDesc}`,
+          duration: 8000,
+          action: {
+            label: 'Undo',
+            onClick: () => {
+              renameToastStore.removeToast(renameToastId);
+              const freshUndoStore = useUndoStore.getState();
+              const entry = freshUndoStore.stack.find((e) => e.id === undoId);
+              if (entry) {
+                freshUndoStore.removeById(undoId);
+                void freshUndoStore.executeUndoRecord(entry.record);
+              }
+            },
+          },
+        });
+      }
 
       // Use non-streaming refresh for remote paths (gdrive://)
       if (state.currentPath?.includes('://')) {

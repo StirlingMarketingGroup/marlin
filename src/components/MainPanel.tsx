@@ -21,6 +21,7 @@ import {
   NAV_SCROLL_THRESHOLD,
   NAV_COOLDOWN_MS,
 } from '@/utils/gridConstants';
+import { useFilePanelDropZone } from '../hooks/useDragDetector';
 
 const arraysEqual = (a: string[], b: string[]) => {
   if (a === b) return true;
@@ -57,6 +58,7 @@ export default function MainPanel() {
 
   // We rely solely on the native OS context menu now
   const scrollRef = useRef<HTMLDivElement>(null);
+  useFilePanelDropZone(currentPath, scrollRef);
   const fileCtxCaptureRef = useRef<boolean>(false);
   const fileCtxPathRef = useRef<string | null>(null);
 
@@ -717,6 +719,7 @@ export default function MainPanel() {
         onClick={handleContainerBackgroundClick}
         onDoubleClick={handleContainerBackgroundDoubleClick}
         onPointerDown={startMarquee}
+        data-drop-zone-id="file-panel"
       >
         {/* Mask old content while loading to avoid layout flicker during view changes */}
         <ScrollContext.Provider value={scrollRef}>

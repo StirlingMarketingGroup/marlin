@@ -10,6 +10,9 @@ interface DragStore {
   nativeDragDirectory: DraggedDirectory | null;
   // In-app hover target for non-native drags
   inAppDropTargetId: string | null;
+  dropTargetPath: string | null;
+  pendingDropOperation: 'move' | 'copy' | null;
+  isDraggingOver: boolean;
 
   // Start tracking a native drag of a directory
   startNativeDrag: (directory: DraggedDirectory) => void;
@@ -19,11 +22,17 @@ interface DragStore {
   isDraggedDirectory: (path: string) => boolean;
   // Update in-app drop target for hover feedback
   setInAppDropTargetId: (targetId: string | null) => void;
+  setDropTargetPath: (path: string | null) => void;
+  setPendingDropOperation: (op: 'move' | 'copy' | null) => void;
+  setIsDraggingOver: (isDragging: boolean) => void;
 }
 
 export const useDragStore = create<DragStore>((set, get) => ({
   nativeDragDirectory: null,
   inAppDropTargetId: null,
+  dropTargetPath: null,
+  pendingDropOperation: null,
+  isDraggingOver: false,
 
   startNativeDrag: (directory: DraggedDirectory) => {
     set({
@@ -47,4 +56,8 @@ export const useDragStore = create<DragStore>((set, get) => ({
     if (get().inAppDropTargetId === targetId) return;
     set({ inAppDropTargetId: targetId });
   },
+
+  setDropTargetPath: (path) => set({ dropTargetPath: path }),
+  setPendingDropOperation: (op) => set({ pendingDropOperation: op }),
+  setIsDraggingOver: (isDragging) => set({ isDraggingOver: isDragging }),
 }));
