@@ -6527,6 +6527,15 @@ pub fn show_native_context_menu(
         } else {
             None
         };
+        let get_info_item = if first_path_is_local {
+            Some(
+                MenuItemBuilder::with_id("ctx:get_info", get_file_properties_label())
+                    .build(&app)
+                    .map_err(|e| e.to_string())?,
+            )
+        } else {
+            None
+        };
         builder = builder.item(&rename_item).separator();
         builder = builder
             .item(&copy_files_item)
@@ -6547,6 +6556,9 @@ pub fn show_native_context_menu(
             builder = builder.item(item);
         }
         if let Some(ref item) = reveal_item {
+            builder = builder.item(item);
+        }
+        if let Some(ref item) = get_info_item {
             builder = builder.item(item);
         }
         builder = builder.separator();
@@ -8005,4 +8017,159 @@ fn merge_local_directory(source: &Path, dest: &Path, is_cut: bool) -> Result<(),
     }
 
     Ok(())
+}
+
+/// Returns the platform-specific label for the file properties menu item.
+fn get_file_properties_label() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "Get Info"
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        "Properties"
+    }
+}
+
+/// Maximum number of property windows to open at once to avoid process storms.
+const MAX_PROPERTIES_WINDOWS: usize = 10;
+
+/// Open the native OS properties/info dialog for the given file paths.
+#[command]
+pub async fn show_file_properties(paths: Vec<String>) -> Result<(), String> {
+    if paths.is_empty() {
+        return Err("No paths provided".to_string());
+    }
+
+    // Reject non-local paths (defense in depth — frontend also filters these)
+    for p in &paths {
+        if p.contains("://") {
+            return Err(format_error(
+                error_codes::EPERM,
+                "File properties is only supported for local files.",
+            ));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        for path in paths.iter().take(MAX_PROPERTIES_WINDOWS) {
+            let expanded = expand_path(path)?;
+            let posix = expanded.to_string_lossy().to_string();
+            // Pass the path via a separate -e argument to avoid AppleScript injection.
+            // The first -e sets a variable, the second uses it — no string interpolation
+            // of user data into the script body.
+            OsCommand::new("osascript")
+                .args([
+                    "-e",
+                    &format!("set posixPath to \"{}\"", posix.replace('\\', "\\\\").replace('"', "\\\"")),
+                    "-e",
+                    "tell application \"Finder\" to open information window of (POSIX file posixPath as alias)",
+                ])
+                .spawn()
+                .map_err(|e| {
+                    format_error(
+                        error_codes::EOPEN,
+                        &format!("Failed to open Get Info: {}", e),
+                    )
+                })?;
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::Shell::{ShellExecuteExW, SHELLEXECUTEINFOW, SEE_MASK_INVOKEIDLIST};
+
+        for path in paths.iter().take(MAX_PROPERTIES_WINDOWS) {
+            let expanded = expand_path(path)?;
+            let path_wide: Vec<u16> = expanded
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+            let verb: Vec<u16> = OsString::from("properties")
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+
+            let mut info = SHELLEXECUTEINFOW {
+                cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+                fMask: SEE_MASK_INVOKEIDLIST,
+                hwnd: HWND::default(),
+                lpVerb: PCWSTR(verb.as_ptr()),
+                lpFile: PCWSTR(path_wide.as_ptr()),
+                lpParameters: PCWSTR::null(),
+                lpDirectory: PCWSTR::null(),
+                nShow: 1, // SW_SHOWNORMAL
+                ..Default::default()
+            };
+
+            unsafe {
+                ShellExecuteExW(&mut info).map_err(|e| {
+                    format_error(
+                        error_codes::EOPEN,
+                        &format!("Failed to open Properties: {}", e),
+                    )
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let desktop = env::var("XDG_CURRENT_DESKTOP")
+            .unwrap_or_default()
+            .to_lowercase();
+
+        for path in paths.iter().take(MAX_PROPERTIES_WINDOWS) {
+            let expanded = expand_path(path)?;
+            // Encode commas as %2C since dbus-send uses commas as array delimiters
+            let file_uri = Url::from_file_path(&expanded)
+                .map_err(|_| format_error(error_codes::EOPEN, "Failed to build file URI"))?
+                .to_string()
+                .replace(',', "%2C");
+
+            let result = if desktop.contains("kde") {
+                OsCommand::new("kioclient5")
+                    .args(["exec", &format!("properties:{}", file_uri)])
+                    .spawn()
+            } else {
+                // Use the freedesktop FileManager1 DBus interface
+                // (works for GNOME/Nautilus, Cinnamon/Nemo, MATE/Caja, and others)
+                OsCommand::new("dbus-send")
+                    .args([
+                        "--session",
+                        "--dest=org.freedesktop.FileManager1",
+                        "--type=method_call",
+                        "/org/freedesktop/FileManager1",
+                        "org.freedesktop.FileManager1.ShowItemProperties",
+                        &format!("array:string:{}", file_uri),
+                        "string:",
+                    ])
+                    .spawn()
+            };
+
+            if let Err(e) = result {
+                warn!(
+                    "Failed to launch properties for '{}': {}",
+                    expanded.display(),
+                    e
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        Err(format_error(
+            error_codes::EOPEN,
+            "File properties dialog is not supported on this platform.",
+        ))
+    }
 }

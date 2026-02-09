@@ -1175,6 +1175,9 @@ function App() {
         if (target.includes('://')) return;
         void revealInFileBrowser(target);
       });
+      await registerFocused('menu:get_info', () => {
+        showFileProperties();
+      });
       await registerFocused('menu:new_window', () => {
         // Create new window in current directory
         const currentPath = useAppStore.getState().currentPath;
@@ -1255,6 +1258,17 @@ function App() {
       });
     })();
 
+    const showFileProperties = (): boolean => {
+      const selection = useAppStore.getState().selectedFiles;
+      if (selection.length === 0) return false;
+      const localPaths = selection.filter((p) => !p.includes('://'));
+      if (localPaths.length === 0) return false;
+      invoke('show_file_properties', { paths: localPaths }).catch((err) => {
+        console.error('Failed to show file properties:', err);
+      });
+      return true;
+    };
+
     // Keyboard shortcuts as fallback (mac-like)
     const onKey = (e: KeyboardEvent) => {
       const uaUpper = navigator.userAgent.toUpperCase();
@@ -1314,6 +1328,20 @@ function App() {
             }
           }
         }
+      }
+
+      // Cmd+I / Ctrl+I: Show file properties / Get Info
+      if (
+        !inEditable &&
+        ((isMac && e.metaKey) || (!isMac && e.ctrlKey)) &&
+        !e.altKey &&
+        !e.shiftKey &&
+        e.key === 'i'
+      ) {
+        if (showFileProperties()) {
+          e.preventDefault();
+        }
+        return;
       }
 
       // Type-to-filter: any single printable character starts/appends to filter

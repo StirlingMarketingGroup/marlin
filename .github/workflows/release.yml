@@ -355,6 +355,13 @@ jobs:
           rm -rf "$TARGET_DIR/${{ matrix.target }}/release/bundle/dmg" || true
           rm -rf "$TARGET_DIR/${{ matrix.target }}/release/bundle/macos" || true
 
+      - name: Clean up stale build artifacts (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          # Remove stale AppImage bundle to avoid linuxdeploy "Cannot deploy non-existing library" errors
+          TARGET_DIR="${CARGO_TARGET_DIR:-src-tauri/target}"
+          rm -rf "$TARGET_DIR/${{ matrix.target }}/release/bundle/appimage" || true
+
       - name: Create SMB sidecar placeholders
         run: |
           # Create placeholder files for all platforms to satisfy tauri-build
@@ -582,6 +589,13 @@ jobs:
           TARGET_DIR="${CARGO_TARGET_DIR:-src-tauri/target}"
           rm -rf "$TARGET_DIR/${{ matrix.target }}/release/bundle/dmg" || true
           rm -rf "$TARGET_DIR/${{ matrix.target }}/release/bundle/macos" || true
+
+      - name: Clean up stale build artifacts (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          # Remove stale AppImage bundle to avoid linuxdeploy "Cannot deploy non-existing library" errors
+          TARGET_DIR="${CARGO_TARGET_DIR:-src-tauri/target}"
+          rm -rf "$TARGET_DIR/${{ matrix.target }}/release/bundle/appimage" || true
 
       - name: Create SMB sidecar placeholders
         run: |
