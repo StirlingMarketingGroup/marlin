@@ -425,8 +425,66 @@ jobs:
             **macOS users**: Choose `arm64` for Apple Silicon (M1/M2/M3) or `x86_64` for Intel Macs.
           releaseDraft: false
           prerelease: ${{ startsWith(env.RELEASE_TAG, 'v0.') }}
+          # macOS: skip DMG (create-dmg uses AppleScript/Finder which requires TCC approval)
+          # We create a notarized DMG manually in the next step using hdiutil instead
           # arm64 Linux (GitHub-hosted): deb only (no AppImage on arm64)
-          args: --target ${{ matrix.target }} --verbose ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '--bundles deb' || '' }}
+          args: >-
+            --target ${{ matrix.target }}
+            --verbose
+            ${{ runner.os == 'macOS' && '--bundles app updater' || '' }}
+            ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '--bundles deb' || '' }}
+
+      - name: Create and notarize DMG (macOS)
+        if: runner.os == 'macOS'
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '-' }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          TARGET_DIR="${CARGO_TARGET_DIR:-src-tauri/target}"
+          APP_PATH="$TARGET_DIR/${{ matrix.target }}/release/bundle/macos/Marlin.app"
+          ARCH="${{ matrix.arch }}"
+          VERSION="${RELEASE_TAG#v}"
+          DMG_NAME="Marlin_${VERSION}_${ARCH}.dmg"
+          DMG_DIR="$TARGET_DIR/${{ matrix.target }}/release/bundle/dmg"
+          DMG_PATH="$DMG_DIR/$DMG_NAME"
+
+          mkdir -p "$DMG_DIR"
+
+          # Create a temporary directory with the app and Applications symlink
+          STAGING=$(mktemp -d)
+          cp -R "$APP_PATH" "$STAGING/"
+          ln -s /Applications "$STAGING/Applications"
+
+          # Create DMG using hdiutil (no AppleScript/Finder needed)
+          hdiutil create -volname "Marlin" -srcfolder "$STAGING" -ov -format UDZO "$DMG_PATH"
+          rm -rf "$STAGING"
+
+          # Notarize the DMG
+          echo "Notarizing $DMG_NAME..."
+          xcrun notarytool submit "$DMG_PATH" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+
+          # Staple the notarization ticket
+          xcrun stapler staple "$DMG_PATH"
+          echo "DMG notarized and stapled: $DMG_PATH"
+
+      - name: Upload DMG to release (macOS)
+        if: runner.os == 'macOS'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TARGET_DIR="${CARGO_TARGET_DIR:-src-tauri/target}"
+          ARCH="${{ matrix.arch }}"
+          VERSION="${RELEASE_TAG#v}"
+          DMG_NAME="Marlin_${VERSION}_${ARCH}.dmg"
+          DMG_PATH="$TARGET_DIR/${{ matrix.target }}/release/bundle/dmg/$DMG_NAME"
+          gh release upload "${{ env.RELEASE_TAG }}" "$DMG_PATH" --clobber
 
   release-dry-run:
     name: Dry Run (${{ matrix.arch }}-${{ matrix.target }})
