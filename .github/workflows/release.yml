@@ -412,10 +412,9 @@ jobs:
           # linuxdeploy needs to find libzpl.so when bundling the AppImage
           LD_LIBRARY_PATH: ${{ runner.os == 'Linux' && format('{0}/{1}/release', env.CARGO_TARGET_DIR || 'src-tauri/target', matrix.target) || '' }}
           # Apple code signing (use ad-hoc signing with '-' if secrets not configured)
+          # Only pass APPLE_SIGNING_IDENTITY here — omit APPLE_ID/PASSWORD/TEAM_ID
+          # so Tauri signs without trying to notarize (our DMG step handles notarization)
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '-' }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           tagName: ${{ env.RELEASE_TAG }}
           releaseName: Marlin ${{ env.RELEASE_TAG }}
