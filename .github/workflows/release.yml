@@ -459,7 +459,13 @@ jobs:
           ln -s /Applications "$STAGING/Applications"
 
           # Create DMG using hdiutil (no AppleScript/Finder needed)
-          hdiutil create -volname "Marlin" -srcfolder "$STAGING" -ov -format UDZO "$DMG_PATH"
+          # Use arch-specific volume name to avoid "Resource busy" when two
+          # macOS runners create DMGs on the same machine simultaneously.
+          for attempt in 1 2 3; do
+            hdiutil create -volname "Marlin-${ARCH}" -srcfolder "$STAGING" -ov -format UDZO "$DMG_PATH" && break
+            echo "hdiutil attempt $attempt failed, retrying in 10s..."
+            sleep 10
+          done
           rm -rf "$STAGING"
 
           # Notarize the DMG
