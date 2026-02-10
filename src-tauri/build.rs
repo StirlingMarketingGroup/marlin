@@ -76,6 +76,20 @@ fn setup_libzpl() {
                     if let Err(e) = std::fs::copy(&lib_path, &dest) {
                         println!("cargo:warning=libzpl: copy failed: {}", e);
                     }
+
+                    // Also copy to CARGO_MANIFEST_DIR/lib/ so Tauri's macOS
+                    // `bundle.macOS.frameworks` config can bundle it into
+                    // Contents/Frameworks/ (the build output path is unpredictable).
+                    if target_os == "macos" {
+                        let manifest_dir =
+                            PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+                        let fw_dir = manifest_dir.join("lib");
+                        let _ = std::fs::create_dir_all(&fw_dir);
+                        if let Err(e) = std::fs::copy(&lib_path, fw_dir.join(lib_name)) {
+                            println!("cargo:warning=libzpl: framework copy failed: {}", e);
+                        }
+                    }
+
                     found = true;
                     break;
                 }
