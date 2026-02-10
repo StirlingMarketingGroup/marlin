@@ -425,13 +425,8 @@ jobs:
             **macOS users**: Choose `arm64` for Apple Silicon (M1/M2/M3) or `x86_64` for Intel Macs.
           releaseDraft: false
           prerelease: ${{ startsWith(env.RELEASE_TAG, 'v0.') }}
-          # macOS: skip DMG (requires Finder AppleScript which fails on headless CI)
           # arm64 Linux (GitHub-hosted): deb only (no AppImage on arm64)
-          args: >-
-            --target ${{ matrix.target }}
-            --verbose
-            ${{ runner.os == 'macOS' && '--bundles app updater' || '' }}
-            ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '--bundles deb' || '' }}
+          args: --target ${{ matrix.target }} --verbose ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '--bundles deb' || '' }}
 
   release-dry-run:
     name: Dry Run (${{ matrix.arch }}-${{ matrix.target }})
