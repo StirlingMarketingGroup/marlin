@@ -2254,7 +2254,10 @@ export const useAppStore = create<AppState>((set, get) => ({
           message: 'Downloading files to clipboard\u2026',
           duration: 30000,
         });
-        tempPaths = await invoke<string[]>('download_and_copy_to_clipboard', { paths: filePaths, isCut: false });
+        tempPaths = await invoke<string[]>('download_and_copy_to_clipboard', {
+          paths: filePaths,
+          isCut: false,
+        });
         useToastStore.getState().removeToast(downloadToastId);
       } else {
         await invoke('clipboard_copy_files', { paths: filePaths, isCut: false });
@@ -2324,7 +2327,10 @@ export const useAppStore = create<AppState>((set, get) => ({
           message: 'Downloading files to clipboard\u2026',
           duration: 30000,
         });
-        tempPaths = await invoke<string[]>('download_and_copy_to_clipboard', { paths: filePaths, isCut: true });
+        tempPaths = await invoke<string[]>('download_and_copy_to_clipboard', {
+          paths: filePaths,
+          isCut: true,
+        });
         useToastStore.getState().removeToast(downloadToastId);
       } else {
         await invoke('clipboard_copy_files', { paths: filePaths, isCut: true });
@@ -2478,14 +2484,22 @@ export const useAppStore = create<AppState>((set, get) => ({
       } catch (error) {
         console.error('Failed to paste image:', error);
         const msg = error instanceof Error ? error.message : String(error);
-        toastStore.addToast({ type: 'error', message: `Failed to paste image: ${msg}`, duration: 5000 });
+        toastStore.addToast({
+          type: 'error',
+          message: `Failed to paste image: ${msg}`,
+          duration: 5000,
+        });
       }
       return;
     }
 
     // File paste — OS clipboard has file paths (local or temp copies of remote files)
     if (!clipboardInfo.hasFiles || clipboardInfo.filePaths.length === 0) {
-      toastStore.addToast({ type: 'info', message: 'No files in clipboard to paste.', duration: 4000 });
+      toastStore.addToast({
+        type: 'info',
+        message: 'No files in clipboard to paste.',
+        duration: 4000,
+      });
       return;
     }
 

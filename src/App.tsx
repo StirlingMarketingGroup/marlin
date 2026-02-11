@@ -1244,7 +1244,6 @@ function App() {
           await useAppStore.getState().refreshCurrentDirectoryStreaming();
         }
       });
-
     })();
 
     const showFileProperties = (): boolean => {
