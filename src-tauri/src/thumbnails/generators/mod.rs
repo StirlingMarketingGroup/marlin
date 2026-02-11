@@ -20,6 +20,27 @@ pub mod zpl;
 pub mod sftp;
 pub mod smb;
 
+/// Check if a file extension (without the dot) is a video format.
+pub fn is_video_extension(ext: &str) -> bool {
+    matches!(
+        ext.to_lowercase().as_str(),
+        "mp4"
+            | "m4v"
+            | "mov"
+            | "mkv"
+            | "webm"
+            | "avi"
+            | "flv"
+            | "wmv"
+            | "mpg"
+            | "mpeg"
+            | "m2ts"
+            | "mts"
+            | "3gp"
+            | "ogv"
+    )
+}
+
 pub struct ThumbnailGenerator;
 
 /// Result of async pre-processing: a local file path ready for CPU-bound generation,
@@ -225,27 +246,9 @@ impl ThumbnailGenerator {
     }
 
     fn is_video_file(path: &Path) -> bool {
-        if let Some(extension) = path.extension().and_then(|s| s.to_str()) {
-            matches!(
-                extension.to_lowercase().as_str(),
-                "mp4"
-                    | "m4v"
-                    | "mov"
-                    | "mkv"
-                    | "webm"
-                    | "avi"
-                    | "flv"
-                    | "wmv"
-                    | "mpg"
-                    | "mpeg"
-                    | "m2ts"
-                    | "mts"
-                    | "3gp"
-                    | "ogv"
-            )
-        } else {
-            false
-        }
+        path.extension()
+            .and_then(|s| s.to_str())
+            .map_or(false, is_video_extension)
     }
 
     fn is_font_file(path: &Path) -> bool {

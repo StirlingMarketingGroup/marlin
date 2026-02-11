@@ -177,6 +177,13 @@ function GridFilePreview({
       >
         {isGitRepo && <GitRepoBadge className={gitBadgeOffset} size={badgeSize} />}
         {isSymlink && <SymlinkBadge className={badgeOffset} size={badgeSize} />}
+        {isVideo && (
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+            <div className="flex items-center justify-center rounded-full bg-black/25 p-3">
+              <Play weight="fill" className="h-6 w-6 text-white/70" />
+            </div>
+          </div>
+        )}
       </div>
     );
   }

@@ -16,8 +16,8 @@ pub mod protocol;
 
 use protocol::{
     error_codes, methods, CopyParams, CreateDirectoryParams, DeleteParams, DownloadFileParams,
-    GetFileMetadataParams, ListSharesParams, PingResult, ReadDirectoryParams, RenameParams,
-    Request, Response, TestConnectionParams, UploadFileParams,
+    DownloadPartialParams, GetFileMetadataParams, ListSharesParams, PingResult,
+    ReadDirectoryParams, RenameParams, Request, Response, TestConnectionParams, UploadFileParams,
 };
 use std::io::{BufRead, Write};
 
@@ -97,6 +97,7 @@ fn dispatch_request(request: &Request) -> Response {
         methods::LIST_SHARES => handle_list_shares(request),
         methods::TEST_CONNECTION => handle_test_connection(request),
         methods::DOWNLOAD_FILE => handle_download_file(request),
+        methods::DOWNLOAD_PARTIAL => handle_download_partial(request),
         methods::UPLOAD_FILE => handle_upload_file(request),
         _ => Response::error(
             request.id,
@@ -272,6 +273,24 @@ fn handle_download_file(request: &Request) -> Response {
     };
 
     match operations::download_file(params) {
+        Ok(result) => Response::success(request.id, result),
+        Err((code, msg)) => Response::error(request.id, code, msg),
+    }
+}
+
+fn handle_download_partial(request: &Request) -> Response {
+    let params: DownloadPartialParams = match serde_json::from_value(request.params.clone()) {
+        Ok(p) => p,
+        Err(e) => {
+            return Response::error(
+                request.id,
+                error_codes::INVALID_PARAMS,
+                format!("Invalid params: {}", e),
+            )
+        }
+    };
+
+    match operations::download_partial(params) {
         Ok(result) => Response::success(request.id, result),
         Err((code, msg)) => Response::error(request.id, code, msg),
     }

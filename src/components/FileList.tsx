@@ -154,7 +154,17 @@ function ListFilePreview({
         />
       );
     }
-    return <div ref={previewRef} className="w-5 h-5 rounded-sm border border-app-border" />;
+    return (
+      <div ref={previewRef} className="relative w-5 h-5 rounded-sm border border-app-border">
+        {isVideo && (
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+            <div className="flex items-center justify-center rounded-full bg-black/25 p-[2px]">
+              <Play weight="fill" className="h-[10px] w-[10px] text-white/70" />
+            </div>
+          </div>
+        )}
+      </div>
+    );
   }
 
   const containerPx = 20; // matches w-5/h-5

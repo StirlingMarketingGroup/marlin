@@ -269,6 +269,26 @@ pub struct DownloadFileResult {
     pub size: u64,
 }
 
+/// Parameters for download_partial method.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DownloadPartialParams {
+    pub credentials: SmbCredentials,
+    pub share: String,
+    pub path: String,
+    /// Local path to write the file to.
+    pub dest_path: String,
+    /// Maximum number of bytes to download.
+    pub max_bytes: u64,
+}
+
+/// Result of download_partial.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DownloadPartialResult {
+    pub path: String,
+    pub bytes_written: u64,
+    pub total_size: u64,
+}
+
 /// Result of test_connection.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TestConnectionResult {
@@ -293,5 +313,6 @@ pub mod methods {
     pub const LIST_SHARES: &str = "list_shares";
     pub const TEST_CONNECTION: &str = "test_connection";
     pub const DOWNLOAD_FILE: &str = "download_file";
+    pub const DOWNLOAD_PARTIAL: &str = "download_partial";
     pub const UPLOAD_FILE: &str = "upload_file";
 }
