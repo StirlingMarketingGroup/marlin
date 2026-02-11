@@ -269,7 +269,9 @@ fn generate_smb_video_thumbnail(
     // Step 2: Try FFmpeg on the partial file
     let local_request = request_with_local_path(request, &partial_path);
     let result = super::ThumbnailGenerator::generate_local(&local_request);
-    let _ = std::fs::remove_file(&partial_path);
+    if let Err(e) = std::fs::remove_file(&partial_path) {
+        log::warn!("Failed to remove temp file {}: {}", partial_path.display(), e);
+    }
 
     match result {
         Ok(thumb) => Ok(thumb),
@@ -301,7 +303,9 @@ fn generate_smb_video_thumbnail(
             let full_path = download_smb_file_sync(&request.path)?;
             let full_request = request_with_local_path(request, &full_path);
             let full_result = super::ThumbnailGenerator::generate_local(&full_request);
-            let _ = std::fs::remove_file(&full_path);
+            if let Err(e) = std::fs::remove_file(&full_path) {
+                log::warn!("Failed to remove temp file {}: {}", full_path.display(), e);
+            }
             full_result
         }
     }
@@ -324,6 +328,8 @@ fn generate_smb_nonvideo_thumbnail(
     let temp_path = download_smb_file_sync(&request.path)?;
     let local_request = request_with_local_path(request, &temp_path);
     let result = super::ThumbnailGenerator::generate_local(&local_request);
-    let _ = std::fs::remove_file(&temp_path);
+    if let Err(e) = std::fs::remove_file(&temp_path) {
+        log::warn!("Failed to remove temp file {}: {}", temp_path.display(), e);
+    }
     result
 }
