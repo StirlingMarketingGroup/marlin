@@ -5,14 +5,14 @@
 
 use crate::smb_sidecar::protocol::{
     error_codes, CopyParams, CreateDirectoryParams, DeleteParams, DirectoryEntry,
-    DownloadFileParams, DownloadFileResult, FileMetadataResult, GetFileMetadataParams,
-    ListSharesParams, ListSharesResult, ReadDirectoryParams, ReadDirectoryResult, RenameParams,
-    ShareEntry, SmbCredentials, TestConnectionParams, TestConnectionResult, UploadFileParams,
-    UploadFileResult,
+    DownloadFileParams, DownloadFileResult, DownloadPartialParams, DownloadPartialResult,
+    FileMetadataResult, GetFileMetadataParams, ListSharesParams, ListSharesResult,
+    ReadDirectoryParams, ReadDirectoryResult, RenameParams, ShareEntry, SmbCredentials,
+    TestConnectionParams, TestConnectionResult, UploadFileParams, UploadFileResult,
 };
 use once_cell::sync::Lazy;
 use pavao::{SmbClient, SmbCredentials as PavaoCredentials, SmbMode, SmbOpenOptions, SmbOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::sync::Mutex;
 
 /// Global mutex to serialize ALL SMB operations.
@@ -461,6 +461,77 @@ pub fn download_file(params: DownloadFileParams) -> Result<DownloadFileResult, (
     Ok(DownloadFileResult {
         path: params.dest_path,
         size,
+    })
+}
+
+/// Download up to `max_bytes` of a file to a local path.
+/// Returns the number of bytes written and the total file size on the server.
+pub fn download_partial(
+    params: DownloadPartialParams,
+) -> Result<DownloadPartialResult, (i32, String)> {
+    let _guard = SMB_MUTEX
+        .lock()
+        .map_err(|e| (error_codes::INTERNAL_ERROR, format!("SMB mutex poisoned: {}", e)))?;
+
+    let credentials = build_credentials(&params.credentials, &params.share);
+
+    let client = SmbClient::new(credentials, SmbOptions::default()).map_err(|e| {
+        let (code, msg) = map_smb_error(&e);
+        (code, format!("Failed to connect to SMB server: {}", msg))
+    })?;
+
+    // Get total file size first
+    let stat = client.stat(&params.path).map_err(|e| {
+        let (code, msg) = map_smb_error(&e);
+        (code, format!("Failed to stat SMB file: {}", msg))
+    })?;
+    let total_size = stat.size;
+
+    // Open the remote file for reading
+    let smb_file = client
+        .open_with(&params.path, SmbOpenOptions::default().read(true))
+        .map_err(|e| {
+            let (code, msg) = map_smb_error(&e);
+            (code, format!("Failed to open SMB file: {}", msg))
+        })?;
+
+    // Create parent directories if needed
+    if let Some(parent) = std::path::Path::new(&params.dest_path).parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            (
+                error_codes::INTERNAL_ERROR,
+                format!("Failed to create temp directory: {}", e),
+            )
+        })?;
+    }
+
+    // Write to local file, limiting to max_bytes
+    let mut local_file = std::fs::File::create(&params.dest_path).map_err(|e| {
+        (
+            error_codes::INTERNAL_ERROR,
+            format!("Failed to create temp file: {}", e),
+        )
+    })?;
+
+    let mut limited = smb_file.take(params.max_bytes);
+    let bytes_written = std::io::copy(&mut limited, &mut local_file).map_err(|e| {
+        (
+            error_codes::SMB_ERROR,
+            format!("Failed to copy SMB file to temp: {}", e),
+        )
+    })?;
+
+    local_file.flush().map_err(|e| {
+        (
+            error_codes::INTERNAL_ERROR,
+            format!("Failed to flush temp file: {}", e),
+        )
+    })?;
+
+    Ok(DownloadPartialResult {
+        path: params.dest_path,
+        bytes_written,
+        total_size,
     })
 }
 
