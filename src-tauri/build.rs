@@ -77,16 +77,17 @@ fn setup_libzpl() {
                         println!("cargo:warning=libzpl: copy failed: {}", e);
                     }
 
-                    // Also copy to CARGO_MANIFEST_DIR/lib/ so Tauri's macOS
-                    // `bundle.macOS.frameworks` config can bundle it into
-                    // Contents/Frameworks/ (the build output path is unpredictable).
-                    if target_os == "macos" {
+                    // Also copy to CARGO_MANIFEST_DIR/lib/ so Tauri's bundler can
+                    // find it: macOS uses `bundle.macOS.frameworks` to bundle into
+                    // Contents/Frameworks/, Linux uses `bundle.linux.deb.files` to
+                    // install into /usr/lib/marlin/.
+                    if target_os == "macos" || target_os == "linux" {
                         let manifest_dir =
                             PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
                         let fw_dir = manifest_dir.join("lib");
                         let _ = std::fs::create_dir_all(&fw_dir);
                         if let Err(e) = std::fs::copy(&lib_path, fw_dir.join(lib_name)) {
-                            println!("cargo:warning=libzpl: framework copy failed: {}", e);
+                            println!("cargo:warning=libzpl: bundler copy failed: {}", e);
                         }
                     }
 
@@ -105,6 +106,8 @@ fn setup_libzpl() {
     if target_os == "macos" {
         println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path");
     } else if target_os == "linux" {
-        println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
+        // $ORIGIN: finds libzpl.so next to the binary (dev builds + AppImage)
+        // /usr/lib/marlin: finds libzpl.so installed by the .deb package
+        println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN,-rpath,/usr/lib/marlin");
     }
 }
