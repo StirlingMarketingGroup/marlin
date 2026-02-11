@@ -371,28 +371,7 @@ impl ThumbnailGenerator {
 
 /// Parse a `gdrive://user@domain/path` URI into (email, decoded_path).
 fn parse_gdrive_path(raw: &str) -> Result<(String, String), String> {
-    // gdrive://brian@smg.gg/My Drive/file.zpl
-    // The url crate treats this as scheme=gdrive, username=brian, host=smg.gg,
-    // path=/My%20Drive/file.zpl (percent-encoded).
-    let url =
-        url::Url::parse(raw).map_err(|e| format!("Invalid Google Drive path: {e}"))?;
-
-    let host = url
-        .host_str()
-        .ok_or_else(|| "Google Drive path missing account".to_string())?;
-
-    let email = if url.username().is_empty() {
-        host.to_string()
-    } else {
-        format!("{}@{}", url.username(), host)
-    };
-
-    // url.path() returns percent-encoded; decode it back to the original path
-    let path = urlencoding::decode(url.path())
-        .map_err(|e| format!("Invalid UTF-8 in Google Drive path: {e}"))?
-        .into_owned();
-
-    Ok((email, path))
+    crate::locations::gdrive::parse_gdrive_uri(raw)
 }
 
 #[cfg(test)]
