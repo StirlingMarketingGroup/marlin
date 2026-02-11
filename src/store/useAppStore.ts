@@ -253,7 +253,7 @@ interface AppState {
   clipboardMode: 'copy' | 'cut' | null;
   clipboardPaths: string[];
   clipboardPathsSet: Set<string>; // O(1) lookup for cut state rendering
-  clipboardInternalOnly: boolean; // true when clipboard isn't in OS clipboard (e.g., remote providers)
+  clipboardTempPaths: string[]; // temp local paths written to OS clipboard for remote files
   canPasteFiles: boolean;
   canPasteImage: boolean;
 
@@ -368,7 +368,6 @@ interface AppState {
   pasteFiles: () => Promise<void>;
   syncClipboardState: () => Promise<void>;
   clearClipboardState: () => void;
-  setClipboardState: (paths: string[], mode: string) => void;
   // Rename UX
   justCreatedPath?: string;
   renameTargetPath?: string;
@@ -445,7 +444,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   clipboardMode: null,
   clipboardPaths: [],
   clipboardPathsSet: new Set<string>(),
-  clipboardInternalOnly: false,
+  clipboardTempPaths: [],
   canPasteFiles: false,
   canPasteImage: false,
 
@@ -2244,41 +2243,30 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     const isRemote =
       currentPath.includes('://') || filePaths.some((p) => /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(p));
-    if (isRemote) {
-      // Remote providers can't be written to the OS file clipboard; keep an internal clipboard instead.
-      set({
-        clipboardMode: 'copy',
-        clipboardPaths: filePaths,
-        clipboardPathsSet: new Set(filePaths),
-        clipboardInternalOnly: true,
-      });
 
-      // Broadcast to other windows so they can paste too
-      emit('clipboard:internal_copy', { paths: filePaths, mode: 'copy' }).catch((err) => {
-        console.warn('Failed to emit clipboard:internal_copy:', err);
-      });
-
-      const count = filePaths.length;
-      let message = count === 1 ? 'File copied.' : `${count} files copied.`;
-      if (skippedFolders > 0) {
-        message += ` (${skippedFolders} folder${skippedFolders > 1 ? 's' : ''} skipped)`;
-      }
-      message += ' (Marlin only)';
-      useToastStore.getState().addToast({
-        type: 'success',
-        message,
-        duration: 3000,
-      });
-      return;
-    }
-
+    let downloadToastId: string | undefined;
     try {
-      await invoke('clipboard_copy_files', { paths: filePaths, isCut: false });
+      let tempPaths: string[] = [];
+      if (isRemote) {
+        // Download remote files to temp, then write temp paths to OS clipboard
+        downloadToastId = useToastStore.getState().addToast({
+          type: 'info',
+          message: 'Downloading files to clipboard\u2026',
+          duration: 30000,
+        });
+        tempPaths = await invoke<string[]>('download_and_copy_to_clipboard', { paths: filePaths, isCut: false });
+        useToastStore.getState().removeToast(downloadToastId);
+      } else {
+        await invoke('clipboard_copy_files', { paths: filePaths, isCut: false });
+      }
+
+      // Store original remote paths for cut tracking / visual indicator
+      // and temp paths for clipboard ownership validation
       set({
         clipboardMode: 'copy',
         clipboardPaths: filePaths,
         clipboardPathsSet: new Set(filePaths),
-        clipboardInternalOnly: false,
+        clipboardTempPaths: tempPaths,
       });
 
       const count = filePaths.length;
@@ -2292,6 +2280,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         duration: 3000,
       });
     } catch (error) {
+      if (downloadToastId) useToastStore.getState().removeToast(downloadToastId);
       console.error('Failed to copy files:', error);
       useToastStore.getState().addToast({
         type: 'error',
@@ -2324,40 +2313,30 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     const isRemote =
       currentPath.includes('://') || filePaths.some((p) => /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(p));
-    if (isRemote) {
-      set({
-        clipboardMode: 'cut',
-        clipboardPaths: filePaths,
-        clipboardPathsSet: new Set(filePaths),
-        clipboardInternalOnly: true,
-      });
 
-      // Broadcast to other windows so they can paste too
-      emit('clipboard:internal_copy', { paths: filePaths, mode: 'cut' }).catch((err) => {
-        console.warn('Failed to emit clipboard:internal_copy:', err);
-      });
-
-      const count = filePaths.length;
-      let message = count === 1 ? 'File cut.' : `${count} files cut.`;
-      if (skippedFolders > 0) {
-        message += ` (${skippedFolders} folder${skippedFolders > 1 ? 's' : ''} skipped)`;
-      }
-      message += ' (Marlin only)';
-      useToastStore.getState().addToast({
-        type: 'success',
-        message,
-        duration: 3000,
-      });
-      return;
-    }
-
+    let downloadToastId: string | undefined;
     try {
-      await invoke('clipboard_copy_files', { paths: filePaths, isCut: true });
+      let tempPaths: string[] = [];
+      if (isRemote) {
+        // Download remote files to temp, then write temp paths to OS clipboard with cut intent
+        downloadToastId = useToastStore.getState().addToast({
+          type: 'info',
+          message: 'Downloading files to clipboard\u2026',
+          duration: 30000,
+        });
+        tempPaths = await invoke<string[]>('download_and_copy_to_clipboard', { paths: filePaths, isCut: true });
+        useToastStore.getState().removeToast(downloadToastId);
+      } else {
+        await invoke('clipboard_copy_files', { paths: filePaths, isCut: true });
+      }
+
+      // Store original remote paths for cut deletion after paste
+      // and temp paths for clipboard ownership validation
       set({
         clipboardMode: 'cut',
         clipboardPaths: filePaths,
         clipboardPathsSet: new Set(filePaths),
-        clipboardInternalOnly: false,
+        clipboardTempPaths: tempPaths,
       });
 
       const count = filePaths.length;
@@ -2371,6 +2350,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         duration: 3000,
       });
     } catch (error) {
+      if (downloadToastId) useToastStore.getState().removeToast(downloadToastId);
       console.error('Failed to cut files:', error);
       useToastStore.getState().addToast({
         type: 'error',
@@ -2408,27 +2388,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       } finally {
         window.clearTimeout(timer);
         if (showPromise) {
-          // Wait for the show to complete before hiding, otherwise the hide
-          // can arrive while the window is still being created (race condition).
           await showPromise;
           void invoke('hide_clipboard_progress_window').catch((e) => {
             console.warn('Failed to hide clipboard progress window:', e);
           });
         }
-      }
-    };
-
-    const readClipboardInfo = async (): Promise<ClipboardInfo | null> => {
-      try {
-        return await invoke<ClipboardInfo>('clipboard_get_contents');
-      } catch (error) {
-        console.error('Failed to read clipboard:', error);
-        toastStore.addToast({
-          type: 'error',
-          message: 'Failed to read clipboard.',
-          duration: 5000,
-        });
-        return null;
       }
     };
 
@@ -2459,7 +2423,6 @@ export const useAppStore = create<AppState>((set, get) => ({
           messageText += ` (${skippedCount} skipped)`;
         }
 
-        // Push to undo stack and show toast with Undo button
         if (undoInfo && result.pastedPaths.length > 0) {
           pushUndoAndShowToast(result, undoInfo.isCut, undoInfo.sourcePaths, toastStore);
         } else {
@@ -2473,26 +2436,63 @@ export const useAppStore = create<AppState>((set, get) => ({
         if (result.errorMessage) {
           message += ` ${result.errorMessage}`;
         }
-        toastStore.addToast({
-          type: 'info',
-          message,
-          duration: 5000,
-        });
+        toastStore.addToast({ type: 'info', message, duration: 5000 });
       }
     };
 
-    const pasteInternalClipboardToLocal = async () => {
-      if (state.clipboardPaths.length === 0) {
-        toastStore.addToast({
-          type: 'info',
-          message: 'No files in clipboard to paste.',
-          duration: 4000,
-        });
-        return;
-      }
+    // Read OS clipboard (the single source of truth)
+    let clipboardInfo: ClipboardInfo;
+    try {
+      clipboardInfo = await invoke<ClipboardInfo>('clipboard_get_contents');
+    } catch (error) {
+      console.error('Failed to read clipboard:', error);
+      toastStore.addToast({ type: 'error', message: 'Failed to read clipboard.', duration: 5000 });
+      return;
+    }
 
-      const isCut = state.clipboardMode === 'cut';
-      const sourcePaths = state.clipboardPaths.slice();
+    // Image paste (screenshot) — no files in clipboard
+    if (clipboardInfo.hasImage && !clipboardInfo.hasFiles) {
+      try {
+        if (destinationIsRemote) {
+          const task = invoke<PasteImageResult>('clipboard_paste_image_to_location', {
+            destination: currentPath,
+          });
+          const result = await runWithClipboardProgress(task, {
+            operation: 'Pasting screenshot',
+            destination: currentPath,
+            totalItems: 1,
+          });
+          await state.refreshCurrentDirectory();
+          state.setSelectedFiles([result.path]);
+          set({ renameTargetPath: result.path });
+        } else {
+          const result = await invoke<PasteImageResult>('clipboard_paste_image', {
+            destination: currentPath,
+            filename: null as string | null,
+          });
+          await state.refreshCurrentDirectoryStreaming();
+          state.setSelectedFiles([result.path]);
+          set({ renameTargetPath: result.path });
+        }
+        toastStore.addToast({ type: 'success', message: 'Screenshot pasted.', duration: 3000 });
+      } catch (error) {
+        console.error('Failed to paste image:', error);
+        const msg = error instanceof Error ? error.message : String(error);
+        toastStore.addToast({ type: 'error', message: `Failed to paste image: ${msg}`, duration: 5000 });
+      }
+      return;
+    }
+
+    // File paste — OS clipboard has file paths (local or temp copies of remote files)
+    if (!clipboardInfo.hasFiles || clipboardInfo.filePaths.length === 0) {
+      toastStore.addToast({ type: 'info', message: 'No files in clipboard to paste.', duration: 4000 });
+      return;
+    }
+
+    const isCut = clipboardInfo.isCut;
+    const sourcePaths = clipboardInfo.filePaths.slice();
+
+    try {
       const task = invoke<PasteResult>('paste_items_to_location', {
         destination: currentPath,
         sourcePaths,
@@ -2504,228 +2504,63 @@ export const useAppStore = create<AppState>((set, get) => ({
         totalItems: sourcePaths.length,
       });
 
-      await state.refreshCurrentDirectoryStreaming();
+      if (destinationIsRemote) {
+        await state.refreshCurrentDirectory();
+      } else {
+        await state.refreshCurrentDirectoryStreaming();
+      }
 
       if (result.pastedPaths.length > 0) {
         state.setSelectedFiles(result.pastedPaths);
       }
 
-      if (isCut && result.pastedPaths.length > 0) {
-        // Capture paths before clearing state
-        const movedPaths = get().clipboardPaths;
+      // On cut+paste success, delete the original remote files (if any) and
+      // clear clipboard state. clipboardPaths holds the *original* remote URIs
+      // (e.g. smb://...) while the OS clipboard had temp local copies. The
+      // backend only moved/deleted the temp files, so we must explicitly delete
+      // the remote originals here.
+      //
+      // Only delete if ALL items pasted successfully to prevent data loss on
+      // partial failures. If some items were skipped/cancelled, leave originals
+      // intact so the user can retry.
+      const allPasted = result.pastedPaths.length === sourcePaths.length && !result.cancelled;
+      // Capture remote originals BEFORE clearing state (clearClipboardState empties clipboardPaths)
+      const movedPaths = get().clipboardPaths;
+      const hasRemoteOriginals = movedPaths.some((p) => /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(p));
+      if (isCut && allPasted) {
+        // Delete remote originals that the backend couldn't see
+        const remoteOriginals = movedPaths.filter((p) => /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(p));
+        const failedDeletes: string[] = [];
+        for (const remotePath of remoteOriginals) {
+          try {
+            await invoke('delete_file', { path: remotePath });
+          } catch (err) {
+            console.warn(`Failed to delete remote original after cut: ${remotePath}`, err);
+            failedDeletes.push(remotePath);
+          }
+        }
+        if (failedDeletes.length > 0) {
+          toastStore.addToast({
+            type: 'warning',
+            message: `Cut complete, but ${failedDeletes.length} source file${failedDeletes.length > 1 ? 's' : ''} could not be deleted.`,
+            duration: 6000,
+          });
+        }
         get().clearClipboardState();
         emitCutComplete(movedPaths);
       }
 
-      showPasteResultToast(result, { isCut, sourcePaths });
+      // Skip undo for remote cut — remote originals are already deleted and
+      // undo can't reverse that. Undo would point to temp local paths.
+      const undoInfo = isCut && hasRemoteOriginals ? undefined : { isCut, sourcePaths };
+      showPasteResultToast(result, undoInfo);
       if (result.errorMessage) {
         console.warn('Paste error:', result.errorMessage);
       }
-    };
-
-    const pasteRemoteImage = async () => {
-      const task = invoke<PasteImageResult>('clipboard_paste_image_to_location', {
-        destination: currentPath,
-      });
-      const result = await runWithClipboardProgress(task, {
-        operation: 'Pasting screenshot',
-        destination: currentPath,
-        totalItems: 1,
-      });
-
-      await state.refreshCurrentDirectory();
-      state.setSelectedFiles([result.path]);
-      set({ renameTargetPath: result.path });
-
-      toastStore.addToast({
-        type: 'success',
-        message: 'Screenshot pasted.',
-        duration: 3000,
-      });
-    };
-
-    const pasteToRemoteDestination = async (clipboardInfo: ClipboardInfo) => {
-      // When the internal clipboard has files (remote copies like gdrive), prefer
-      // those over anything in the OS clipboard (which may be stale or an image).
-      const hasInternalClipboard = state.clipboardInternalOnly && state.clipboardPaths.length > 0;
-
-      if (!hasInternalClipboard && clipboardInfo.hasImage && !clipboardInfo.hasFiles) {
-        await pasteRemoteImage();
-        return;
-      }
-
-      const sourcePaths = hasInternalClipboard
-        ? state.clipboardPaths
-        : clipboardInfo.hasFiles && clipboardInfo.filePaths.length > 0
-          ? clipboardInfo.filePaths
-          : state.clipboardPaths;
-      const isCut = hasInternalClipboard
-        ? state.clipboardMode === 'cut'
-        : clipboardInfo.hasFiles
-          ? clipboardInfo.isCut
-          : state.clipboardMode === 'cut';
-
-      if (!sourcePaths || sourcePaths.length === 0) {
-        toastStore.addToast({
-          type: 'info',
-          message: 'No files in clipboard to paste.',
-          duration: 4000,
-        });
-        return;
-      }
-
-      const task = invoke<PasteResult>('paste_items_to_location', {
-        destination: currentPath,
-        sourcePaths,
-        isCut,
-      });
-      const result = await runWithClipboardProgress(task, {
-        operation: isCut ? 'Moving items' : 'Copying items',
-        destination: currentPath,
-        totalItems: sourcePaths.length,
-      });
-
-      await state.refreshCurrentDirectory();
-
-      if (result.pastedPaths.length > 0) {
-        state.setSelectedFiles(result.pastedPaths);
-      }
-
-      if (isCut && result.pastedPaths.length > 0) {
-        get().clearClipboardState();
-        emitCutComplete(sourcePaths);
-      }
-
-      showPasteResultToast(result, { isCut, sourcePaths });
-      if (result.errorMessage) {
-        console.warn('Paste error:', result.errorMessage);
-      }
-    };
-
-    const pasteLocalImage = async () => {
-      const result = await invoke<PasteImageResult>('clipboard_paste_image', {
-        destination: currentPath,
-        filename: null as string | null,
-      });
-
-      await state.refreshCurrentDirectoryStreaming();
-      state.setSelectedFiles([result.path]);
-      set({ renameTargetPath: result.path });
-
-      toastStore.addToast({
-        type: 'success',
-        message: 'Screenshot pasted.',
-        duration: 3000,
-      });
-    };
-
-    const pasteLocalFilesFromSystemClipboard = async (clipboardInfo: ClipboardInfo) => {
-      if (!clipboardInfo.hasFiles || clipboardInfo.filePaths.length === 0) {
-        toastStore.addToast({
-          type: 'info',
-          message: 'No files in clipboard to paste.',
-          duration: 4000,
-        });
-        return;
-      }
-
-      const isCut = clipboardInfo.isCut;
-      const sourcePaths = clipboardInfo.filePaths.slice();
-      const task = invoke<PasteResult>('paste_items_to_location', {
-        destination: currentPath,
-        sourcePaths: clipboardInfo.filePaths,
-        isCut,
-      });
-      const result = await runWithClipboardProgress(task, {
-        operation: isCut ? 'Moving items' : 'Copying items',
-        destination: currentPath,
-        totalItems: clipboardInfo.filePaths.length,
-      });
-
-      await state.refreshCurrentDirectoryStreaming();
-
-      if (result.pastedPaths.length > 0) {
-        state.setSelectedFiles(result.pastedPaths);
-      }
-
-      if (isCut && result.pastedPaths.length > 0) {
-        get().clearClipboardState();
-        emitCutComplete(sourcePaths);
-      }
-
-      showPasteResultToast(result, { isCut, sourcePaths });
-      if (result.errorMessage) {
-        console.warn('Paste error:', result.errorMessage);
-      }
-    };
-
-    const clipboardInfo = await readClipboardInfo();
-    if (!clipboardInfo) return;
-
-    // Internal clipboard (remote selections) pasted into a local destination.
-    // Only use internal clipboard if there's no image in the OS clipboard (screenshot takes priority).
-    if (
-      !destinationIsRemote &&
-      !clipboardInfo.hasFiles &&
-      !clipboardInfo.hasImage &&
-      state.clipboardInternalOnly
-    ) {
-      try {
-        await pasteInternalClipboardToLocal();
-      } catch (error) {
-        console.error('Failed to paste files:', error);
-        const msg = error instanceof Error ? error.message : String(error);
-        toastStore.addToast({
-          type: 'error',
-          message: `Failed to paste: ${msg}`,
-          duration: 5000,
-        });
-      }
-      return;
-    }
-
-    // Remote destinations (gdrive://, smb://, etc.)
-    if (destinationIsRemote) {
-      try {
-        await pasteToRemoteDestination(clipboardInfo);
-      } catch (error) {
-        console.error('Failed to paste files to remote destination:', error);
-        const msg = error instanceof Error ? error.message : String(error);
-        toastStore.addToast({
-          type: 'error',
-          message: `Failed to paste: ${msg}`,
-          duration: 5000,
-        });
-      }
-      return;
-    }
-
-    // Handle image paste
-    if (clipboardInfo.hasImage && !clipboardInfo.hasFiles) {
-      try {
-        await pasteLocalImage();
-      } catch (error) {
-        console.error('Failed to paste image:', error);
-        const msg = error instanceof Error ? error.message : String(error);
-        toastStore.addToast({
-          type: 'error',
-          message: `Failed to paste image: ${msg}`,
-          duration: 5000,
-        });
-      }
-      return;
-    }
-
-    try {
-      await pasteLocalFilesFromSystemClipboard(clipboardInfo);
     } catch (error) {
       console.error('Failed to paste files:', error);
       const msg = error instanceof Error ? error.message : String(error);
-      toastStore.addToast({
-        type: 'error',
-        message: `Failed to paste: ${msg}`,
-        duration: 5000,
-      });
+      toastStore.addToast({ type: 'error', message: `Failed to paste: ${msg}`, duration: 5000 });
     }
   },
 
@@ -2892,21 +2727,26 @@ export const useAppStore = create<AppState>((set, get) => ({
   syncClipboardState: async () => {
     try {
       const clipboardInfo = await invoke<ClipboardInfo>('clipboard_get_contents');
-      const { clipboardPaths, clipboardInternalOnly } = get();
 
-      // Check if our tracked cut paths are still in the clipboard
-      const pathsMatch =
-        clipboardInfo.filePaths.length === clipboardPaths.length &&
-        clipboardPaths.every((p) => clipboardInfo.filePaths.includes(p));
-
-      // If clipboard changed externally, clear our cut state
-      if (!clipboardInternalOnly && !pathsMatch) {
-        set({
-          clipboardMode: null,
-          clipboardPaths: [],
-          clipboardPathsSet: new Set<string>(),
-          clipboardInternalOnly: false,
-        });
+      // If clipboard changed externally (user copied something else), clear cut state.
+      // For remote cut, the OS clipboard has temp paths stored in clipboardTempPaths.
+      // For local cut, clipboardTempPaths is empty so we compare against clipboardPaths.
+      // If the clipboard contents don't match what we wrote, the user has overwritten it.
+      if (get().clipboardMode === 'cut') {
+        const { clipboardPaths, clipboardTempPaths } = get();
+        const expectedPaths = clipboardTempPaths.length > 0 ? clipboardTempPaths : clipboardPaths;
+        const currentPaths = clipboardInfo.filePaths;
+        const pathsMatch =
+          currentPaths.length === expectedPaths.length &&
+          currentPaths.every((p, i) => p === expectedPaths[i]);
+        if (!clipboardInfo.hasFiles || !pathsMatch) {
+          set({
+            clipboardMode: null,
+            clipboardPaths: [],
+            clipboardPathsSet: new Set<string>(),
+            clipboardTempPaths: [],
+          });
+        }
       }
 
       set({
@@ -2927,16 +2767,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       clipboardMode: null,
       clipboardPaths: [],
       clipboardPathsSet: new Set<string>(),
-      clipboardInternalOnly: false,
-    });
-  },
-
-  setClipboardState: (paths: string[], mode: string) => {
-    set({
-      clipboardMode: mode === 'cut' ? 'cut' : 'copy',
-      clipboardPaths: paths,
-      clipboardPathsSet: new Set(paths),
-      clipboardInternalOnly: true,
+      clipboardTempPaths: [],
     });
   },
 

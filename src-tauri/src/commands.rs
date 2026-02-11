@@ -8281,3 +8281,80 @@ pub async fn show_file_properties(paths: Vec<String>) -> Result<(), String> {
         ))
     }
 }
+
+/// Download remote files to a temp directory and copy the temp paths to the OS clipboard.
+/// This bridges remote file providers (GDrive, SMB, SFTP) with the native clipboard so
+/// paste works across windows and into external apps (Finder/Explorer).
+#[command]
+pub async fn download_and_copy_to_clipboard(
+    app: AppHandle,
+    paths: Vec<String>,
+    is_cut: bool,
+) -> Result<Vec<String>, String> {
+    use std::path::PathBuf;
+
+    if paths.is_empty() {
+        return Err("No paths provided".into());
+    }
+
+    let total = paths.len();
+    let mut temp_paths: Vec<String> = Vec::with_capacity(total);
+
+    for (i, path) in paths.iter().enumerate() {
+        // Emit progress for UI feedback
+        let _ = app.emit("clipboard:download_progress", serde_json::json!({
+            "current": i + 1,
+            "total": total,
+            "path": path,
+        }));
+
+        let local_path: PathBuf = if path.starts_with("gdrive://") {
+            // Parse gdrive://user@domain/path
+            let url = Url::parse(path)
+                .map_err(|e| format!("Invalid Google Drive path: {e}"))?;
+            let host = url
+                .host_str()
+                .ok_or_else(|| "Google Drive path missing account".to_string())?;
+            let email = if url.username().is_empty() {
+                host.to_string()
+            } else {
+                format!("{}@{}", url.username(), host)
+            };
+            let decoded_path = urlencoding::decode(url.path())
+                .map_err(|e| format!("Invalid UTF-8 in Google Drive path: {e}"))?
+                .into_owned();
+            let file_name = std::path::Path::new(&decoded_path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("file")
+                .to_string();
+            let file_id = get_file_id_by_path(&email, &decoded_path).await?;
+            let temp_str = download_file_to_temp(&email, &file_id, &file_name).await?;
+            PathBuf::from(temp_str)
+        } else if path.starts_with("smb://") {
+            let smb_path = path.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                crate::thumbnails::generators::smb::download_smb_file_sync(&smb_path)
+            })
+            .await
+            .map_err(|e| format!("Task join error: {e}"))??
+        } else if path.starts_with("sftp://") {
+            crate::locations::sftp::download_sftp_file_to_temp(path).await?
+        } else {
+            // Already a local path — no download needed
+            PathBuf::from(path)
+        };
+
+        temp_paths.push(local_path.to_string_lossy().into_owned());
+    }
+
+    // Write temp paths to the OS clipboard
+    let paths_for_clipboard = temp_paths.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::clipboard::copy_to_clipboard(&paths_for_clipboard, is_cut)
+    })
+    .await
+    .map_err(|e| format!("Task join error: {e}"))??;
+
+    Ok(temp_paths)
+}

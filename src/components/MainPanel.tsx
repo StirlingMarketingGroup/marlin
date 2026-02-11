@@ -326,7 +326,7 @@ export default function MainPanel() {
         path,
         canPasteFiles: state.canPasteFiles,
         canPasteImage: state.canPasteImage,
-        canPasteInternal: state.clipboardPaths.length > 0,
+        canPasteInternal: false,
         // Always send a boolean (never undefined)
         hasFileContext: !!isFileCtx,
         // Only send file paths when clicking on a file

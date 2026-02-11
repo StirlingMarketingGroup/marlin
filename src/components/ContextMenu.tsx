@@ -48,7 +48,6 @@ export default function ContextMenu({ x, y, isFileContext, onRequestClose }: Con
     syncClipboardState,
     canPasteFiles,
     canPasteImage,
-    clipboardPaths,
   } = state;
 
   const prefs = useMemo(
@@ -338,8 +337,8 @@ export default function ContextMenu({ x, y, isFileContext, onRequestClose }: Con
         )}
         {/* Paste is always available */}
         <button
-          className={`w-full text-left px-3 py-2 hover:bg-app-light ${!canPasteFiles && !canPasteImage && clipboardPaths.length === 0 ? 'text-app-muted' : ''}`}
-          disabled={!canPasteFiles && !canPasteImage && clipboardPaths.length === 0}
+          className={`w-full text-left px-3 py-2 hover:bg-app-light ${!canPasteFiles && !canPasteImage ? 'text-app-muted' : ''}`}
+          disabled={!canPasteFiles && !canPasteImage}
           onClick={() => {
             onRequestClose();
             void pasteFiles();
@@ -347,7 +346,7 @@ export default function ContextMenu({ x, y, isFileContext, onRequestClose }: Con
         >
           Paste
         </button>
-        {(fileSpecific || canPasteFiles || canPasteImage || clipboardPaths.length > 0) && (
+        {(fileSpecific || canPasteFiles || canPasteImage) && (
           <div className="my-1 h-px bg-app-border" />
         )}
 
