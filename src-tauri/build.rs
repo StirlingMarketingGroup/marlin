@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn main() {
     // Load .env file if it exists (for local development)
@@ -25,6 +25,35 @@ fn main() {
     setup_libzpl();
 
     tauri_build::build()
+}
+
+/// Read the Linux deb install directory for libzpl from tauri.conf.json.
+///
+/// The `bundle.linux.deb.files` map uses destination-in-package as key and
+/// source-on-disk as value. We look for a key whose filename is `libzpl.so`
+/// and return its parent directory (e.g. `/usr/lib/marlin`).
+fn libzpl_deb_install_dir() -> Option<PathBuf> {
+    let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    let conf_path = manifest_dir.join("tauri.conf.json");
+    println!("cargo:rerun-if-changed={}", conf_path.display());
+
+    let conf_text = std::fs::read_to_string(&conf_path).ok()?;
+    let conf: serde_json::Value = serde_json::from_str(&conf_text).ok()?;
+
+    let files = conf
+        .get("bundle")?
+        .get("linux")?
+        .get("deb")?
+        .get("files")?
+        .as_object()?;
+
+    for pkg_dest in files.keys() {
+        if Path::new(pkg_dest).file_name().and_then(|n| n.to_str()) == Some("libzpl.so") {
+            return Path::new(pkg_dest).parent().map(|p| p.to_path_buf());
+        }
+    }
+
+    None
 }
 
 fn setup_libzpl() {
@@ -77,16 +106,17 @@ fn setup_libzpl() {
                         println!("cargo:warning=libzpl: copy failed: {}", e);
                     }
 
-                    // Also copy to CARGO_MANIFEST_DIR/lib/ so Tauri's macOS
-                    // `bundle.macOS.frameworks` config can bundle it into
-                    // Contents/Frameworks/ (the build output path is unpredictable).
-                    if target_os == "macos" {
+                    // Also copy to CARGO_MANIFEST_DIR/lib/ so Tauri's bundler can
+                    // find it: macOS uses `bundle.macOS.frameworks` to bundle into
+                    // Contents/Frameworks/, Linux uses `bundle.linux.deb.files` to
+                    // install into the configured directory.
+                    if target_os == "macos" || target_os == "linux" {
                         let manifest_dir =
                             PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
                         let fw_dir = manifest_dir.join("lib");
                         let _ = std::fs::create_dir_all(&fw_dir);
                         if let Err(e) = std::fs::copy(&lib_path, fw_dir.join(lib_name)) {
-                            println!("cargo:warning=libzpl: framework copy failed: {}", e);
+                            println!("cargo:warning=libzpl: bundler copy failed: {}", e);
                         }
                     }
 
@@ -105,6 +135,12 @@ fn setup_libzpl() {
     if target_os == "macos" {
         println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path");
     } else if target_os == "linux" {
-        println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
+        // $ORIGIN: finds libzpl.so next to the binary (dev builds + AppImage)
+        // deb install dir: finds libzpl.so installed by the .deb package
+        // (read from tauri.conf.json so the path isn't duplicated)
+        let deb_rpath = libzpl_deb_install_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "/usr/lib/marlin".to_string());
+        println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN,-rpath,{deb_rpath}");
     }
 }
