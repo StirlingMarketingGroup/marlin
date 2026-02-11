@@ -234,6 +234,7 @@ pub fn run() {
             clipboard::clipboard_get_contents,
             clipboard::clipboard_paste_files,
             clipboard::clipboard_paste_image,
+            commands::download_and_copy_to_clipboard,
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {
