@@ -2555,7 +2555,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         }
         if (failedDeletes.length > 0) {
           toastStore.addToast({
-            type: 'warning',
+            type: 'error',
             message: `Cut complete, but ${failedDeletes.length} source file${failedDeletes.length > 1 ? 's' : ''} could not be deleted.`,
             duration: 6000,
           });
