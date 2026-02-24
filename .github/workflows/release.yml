@@ -390,6 +390,7 @@ jobs:
           # Use CARGO_TARGET_DIR if set (self-hosted), otherwise default 'target' dir
           TARGET_DIR="${CARGO_TARGET_DIR:-target}"
           cp "$TARGET_DIR/${{ matrix.target }}/release/marlin-smb" binaries/marlin-smb-${{ matrix.target }}
+          chmod +x binaries/marlin-smb-${{ matrix.target }}
 
       - name: Codesign SMB sidecar (macOS)
         if: matrix.smb && runner.os == 'macOS' && env.APPLE_SIGNING_IDENTITY != '-'
@@ -691,6 +692,7 @@ jobs:
           # Use CARGO_TARGET_DIR if set (self-hosted), otherwise default 'target' dir
           TARGET_DIR="${CARGO_TARGET_DIR:-target}"
           cp "$TARGET_DIR/${{ matrix.target }}/release/marlin-smb" binaries/marlin-smb-${{ matrix.target }}
+          chmod +x binaries/marlin-smb-${{ matrix.target }}
 
       - name: Build Tauri bundle
         run: |
