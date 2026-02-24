@@ -227,6 +227,27 @@ fn start_sidecar(state: &mut SidecarState) -> SidecarStatus {
 
     log::info!("Starting SMB sidecar from: {}", binary_path.display());
 
+    // Ensure the binary has execute permissions (may be stripped during bundling or updates)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(metadata) = std::fs::metadata(&binary_path) {
+            let mode = metadata.permissions().mode();
+            if mode & 0o100 == 0 {
+                let mut new_perms = metadata.permissions();
+                new_perms.set_mode(mode | 0o111);
+                match std::fs::set_permissions(&binary_path, new_perms) {
+                    Ok(()) => log::warn!(
+                        "Sidecar binary lacked execute permission (mode {:o}), fixed to {:o}",
+                        mode,
+                        mode | 0o111
+                    ),
+                    Err(e) => log::warn!("Failed to set execute permission on sidecar: {}", e),
+                }
+            }
+        }
+    }
+
     // Spawn the sidecar
     let mut child = match Command::new(&binary_path)
         .stdin(Stdio::piped())
