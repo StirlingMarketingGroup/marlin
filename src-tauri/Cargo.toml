@@ -74,7 +74,7 @@ psd = "0.3"
 notify = { version = "8.2", default-features = false, features = ["macos_fsevent"] }
 walkdir = "2.5"
 libc = "0.2"
-zip = { version = "8.0", default-features = false, features = ["deflate", "bzip2", "zstd"] }
+zip = { version = "8.1", default-features = false, features = ["deflate", "bzip2", "zstd"] }
 unrar = "0.5"
 tar = "0.4"
 flate2 = "1.1"
@@ -103,10 +103,10 @@ reqwest = { version = "0.13", features = ["json", "form"] }
 open = "5"
 bytes = "1"
 mime_guess = "2.0.5"
-rustls = { version = "0.23.32", features = ["ring"] }
+rustls = { version = "0.23.37", features = ["ring"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.6.3"
+objc2 = "0.6.4"
 objc2-foundation = "0.3.2"
 objc2-app-kit = "0.3.2"
 block = "0.1"
@@ -126,4 +126,4 @@ gtk = { version = "0.18", package = "gtk" }
 pavao = { version = "0.2", optional = true }
 
 [dev-dependencies]
-tempfile = "3.25"
+tempfile = "3.26"
