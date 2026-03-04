@@ -1,0 +1,173 @@
+name: APT Repository
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (e.g. v0.1.22)"
+        required: true
+
+concurrency:
+  group: apt-repo
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  publish-apt-repo:
+    name: Build & Deploy APT Repository
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Determine release tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${{ github.event.release.tag_name }}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y reprepro gnupg
+
+      - name: Import GPG signing key
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+        run: |
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          # Get the key fingerprint for reprepro config
+          KEY_ID=$(gpg --list-keys --with-colons "Marlin APT Repo" | awk -F: '/^fpr/{print $10; exit}')
+          echo "GPG_KEY_ID=$KEY_ID" >> "$GITHUB_ENV"
+
+      - name: Export public key
+        run: |
+          mkdir -p repo
+          gpg --armor --export "Marlin APT Repo" > repo/marlin-apt.asc
+
+      - name: Configure reprepro
+        run: |
+          mkdir -p repo/conf
+          cat > repo/conf/distributions <<EOF
+          Origin: Marlin
+          Label: Marlin
+          Suite: stable
+          Codename: stable
+          Architectures: amd64 arm64
+          Components: main
+          Description: Marlin File Browser - Official APT Repository
+          SignWith: ${GPG_KEY_ID}
+          EOF
+
+      - name: Wait for .deb release assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.tag.outputs.version }}"
+          TAG="${{ steps.tag.outputs.tag }}"
+          REPO="${{ github.repository }}"
+
+          # Wait until both amd64 and arm64 .deb files are available
+          for i in $(seq 1 30); do
+            ASSETS=$(gh release view "$TAG" --repo "$REPO" --json assets -q '[.assets[].name | select(endswith(".deb"))] | sort | .[]')
+            HAVE_AMD64=$(echo "$ASSETS" | grep -c "amd64.deb" || true)
+            HAVE_ARM64=$(echo "$ASSETS" | grep -c "arm64.deb" || true)
+
+            if [ "$HAVE_AMD64" -ge 1 ] && [ "$HAVE_ARM64" -ge 1 ]; then
+              echo "Both architectures available:"
+              echo "$ASSETS"
+              break
+            fi
+
+            if [ "$i" -eq 30 ]; then
+              echo "Timed out waiting for .deb assets (amd64=$HAVE_AMD64, arm64=$HAVE_ARM64)" >&2
+              exit 1
+            fi
+
+            echo "Attempt $i/30 — amd64=$HAVE_AMD64, arm64=$HAVE_ARM64, waiting 30s..."
+            sleep 30
+          done
+
+      - name: Download .deb files from release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p debs
+          gh release download "${{ steps.tag.outputs.tag }}" \
+            --repo "${{ github.repository }}" \
+            --pattern "*.deb" \
+            --dir debs
+          echo "Downloaded .deb files:"
+          ls -la debs/
+
+      - name: Download previous .deb files from older releases
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Source old packages from GitHub Releases (immutable, authenticated)
+          # rather than from the mutable GitHub Pages site
+          CURRENT_TAG="${{ steps.tag.outputs.tag }}"
+          REPO="${{ github.repository }}"
+
+          mkdir -p old-debs
+          TAGS=$(gh release list --repo "$REPO" --limit 50 --json tagName -q '.[].tagName')
+          for tag in $TAGS; do
+            [ "$tag" = "$CURRENT_TAG" ] && continue
+            echo "Checking release $tag for .deb files..."
+            gh release download "$tag" --repo "$REPO" \
+              --pattern "*.deb" \
+              --dir old-debs --skip-existing 2>/dev/null || true
+          done
+
+          # Remove any old debs that have the same name as new ones (current release wins)
+          for deb in debs/*.deb; do
+            [ -f "$deb" ] || continue
+            deb_name=$(basename "$deb")
+            rm -f "old-debs/${deb_name}"
+          done
+
+          echo "Previous .deb files to re-import:"
+          ls -la old-debs/ 2>/dev/null || echo "  (none)"
+
+      - name: Build repository with reprepro
+        run: |
+          cd repo
+
+          # Import previous packages first
+          for deb in ../old-debs/*.deb; do
+            [ -f "$deb" ] || continue
+            echo "Re-importing: $(basename "$deb")"
+            reprepro includedeb stable "$deb"
+          done
+
+          # Import new packages (replaces same-version entries)
+          for deb in ../debs/*.deb; do
+            [ -f "$deb" ] || continue
+            echo "Adding: $(basename "$deb")"
+            reprepro includedeb stable "$deb"
+          done
+
+          echo ""
+          echo "=== Repository contents ==="
+          reprepro list stable
+
+      - name: Clean up reprepro internals
+        run: rm -rf repo/conf repo/db
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: repo
+
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4
