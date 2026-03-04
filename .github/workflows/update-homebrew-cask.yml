@@ -1,0 +1,165 @@
+name: Update Homebrew Cask
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g., v0.1.22)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  update-cask:
+    name: Update Homebrew Cask
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.release.tag_name && startsWith(github.event.release.tag_name, 'v'))
+    steps:
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${{ github.event.release.tag_name }}"
+          fi
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for DMG assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG="${{ steps.version.outputs.tag }}"
+          REPO="${{ github.repository }}"
+
+          ARM64_DMG="Marlin_${VERSION}_arm64.dmg"
+          X86_64_DMG="Marlin_${VERSION}_x86_64.dmg"
+
+          for i in $(seq 1 30); do
+            # Single API call per attempt — check both assets at once
+            ASSETS=$(gh release view "$TAG" --repo "$REPO" --json assets -q '.assets[].name')
+            HAVE_ARM64=$(echo "$ASSETS" | grep -c "^${ARM64_DMG}$" || true)
+            HAVE_X86_64=$(echo "$ASSETS" | grep -c "^${X86_64_DMG}$" || true)
+
+            if [ "$HAVE_ARM64" -ge 1 ] && [ "$HAVE_X86_64" -ge 1 ]; then
+              echo "Both DMGs available: $ARM64_DMG, $X86_64_DMG"
+              break
+            fi
+
+            if [ "$i" -eq 30 ]; then
+              echo "Timed out waiting for DMG assets (arm64=$HAVE_ARM64, x86_64=$HAVE_X86_64)" >&2
+              exit 1
+            fi
+
+            echo "Attempt $i/30 — arm64=$HAVE_ARM64, x86_64=$HAVE_X86_64, waiting 30s..."
+            sleep 30
+          done
+
+      - name: Download DMGs and compute SHA256
+        id: sha
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG="${{ steps.version.outputs.tag }}"
+          REPO="${{ github.repository }}"
+
+          gh release download "$TAG" --repo "$REPO" \
+            --pattern "Marlin_${VERSION}_arm64.dmg" \
+            --pattern "Marlin_${VERSION}_x86_64.dmg" \
+            --dir .
+
+          ARM64_SHA=$(shasum -a 256 "Marlin_${VERSION}_arm64.dmg" | awk '{print $1}')
+          X86_64_SHA=$(shasum -a 256 "Marlin_${VERSION}_x86_64.dmg" | awk '{print $1}')
+
+          echo "arm64_sha=$ARM64_SHA" >> "$GITHUB_OUTPUT"
+          echo "x86_64_sha=$X86_64_SHA" >> "$GITHUB_OUTPUT"
+          echo "ARM64  SHA256: $ARM64_SHA"
+          echo "x86_64 SHA256: $X86_64_SHA"
+
+      - name: Generate GitHub App token
+        id: app-token
+        uses: getsentry/action-github-app-token@d4b5da6c5e37703f8c3b3e43abb5705b46e159cc # v3
+        with:
+          app_id: ${{ secrets.APP_ID }}
+          private_key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Checkout homebrew-marlin tap
+        uses: actions/checkout@v6
+        with:
+          repository: StirlingMarketingGroup/homebrew-marlin
+          token: ${{ steps.app-token.outputs.token }}
+          path: homebrew-marlin
+
+      - name: Update cask file
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          ARM64_SHA="${{ steps.sha.outputs.arm64_sha }}"
+          X86_64_SHA="${{ steps.sha.outputs.x86_64_sha }}"
+
+          mkdir -p homebrew-marlin/Casks
+          cat > homebrew-marlin/Casks/marlin.rb <<RUBY
+          cask "marlin" do
+            version "$VERSION"
+            sha256 arm:   "$ARM64_SHA",
+                   intel: "$X86_64_SHA"
+
+            arch arm: "arm64", intel: "x86_64"
+
+            url "https://github.com/StirlingMarketingGroup/marlin/releases/download/v#{version}/Marlin_#{version}_#{arch}.dmg",
+                verified: "github.com/StirlingMarketingGroup/marlin/"
+            name "Marlin"
+            desc "Modern file browser with native performance"
+            homepage "https://github.com/StirlingMarketingGroup/marlin"
+
+            livecheck do
+              url :url
+              strategy :github_latest
+              regex(/^v?(\d+(?:\.\d+)+)$/i)
+            end
+
+            depends_on macos: ">= :monterey"
+
+            app "Marlin.app"
+
+            zap trash: [
+              "~/Library/Application Support/com.marlin.filebrowser",
+              "~/Library/Caches/com.marlin.filebrowser",
+              "~/Library/Preferences/com.marlin.filebrowser.plist",
+              "~/Library/Saved Application State/com.marlin.filebrowser.savedState",
+            ]
+          end
+          RUBY
+
+          # Remove heredoc indentation
+          sed -i 's/^          //' homebrew-marlin/Casks/marlin.rb
+
+      - name: Commit and push
+        shell: bash
+        run: |
+          cd homebrew-marlin
+          VERSION="${{ steps.version.outputs.version }}"
+
+          git config user.name "marlin-release-bot"
+          git config user.email "releases@marlin.app"
+
+          git add Casks/marlin.rb
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git commit -m "chore: bump marlin to $VERSION"
+          git push
