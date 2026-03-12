@@ -54,6 +54,12 @@ function parseErrorCode(error: unknown): string | null {
   return match ? match[1] : null;
 }
 
+function getRefreshFailureMessage(): string | null {
+  const refreshError = useAppStore.getState().error;
+  if (!refreshError) return null;
+  return refreshError.replace(/^Failed to refresh:\s*/, '');
+}
+
 const ACCENT_POLL_INTERVAL_MS = 5000;
 
 // Grid zoom constants (for keyboard shortcuts - wheel handler moved to MainPanel)
@@ -446,13 +452,23 @@ function App() {
         const tryLoadPath = async (path: string): Promise<boolean> => {
           try {
             setCurrentPath(path);
-            navigateTo(path);
-            // Use non-streaming refresh for gdrive:// paths since streaming isn't supported
-            if (path.startsWith('gdrive://')) {
+            // Use non-streaming refresh for remote paths since streaming isn't supported there.
+            if (path.includes('://')) {
               await useAppStore.getState().refreshCurrentDirectory();
             } else {
               await useAppStore.getState().refreshCurrentDirectoryStreaming();
             }
+
+            const refreshFailure = getRefreshFailureMessage();
+            if (refreshFailure) {
+              throw new Error(refreshFailure);
+            }
+
+            const normalizedPath = useAppStore.getState().currentPath;
+            useAppStore.setState({
+              pathHistory: [normalizedPath],
+              historyIndex: 0,
+            });
             return true;
           } catch (err) {
             console.error('Failed to load directory:', path, err);
@@ -658,6 +674,12 @@ function App() {
         } else {
           await useAppStore.getState().refreshCurrentDirectoryStreaming();
         }
+
+        const refreshFailure = getRefreshFailureMessage();
+        if (refreshFailure) {
+          throw new Error(refreshFailure);
+        }
+
         setError(undefined); // Clear any previous errors on success
 
         // Check if we have a pending file selection (from navigating to a file path)
@@ -706,6 +728,10 @@ function App() {
           ? '\n\nAllow Marlin under System Settings → Privacy & Security → Files and Folders.'
           : '';
 
+        // This was a failed navigation, not a render-state error.
+        setLoading(false);
+        setError(undefined);
+
         // Show native alert dialog
         await message(`Cannot access: ${currentPath}\n\n${errorMessage}${hint}`, {
           title: 'Directory Error',
@@ -720,10 +746,14 @@ function App() {
           // Go back in history (this will restore the previous path in the address bar)
           goBack();
         } else {
-          // If no history, at least update the path to match what we're showing
+          // If no history, replace the failed location with home so we don't leave a dead path around.
           const { homeDir } = useAppStore.getState();
           if (homeDir && currentPath !== homeDir) {
             setCurrentPath(homeDir);
+            useAppStore.setState({
+              pathHistory: [useAppStore.getState().currentPath],
+              historyIndex: 0,
+            });
           }
         }
       }
