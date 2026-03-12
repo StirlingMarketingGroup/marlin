@@ -187,20 +187,23 @@ fn oauth_credentials_candidate_paths() -> Vec<PathBuf> {
         }
     }
 
-    if let Ok(current_dir) = std::env::current_dir() {
-        push_unique_path(&mut paths, current_dir.join(GOOGLE_CREDENTIALS_FILE_NAME));
+    #[cfg(debug_assertions)]
+    {
+        if let Ok(current_dir) = std::env::current_dir() {
+            push_unique_path(&mut paths, current_dir.join(GOOGLE_CREDENTIALS_FILE_NAME));
+            push_unique_path(
+                &mut paths,
+                current_dir
+                    .join("src-tauri")
+                    .join(GOOGLE_CREDENTIALS_FILE_NAME),
+            );
+        }
+
         push_unique_path(
             &mut paths,
-            current_dir
-                .join("src-tauri")
-                .join(GOOGLE_CREDENTIALS_FILE_NAME),
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(GOOGLE_CREDENTIALS_FILE_NAME),
         );
     }
-
-    push_unique_path(
-        &mut paths,
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(GOOGLE_CREDENTIALS_FILE_NAME),
-    );
 
     paths
 }
