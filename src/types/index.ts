@@ -243,6 +243,7 @@ export interface TrashPathsResponse {
   trashed: string[];
   undoToken?: string;
   fallbackToPermanent: boolean;
+  usedSystemTrash: boolean;
 }
 
 export interface UndoTrashResponse {
