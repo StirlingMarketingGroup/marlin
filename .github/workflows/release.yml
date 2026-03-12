@@ -31,7 +31,7 @@ jobs:
     steps:
       - name: Generate GitHub App token
         id: smg-actions
-        uses: getsentry/action-github-app-token@v3
+        uses: getsentry/action-github-app-token@d4b5da6c5e37703f8c3b3e43abb5705b46e159cc # v3
         with:
           app_id: ${{ secrets.APP_ID }}
           private_key: ${{ secrets.APP_PRIVATE_KEY }}
@@ -144,6 +144,9 @@ jobs:
     needs: sync-version
     if: ${{ github.event_name != 'pull_request' && needs.sync-version.result == 'success' }}
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
@@ -175,6 +178,13 @@ jobs:
             arch: arm64
             rust-targets: aarch64-unknown-linux-gnu
             smb: true
+            self_hosted: false
+          # Windows x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            arch: x86_64
+            rust-targets: x86_64-pc-windows-msvc
+            smb: false
             self_hosted: false
     permissions:
       contents: write
@@ -247,7 +257,7 @@ jobs:
       - name: Normalize npm lockfile for caching
         if: ${{ !matrix.self_hosted }}
         run: |
-          python3 - <<'PY'
+          (python3 - || python -) <<'PY'
           import json
           from pathlib import Path
 
@@ -379,6 +389,7 @@ jobs:
           touch src-tauri/binaries/marlin-smb-aarch64-unknown-linux-gnu
           touch src-tauri/binaries/marlin-smb-x86_64-apple-darwin
           touch src-tauri/binaries/marlin-smb-aarch64-apple-darwin
+          touch src-tauri/binaries/marlin-smb-x86_64-pc-windows-msvc.exe
 
       - name: Build SMB sidecar
         if: matrix.smb
@@ -416,6 +427,9 @@ jobs:
           # Only pass APPLE_SIGNING_IDENTITY here — omit APPLE_ID/PASSWORD/TEAM_ID
           # so Tauri signs without trying to notarize (our DMG step handles notarization)
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '-' }}
+          # Windows: bundle zpl.dll alongside the exe (injected via TAURI_CONFIG since
+          # the static config can't have platform-conditional resources)
+          TAURI_CONFIG: ${{ runner.os == 'Windows' && '{"bundle":{"resources":["zpl.dll"]}}' || '' }}
         with:
           tagName: ${{ env.RELEASE_TAG }}
           releaseName: Marlin ${{ env.RELEASE_TAG }}
@@ -428,11 +442,13 @@ jobs:
           # macOS: skip DMG (create-dmg uses AppleScript/Finder which requires TCC approval)
           # We create a notarized DMG manually in the next step using hdiutil instead
           # arm64 Linux (GitHub-hosted): deb only (no AppImage on arm64)
+          # Windows: NSIS installer (.exe) + updater
           args: >-
             --target ${{ matrix.target }}
             --verbose
             ${{ runner.os == 'macOS' && '--bundles app updater' || '' }}
             ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '--bundles deb' || '' }}
+            ${{ runner.os == 'Windows' && '--bundles nsis updater' || '' }}
 
       - name: Create and notarize DMG (macOS)
         if: runner.os == 'macOS'
@@ -496,6 +512,9 @@ jobs:
     name: Dry Run (${{ matrix.arch }}-${{ matrix.target }})
     if: ${{ github.event_name == 'pull_request' }}
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
@@ -527,6 +546,13 @@ jobs:
             arch: arm64
             rust-targets: aarch64-unknown-linux-gnu
             smb: true
+            self_hosted: false
+          # Windows x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            arch: x86_64
+            rust-targets: x86_64-pc-windows-msvc
+            smb: false
             self_hosted: false
     steps:
       - name: Checkout code
@@ -585,7 +611,7 @@ jobs:
       - name: Normalize npm lockfile for caching
         if: ${{ !matrix.self_hosted }}
         run: |
-          python3 - <<'PY'
+          (python3 - || python -) <<'PY'
           import json
           from pathlib import Path
 
@@ -681,6 +707,7 @@ jobs:
           touch src-tauri/binaries/marlin-smb-aarch64-unknown-linux-gnu
           touch src-tauri/binaries/marlin-smb-x86_64-apple-darwin
           touch src-tauri/binaries/marlin-smb-aarch64-apple-darwin
+          touch src-tauri/binaries/marlin-smb-x86_64-pc-windows-msvc.exe
 
       - name: Build SMB sidecar
         if: matrix.smb
@@ -697,7 +724,9 @@ jobs:
       - name: Build Tauri bundle
         run: |
           set -euxo pipefail
-          npm run tauri build -- --ci --target ${{ matrix.target }} --verbose ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '--bundles deb' || '' }}
+          npm run tauri build -- --ci --target ${{ matrix.target }} --verbose \
+            ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '--bundles deb' || '' }} \
+            ${{ runner.os == 'Windows' && '--bundles nsis updater' || '' }}
         env:
           APPIMAGE_EXTRACT_AND_RUN: ${{ runner.os == 'Linux' && '1' || '0' }}
           TAURI_BUNDLE_DEBUG: '1'
@@ -706,6 +735,8 @@ jobs:
           TAURI_BUNDLE_LINUX_APPIMAGE_ARGS: ${{ runner.os == 'Linux' && '--verbosity=2' || '' }}
           # linuxdeploy needs to find libzpl.so when bundling the AppImage
           LD_LIBRARY_PATH: ${{ runner.os == 'Linux' && format('{0}/{1}/release', env.CARGO_TARGET_DIR || 'src-tauri/target', matrix.target) || '' }}
+          # Windows: bundle zpl.dll alongside the exe
+          TAURI_CONFIG: ${{ runner.os == 'Windows' && '{"bundle":{"resources":["zpl.dll"]}}' || '' }}
 
       - name: Dump linuxdeploy diagnostics
         if: failure() && runner.os == 'Linux'
