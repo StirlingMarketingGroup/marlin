@@ -1785,9 +1785,7 @@ function App() {
       {
         const keyLc = e.key.toLowerCase();
         const hasClipboardModifier =
-          !e.altKey &&
-          !e.shiftKey &&
-          ((isMac && e.metaKey && !e.ctrlKey) || (!isMac && e.ctrlKey));
+          !e.altKey && !e.shiftKey && ((isMac && e.metaKey && !e.ctrlKey) || (!isMac && e.ctrlKey));
 
         if (hasClipboardModifier && keyLc === 'c' && !inEditable) {
           const state = useAppStore.getState();
