@@ -1,21 +1,19 @@
 use chrono::{DateTime, Duration, Utc};
+use once_cell::sync::Lazy;
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::RwLock;
+use tokio::sync::Mutex;
 use yup_oauth2::authenticator_delegate::InstalledFlowDelegate;
 use yup_oauth2::{
     ApplicationSecret, InstalledFlowAuthenticator, InstalledFlowReturnMethod,
     ServiceAccountAuthenticator, ServiceAccountKey,
 };
-use once_cell::sync::Lazy;
-use serde::{Deserialize, Serialize};
-use std::fs;
-use std::path::PathBuf;
-use std::sync::RwLock;
-use tokio::sync::Mutex;
 
-/// Google API OAuth credentials
-/// These are for a desktop application and are safe to embed
-/// Users must still authenticate with their own Google account
-/// Set via GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET environment variables at build time
-/// If not set at build time, OAuth features will be disabled
+/// Google API OAuth credentials embedded at build time when available.
+/// These remain as a fallback, but runtime sources are preferred so refresh
+/// can keep working even if the current binary was built without them.
 const CLIENT_ID: &str = match option_env!("GOOGLE_CLIENT_ID") {
     Some(id) => id,
     None => "",
@@ -33,11 +31,13 @@ const SCOPES: &[&str] = &[
 
 /// Environment variable for service account key file path
 const SERVICE_ACCOUNT_KEY_FILE_ENV: &str = "GOOGLE_SERVICE_ACCOUNT_KEY_FILE";
+const GOOGLE_CLIENT_ID_ENV: &str = "GOOGLE_CLIENT_ID";
+const GOOGLE_CLIENT_SECRET_ENV: &str = "GOOGLE_CLIENT_SECRET";
+const GOOGLE_CREDENTIALS_FILE_NAME: &str = "google-credentials.json";
 
 /// Cached service account key (loaded once from environment)
-static SERVICE_ACCOUNT_KEY: Lazy<Option<ServiceAccountKey>> = Lazy::new(|| {
-    load_service_account_key().ok()
-});
+static SERVICE_ACCOUNT_KEY: Lazy<Option<ServiceAccountKey>> =
+    Lazy::new(|| load_service_account_key().ok());
 
 /// Load service account key from environment variable
 fn load_service_account_key() -> Result<ServiceAccountKey, String> {
@@ -71,9 +71,178 @@ pub fn is_service_account_email(email: &str) -> bool {
     get_service_account_email().map_or(false, |sa_email| sa_email == email)
 }
 
-/// Check if OAuth credentials are configured at build time
-fn is_oauth_configured() -> bool {
-    !CLIENT_ID.is_empty() && !CLIENT_SECRET.is_empty()
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OAuthCredentials {
+    client_id: String,
+    client_secret: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct OAuthCredentialsFile {
+    installed: Option<OAuthClientSecret>,
+    web: Option<OAuthClientSecret>,
+    client_id: Option<String>,
+    client_secret: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OAuthClientSecret {
+    client_id: String,
+    client_secret: String,
+}
+
+fn normalize_secret(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn oauth_credentials_error() -> String {
+    format!(
+        "Google OAuth credentials not configured. Set {} and {} or provide {}.",
+        GOOGLE_CLIENT_ID_ENV, GOOGLE_CLIENT_SECRET_ENV, GOOGLE_CREDENTIALS_FILE_NAME
+    )
+}
+
+fn oauth_from_pair(
+    client_id: Option<String>,
+    client_secret: Option<String>,
+    source: &str,
+) -> Result<OAuthCredentials, String> {
+    let client_id = normalize_secret(client_id);
+    let client_secret = normalize_secret(client_secret);
+
+    match (client_id, client_secret) {
+        (Some(client_id), Some(client_secret)) => Ok(OAuthCredentials {
+            client_id,
+            client_secret,
+        }),
+        (Some(_), None) | (None, Some(_)) => Err(format!(
+            "{} is missing part of the OAuth client secret",
+            source
+        )),
+        (None, None) => Err(format!("{} not configured", source)),
+    }
+}
+
+fn load_oauth_credentials_from_file(path: &Path) -> Result<OAuthCredentials, String> {
+    let contents = fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+    let parsed: OAuthCredentialsFile = serde_json::from_str(&contents)
+        .map_err(|e| format!("Failed to parse {}: {}", path.display(), e))?;
+
+    if let Some(installed) = parsed.installed {
+        return oauth_from_pair(
+            Some(installed.client_id),
+            Some(installed.client_secret),
+            &format!("OAuth credentials file {}", path.display()),
+        );
+    }
+
+    if let Some(web) = parsed.web {
+        return oauth_from_pair(
+            Some(web.client_id),
+            Some(web.client_secret),
+            &format!("OAuth credentials file {}", path.display()),
+        );
+    }
+
+    oauth_from_pair(
+        parsed.client_id,
+        parsed.client_secret,
+        &format!("OAuth credentials file {}", path.display()),
+    )
+}
+
+fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    if !paths.iter().any(|existing| existing == &path) {
+        paths.push(path);
+    }
+}
+
+fn oauth_credentials_candidate_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+
+    if let Some(config_dir) = dirs::config_dir() {
+        push_unique_path(
+            &mut paths,
+            config_dir.join("marlin").join(GOOGLE_CREDENTIALS_FILE_NAME),
+        );
+    }
+
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            push_unique_path(&mut paths, exe_dir.join(GOOGLE_CREDENTIALS_FILE_NAME));
+            push_unique_path(
+                &mut paths,
+                exe_dir
+                    .join("../Resources")
+                    .join(GOOGLE_CREDENTIALS_FILE_NAME),
+            );
+        }
+    }
+
+    if let Ok(current_dir) = std::env::current_dir() {
+        push_unique_path(&mut paths, current_dir.join(GOOGLE_CREDENTIALS_FILE_NAME));
+        push_unique_path(
+            &mut paths,
+            current_dir
+                .join("src-tauri")
+                .join(GOOGLE_CREDENTIALS_FILE_NAME),
+        );
+    }
+
+    push_unique_path(
+        &mut paths,
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(GOOGLE_CREDENTIALS_FILE_NAME),
+    );
+
+    paths
+}
+
+fn load_oauth_credentials() -> Result<OAuthCredentials, String> {
+    if let Ok(credentials) = oauth_from_pair(
+        std::env::var(GOOGLE_CLIENT_ID_ENV).ok(),
+        std::env::var(GOOGLE_CLIENT_SECRET_ENV).ok(),
+        "runtime environment variables",
+    ) {
+        return Ok(credentials);
+    }
+
+    if let Ok(credentials) = oauth_from_pair(
+        Some(CLIENT_ID.to_string()),
+        Some(CLIENT_SECRET.to_string()),
+        "build-time environment variables",
+    ) {
+        return Ok(credentials);
+    }
+
+    let mut file_errors = Vec::new();
+    for path in oauth_credentials_candidate_paths() {
+        if !path.exists() {
+            continue;
+        }
+
+        match load_oauth_credentials_from_file(&path) {
+            Ok(credentials) => return Ok(credentials),
+            Err(error) => file_errors.push(error),
+        }
+    }
+
+    if file_errors.is_empty() {
+        Err(oauth_credentials_error())
+    } else {
+        Err(format!(
+            "{} Tried credential files: {}",
+            oauth_credentials_error(),
+            file_errors.join(" | ")
+        ))
+    }
 }
 
 /// Information about a connected Google account
@@ -111,8 +280,8 @@ static AUTH_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 /// Get the path to the accounts storage file
 fn get_accounts_path() -> Result<PathBuf, String> {
-    let config_dir = dirs::config_dir()
-        .ok_or_else(|| "Could not determine config directory".to_string())?;
+    let config_dir =
+        dirs::config_dir().ok_or_else(|| "Could not determine config directory".to_string())?;
     let marlin_dir = config_dir.join("marlin");
 
     // Ensure directory exists
@@ -132,8 +301,8 @@ fn load_accounts_from_disk() -> Result<Vec<GoogleAccount>, String> {
         return Ok(Vec::new());
     }
 
-    let contents = fs::read_to_string(&path)
-        .map_err(|e| format!("Failed to read accounts file: {}", e))?;
+    let contents =
+        fs::read_to_string(&path).map_err(|e| format!("Failed to read accounts file: {}", e))?;
 
     let storage: AccountStorage = serde_json::from_str(&contents)
         .map_err(|e| format!("Failed to parse accounts file: {}", e))?;
@@ -152,8 +321,7 @@ fn save_accounts_to_disk(accounts: &[GoogleAccount]) -> Result<(), String> {
     let contents = serde_json::to_string_pretty(&storage)
         .map_err(|e| format!("Failed to serialize accounts: {}", e))?;
 
-    fs::write(&path, contents)
-        .map_err(|e| format!("Failed to write accounts file: {}", e))?;
+    fs::write(&path, contents).map_err(|e| format!("Failed to write accounts file: {}", e))?;
 
     Ok(())
 }
@@ -212,9 +380,9 @@ pub fn get_all_accounts() -> Result<Vec<GoogleAccount>, String> {
             email: sa_email,
             display_name: Some("Service Account".to_string()),
             photo_url: None,
-            access_token: String::new(), // Will be fetched on demand
+            access_token: String::new(),  // Will be fetched on demand
             refresh_token: String::new(), // Service accounts use JWT, not refresh tokens
-            expires_at: Utc::now(), // Force refresh on first use
+            expires_at: Utc::now(),       // Force refresh on first use
         });
     }
 
@@ -242,7 +410,8 @@ pub fn get_all_accounts() -> Result<Vec<GoogleAccount>, String> {
 
 /// Get an access token for the service account
 async fn get_service_account_token() -> Result<String, String> {
-    let key = SERVICE_ACCOUNT_KEY.as_ref()
+    let key = SERVICE_ACCOUNT_KEY
+        .as_ref()
         .ok_or_else(|| "Service account not configured".to_string())?;
 
     let auth = ServiceAccountAuthenticator::builder(key.clone())
@@ -261,7 +430,6 @@ async fn get_service_account_token() -> Result<String, String> {
         .ok_or_else(|| "No access token in service account response".to_string())
 }
 
-
 /// Custom flow delegate that opens the browser
 struct BrowserFlowDelegate;
 
@@ -270,7 +438,8 @@ impl InstalledFlowDelegate for BrowserFlowDelegate {
         &'a self,
         url: &'a str,
         _need_code: bool,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send + 'a>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send + 'a>>
+    {
         Box::pin(async move {
             // Open the URL in the default browser
             if let Err(e) = open::that(url) {
@@ -290,10 +459,7 @@ impl InstalledFlowDelegate for BrowserFlowDelegate {
 
 /// Add a new Google account via OAuth flow
 pub async fn add_google_account() -> Result<GoogleAccountInfo, String> {
-    // Check if OAuth credentials are configured
-    if !is_oauth_configured() {
-        return Err("Google OAuth credentials not configured. Build with GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET environment variables.".to_string());
-    }
+    let oauth_credentials = load_oauth_credentials()?;
 
     // Prevent concurrent auth flows
     let _guard = AUTH_MUTEX.lock().await;
@@ -301,8 +467,8 @@ pub async fn add_google_account() -> Result<GoogleAccountInfo, String> {
     log::info!("Starting Google OAuth flow...");
 
     let secret = ApplicationSecret {
-        client_id: CLIENT_ID.to_string(),
-        client_secret: CLIENT_SECRET.to_string(),
+        client_id: oauth_credentials.client_id,
+        client_secret: oauth_credentials.client_secret,
         auth_uri: "https://accounts.google.com/o/oauth2/auth".to_string(),
         token_uri: "https://oauth2.googleapis.com/token".to_string(),
         redirect_uris: vec![
@@ -327,18 +493,15 @@ pub async fn add_google_account() -> Result<GoogleAccountInfo, String> {
     // Build the authenticator
     log::info!("Building authenticator...");
     // Use HTTPRedirect which automatically finds an available port
-    let auth = InstalledFlowAuthenticator::builder(
-        secret,
-        InstalledFlowReturnMethod::HTTPRedirect,
-    )
-    .persist_tokens_to_disk(&token_cache_path)
-    .flow_delegate(Box::new(BrowserFlowDelegate))
-    .build()
-    .await
-    .map_err(|e| {
-        log::error!("Failed to build authenticator: {}", e);
-        format!("Failed to build authenticator: {}", e)
-    })?;
+    let auth = InstalledFlowAuthenticator::builder(secret, InstalledFlowReturnMethod::HTTPRedirect)
+        .persist_tokens_to_disk(&token_cache_path)
+        .flow_delegate(Box::new(BrowserFlowDelegate))
+        .build()
+        .await
+        .map_err(|e| {
+            log::error!("Failed to build authenticator: {}", e);
+            format!("Failed to build authenticator: {}", e)
+        })?;
 
     log::info!("Authenticator built, requesting token...");
 
@@ -515,10 +678,7 @@ pub async fn ensure_valid_token(email: &str) -> Result<String, String> {
         return Ok(accounts[account_index].access_token.clone());
     }
 
-    // Need to refresh - check if OAuth credentials are configured
-    if !is_oauth_configured() {
-        return Err("Google OAuth credentials not configured. Cannot refresh token.".to_string());
-    }
+    let oauth_credentials = load_oauth_credentials()?;
 
     // Clone the refresh token before the async operation
     let refresh_token = accounts[account_index].refresh_token.clone();
@@ -527,8 +687,8 @@ pub async fn ensure_valid_token(email: &str) -> Result<String, String> {
     let response = client
         .post("https://oauth2.googleapis.com/token")
         .form(&[
-            ("client_id", CLIENT_ID),
-            ("client_secret", CLIENT_SECRET),
+            ("client_id", oauth_credentials.client_id.as_str()),
+            ("client_secret", oauth_credentials.client_secret.as_str()),
             ("refresh_token", &refresh_token),
             ("grant_type", "refresh_token"),
         ])
@@ -539,8 +699,15 @@ pub async fn ensure_valid_token(email: &str) -> Result<String, String> {
     if !response.status().is_success() {
         let status = response.status();
         let error_text = response.text().await.unwrap_or_default();
-        log::error!("Token refresh failed with status {}: {}", status, error_text);
-        return Err(format!("Token refresh failed (status {}). Re-authentication may be required.", status));
+        log::error!(
+            "Token refresh failed with status {}: {}",
+            status,
+            error_text
+        );
+        return Err(format!(
+            "Token refresh failed (status {}). Re-authentication may be required.",
+            status
+        ));
     }
 
     #[derive(Deserialize)]
@@ -574,4 +741,71 @@ pub async fn ensure_valid_token(email: &str) -> Result<String, String> {
     }
 
     Ok(token_response.access_token)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        load_oauth_credentials_from_file, oauth_from_pair, OAuthCredentials, GOOGLE_CLIENT_ID_ENV,
+        GOOGLE_CLIENT_SECRET_ENV,
+    };
+    use std::fs;
+
+    #[test]
+    fn oauth_from_pair_rejects_partial_credentials() {
+        let result = oauth_from_pair(Some("client".into()), None, "test");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn loads_google_credentials_json_installed_shape() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("google-credentials.json");
+        fs::write(
+            &path,
+            r#"{
+              "installed": {
+                "client_id": "client-id.apps.googleusercontent.com",
+                "client_secret": "client-secret"
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let credentials = load_oauth_credentials_from_file(&path).unwrap();
+        assert_eq!(
+            credentials.client_id,
+            "client-id.apps.googleusercontent.com"
+        );
+        assert_eq!(credentials.client_secret, "client-secret");
+    }
+
+    #[test]
+    fn loads_google_credentials_json_flat_shape() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("google-credentials.json");
+        fs::write(
+            &path,
+            r#"{
+              "client_id": "flat-client-id",
+              "client_secret": "flat-client-secret"
+            }"#,
+        )
+        .unwrap();
+
+        let credentials = load_oauth_credentials_from_file(&path).unwrap();
+        assert_eq!(
+            credentials,
+            OAuthCredentials {
+                client_id: "flat-client-id".into(),
+                client_secret: "flat-client-secret".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn runtime_env_var_names_remain_stable() {
+        assert_eq!(GOOGLE_CLIENT_ID_ENV, "GOOGLE_CLIENT_ID");
+        assert_eq!(GOOGLE_CLIENT_SECRET_ENV, "GOOGLE_CLIENT_SECRET");
+    }
 }
