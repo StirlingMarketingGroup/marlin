@@ -1679,8 +1679,12 @@ function App() {
       // when NOT in an editable field to do file operations instead.
       {
         const keyLc = e.key.toLowerCase();
+        const hasClipboardModifier =
+          !e.altKey &&
+          !e.shiftKey &&
+          ((isMac && e.metaKey && !e.ctrlKey) || (!isMac && e.ctrlKey));
 
-        if (keyLc === 'c' && !inEditable) {
+        if (hasClipboardModifier && keyLc === 'c' && !inEditable) {
           const state = useAppStore.getState();
           if (state.selectedFiles.length > 0) {
             e.preventDefault();
@@ -1689,7 +1693,7 @@ function App() {
           }
         }
 
-        if (keyLc === 'x' && !inEditable) {
+        if (hasClipboardModifier && keyLc === 'x' && !inEditable) {
           const state = useAppStore.getState();
           if (state.selectedFiles.length > 0) {
             e.preventDefault();
@@ -1698,7 +1702,7 @@ function App() {
           }
         }
 
-        if (keyLc === 'v' && !inEditable) {
+        if (hasClipboardModifier && keyLc === 'v' && !inEditable) {
           e.preventDefault();
           void useAppStore.getState().pasteFiles();
           return;
