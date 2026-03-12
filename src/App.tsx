@@ -54,10 +54,8 @@ function parseErrorCode(error: unknown): string | null {
   return match ? match[1] : null;
 }
 
-function getRefreshFailureMessage(): string | null {
-  const refreshError = useAppStore.getState().error;
-  if (!refreshError) return null;
-  return refreshError.replace(/^Failed to refresh:\s*/, '');
+function hasUriScheme(path: string): boolean {
+  return /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(path);
 }
 
 const ACCENT_POLL_INTERVAL_MS = 5000;
@@ -453,13 +451,13 @@ function App() {
           try {
             setCurrentPath(path);
             // Use non-streaming refresh for remote paths since streaming isn't supported there.
-            if (path.includes('://')) {
+            if (hasUriScheme(path)) {
               await useAppStore.getState().refreshCurrentDirectory();
             } else {
               await useAppStore.getState().refreshCurrentDirectoryStreaming();
             }
 
-            const refreshFailure = getRefreshFailureMessage();
+            const refreshFailure = useAppStore.getState().error;
             if (refreshFailure) {
               throw new Error(refreshFailure);
             }
@@ -675,7 +673,7 @@ function App() {
           await useAppStore.getState().refreshCurrentDirectoryStreaming();
         }
 
-        const refreshFailure = getRefreshFailureMessage();
+        const refreshFailure = useAppStore.getState().error;
         if (refreshFailure) {
           throw new Error(refreshFailure);
         }

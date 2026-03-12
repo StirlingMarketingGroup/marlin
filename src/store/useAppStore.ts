@@ -942,7 +942,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         }
       }
 
-      setError(`Failed to refresh: ${msg}`);
+      setError(msg);
     } finally {
       setLoading(false);
     }
@@ -1012,7 +1012,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error('❌ refreshCurrentDirectoryStreaming failed:', msg);
-      setError(`Failed to refresh: ${msg}`);
+      setError(msg);
       set({ isStreamingComplete: true, loading: false, streamingSessionId: null });
     }
     // Note: We don't set loading=false in finally because streaming continues in background
