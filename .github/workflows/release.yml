@@ -209,11 +209,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             build-essential \
+            clang \
             curl \
             wget \
             file \
             xdg-utils \
             libssl-dev \
+            libclang-dev \
             libgtk-3-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
@@ -546,11 +548,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             build-essential \
+            clang \
             curl \
             wget \
             file \
             xdg-utils \
             libssl-dev \
+            libclang-dev \
             libgtk-3-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
