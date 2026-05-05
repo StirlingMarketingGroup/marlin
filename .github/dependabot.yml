@@ -52,6 +52,36 @@ updates:
       - 'dependencies'
       - 'cargo'
     groups:
+      ssh-crypto-stack:
+        applies-to: 'version-updates'
+        update-types:
+          - 'minor'
+          - 'patch'
+        patterns:
+          - 'russh*'
+          - 'internal-russh-*'
+          - 'ssh-*'
+          - 'ed25519*'
+          - 'curve25519-dalek*'
+          - 'rsa'
+          - 'ecdsa'
+          - 'elliptic-curve'
+          - 'p256'
+          - 'p384'
+          - 'p521'
+          - 'pkcs*'
+          - 'spki'
+          - 'der'
+          - 'signature'
+          - 'crypto-*'
+          - 'cipher'
+          - 'digest'
+          - 'hmac'
+          - 'hkdf'
+          - 'sha*'
+          - 'universal-hash'
+          - 'ml-kem'
+          - 'kem'
       minor-and-patch:
         applies-to: 'version-updates'
         update-types:

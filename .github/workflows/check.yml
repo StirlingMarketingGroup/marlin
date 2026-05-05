@@ -45,6 +45,10 @@ jobs:
         if: steps.changes.outputs.check != 'true'
         run: echo "No relevant changes detected. Skipping lint/typecheck/rust checks."
 
+      - name: Install Rust toolchain
+        if: steps.changes.outputs.check == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Install dependencies
         if: steps.changes.outputs.check == 'true'
         run: npm ci
