@@ -149,11 +149,31 @@ async fn create_session(
             }
 
             let mut authenticated = false;
-            for key in identities {
-                match session
-                    .authenticate_publickey_with(&creds.username, key, None, &mut agent)
-                    .await
-                {
+            for identity in identities {
+                let auth_result = match &identity {
+                    russh::keys::agent::AgentIdentity::PublicKey { key, .. } => {
+                        session
+                            .authenticate_publickey_with(
+                                &creds.username,
+                                key.clone(),
+                                None,
+                                &mut agent,
+                            )
+                            .await
+                    }
+                    russh::keys::agent::AgentIdentity::Certificate { certificate, .. } => {
+                        session
+                            .authenticate_certificate_with(
+                                &creds.username,
+                                certificate.clone(),
+                                None,
+                                &mut agent,
+                            )
+                            .await
+                    }
+                };
+
+                match auth_result {
                     Ok(result) if result.success() => {
                         authenticated = true;
                         break;

@@ -148,20 +148,20 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macOS Apple Silicon (M1/M2/M3) - self-hosted Mac Mini
-          - os: [self-hosted, macOS, ARM64, medium]
+          # macOS Apple Silicon (M1/M2/M3) - GitHub-hosted
+          - os: macos-15
             target: aarch64-apple-darwin
             arch: arm64
             rust-targets: aarch64-apple-darwin
             smb: true
-            self_hosted: true
-          # macOS Intel (cross-compile from arm64 runner - no SMB due to cross-compile)
-          - os: [self-hosted, macOS, ARM64, medium]
+            self_hosted: false
+          # macOS Intel - GitHub-hosted
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             arch: x86_64
             rust-targets: x86_64-apple-darwin
             smb: false
-            self_hosted: true
+            self_hosted: false
           # Linux x86_64
           - os: [self-hosted, Linux, X64, medium]
             target: x86_64-unknown-linux-gnu
@@ -204,16 +204,29 @@ jobs:
           ref: ${{ env.RELEASE_REF }}
 
       - name: Install dependencies (Ubuntu)
-        if: runner.os == 'Linux' && !matrix.self_hosted
+        if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          apt_retry() {
+            for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+              if sudo DEBIAN_FRONTEND=noninteractive apt-get "$@"; then
+                return 0
+              fi
+              echo "apt-get $* failed on attempt $attempt; retrying in 10s..." >&2
+              sleep 10
+            done
+            sudo DEBIAN_FRONTEND=noninteractive apt-get "$@"
+          }
+
+          apt_retry update
+          apt_retry install -y \
             build-essential \
+            clang \
             curl \
             wget \
             file \
             xdg-utils \
             libssl-dev \
+            libclang-dev \
             libgtk-3-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
@@ -224,11 +237,11 @@ jobs:
             desktop-file-utils \
             shared-mime-info \
             gperf
-          sudo apt-get install -y libwebkit2gtk-4.1-dev || sudo apt-get install -y libwebkit2gtk-4.0-dev
-          sudo apt-get install -y libfuse2 || sudo apt-get install -y libfuse2t64
+          apt_retry install -y libwebkit2gtk-4.1-dev || apt_retry install -y libwebkit2gtk-4.0-dev
+          apt_retry install -y libfuse2 || apt_retry install -y libfuse2t64
           # Install SMB dependencies if enabled for this target
           if [ "${{ matrix.smb }}" = "true" ]; then
-            sudo apt-get install -y libsmbclient-dev
+            apt_retry install -y libsmbclient-dev
           fi
 
       - name: Setup Homebrew PATH (macOS self-hosted)
@@ -272,7 +285,6 @@ jobs:
           cache-dependency-path: package-lock.ci.json
 
       - name: Install Rust toolchain
-        if: ${{ !matrix.self_hosted }}
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
@@ -500,20 +512,20 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macOS Apple Silicon (M1/M2/M3) - self-hosted Mac Mini
-          - os: [self-hosted, macOS, ARM64, medium]
+          # macOS Apple Silicon (M1/M2/M3) - GitHub-hosted
+          - os: macos-15
             target: aarch64-apple-darwin
             arch: arm64
             rust-targets: aarch64-apple-darwin
             smb: true
-            self_hosted: true
-          # macOS Intel (cross-compile from arm64 runner - no SMB due to cross-compile)
-          - os: [self-hosted, macOS, ARM64, medium]
+            self_hosted: false
+          # macOS Intel - GitHub-hosted
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             arch: x86_64
             rust-targets: x86_64-apple-darwin
             smb: false
-            self_hosted: true
+            self_hosted: false
           # Linux x86_64
           - os: [self-hosted, Linux, X64, medium]
             target: x86_64-unknown-linux-gnu
@@ -542,16 +554,29 @@ jobs:
           mkdir -p "$HOME/.cache/cargo-target/marlin-${{ matrix.target }}"
 
       - name: Install dependencies (Ubuntu)
-        if: runner.os == 'Linux' && !matrix.self_hosted
+        if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          apt_retry() {
+            for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+              if sudo DEBIAN_FRONTEND=noninteractive apt-get "$@"; then
+                return 0
+              fi
+              echo "apt-get $* failed on attempt $attempt; retrying in 10s..." >&2
+              sleep 10
+            done
+            sudo DEBIAN_FRONTEND=noninteractive apt-get "$@"
+          }
+
+          apt_retry update
+          apt_retry install -y \
             build-essential \
+            clang \
             curl \
             wget \
             file \
             xdg-utils \
             libssl-dev \
+            libclang-dev \
             libgtk-3-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
@@ -562,11 +587,11 @@ jobs:
             desktop-file-utils \
             shared-mime-info \
             gperf
-          sudo apt-get install -y libwebkit2gtk-4.1-dev || sudo apt-get install -y libwebkit2gtk-4.0-dev
-          sudo apt-get install -y libfuse2 || sudo apt-get install -y libfuse2t64
+          apt_retry install -y libwebkit2gtk-4.1-dev || apt_retry install -y libwebkit2gtk-4.0-dev
+          apt_retry install -y libfuse2 || apt_retry install -y libfuse2t64
           # Install SMB dependencies if enabled for this target
           if [ "${{ matrix.smb }}" = "true" ]; then
-            sudo apt-get install -y libsmbclient-dev
+            apt_retry install -y libsmbclient-dev
           fi
 
       - name: Setup Homebrew PATH (macOS self-hosted)
@@ -610,7 +635,6 @@ jobs:
           cache-dependency-path: package-lock.ci.json
 
       - name: Install Rust toolchain
-        if: ${{ !matrix.self_hosted }}
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
