@@ -206,8 +206,19 @@ jobs:
       - name: Install dependencies (Ubuntu)
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          apt_retry() {
+            for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+              if sudo DEBIAN_FRONTEND=noninteractive apt-get "$@"; then
+                return 0
+              fi
+              echo "apt-get $* failed on attempt $attempt; retrying in 10s..." >&2
+              sleep 10
+            done
+            sudo DEBIAN_FRONTEND=noninteractive apt-get "$@"
+          }
+
+          apt_retry update
+          apt_retry install -y \
             build-essential \
             clang \
             curl \
@@ -226,11 +237,11 @@ jobs:
             desktop-file-utils \
             shared-mime-info \
             gperf
-          sudo apt-get install -y libwebkit2gtk-4.1-dev || sudo apt-get install -y libwebkit2gtk-4.0-dev
-          sudo apt-get install -y libfuse2 || sudo apt-get install -y libfuse2t64
+          apt_retry install -y libwebkit2gtk-4.1-dev || apt_retry install -y libwebkit2gtk-4.0-dev
+          apt_retry install -y libfuse2 || apt_retry install -y libfuse2t64
           # Install SMB dependencies if enabled for this target
           if [ "${{ matrix.smb }}" = "true" ]; then
-            sudo apt-get install -y libsmbclient-dev
+            apt_retry install -y libsmbclient-dev
           fi
 
       - name: Setup Homebrew PATH (macOS self-hosted)
@@ -545,8 +556,19 @@ jobs:
       - name: Install dependencies (Ubuntu)
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          apt_retry() {
+            for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+              if sudo DEBIAN_FRONTEND=noninteractive apt-get "$@"; then
+                return 0
+              fi
+              echo "apt-get $* failed on attempt $attempt; retrying in 10s..." >&2
+              sleep 10
+            done
+            sudo DEBIAN_FRONTEND=noninteractive apt-get "$@"
+          }
+
+          apt_retry update
+          apt_retry install -y \
             build-essential \
             clang \
             curl \
@@ -565,11 +587,11 @@ jobs:
             desktop-file-utils \
             shared-mime-info \
             gperf
-          sudo apt-get install -y libwebkit2gtk-4.1-dev || sudo apt-get install -y libwebkit2gtk-4.0-dev
-          sudo apt-get install -y libfuse2 || sudo apt-get install -y libfuse2t64
+          apt_retry install -y libwebkit2gtk-4.1-dev || apt_retry install -y libwebkit2gtk-4.0-dev
+          apt_retry install -y libfuse2 || apt_retry install -y libfuse2t64
           # Install SMB dependencies if enabled for this target
           if [ "${{ matrix.smb }}" = "true" ]; then
-            sudo apt-get install -y libsmbclient-dev
+            apt_retry install -y libsmbclient-dev
           fi
 
       - name: Setup Homebrew PATH (macOS self-hosted)
