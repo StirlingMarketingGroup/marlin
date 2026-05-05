@@ -272,7 +272,6 @@ jobs:
           cache-dependency-path: package-lock.ci.json
 
       - name: Install Rust toolchain
-        if: ${{ !matrix.self_hosted }}
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
@@ -610,7 +609,6 @@ jobs:
           cache-dependency-path: package-lock.ci.json
 
       - name: Install Rust toolchain
-        if: ${{ !matrix.self_hosted }}
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
