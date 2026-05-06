@@ -12,6 +12,21 @@ export interface DragModifiers {
 
 const SAME_LOCATION_DROP_REASON = 'NO_OP_SAME_LOCATION';
 
+const normalizeLocalPathForDrop = (path: string) =>
+  path.replace(/\\/g, '/').replace(/\/+$/, '') || '/';
+
+const localDirnameForDrop = (path: string) => {
+  const normalized = normalizeLocalPathForDrop(path);
+  const lastSlash = normalized.lastIndexOf('/');
+  if (lastSlash <= 0) return '/';
+  return normalized.slice(0, lastSlash);
+};
+
+const isSameDirectoryDrop = (paths: string[], targetPath: string) => {
+  const normalizedTarget = normalizeLocalPathForDrop(targetPath);
+  return paths.length > 0 && paths.every((path) => localDirnameForDrop(path) === normalizedTarget);
+};
+
 export interface DragDropEvent {
   paths: string[];
   location: {
@@ -336,6 +351,14 @@ export function useFilePanelDropZone(
           if (folderPath) {
             targetPath = folderPath;
           }
+        }
+
+        if (isSameDirectoryDrop(event.paths, targetPath)) {
+          setIsDraggingOver(false);
+          setDropTargetPath(null);
+          setPendingDropOperation(null);
+          operationCache.current.clear();
+          return;
         }
 
         // Dedupe rapid drops (include target to allow different destinations)
