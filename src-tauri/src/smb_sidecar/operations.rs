@@ -64,6 +64,50 @@ fn is_hidden_file(name: &str) -> bool {
     name.starts_with('.')
 }
 
+fn join_smb_path(parent: &str, name: &str) -> String {
+    let trimmed = parent.trim_end_matches('/');
+    if trimmed.is_empty() {
+        format!("/{}", name)
+    } else {
+        format!("{}/{}", trimmed, name)
+    }
+}
+
+fn delete_directory_recursive(client: &SmbClient, path: &str) -> Result<(), (i32, String)> {
+    let entries = client
+        .list_dirplus(path)
+        .map_err(|e| {
+            let (code, msg) = map_smb_error(&e);
+            (code, format!("Failed to list directory for deletion: {}", msg))
+        })?;
+
+    for entry in entries {
+        let name = entry.name();
+        if name == "." || name == ".." {
+            continue;
+        }
+
+        let child_path = join_smb_path(path, name);
+        if matches!(entry.get_type(), pavao::SmbDirentType::Dir) {
+            delete_directory_recursive(client, &child_path)?;
+        } else {
+            client
+                .unlink(&child_path)
+                .map_err(|e| {
+                    let (code, msg) = map_smb_error(&e);
+                    (code, format!("Failed to delete file {}: {}", child_path, msg))
+                })?;
+        }
+    }
+
+    client
+        .rmdir(path)
+        .map_err(|e| {
+            let (code, msg) = map_smb_error(&e);
+            (code, format!("Failed to delete directory {}: {}", path, msg))
+        })
+}
+
 /// Read directory contents.
 pub fn read_directory(params: ReadDirectoryParams) -> Result<ReadDirectoryResult, (i32, String)> {
     let _guard = SMB_MUTEX
@@ -215,12 +259,7 @@ pub fn delete(params: DeleteParams) -> Result<(), (i32, String)> {
         })?;
 
     if stat.mode.is_dir() {
-        client
-            .rmdir(&params.path)
-            .map_err(|e| {
-                let (code, msg) = map_smb_error(&e);
-                (code, format!("Failed to delete directory: {}", msg))
-            })
+        delete_directory_recursive(&client, &params.path)
     } else {
         client
             .unlink(&params.path)

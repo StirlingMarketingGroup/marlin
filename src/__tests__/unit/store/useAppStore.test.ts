@@ -628,6 +628,7 @@ describe('useAppStore', () => {
             trashed: ['/test/file.txt'],
             undoToken: 'test-token',
             fallbackToPermanent: false,
+            usedSystemTrash: true,
           });
         }
         if (cmd === 'read_directory') {
@@ -659,6 +660,7 @@ describe('useAppStore', () => {
             trashed: [],
             undoToken: null,
             fallbackToPermanent: true,
+            usedSystemTrash: false,
           });
         }
         if (cmd === 'delete_paths_permanently') {

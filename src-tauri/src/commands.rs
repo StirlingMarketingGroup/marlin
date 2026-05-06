@@ -266,6 +266,55 @@ fn normalize_path_for_compare(path: &Path) -> String {
     value
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrashStrategy {
+    SystemTrash,
+    ProviderTrash,
+    PermanentDeleteFallback,
+}
+
+fn trash_strategy_for_scheme(scheme: &str) -> TrashStrategy {
+    match scheme {
+        "file" => TrashStrategy::SystemTrash,
+        "gdrive" => TrashStrategy::ProviderTrash,
+        _ => TrashStrategy::PermanentDeleteFallback,
+    }
+}
+
+struct DeleteTarget {
+    provider: crate::locations::ProviderRef,
+    location: Location,
+    display_path: String,
+}
+
+fn resolve_delete_targets(paths: Vec<String>) -> Result<Vec<DeleteTarget>, String> {
+    let mut targets = Vec::with_capacity(paths.len());
+
+    for original in paths {
+        let (provider, location) = resolve_location(LocationInput::Raw(original))?;
+        let capabilities = provider.capabilities(&location);
+        if !capabilities.can_delete {
+            return Err("Provider does not support deleting items".to_string());
+        }
+
+        let display_path = if location.scheme() == "file" {
+            expand_path(&location.to_path_string())?
+                .to_string_lossy()
+                .to_string()
+        } else {
+            location.raw().to_string()
+        };
+
+        targets.push(DeleteTarget {
+            provider,
+            location,
+            display_path,
+        });
+    }
+
+    Ok(targets)
+}
+
 fn cleanup_trash_undo_records(state: &TrashUndoState) {
     const TTL: Duration = Duration::from_secs(300);
     const MAX_RECORDS: usize = 10;
@@ -714,6 +763,7 @@ pub struct TrashPathsResponse {
     trashed: Vec<String>,
     undo_token: Option<String>,
     fallback_to_permanent: bool,
+    used_system_trash: bool,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -1974,22 +2024,55 @@ pub async fn trash_paths(app: AppHandle, paths: Vec<String>) -> Result<TrashPath
             trashed: Vec::new(),
             undo_token: None,
             fallback_to_permanent: false,
+            used_system_trash: false,
         });
     }
 
-    let mut expanded: Vec<PathBuf> = Vec::with_capacity(paths.len());
-    for original in paths {
-        let path_buf = expand_path(&original)?;
-        if !path_buf.exists() {
-            return Err(format!("Path does not exist: {}", original));
-        }
-        expanded.push(path_buf);
+    let targets = resolve_delete_targets(paths)?;
+    let strategy = trash_strategy_for_scheme(targets[0].location.scheme());
+    if targets
+        .iter()
+        .any(|target| trash_strategy_for_scheme(target.location.scheme()) != strategy)
+    {
+        return Err("Delete selection must come from a single provider type".to_string());
     }
 
-    let original_paths: Vec<String> = expanded
+    let original_paths: Vec<String> = targets
         .iter()
-        .map(|path| path.to_string_lossy().to_string())
+        .map(|target| target.display_path.clone())
         .collect();
+
+    if strategy == TrashStrategy::PermanentDeleteFallback {
+        return Ok(TrashPathsResponse {
+            trashed: Vec::new(),
+            undo_token: None,
+            fallback_to_permanent: true,
+            used_system_trash: false,
+        });
+    }
+
+    if strategy == TrashStrategy::ProviderTrash {
+        for target in &targets {
+            target.provider.delete(&target.location).await?;
+        }
+
+        return Ok(TrashPathsResponse {
+            trashed: original_paths,
+            undo_token: None,
+            fallback_to_permanent: false,
+            used_system_trash: false,
+        });
+    }
+
+    let expanded: Vec<PathBuf> = targets
+        .iter()
+        .map(|target| PathBuf::from(&target.display_path))
+        .collect();
+    for path_buf in &expanded {
+        if !path_buf.exists() {
+            return Err(format!("Path does not exist: {}", path_buf.to_string_lossy()));
+        }
+    }
 
     let delete_targets: Vec<PathBuf> = expanded.clone();
     let state = app.state::<TrashUndoState>();
@@ -2018,6 +2101,7 @@ pub async fn trash_paths(app: AppHandle, paths: Vec<String>) -> Result<TrashPath
                         trashed: Vec::new(),
                         undo_token: None,
                         fallback_to_permanent: true,
+                        used_system_trash: false,
                     });
                 }
                 return Err(err);
@@ -2103,6 +2187,7 @@ pub async fn trash_paths(app: AppHandle, paths: Vec<String>) -> Result<TrashPath
         trashed: original_paths,
         undo_token,
         fallback_to_permanent: false,
+        used_system_trash: true,
     })
 }
 
@@ -2191,72 +2276,54 @@ pub async fn delete_paths_permanently(
         });
     }
 
-    let mut expanded: Vec<PathBuf> = Vec::with_capacity(paths.len());
-    for original in paths {
-        let path_buf = expand_path(&original)?;
-        if !path_buf.exists() {
-            return Err(format!("Path does not exist: {}", original));
-        }
-        expanded.push(path_buf);
-    }
-
-    let total = expanded.len();
-    let original_paths: Vec<String> = expanded
+    let targets = resolve_delete_targets(paths)?;
+    let total = targets.len();
+    let original_paths: Vec<String> = targets
         .iter()
-        .map(|path| path.to_string_lossy().to_string())
+        .map(|target| target.display_path.clone())
         .collect();
-    let targets: Vec<PathBuf> = expanded.clone();
 
-    let app_handle = app.clone();
-    let request_id_clone = request_id.clone();
-
-    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
-        for (idx, target) in targets.iter().enumerate() {
-            let current_path = target.to_string_lossy().to_string();
-            emit_delete_progress_update(
-                &app_handle,
-                DeleteProgressUpdatePayload {
-                    request_id: request_id_clone.clone(),
-                    current_path: Some(current_path.clone()),
-                    completed: idx,
-                    total,
-                    finished: false,
-                    error: None,
-                },
-            );
-
-            if let Err(err) = delete_file_or_directory(target) {
-                emit_delete_progress_update(
-                    &app_handle,
-                    DeleteProgressUpdatePayload {
-                        request_id: request_id_clone.clone(),
-                        current_path: Some(current_path),
-                        completed: idx,
-                        total,
-                        finished: true,
-                        error: Some(err.clone()),
-                    },
-                );
-                return Err(err);
-            }
-        }
-
+    for (idx, target) in targets.iter().enumerate() {
+        let current_path = target.display_path.clone();
         emit_delete_progress_update(
-            &app_handle,
+            &app,
             DeleteProgressUpdatePayload {
-                request_id: request_id_clone,
-                current_path: None,
-                completed: total,
+                request_id: request_id.clone(),
+                current_path: Some(current_path.clone()),
+                completed: idx,
                 total,
-                finished: true,
+                finished: false,
                 error: None,
             },
         );
 
-        Ok(())
-    })
-    .await
-    .map_err(|err| format!("Failed to join delete task: {err}"))??;
+        if let Err(err) = target.provider.delete(&target.location).await {
+            emit_delete_progress_update(
+                &app,
+                DeleteProgressUpdatePayload {
+                    request_id: request_id.clone(),
+                    current_path: Some(current_path),
+                    completed: idx,
+                    total,
+                    finished: true,
+                    error: Some(err.clone()),
+                },
+            );
+            return Err(err);
+        }
+    }
+
+    emit_delete_progress_update(
+        &app,
+        DeleteProgressUpdatePayload {
+            request_id,
+            current_path: None,
+            completed: total,
+            total,
+            finished: true,
+            error: None,
+        },
+    );
 
     Ok(DeletePathsResponse {
         deleted: original_paths,

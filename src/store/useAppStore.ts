@@ -1179,7 +1179,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       const undoToken = response.undoToken;
       const isMacPlatform = typeof navigator !== 'undefined' && /mac/i.test(navigator.userAgent);
       const infoMessage =
-        undoToken || !isMacPlatform ? messageText : `${messageText} Restore via Finder if needed.`;
+        undoToken || !isMacPlatform || !response.usedSystemTrash
+          ? messageText
+          : `${messageText} Restore via Finder if needed.`;
 
       if (undoToken) {
         // Push to undo stack for Cmd+Z support
