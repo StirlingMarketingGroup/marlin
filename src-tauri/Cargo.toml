@@ -39,13 +39,13 @@ serde_json = "1.0"
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
-tauri = { version = "2.10.3", features = [] }
+tauri = { version = "2.11.1", features = [] }
 tauri-plugin-log = "2.3.1"
-tauri-plugin-fs = "2.4.4"
+tauri-plugin-fs = "2.5.1"
 tauri-plugin-os = "2.3.2"
 tauri-plugin-shell = "2.3.5"
 tauri-plugin-decorum = "1.1.1"
-tauri-plugin-dialog = "2.6.0"
+tauri-plugin-dialog = "2.7.1"
 tauri-plugin-drag = "2.1.0"
 tauri-plugin-opener = "2.5.2"
 git2 = { version = "0.20", default-features = false, features = ["https", "vendored-openssl"] }
