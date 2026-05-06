@@ -196,6 +196,8 @@ export default function PathBar() {
   const suggestionRequestIdRef = useRef(0);
   const startNativeDrag = useDragStore((state) => state.startNativeDrag);
   const endNativeDrag = useDragStore((state) => state.endNativeDrag);
+  const setNativeDragPaths = useDragStore((state) => state.setNativeDragPaths);
+  const clearNativeDragPaths = useDragStore((state) => state.clearNativeDragPaths);
   const setInAppDropTargetId = useDragStore((state) => state.setInAppDropTargetId);
   const dropTargetPath = useDragStore((state) => state.dropTargetPath);
 
@@ -579,6 +581,7 @@ export default function PathBar() {
           }
 
           cleanup();
+          setNativeDragPaths([currentPath]);
           void invoke('start_native_drag', {
             paths: [currentPath],
             previewImage: null,
@@ -588,6 +591,7 @@ export default function PathBar() {
               console.warn('Native drag failed for current directory:', error);
             })
             .finally(() => {
+              window.setTimeout(clearNativeDragPaths, 500);
               endNativeDrag();
             });
           return;
@@ -606,7 +610,15 @@ export default function PathBar() {
       window.addEventListener('mousemove', onMouseMove);
       window.addEventListener('mouseup', onMouseUp);
     },
-    [currentDirMeta, currentPath, endNativeDrag, setInAppDropTargetId, startNativeDrag]
+    [
+      clearNativeDragPaths,
+      currentDirMeta,
+      currentPath,
+      endNativeDrag,
+      setInAppDropTargetId,
+      setNativeDragPaths,
+      startNativeDrag,
+    ]
   );
 
   return (

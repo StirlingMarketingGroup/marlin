@@ -271,7 +271,13 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     cancelRename: cancelRenameAction,
     justCreatedPath,
   } = useAppStore();
-  const { startNativeDrag, endNativeDrag, isDraggedDirectory } = useDragStore();
+  const {
+    startNativeDrag,
+    endNativeDrag,
+    isDraggedDirectory,
+    setNativeDragPaths,
+    clearNativeDragPaths,
+  } = useDragStore();
   const dropTargetPath = useDragStore((s) => s.dropTargetPath);
   const [renameText, setRenameText] = useState<string>('');
   const [draggedFile, setDraggedFile] = useState<string | null>(null);
@@ -534,6 +540,8 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
               return;
             }
 
+            setNativeDragPaths(dragPaths);
+
             // Use new unified native drag API
             await invoke('start_native_drag', {
               paths: dragPaths,
@@ -545,6 +553,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
           } finally {
             // Clear dragging state
             setDraggedFile(null);
+            window.setTimeout(clearNativeDragPaths, 500);
             // If we were tracking a directory drag, end it
             if (file.is_directory) {
               endNativeDrag();

@@ -213,7 +213,13 @@ export default function FileList({ files, preferences }: FileListProps) {
     cancelRename: cancelRenameAction,
     justCreatedPath,
   } = useAppStore();
-  const { startNativeDrag, endNativeDrag, isDraggedDirectory } = useDragStore();
+  const {
+    startNativeDrag,
+    endNativeDrag,
+    isDraggedDirectory,
+    setNativeDragPaths,
+    clearNativeDragPaths,
+  } = useDragStore();
   const dropTargetPath = useDragStore((s) => s.dropTargetPath);
   const [renameText, setRenameText] = useState<string>('');
   const renameInputRef = useRef<HTMLInputElement>(null);
@@ -516,6 +522,8 @@ export default function FileList({ files, preferences }: FileListProps) {
               return;
             }
 
+            setNativeDragPaths(dragPaths);
+
             // Use new unified native drag API
             await invoke('start_native_drag', {
               paths: dragPaths,
@@ -527,6 +535,7 @@ export default function FileList({ files, preferences }: FileListProps) {
           } finally {
             // Clear dragging state
             setDraggedFile(null);
+            window.setTimeout(clearNativeDragPaths, 500);
             // If we were tracking a directory drag, end it
             if (file.is_directory) {
               endNativeDrag();
