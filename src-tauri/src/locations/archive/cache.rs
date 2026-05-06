@@ -80,7 +80,7 @@ pub fn acquire_lock(cache_path: &Path) -> Result<CacheLock, String> {
 fn hash_key(key: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(key.as_bytes());
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 pub fn cached_path_for_key(key: &str, extension: Option<&str>) -> Result<PathBuf, String> {
