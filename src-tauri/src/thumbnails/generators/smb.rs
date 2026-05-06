@@ -78,8 +78,8 @@ fn smb_temp_path(
     hasher.update(b"/");
     hasher.update(share.as_bytes());
     hasher.update(file_path.as_bytes());
-    let hash = hasher.finalize();
-    let hash_prefix = format!("{:x}", hash)[..12].to_string();
+    let hash = hex::encode(hasher.finalize());
+    let hash_prefix = hash[..12].to_string();
 
     let safe_name = original_name
         .replace(['/', '\\', '\0', ':', '*', '?', '"', '<', '>', '|'], "_")
@@ -101,7 +101,7 @@ fn smb_temp_path(
     // Hash the unique components to keep the filename short
     let mut u_hasher = Sha256::new();
     u_hasher.update(unique.as_bytes());
-    let u_hash = format!("{:x}", u_hasher.finalize());
+    let u_hash = hex::encode(u_hasher.finalize());
     let unique_suffix = &u_hash[..8];
 
     Ok(temp_dir.join(format!(

@@ -263,7 +263,7 @@ pub fn generate_cache_key(
         hasher.update([color.r, color.g, color.b]);
     }
     let result = hasher.finalize();
-    format!("{:x}", result)[..16].to_string()
+    hex::encode(result)[..16].to_string()
 }
 
 pub fn get_thumbnail_format_from_path(path: &Path) -> ThumbnailFormat {

@@ -484,8 +484,8 @@ pub async fn download_sftp_file_to_temp(sftp_url: &str) -> Result<std::path::Pat
     hasher.update(b":");
     hasher.update(port.to_string().as_bytes());
     hasher.update(remote_path.as_bytes());
-    let hash = hasher.finalize();
-    let hash_prefix = format!("{:x}", hash)[..12].to_string();
+    let hash = hex::encode(hasher.finalize());
+    let hash_prefix = hash[..12].to_string();
 
     let safe_name = original_name
         .replace(['/', '\\', '\0', ':', '*', '?', '"', '<', '>', '|'], "_")

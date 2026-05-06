@@ -4105,6 +4105,7 @@ dependencies = [
  "git2",
  "google-drive3",
  "gtk",
+ "hex",
  "http-body-util",
  "hyper",
  "hyper-rustls",

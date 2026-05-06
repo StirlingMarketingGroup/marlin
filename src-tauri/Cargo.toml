@@ -60,6 +60,7 @@ dashmap = "6.1"
 rayon = "1.10"
 uuid = { version = "1.22", features = ["v4"] }
 sha2 = "0.11"
+hex = "0.4"
 urlencoding = "2.1"
 url = "2.5"
 webp = { version = "0.3", optional = true }
