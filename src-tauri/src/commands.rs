@@ -2597,7 +2597,18 @@ pub async fn paste_items_to_location(
                     let candidate = dest_dir.join(&name);
                     let source_path = PathBuf::from(source_location.to_path_string());
 
-                    if candidate
+                    if source_path
+                        .canonicalize()
+                        .ok()
+                        .and_then(|path| path.parent().map(Path::to_path_buf))
+                        .and_then(|parent| parent.canonicalize().ok())
+                        .as_ref()
+                        == dest_dir.canonicalize().ok().as_ref()
+                    {
+                        completed += 1;
+                        emit_clipboard_progress_item(&app, None, completed, total_items, None);
+                        continue;
+                    } else if candidate
                         .canonicalize()
                         .ok()
                         .zip(source_path.canonicalize().ok())
