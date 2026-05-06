@@ -3,7 +3,6 @@
 //! Downloads SFTP files to a local temp directory before generating thumbnails.
 //! All network operations are async to avoid blocking tokio or rayon threads.
 
-
 /// Check if the path is an SFTP URL
 pub fn is_sftp_path(path: &str) -> bool {
     path.starts_with("sftp://")
@@ -37,4 +36,3 @@ pub async fn get_sftp_file_identity_async(
         file_id: None,
     })
 }
-

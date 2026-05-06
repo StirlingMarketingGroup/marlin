@@ -11,11 +11,11 @@ import { useToastStore } from './store/useToastStore';
 import { useUndoStore } from './store/useUndoStore';
 import { openFolderSizeWindow } from './store/useFolderSizeStore';
 import { useDirectoryStream } from './hooks/useDirectoryStream';
-import { message } from '@tauri-apps/plugin-dialog';
+import { ask, message, open as openDialog } from '@tauri-apps/plugin-dialog';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { platform } from '@tauri-apps/plugin-os';
 import { getEffectiveExtension, isArchiveFile } from './utils/fileTypes';
-import { dirname } from './utils/pathUtils';
+import { basename, dirname } from './utils/pathUtils';
 import { applyAccentVariables, DEFAULT_ACCENT, normalizeHexColor } from '@/utils/accent';
 import { getSuggestedZipName } from './utils/zipNaming';
 import { revealInFileBrowser } from '@/utils/fileBrowser';
@@ -59,6 +59,65 @@ function hasUriScheme(path: string): boolean {
 }
 
 const ACCENT_POLL_INTERVAL_MS = 5000;
+
+function isPermissionErrorMessage(errorCode: string | null, errorMessage: string) {
+  return errorCode === ErrorCodes.EPERM || errorMessage.includes('Operation not permitted');
+}
+
+function isMacTrashPath(path: string) {
+  return path.replace(/\/+$/, '').endsWith('/.Trash');
+}
+
+async function requestFolderAccessForPath(path: string): Promise<boolean> {
+  if (platform() !== 'macos') return false;
+
+  const requestsTrashAccess = isMacTrashPath(path);
+  const folderName = requestsTrashAccess ? 'Trash' : basename(path) || path;
+  const folderToSelect = requestsTrashAccess ? dirname(path) : path;
+  const folderToSelectLabel = requestsTrashAccess
+    ? basename(folderToSelect) || folderToSelect
+    : folderName;
+  const shouldSelectFolder = await ask(
+    `Marlin needs permission to open "${folderName}". Select "${folderToSelectLabel}" in the next dialog to grant access.`,
+    {
+      title: 'Folder Access Required',
+      okLabel: 'Select Folder',
+      cancelLabel: 'Cancel',
+      kind: 'warning',
+    }
+  );
+
+  if (!shouldSelectFolder) return false;
+
+  const selection = await openDialog({
+    title: `Grant Access to ${folderToSelectLabel}`,
+    directory: true,
+    multiple: false,
+    recursive: true,
+    canCreateDirectories: false,
+    defaultPath: folderToSelect,
+    fileAccessMode: 'scoped',
+  });
+
+  if (!selection) return false;
+
+  const selectedPath = Array.isArray(selection) ? selection[0] : selection;
+  if (!selectedPath) return false;
+
+  await invoke('authorize_folder_access', { path: selectedPath });
+  return true;
+}
+
+async function retryCurrentDirectoryAfterAccessGrant(path: string) {
+  const state = useAppStore.getState();
+  if (path.includes('://')) {
+    await state.refreshCurrentDirectory();
+  } else {
+    await state.refreshCurrentDirectoryStreaming();
+  }
+
+  return !useAppStore.getState().error;
+}
 
 // Grid zoom constants (for keyboard shortcuts - wheel handler moved to MainPanel)
 import {
@@ -720,18 +779,26 @@ function App() {
         }
 
         // Show alert for all other directory access errors
-        const isPermissionError =
-          errorCode === ErrorCodes.EPERM || errorMessage.includes('Operation not permitted');
-        const hint = isPermissionError
-          ? '\n\nAllow Marlin under System Settings → Privacy & Security → Files and Folders.'
-          : '';
+        const isPermissionError = isPermissionErrorMessage(errorCode, errorMessage);
+
+        if (isPermissionError) {
+          try {
+            const accessGranted = await requestFolderAccessForPath(currentPath);
+            if (accessGranted && (await retryCurrentDirectoryAfterAccessGrant(currentPath))) {
+              setError(undefined);
+              return;
+            }
+          } catch (accessError) {
+            console.warn('Failed to request folder access:', accessError);
+          }
+        }
 
         // This was a failed navigation, not a render-state error.
         setLoading(false);
         setError(undefined);
 
         // Show native alert dialog
-        await message(`Cannot access: ${currentPath}\n\n${errorMessage}${hint}`, {
+        await message(`Cannot access: ${currentPath}\n\n${errorMessage}`, {
           title: 'Directory Error',
           okLabel: 'OK',
           kind: 'error',
@@ -1691,10 +1758,22 @@ function App() {
             });
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
-            const hint = msg.includes('Operation not permitted')
-              ? ' Grant access under System Settings → Privacy & Security → Files and Folders.'
-              : '';
-            await message(`Failed to refresh: ${msg}${hint}`, {
+            const errorCode = parseErrorCode(err);
+            const isPermissionError = isPermissionErrorMessage(errorCode, msg);
+
+            if (isPermissionError) {
+              try {
+                const accessGranted = await requestFolderAccessForPath(currentPath);
+                if (accessGranted && (await retryCurrentDirectoryAfterAccessGrant(currentPath))) {
+                  setError(undefined);
+                  return;
+                }
+              } catch (accessError) {
+                console.warn('Failed to request folder access:', accessError);
+              }
+            }
+
+            await message(`Failed to refresh: ${msg}`, {
               title: 'Refresh Error',
               okLabel: 'OK',
               kind: 'error',

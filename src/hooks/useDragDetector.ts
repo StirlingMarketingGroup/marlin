@@ -10,6 +10,29 @@ export interface DragModifiers {
   cmdCtrl: boolean;
 }
 
+const SAME_LOCATION_DROP_REASON = 'NO_OP_SAME_LOCATION';
+
+const normalizeLocalPathForDrop = (path: string) =>
+  path.replace(/\\/g, '/').replace(/\/+$/, '') || '/';
+
+const localDirnameForDrop = (path: string) => {
+  const normalized = normalizeLocalPathForDrop(path);
+  const lastSlash = normalized.lastIndexOf('/');
+  if (lastSlash <= 0) return '/';
+  return normalized.slice(0, lastSlash);
+};
+
+const isSameLocationDrop = (paths: string[], targetPath: string) => {
+  const normalizedTarget = normalizeLocalPathForDrop(targetPath);
+  return (
+    paths.length > 0 &&
+    paths.every((path) => {
+      const normalizedPath = normalizeLocalPathForDrop(path);
+      return normalizedPath === normalizedTarget || localDirnameForDrop(path) === normalizedTarget;
+    })
+  );
+};
+
 export interface DragDropEvent {
   paths: string[];
   location: {
@@ -33,6 +56,12 @@ export interface DragDropHandlers {
  * This uses a custom Tauri plugin to detect drops that the native drag API can't handle
  */
 export function useDragDetector(handlers: DragDropHandlers) {
+  const handlersRef = useRef(handlers);
+
+  useEffect(() => {
+    handlersRef.current = handlers;
+  }, [handlers]);
+
   const enableDragDetection = useCallback(async () => {
     try {
       await invoke('enable_drag_detection');
@@ -60,13 +89,15 @@ export function useDragDetector(handlers: DragDropHandlers) {
     let unlisten: UnlistenFn | null = null;
     let lastTargetId: string | null = null;
     let lastLogTime = 0;
+    let disposed = false;
 
     const setupListener = async () => {
       // Enable drag detection when component mounts
       await enableDragDetection();
+      if (disposed) return;
 
       // Listen for drag-drop events from the plugin
-      unlisten = await listen<DragDropEvent>('drag-drop-event', (event) => {
+      const nextUnlisten = await listen<DragDropEvent>('drag-drop-event', (event) => {
         // Only handle hover/highlight events when this window is focused
         // This prevents unfocused windows from showing dropzone highlights
         // But allow drop events through - during cross-app drags, target window
@@ -124,13 +155,13 @@ export function useDragDetector(handlers: DragDropHandlers) {
 
         switch (normalizedEvent.eventType) {
           case 'dragEnter':
-            handlers.onDragEnter?.(normalizedEvent);
+            handlersRef.current.onDragEnter?.(normalizedEvent);
             break;
           case 'dragOver':
             if (normalizedEvent.location.targetId) {
-              handlers.onDragOver?.(normalizedEvent);
+              handlersRef.current.onDragOver?.(normalizedEvent);
             } else {
-              handlers.onDragLeave?.({
+              handlersRef.current.onDragLeave?.({
                 ...normalizedEvent,
                 eventType: 'dragLeave',
                 location: {
@@ -141,25 +172,32 @@ export function useDragDetector(handlers: DragDropHandlers) {
             }
             break;
           case 'dragLeave':
-            handlers.onDragLeave?.(normalizedEvent);
+            handlersRef.current.onDragLeave?.(normalizedEvent);
             break;
           case 'drop':
-            handlers.onDrop?.(normalizedEvent);
+            handlersRef.current.onDrop?.(normalizedEvent);
             break;
         }
       });
+
+      if (disposed) {
+        nextUnlisten();
+      } else {
+        unlisten = nextUnlisten;
+      }
     };
 
     setupListener();
 
     return () => {
+      disposed = true;
       if (unlisten) {
         unlisten();
       }
       lastTargetId = null;
       lastLogTime = 0;
     };
-  }, [handlers, enableDragDetection]);
+  }, [enableDragDetection]);
 
   return {
     setDropZone,
@@ -336,6 +374,18 @@ export function useFilePanelDropZone(
           }
         }
 
+        const activeNativeDragPaths = useDragStore.getState().nativeDragPaths;
+        if (
+          isSameLocationDrop(event.paths, targetPath) ||
+          isSameLocationDrop(activeNativeDragPaths, targetPath)
+        ) {
+          setIsDraggingOver(false);
+          setDropTargetPath(null);
+          setPendingDropOperation(null);
+          operationCache.current.clear();
+          return;
+        }
+
         // Dedupe rapid drops (include target to allow different destinations)
         const sortedKey = `${event.paths.slice().sort().join('|')}::${targetPath}`;
         const now = Date.now();
@@ -359,6 +409,10 @@ export function useFilePanelDropZone(
 
         // Final validation and execution
         void resolveOperation(event.paths, targetPath, event.modifiers).then(async (opInfo) => {
+          if (opInfo.reason === SAME_LOCATION_DROP_REASON) {
+            return;
+          }
+
           if (!opInfo.valid) {
             useToastStore.getState().addToast({
               type: 'error',

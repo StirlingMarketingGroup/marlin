@@ -25,7 +25,8 @@ fn env_or(name: &str, default: &str) -> String {
 #[test]
 #[ignore]
 fn smb_can_list_shares() {
-    let server = env("MARLIN_SMB_TEST_SERVER").expect("Set MARLIN_SMB_TEST_SERVER to run this test");
+    let server =
+        env("MARLIN_SMB_TEST_SERVER").expect("Set MARLIN_SMB_TEST_SERVER to run this test");
     let provider = SmbProvider::default();
     let location = Location::parse(&format!("smb://{server}/")).expect("Invalid SMB URL");
 
@@ -44,7 +45,8 @@ fn smb_can_list_shares() {
 #[test]
 #[ignore]
 fn smb_can_list_directory() {
-    let server = env("MARLIN_SMB_TEST_SERVER").expect("Set MARLIN_SMB_TEST_SERVER to run this test");
+    let server =
+        env("MARLIN_SMB_TEST_SERVER").expect("Set MARLIN_SMB_TEST_SERVER to run this test");
     let share = env("MARLIN_SMB_TEST_SHARE").expect("Set MARLIN_SMB_TEST_SHARE to run this test");
     let path = env_or("MARLIN_SMB_TEST_PATH", "/");
 
@@ -70,4 +72,3 @@ fn smb_can_list_directory() {
         Err(err) => panic!("Failed to list directory for {url}: {err}"),
     }
 }
-

@@ -1,4 +1,6 @@
-use super::super::{ThumbnailFormat, ThumbnailGenerationResult, ThumbnailQuality, ThumbnailRequest};
+use super::super::{
+    ThumbnailFormat, ThumbnailGenerationResult, ThumbnailQuality, ThumbnailRequest,
+};
 use super::ThumbnailGenerator;
 use ffmpeg_sidecar::command::FfmpegCommand;
 use ffmpeg_sidecar::download::{download_ffmpeg_package, ffmpeg_download_url, unpack_ffmpeg};

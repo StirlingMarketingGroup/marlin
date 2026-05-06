@@ -6,11 +6,11 @@ use url::Url;
 use urlencoding::encode;
 
 use crate::fs_utils::{expand_path, is_hidden_file, FileItem};
+use crate::locations::gdrive::provider::{download_file_to_temp, get_file_id_by_path};
+use crate::locations::LocationInput;
 use crate::locations::{
     Location, LocationCapabilities, LocationProvider, LocationSummary, ProviderDirectoryEntries,
 };
-use crate::locations::gdrive::provider::{download_file_to_temp, get_file_id_by_path};
-use crate::locations::LocationInput;
 
 #[cfg(not(target_os = "windows"))]
 use crate::thumbnails::generators::smb::download_smb_file_sync;
@@ -125,8 +125,7 @@ async fn resolve_non_archive_source(src: &str) -> Result<PathBuf, String> {
             {
                 let smb_path = location.raw().to_string();
                 let temp_path = spawn_blocking(move || {
-                    download_smb_file_sync(&smb_path)
-                        .map(|p| p.to_string_lossy().to_string())
+                    download_smb_file_sync(&smb_path).map(|p| p.to_string_lossy().to_string())
                 })
                 .await
                 .map_err(|e| format!("Task join error: {e}"))??;
@@ -243,18 +242,20 @@ impl LocationProvider for ArchiveProvider {
         LocationCapabilities::new("archive", "Archive", true, false)
     }
 
-    async fn read_directory(&self, location: &Location) -> Result<ProviderDirectoryEntries, String> {
+    async fn read_directory(
+        &self,
+        location: &Location,
+    ) -> Result<ProviderDirectoryEntries, String> {
         let archive_location = parse_archive_uri(location.raw())?;
         let src = archive_location.src.clone();
         let archive_path = resolve_archive_source(&src).await?;
         let internal_path = archive_location.path.clone();
         let internal_path_for_task = internal_path.clone();
 
-        let entries = spawn_blocking(move || {
-            reader::list_directory(&archive_path, &internal_path_for_task)
-        })
-            .await
-            .map_err(|e| format!("Task join error: {e}"))??;
+        let entries =
+            spawn_blocking(move || reader::list_directory(&archive_path, &internal_path_for_task))
+                .await
+                .map_err(|e| format!("Task join error: {e}"))??;
 
         let file_items = entries
             .into_iter()
@@ -285,8 +286,8 @@ impl LocationProvider for ArchiveProvider {
         let metadata = spawn_blocking(move || {
             reader::get_entry_metadata(&archive_path, &internal_path_for_task)
         })
-            .await
-            .map_err(|e| format!("Task join error: {e}"))??;
+        .await
+        .map_err(|e| format!("Task join error: {e}"))??;
 
         let mut file_item = entry_to_file_item(metadata, &src);
         if internal_path == "/" {

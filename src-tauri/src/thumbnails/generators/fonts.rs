@@ -63,7 +63,8 @@ impl FontGenerator {
             }
 
             // Position the glyph
-            let glyph = glyph_id.with_scale_and_position(scale, ab_glyph::point(cursor_x, baseline_y));
+            let glyph =
+                glyph_id.with_scale_and_position(scale, ab_glyph::point(cursor_x, baseline_y));
 
             // Draw the glyph
             if let Some(outlined) = scaled_font.outline_glyph(glyph) {

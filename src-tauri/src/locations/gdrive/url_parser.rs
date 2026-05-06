@@ -173,7 +173,9 @@ mod tests {
     #[test]
     fn test_is_google_drive_url() {
         assert!(is_google_drive_url("https://drive.google.com/open?id=123"));
-        assert!(is_google_drive_url("https://docs.google.com/document/d/123/edit"));
+        assert!(is_google_drive_url(
+            "https://docs.google.com/document/d/123/edit"
+        ));
         assert!(!is_google_drive_url("https://example.com/file"));
         assert!(!is_google_drive_url("not a url"));
     }

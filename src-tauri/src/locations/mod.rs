@@ -7,15 +7,15 @@ use std::sync::{Arc, RwLock};
 
 use crate::fs_utils::FileItem;
 
-mod file;
 pub mod archive;
+mod file;
 pub mod gdrive;
 pub mod sftp;
 #[cfg(not(target_os = "windows"))]
 pub mod smb;
 
-pub use file::FileSystemProvider;
 pub use archive::ArchiveProvider;
+pub use file::FileSystemProvider;
 pub use gdrive::GoogleDriveProvider;
 pub use sftp::SftpProvider;
 #[cfg(not(target_os = "windows"))]
@@ -308,7 +308,8 @@ pub trait LocationProvider: Send + Sync {
     fn scheme(&self) -> &'static str;
     fn capabilities(&self, location: &Location) -> LocationCapabilities;
 
-    async fn read_directory(&self, location: &Location) -> Result<ProviderDirectoryEntries, String>;
+    async fn read_directory(&self, location: &Location)
+        -> Result<ProviderDirectoryEntries, String>;
     async fn get_file_metadata(&self, location: &Location) -> Result<FileItem, String>;
     async fn create_directory(&self, location: &Location) -> Result<(), String>;
     async fn delete(&self, location: &Location) -> Result<(), String>;

@@ -68,7 +68,10 @@ impl LocationProvider for FileSystemProvider {
             .with_supports_watching(true)
     }
 
-    async fn read_directory(&self, location: &Location) -> Result<ProviderDirectoryEntries, String> {
+    async fn read_directory(
+        &self,
+        location: &Location,
+    ) -> Result<ProviderDirectoryEntries, String> {
         let (path, summary) = self.resolve_path(location)?;
 
         spawn_blocking(move || {

@@ -56,12 +56,13 @@ impl PsdGenerator {
         // Get the pre-flattened composite image stored in the PSD
         // This is the merged/flattened image that Photoshop stores for quick preview
         // Wrap in catch_unwind to handle panics from malformed PSD files gracefully
-        let rgba_data = std::panic::catch_unwind(AssertUnwindSafe(|| psd.rgba())).map_err(|_| {
-            format!(
-                "Failed to extract image data from PSD (possibly corrupt): {}",
-                path.display()
-            )
-        })?;
+        let rgba_data =
+            std::panic::catch_unwind(AssertUnwindSafe(|| psd.rgba())).map_err(|_| {
+                format!(
+                    "Failed to extract image data from PSD (possibly corrupt): {}",
+                    path.display()
+                )
+            })?;
 
         // Create an RGBA image from the composite data
         let rgba_image = RgbaImage::from_raw(width, height, rgba_data).ok_or_else(|| {

@@ -1,20 +1,20 @@
+use super::{ThumbnailFormat, ThumbnailGenerationResult, ThumbnailQuality, ThumbnailRequest};
 use base64::Engine as _;
 use image::{DynamicImage, GenericImageView, ImageFormat};
 use std::io::Cursor;
 use std::path::Path;
-use super::{ThumbnailFormat, ThumbnailGenerationResult, ThumbnailQuality, ThumbnailRequest};
 
 #[cfg(target_os = "macos")]
 use crate::macos_security;
 #[cfg(target_os = "macos")]
 pub mod apps;
+pub mod fonts;
 pub mod images;
 pub mod pdf;
 pub mod psd;
 pub mod stl;
 pub mod svg;
 pub mod video;
-pub mod fonts;
 pub mod zpl;
 
 pub mod sftp;
@@ -76,9 +76,10 @@ impl ThumbnailGenerator {
 
             let file_id =
                 crate::locations::gdrive::provider::get_file_id_by_path(&email, &path).await?;
-            let temp_path =
-                crate::locations::gdrive::provider::download_file_to_temp(&email, &file_id, &file_name)
-                    .await?;
+            let temp_path = crate::locations::gdrive::provider::download_file_to_temp(
+                &email, &file_id, &file_name,
+            )
+            .await?;
 
             let mut prepared = request;
             prepared.path = temp_path.clone();
@@ -380,18 +381,16 @@ mod tests {
 
     #[test]
     fn test_parse_gdrive_path_basic() {
-        let (email, path) =
-            parse_gdrive_path("gdrive://brian@smg.gg/My Drive/file.zpl").unwrap();
+        let (email, path) = parse_gdrive_path("gdrive://brian@smg.gg/My Drive/file.zpl").unwrap();
         assert_eq!(email, "brian@smg.gg");
         assert_eq!(path, "/My Drive/file.zpl");
     }
 
     #[test]
     fn test_parse_gdrive_path_spaces() {
-        let (email, path) = parse_gdrive_path(
-            "gdrive://brian@smg.gg/My Drive/shipping-label-fedex real test.zpl",
-        )
-        .unwrap();
+        let (email, path) =
+            parse_gdrive_path("gdrive://brian@smg.gg/My Drive/shipping-label-fedex real test.zpl")
+                .unwrap();
         assert_eq!(email, "brian@smg.gg");
         assert_eq!(path, "/My Drive/shipping-label-fedex real test.zpl");
     }
@@ -406,10 +405,8 @@ mod tests {
 
     #[test]
     fn test_parse_gdrive_path_nested() {
-        let (email, path) = parse_gdrive_path(
-            "gdrive://a@b.co/My Drive/folder/sub folder/file name.png",
-        )
-        .unwrap();
+        let (email, path) =
+            parse_gdrive_path("gdrive://a@b.co/My Drive/folder/sub folder/file name.png").unwrap();
         assert_eq!(email, "a@b.co");
         assert_eq!(path, "/My Drive/folder/sub folder/file name.png");
     }

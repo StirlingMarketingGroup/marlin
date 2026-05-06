@@ -4,7 +4,7 @@
 #[cfg(test)]
 mod tests {
     use crate::locations::gdrive::auth::get_all_accounts;
-    use crate::locations::gdrive::provider::{GoogleDriveProvider, resolve_file_id_to_path};
+    use crate::locations::gdrive::provider::{resolve_file_id_to_path, GoogleDriveProvider};
     use crate::locations::{LocationInput, LocationProvider};
 
     /// Helper to check if we have any authenticated accounts
@@ -33,17 +33,30 @@ mod tests {
 
         let result = provider.read_directory(&loc).await;
 
-        assert!(result.is_ok(), "Failed to list virtual root: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to list virtual root: {:?}",
+            result.err()
+        );
 
         let entries = result.unwrap();
-        assert!(!entries.entries.is_empty(), "Virtual root should have entries");
+        assert!(
+            !entries.entries.is_empty(),
+            "Virtual root should have entries"
+        );
 
         // Should have My Drive, Shared with me, etc.
         let names: Vec<_> = entries.entries.iter().map(|e| &e.name).collect();
         println!("Virtual root entries: {:?}", names);
 
-        assert!(names.contains(&&"My Drive".to_string()), "Should have My Drive");
-        assert!(names.contains(&&"Shared with me".to_string()), "Should have Shared with me");
+        assert!(
+            names.contains(&&"My Drive".to_string()),
+            "Should have My Drive"
+        );
+        assert!(
+            names.contains(&&"Shared with me".to_string()),
+            "Should have Shared with me"
+        );
     }
 
     #[tokio::test]
@@ -62,7 +75,11 @@ mod tests {
         let result = provider.read_directory(&loc).await;
         println!("My Drive result: is_ok={}", result.is_ok());
 
-        assert!(result.is_ok(), "Failed to list My Drive: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to list My Drive: {:?}",
+            result.err()
+        );
     }
 
     #[tokio::test]
@@ -81,14 +98,21 @@ mod tests {
         let result = provider.read_directory(&loc).await;
         println!("Shared with me result: is_ok={}", result.is_ok());
 
-        assert!(result.is_ok(), "Failed to list Shared with me: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to list Shared with me: {:?}",
+            result.err()
+        );
 
         let entries = result.unwrap();
         println!("Shared with me has {} entries", entries.entries.len());
 
         // Print first few entries to see their paths
         for entry in entries.entries.iter().take(5) {
-            println!("  - name: {}, path: {}, is_dir: {}", entry.name, entry.path, entry.is_directory);
+            println!(
+                "  - name: {}, path: {}, is_dir: {}",
+                entry.name, entry.path, entry.is_directory
+            );
         }
     }
 
@@ -115,14 +139,21 @@ mod tests {
         let folder = entries.entries.iter().find(|e| e.is_directory);
 
         if let Some(folder) = folder {
-            println!("Navigating into folder: {} at path: {}", folder.name, folder.path);
+            println!(
+                "Navigating into folder: {} at path: {}",
+                folder.name, folder.path
+            );
 
             // Navigate into it using the path from the entry
             let folder_location = location(&folder.path);
             let folder_result = provider.read_directory(&folder_location).await;
 
             println!("Folder navigation result: is_ok={}", folder_result.is_ok());
-            assert!(folder_result.is_ok(), "Failed to navigate into folder: {:?}", folder_result.err());
+            assert!(
+                folder_result.is_ok(),
+                "Failed to navigate into folder: {:?}",
+                folder_result.err()
+            );
 
             let folder_entries = folder_result.unwrap();
             println!("Folder has {} entries", folder_entries.entries.len());
@@ -161,7 +192,11 @@ mod tests {
                 let dir_result = provider.read_directory(&loc).await;
 
                 println!("Directory listing result: is_ok={}", dir_result.is_ok());
-                assert!(dir_result.is_ok(), "Failed to list resolved directory: {:?}", dir_result.err());
+                assert!(
+                    dir_result.is_ok(),
+                    "Failed to list resolved directory: {:?}",
+                    dir_result.err()
+                );
 
                 let entries = dir_result.unwrap();
                 println!("Directory has {} entries", entries.entries.len());
@@ -205,8 +240,10 @@ mod tests {
                 println!("  - {}", entry.name);
             }
         } else {
-            println!("Failed (file may not be accessible with this account): {:?}", result.err());
+            println!(
+                "Failed (file may not be accessible with this account): {:?}",
+                result.err()
+            );
         }
     }
-
 }

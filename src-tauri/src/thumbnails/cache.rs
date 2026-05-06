@@ -108,15 +108,29 @@ impl ThumbnailCache {
             if let Some(entry) = memory_cache.get_mut(&cache_key) {
                 entry.last_accessed = Utc::now();
                 self.record_hit().await;
-                return Some((entry.data_url.clone(), entry.has_transparency, entry.image_width, entry.image_height));
+                return Some((
+                    entry.data_url.clone(),
+                    entry.has_transparency,
+                    entry.image_width,
+                    entry.image_height,
+                ));
             }
         }
 
         // Try L2 disk cache
-        if let Some((data_url, has_transparency, image_width, image_height)) = self.get_from_disk(&cache_key).await {
+        if let Some((data_url, has_transparency, image_width, image_height)) =
+            self.get_from_disk(&cache_key).await
+        {
             // Promote to memory cache
-            self.put_memory(&cache_key, &data_url, 0, has_transparency, image_width, image_height)
-                .await;
+            self.put_memory(
+                &cache_key,
+                &data_url,
+                0,
+                has_transparency,
+                image_width,
+                image_height,
+            )
+            .await;
             self.record_hit().await;
             return Some((data_url, has_transparency, image_width, image_height));
         }
@@ -142,10 +156,24 @@ impl ThumbnailCache {
             .ok_or("Failed to generate cache key")?;
 
         // Store in both memory and disk cache
-        self.put_memory(&cache_key, &data_url, generation_time_ms, has_transparency, image_width, image_height)
-            .await;
-        self.put_disk(&cache_key, &data_url, generation_time_ms, has_transparency, image_width, image_height)
-            .await?;
+        self.put_memory(
+            &cache_key,
+            &data_url,
+            generation_time_ms,
+            has_transparency,
+            image_width,
+            image_height,
+        )
+        .await;
+        self.put_disk(
+            &cache_key,
+            &data_url,
+            generation_time_ms,
+            has_transparency,
+            image_width,
+            image_height,
+        )
+        .await?;
 
         // Cleanup if necessary
         self.cleanup_if_needed().await?;
@@ -258,7 +286,12 @@ impl ThumbnailCache {
             }
         }
 
-        Some((entry.data_url, entry.has_transparency, entry.image_width, entry.image_height))
+        Some((
+            entry.data_url,
+            entry.has_transparency,
+            entry.image_width,
+            entry.image_height,
+        ))
     }
 
     async fn generate_cache_key(

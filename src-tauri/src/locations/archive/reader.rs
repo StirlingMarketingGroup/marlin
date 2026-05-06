@@ -10,10 +10,10 @@ use bzip2::read::BzDecoder;
 use flate2::read::GzDecoder;
 use tar::Archive as TarArchive;
 use unrar::Archive as RarArchive;
+use uuid::Uuid;
 use xz2::read::XzDecoder;
 use zip::ZipArchive;
 use zstd::stream::read::Decoder as ZstdDecoder;
-use uuid::Uuid;
 
 const MAX_ENTRIES: usize = 100_000;
 const MAX_TOTAL_SIZE: u64 = 2 * 1024 * 1024 * 1024;
@@ -156,7 +156,9 @@ fn normalize_entry_path(raw: &str) -> Result<String, String> {
     if value.len() >= 2 {
         let bytes = value.as_bytes();
         if bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
-            return Err(format!("Refusing Windows drive path in archive entry: {raw}"));
+            return Err(format!(
+                "Refusing Windows drive path in archive entry: {raw}"
+            ));
         }
     }
 
@@ -311,7 +313,10 @@ fn build_entries(parent_path: &str, map: HashMap<String, EntryInfo>) -> Vec<Arch
     entries
 }
 
-pub fn list_directory(archive_path: &Path, internal_path: &str) -> Result<Vec<ArchiveEntry>, String> {
+pub fn list_directory(
+    archive_path: &Path,
+    internal_path: &str,
+) -> Result<Vec<ArchiveEntry>, String> {
     // Check cache first - avoids O(n) scan for repeated listings
     // Uses Arc for cheap cloning of the entry list
     if let Some(cached_entries) = get_cached_entries(archive_path) {
@@ -332,8 +337,8 @@ pub fn list_directory(archive_path: &Path, internal_path: &str) -> Result<Vec<Ar
         ArchiveFormat::Zip => {
             let file = File::open(archive_path)
                 .map_err(|e| format!("Failed to open archive {}: {e}", archive_path.display()))?;
-            let mut archive = ZipArchive::new(file)
-                .map_err(|e| format!("Failed to read zip archive: {e}"))?;
+            let mut archive =
+                ZipArchive::new(file).map_err(|e| format!("Failed to read zip archive: {e}"))?;
 
             if archive.len() > MAX_ENTRIES {
                 return Err("Archive contains too many entries to list".to_string());
@@ -398,18 +403,14 @@ pub fn list_directory(archive_path: &Path, internal_path: &str) -> Result<Vec<Ar
                 .map_err(|e| format!("Failed to open RAR archive: {e}"))?;
 
             for header_result in archive {
-                let header = header_result
-                    .map_err(|e| format!("Failed to read RAR entry: {e}"))?;
+                let header = header_result.map_err(|e| format!("Failed to read RAR entry: {e}"))?;
 
                 seen_entries += 1;
                 if seen_entries > MAX_ENTRIES {
                     return Err("Archive contains too many entries to list".to_string());
                 }
 
-                let entry_name = header
-                    .filename
-                    .to_string_lossy()
-                    .to_string();
+                let entry_name = header.filename.to_string_lossy().to_string();
                 let normalized = match normalize_entry_path(&entry_name) {
                     Ok(value) => value,
                     Err(_) => continue,
@@ -505,7 +506,14 @@ pub fn list_directory(archive_path: &Path, internal_path: &str) -> Result<Vec<Ar
                     modified,
                 });
 
-                push_entry(&mut children, parent_rel, &normalized, is_dir, size, modified);
+                push_entry(
+                    &mut children,
+                    parent_rel,
+                    &normalized,
+                    is_dir,
+                    size,
+                    modified,
+                );
             }
         }
     }
@@ -582,8 +590,8 @@ pub fn get_entry_metadata(
         ArchiveFormat::Zip => {
             let file = File::open(archive_path)
                 .map_err(|e| format!("Failed to open archive {}: {e}", archive_path.display()))?;
-            let mut archive = ZipArchive::new(file)
-                .map_err(|e| format!("Failed to read zip archive: {e}"))?;
+            let mut archive =
+                ZipArchive::new(file).map_err(|e| format!("Failed to read zip archive: {e}"))?;
 
             for i in 0..archive.len() {
                 let file = archive
@@ -621,8 +629,7 @@ pub fn get_entry_metadata(
                 .map_err(|e| format!("Failed to open RAR archive: {e}"))?;
 
             for header_result in archive {
-                let header = header_result
-                    .map_err(|e| format!("Failed to read RAR entry: {e}"))?;
+                let header = header_result.map_err(|e| format!("Failed to read RAR entry: {e}"))?;
                 let entry_name = header.filename.to_string_lossy().to_string();
                 let normalized_entry = match normalize_entry_path(&entry_name) {
                     Ok(value) => value,
@@ -727,8 +734,8 @@ pub fn extract_entry_to_dir(
         ArchiveFormat::Zip => {
             let file = File::open(archive_path)
                 .map_err(|e| format!("Failed to open archive {}: {e}", archive_path.display()))?;
-            let mut archive = ZipArchive::new(file)
-                .map_err(|e| format!("Failed to read zip archive: {e}"))?;
+            let mut archive =
+                ZipArchive::new(file).map_err(|e| format!("Failed to read zip archive: {e}"))?;
 
             // Find the entry by normalized path (handles ./foo.txt, backslashes, etc.)
             let mut found_index: Option<usize> = None;
@@ -842,7 +849,8 @@ pub fn extract_entry_to_dir(
                 .map_err(|e| format!("Failed to read tar entries: {e}"))?;
 
             for entry_result in entries {
-                let mut entry = entry_result.map_err(|e| format!("Failed to read tar entry: {e}"))?;
+                let mut entry =
+                    entry_result.map_err(|e| format!("Failed to read tar entry: {e}"))?;
                 let path = entry
                     .path()
                     .map_err(|e| format!("Failed to read tar entry path: {e}"))?;
@@ -913,12 +921,10 @@ pub fn extract_entry_to_path(
     let parent = output_path
         .parent()
         .ok_or_else(|| "Invalid output path".to_string())?;
-    fs::create_dir_all(parent)
-        .map_err(|e| format!("Failed to create output directory: {e}"))?;
+    fs::create_dir_all(parent).map_err(|e| format!("Failed to create output directory: {e}"))?;
 
     let temp_dir = parent.join(format!(".__marlin_extract_{}", Uuid::new_v4()));
-    fs::create_dir_all(&temp_dir)
-        .map_err(|e| format!("Failed to create temp directory: {e}"))?;
+    fs::create_dir_all(&temp_dir).map_err(|e| format!("Failed to create temp directory: {e}"))?;
 
     let extracted = extract_entry_to_dir(archive_path, internal_path, &temp_dir)?;
 
@@ -933,10 +939,7 @@ pub fn extract_entry_to_path(
     Ok(output_path.to_path_buf())
 }
 
-fn create_tar_reader(
-    format: ArchiveFormat,
-    archive_path: &Path,
-) -> Result<Box<dyn Read>, String> {
+fn create_tar_reader(format: ArchiveFormat, archive_path: &Path) -> Result<Box<dyn Read>, String> {
     let file = File::open(archive_path)
         .map_err(|e| format!("Failed to open archive {}: {e}", archive_path.display()))?;
     let reader: Box<dyn Read> = match format {
@@ -945,8 +948,7 @@ fn create_tar_reader(
         ArchiveFormat::TarBz2 => Box::new(BzDecoder::new(file)),
         ArchiveFormat::TarXz => Box::new(XzDecoder::new(file)),
         ArchiveFormat::TarZst => Box::new(
-            ZstdDecoder::new(file)
-                .map_err(|e| format!("Failed to read zst archive: {e}"))?,
+            ZstdDecoder::new(file).map_err(|e| format!("Failed to read zst archive: {e}"))?,
         ),
         ArchiveFormat::Zip | ArchiveFormat::Rar => {
             return Err("Invalid tar archive format".to_string())

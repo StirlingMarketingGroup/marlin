@@ -77,7 +77,10 @@ pub enum TrashUndoKind {
     Unsupported,
 }
 
-#[cfg_attr(not(any(target_os = "windows", target_os = "linux", target_os = "macos")), allow(dead_code))]
+#[cfg_attr(
+    not(any(target_os = "windows", target_os = "linux", target_os = "macos")),
+    allow(dead_code)
+)]
 pub struct TrashUndoRecord {
     pub kind: TrashUndoKind,
     pub original_paths: Vec<String>,

@@ -8,6 +8,8 @@ interface DraggedDirectory {
 interface DragStore {
   // Native drag tracking (for directories being dragged to external apps or sidebar)
   nativeDragDirectory: DraggedDirectory | null;
+  // Paths placed on the native pasteboard by this app while a native drag is active.
+  nativeDragPaths: string[];
   // In-app hover target for non-native drags
   inAppDropTargetId: string | null;
   dropTargetPath: string | null;
@@ -16,6 +18,8 @@ interface DragStore {
 
   // Start tracking a native drag of a directory
   startNativeDrag: (directory: DraggedDirectory) => void;
+  setNativeDragPaths: (paths: string[]) => void;
+  clearNativeDragPaths: () => void;
   // End tracking of native drag
   endNativeDrag: () => void;
   // Check if a specific path is being dragged
@@ -29,6 +33,7 @@ interface DragStore {
 
 export const useDragStore = create<DragStore>((set, get) => ({
   nativeDragDirectory: null,
+  nativeDragPaths: [],
   inAppDropTargetId: null,
   dropTargetPath: null,
   pendingDropOperation: null,
@@ -38,6 +43,14 @@ export const useDragStore = create<DragStore>((set, get) => ({
     set({
       nativeDragDirectory: directory,
     });
+  },
+
+  setNativeDragPaths: (paths: string[]) => {
+    set({ nativeDragPaths: paths });
+  },
+
+  clearNativeDragPaths: () => {
+    set({ nativeDragPaths: [] });
   },
 
   endNativeDrag: () => {

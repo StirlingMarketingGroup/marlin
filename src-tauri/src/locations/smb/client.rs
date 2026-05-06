@@ -126,15 +126,17 @@ pub fn call_method_with_timeout<P: Serialize, R: DeserializeOwned>(
     if state.process.is_none() || state.status != SidecarStatus::Available {
         // Try to restart
         if state.restart_attempts >= MAX_RESTART_ATTEMPTS {
-            return Err(state.status.error_message().unwrap_or_else(|| {
-                "SMB sidecar is not available".to_string()
-            }));
+            return Err(state
+                .status
+                .error_message()
+                .unwrap_or_else(|| "SMB sidecar is not available".to_string()));
         }
         state.status = start_sidecar(&mut state);
         if state.status != SidecarStatus::Available {
-            return Err(state.status.error_message().unwrap_or_else(|| {
-                "SMB sidecar failed to start".to_string()
-            }));
+            return Err(state
+                .status
+                .error_message()
+                .unwrap_or_else(|| "SMB sidecar failed to start".to_string()));
         }
     }
 
@@ -188,11 +190,7 @@ pub fn call_method_with_timeout<P: Serialize, R: DeserializeOwned>(
         .and_then(|id| id.as_u64())
         .ok_or("Response missing or invalid id field")?;
     if response_id != id {
-        log::error!(
-            "Response ID mismatch: expected {}, got {}",
-            id,
-            response_id
-        );
+        log::error!("Response ID mismatch: expected {}, got {}", id, response_id);
         return Err("SMB protocol error: response ID mismatch".to_string());
     }
 
@@ -269,19 +267,30 @@ fn start_sidecar(state: &mut SidecarState) -> SidecarStatus {
     match child.try_wait() {
         Ok(Some(status)) => {
             // Process exited immediately - likely a dyld failure
-            let stderr = child.stderr.take().map(|mut s| {
-                let mut buf = String::new();
-                use std::io::Read;
-                let _ = s.read_to_string(&mut buf);
-                buf
-            }).unwrap_or_default();
+            let stderr = child
+                .stderr
+                .take()
+                .map(|mut s| {
+                    let mut buf = String::new();
+                    use std::io::Read;
+                    let _ = s.read_to_string(&mut buf);
+                    buf
+                })
+                .unwrap_or_default();
 
-            if stderr.contains("dyld") || stderr.contains("Library not loaded") || stderr.contains("libsmb") {
+            if stderr.contains("dyld")
+                || stderr.contains("Library not loaded")
+                || stderr.contains("libsmb")
+            {
                 log::warn!("Sidecar failed with dyld error: {}", stderr);
                 return SidecarStatus::LibraryMissing;
             }
 
-            log::error!("Sidecar exited immediately with status {:?}: {}", status, stderr);
+            log::error!(
+                "Sidecar exited immediately with status {:?}: {}",
+                status,
+                stderr
+            );
             return SidecarStatus::StartFailed(format!("Exited with status: {:?}", status));
         }
         Ok(None) => {
@@ -352,7 +361,8 @@ fn find_sidecar_binary() -> Option<PathBuf> {
                 // sidecar might be in Marlin.app/Contents/MacOS/ or Marlin.app/Contents/Resources/
                 if let Some(macos_dir) = exe_dir.parent() {
                     let resources_dir = macos_dir.join("Resources");
-                    let sidecar_resources = resources_dir.join(format!("marlin-smb-{}", target_triple));
+                    let sidecar_resources =
+                        resources_dir.join(format!("marlin-smb-{}", target_triple));
                     if sidecar_resources.is_file() {
                         return Some(sidecar_resources);
                     }

@@ -321,7 +321,10 @@ mod tests {
         };
         let key1 = generate_cache_key("test.jpg", 128, &id1, None);
         let key2 = generate_cache_key("test.jpg", 128, &id2, None);
-        assert_ne!(key1, key2, "Keys should differ when file_id (inode) differs");
+        assert_ne!(
+            key1, key2,
+            "Keys should differ when file_id (inode) differs"
+        );
     }
 
     #[test]
@@ -392,21 +395,16 @@ mod tests {
             mtime_ns: 12345,
             file_id: Some(1),
         };
-        let accent1 = AccentColor {
-            r: 255,
-            g: 0,
-            b: 0,
-        };
-        let accent2 = AccentColor {
-            r: 0,
-            g: 255,
-            b: 0,
-        };
+        let accent1 = AccentColor { r: 255, g: 0, b: 0 };
+        let accent2 = AccentColor { r: 0, g: 255, b: 0 };
         let key1 = generate_cache_key("test.jpg", 128, &id, Some(&accent1));
         let key2 = generate_cache_key("test.jpg", 128, &id, Some(&accent2));
         let key3 = generate_cache_key("test.jpg", 128, &id, None);
         assert_ne!(key1, key2, "Keys should differ when accent colors differ");
-        assert_ne!(key1, key3, "Keys should differ when one has accent and other doesn't");
+        assert_ne!(
+            key1, key3,
+            "Keys should differ when one has accent and other doesn't"
+        );
     }
 
     #[test]
@@ -487,7 +485,8 @@ mod tests {
         );
 
         // Verify the identities actually differ
-        let differs = id1.size != id2.size || id1.mtime_ns != id2.mtime_ns || id1.file_id != id2.file_id;
+        let differs =
+            id1.size != id2.size || id1.mtime_ns != id2.mtime_ns || id1.file_id != id2.file_id;
         assert!(
             differs,
             "File identity should differ after delete and recreate"

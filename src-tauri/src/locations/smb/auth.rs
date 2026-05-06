@@ -81,9 +81,12 @@ fn set_password(hostname: &str, password: &str) -> Result<(), String> {
 
 fn get_password(hostname: &str) -> Result<String, String> {
     let entry = keyring_entry(hostname)?;
-    entry
-        .get_password()
-        .map_err(|e| format!("[SMB_NO_CREDENTIALS] Failed to read password from keychain: {}", e))
+    entry.get_password().map_err(|e| {
+        format!(
+            "[SMB_NO_CREDENTIALS] Failed to read password from keychain: {}",
+            e
+        )
+    })
 }
 
 fn delete_password(hostname: &str) -> Result<(), String> {
@@ -98,8 +101,8 @@ fn delete_password(hostname: &str) -> Result<(), String> {
 
 /// Get the path to the servers storage file
 fn get_servers_path() -> Result<PathBuf, String> {
-    let config_dir = dirs::config_dir()
-        .ok_or_else(|| "Could not determine config directory".to_string())?;
+    let config_dir =
+        dirs::config_dir().ok_or_else(|| "Could not determine config directory".to_string())?;
     let marlin_dir = config_dir.join("marlin");
 
     if !marlin_dir.exists() {
@@ -118,8 +121,8 @@ fn load_servers_from_disk() -> Result<Vec<SmbServer>, String> {
         return Ok(Vec::new());
     }
 
-    let contents = fs::read_to_string(&path)
-        .map_err(|e| format!("Failed to read servers file: {}", e))?;
+    let contents =
+        fs::read_to_string(&path).map_err(|e| format!("Failed to read servers file: {}", e))?;
 
     #[derive(Debug, Clone, Serialize, Deserialize, Default)]
     #[serde(rename_all = "camelCase")]
@@ -136,8 +139,8 @@ fn load_servers_from_disk() -> Result<Vec<SmbServer>, String> {
         servers: Vec<SmbServerDisk>,
     }
 
-    let storage: ServerStorageDisk =
-        serde_json::from_str(&contents).map_err(|e| format!("Failed to parse servers file: {}", e))?;
+    let storage: ServerStorageDisk = serde_json::from_str(&contents)
+        .map_err(|e| format!("Failed to parse servers file: {}", e))?;
 
     // Migrate any legacy plaintext passwords into the OS keychain, and rewrite file without them.
     let mut migrated = false;
@@ -173,8 +176,7 @@ fn save_servers_to_disk(servers: &[SmbServer]) -> Result<(), String> {
     let contents = serde_json::to_string_pretty(&storage)
         .map_err(|e| format!("Failed to serialize servers: {}", e))?;
 
-    fs::write(&path, contents)
-        .map_err(|e| format!("Failed to write servers file: {}", e))?;
+    fs::write(&path, contents).map_err(|e| format!("Failed to write servers file: {}", e))?;
 
     Ok(())
 }
@@ -250,7 +252,12 @@ pub fn get_server_credentials(hostname: &str) -> Result<SmbServerCredentials, St
         .iter()
         .find(|s| s.hostname.eq_ignore_ascii_case(hostname))
         .cloned()
-        .ok_or_else(|| format!("[SMB_NO_CREDENTIALS] No credentials stored for server: {}", hostname))?;
+        .ok_or_else(|| {
+            format!(
+                "[SMB_NO_CREDENTIALS] No credentials stored for server: {}",
+                hostname
+            )
+        })?;
 
     let password = get_password(&server.hostname)?;
     Ok(SmbServerCredentials {
@@ -347,9 +354,9 @@ pub fn test_smb_connection(
     if !client::is_available() {
         let status = client::initialize();
         if status != SidecarStatus::Available {
-            return Err(status.error_message().unwrap_or_else(|| {
-                "SMB support is not available".to_string()
-            }));
+            return Err(status
+                .error_message()
+                .unwrap_or_else(|| "SMB support is not available".to_string()));
         }
     }
 

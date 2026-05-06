@@ -124,18 +124,21 @@ pub struct MetadataBatch {
 /// These are typically system-generated files that users don't want to see.
 /// Note: .DS_Store is already covered by the dotfile check.
 const HIDDEN_SYSTEM_FILES: &[&str] = &[
-    "Thumbs.db",      // Windows thumbnail cache
-    "desktop.ini",    // Windows folder settings
-    "ehthumbs.db",    // Windows Media Center thumbnails
-    "ehthumbs_vista.db", // Vista Media Center thumbnails
-    "$RECYCLE.BIN",   // Windows recycle bin folder
+    "Thumbs.db",                 // Windows thumbnail cache
+    "desktop.ini",               // Windows folder settings
+    "ehthumbs.db",               // Windows Media Center thumbnails
+    "ehthumbs_vista.db",         // Vista Media Center thumbnails
+    "$RECYCLE.BIN",              // Windows recycle bin folder
     "System Volume Information", // Windows system folder
 ];
 
 /// Check if a file should be considered hidden.
 /// Returns true for dotfiles and known system files.
 pub fn is_hidden_file(name: &str) -> bool {
-    name.starts_with('.') || HIDDEN_SYSTEM_FILES.iter().any(|&f| name.eq_ignore_ascii_case(f))
+    name.starts_with('.')
+        || HIDDEN_SYSTEM_FILES
+            .iter()
+            .any(|&f| name.eq_ignore_ascii_case(f))
 }
 
 /// Build a skeleton FileItem from a DirEntry without any stat() calls.
@@ -161,15 +164,15 @@ fn build_file_item_skeleton(entry: &std::fs::DirEntry) -> Option<FileItem> {
     Some(FileItem {
         name: file_name,
         path: path.to_string_lossy().to_string(),
-        size: 0, // Filled in by metadata update
+        size: 0,              // Filled in by metadata update
         modified: Utc::now(), // Placeholder, filled in by metadata update
         is_directory,
         is_hidden,
         is_symlink: file_type.is_symlink(),
         is_git_repo: false, // Filled in by metadata update
         extension,
-        child_count: None, // Filled in by metadata update
-        image_width: None, // Filled in by metadata update
+        child_count: None,  // Filled in by metadata update
+        image_width: None,  // Filled in by metadata update
         image_height: None, // Filled in by metadata update
         remote_id: None,
         thumbnail_url: None,
@@ -200,7 +203,9 @@ fn build_file_metadata(path: &Path) -> Option<FileMetadataUpdate> {
 
     // Compute shallow child count for directories
     let child_count = if is_directory {
-        fs::read_dir(path).ok().map(|entries| entries.count() as u64)
+        fs::read_dir(path)
+            .ok()
+            .map(|entries| entries.count() as u64)
     } else {
         None
     };

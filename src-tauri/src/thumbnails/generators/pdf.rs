@@ -18,7 +18,9 @@ impl PdfGenerator {
         Self::generate_with_mupdf(request)
     }
 
-    fn generate_with_mupdf(request: &ThumbnailRequest) -> Result<ThumbnailGenerationResult, String> {
+    fn generate_with_mupdf(
+        request: &ThumbnailRequest,
+    ) -> Result<ThumbnailGenerationResult, String> {
         // Open the PDF document with MuPDF
         let doc =
             Document::open(&request.path).map_err(|e| format!("Failed to open PDF: {:?}", e))?;

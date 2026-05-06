@@ -1,18 +1,17 @@
 mod auth;
 pub mod client;
 
-use async_trait::async_trait;
 use crate::fs_utils::FileItem;
 use crate::locations::{
     Location, LocationCapabilities, LocationProvider, LocationSummary, ProviderDirectoryEntries,
 };
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
-pub use auth::{
-    add_smb_server, get_smb_servers, remove_smb_server, test_smb_connection,
-    SmbServerInfo,
-};
 pub use auth::get_server_credentials;
+pub use auth::{
+    add_smb_server, get_smb_servers, remove_smb_server, test_smb_connection, SmbServerInfo,
+};
 pub use client::SidecarStatus;
 
 #[derive(Default)]
@@ -36,9 +35,9 @@ impl LocationProvider for SmbProvider {
         if !client::is_available() {
             let status = client::initialize();
             if status != SidecarStatus::Available {
-                return Err(status.error_message().unwrap_or_else(|| {
-                    "SMB support is not available".to_string()
-                }));
+                return Err(status
+                    .error_message()
+                    .unwrap_or_else(|| "SMB support is not available".to_string()));
             }
         }
 
@@ -88,16 +87,23 @@ impl LocationProvider for SmbProvider {
 
         for entry in entries {
             let name = entry.get("name").and_then(|n| n.as_str()).unwrap_or("");
-            let is_directory = entry.get("is_directory").and_then(|d| d.as_bool()).unwrap_or(false);
-            let is_hidden = entry.get("is_hidden").and_then(|h| h.as_bool()).unwrap_or(false);
+            let is_directory = entry
+                .get("is_directory")
+                .and_then(|d| d.as_bool())
+                .unwrap_or(false);
+            let is_hidden = entry
+                .get("is_hidden")
+                .and_then(|h| h.as_bool())
+                .unwrap_or(false);
             let size = entry.get("size").and_then(|s| s.as_u64()).unwrap_or(0);
             let modified_str = entry.get("modified").and_then(|m| m.as_str()).unwrap_or("");
-            let extension = entry.get("extension").and_then(|e| e.as_str()).map(String::from);
+            let extension = entry
+                .get("extension")
+                .and_then(|e| e.as_str())
+                .map(String::from);
 
             // Parse modified time
-            let modified: DateTime<Utc> = modified_str
-                .parse()
-                .unwrap_or_else(|_| Utc::now());
+            let modified: DateTime<Utc> = modified_str.parse().unwrap_or_else(|_| Utc::now());
 
             let full_path = if dir_path == "/" {
                 format!("smb://{}/{}/{}", hostname, share, name)
@@ -149,9 +155,9 @@ impl LocationProvider for SmbProvider {
         if !client::is_available() {
             let status = client::initialize();
             if status != SidecarStatus::Available {
-                return Err(status.error_message().unwrap_or_else(|| {
-                    "SMB support is not available".to_string()
-                }));
+                return Err(status
+                    .error_message()
+                    .unwrap_or_else(|| "SMB support is not available".to_string()));
             }
         }
 
@@ -202,16 +208,30 @@ impl LocationProvider for SmbProvider {
         .await
         .map_err(|e| format!("SMB task failed: {}", e))??;
 
-        let name = result.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
-        let is_directory = result.get("is_directory").and_then(|d| d.as_bool()).unwrap_or(false);
-        let is_hidden = result.get("is_hidden").and_then(|h| h.as_bool()).unwrap_or(false);
+        let name = result
+            .get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or("")
+            .to_string();
+        let is_directory = result
+            .get("is_directory")
+            .and_then(|d| d.as_bool())
+            .unwrap_or(false);
+        let is_hidden = result
+            .get("is_hidden")
+            .and_then(|h| h.as_bool())
+            .unwrap_or(false);
         let size = result.get("size").and_then(|s| s.as_u64()).unwrap_or(0);
-        let modified_str = result.get("modified").and_then(|m| m.as_str()).unwrap_or("");
-        let extension = result.get("extension").and_then(|e| e.as_str()).map(String::from);
+        let modified_str = result
+            .get("modified")
+            .and_then(|m| m.as_str())
+            .unwrap_or("");
+        let extension = result
+            .get("extension")
+            .and_then(|e| e.as_str())
+            .map(String::from);
 
-        let modified: DateTime<Utc> = modified_str
-            .parse()
-            .unwrap_or_else(|_| Utc::now());
+        let modified: DateTime<Utc> = modified_str.parse().unwrap_or_else(|_| Utc::now());
 
         Ok(FileItem {
             name,
@@ -236,9 +256,9 @@ impl LocationProvider for SmbProvider {
         if !client::is_available() {
             let status = client::initialize();
             if status != SidecarStatus::Available {
-                return Err(status.error_message().unwrap_or_else(|| {
-                    "SMB support is not available".to_string()
-                }));
+                return Err(status
+                    .error_message()
+                    .unwrap_or_else(|| "SMB support is not available".to_string()));
             }
         }
 
@@ -273,9 +293,9 @@ impl LocationProvider for SmbProvider {
         if !client::is_available() {
             let status = client::initialize();
             if status != SidecarStatus::Available {
-                return Err(status.error_message().unwrap_or_else(|| {
-                    "SMB support is not available".to_string()
-                }));
+                return Err(status
+                    .error_message()
+                    .unwrap_or_else(|| "SMB support is not available".to_string()));
             }
         }
 
@@ -310,9 +330,9 @@ impl LocationProvider for SmbProvider {
         if !client::is_available() {
             let status = client::initialize();
             if status != SidecarStatus::Available {
-                return Err(status.error_message().unwrap_or_else(|| {
-                    "SMB support is not available".to_string()
-                }));
+                return Err(status
+                    .error_message()
+                    .unwrap_or_else(|| "SMB support is not available".to_string()));
             }
         }
 
@@ -361,9 +381,9 @@ impl LocationProvider for SmbProvider {
         if !client::is_available() {
             let status = client::initialize();
             if status != SidecarStatus::Available {
-                return Err(status.error_message().unwrap_or_else(|| {
-                    "SMB support is not available".to_string()
-                }));
+                return Err(status
+                    .error_message()
+                    .unwrap_or_else(|| "SMB support is not available".to_string()));
             }
         }
 
@@ -471,7 +491,10 @@ impl SmbProvider {
 }
 
 /// Parse an SMB path into (hostname, share, path)
-pub(crate) fn parse_smb_path(authority: &str, path: &str) -> Result<(String, String, String), String> {
+pub(crate) fn parse_smb_path(
+    authority: &str,
+    path: &str,
+) -> Result<(String, String, String), String> {
     let hostname = authority.to_string();
 
     // Path format: /share/rest/of/path
@@ -590,9 +613,9 @@ pub fn upload_file_to_smb(
     if !client::is_available() {
         let status = client::initialize();
         if status != SidecarStatus::Available {
-            return Err(status.error_message().unwrap_or_else(|| {
-                "SMB support is not available".to_string()
-            }));
+            return Err(status
+                .error_message()
+                .unwrap_or_else(|| "SMB support is not available".to_string()));
         }
     }
 
@@ -605,7 +628,10 @@ pub fn upload_file_to_smb(
         .and_then(|s| s.to_str())
         .unwrap_or(preferred_name)
         .to_string();
-    let ext = p.extension().and_then(|e| e.to_str()).map(|s| s.to_string());
+    let ext = p
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_string());
 
     for i in 1..1000usize {
         let candidate = if i == 1 {
@@ -666,9 +692,9 @@ pub fn download_file_from_smb(
     if !client::is_available() {
         let status = client::initialize();
         if status != SidecarStatus::Available {
-            return Err(status.error_message().unwrap_or_else(|| {
-                "SMB support is not available".to_string()
-            }));
+            return Err(status
+                .error_message()
+                .unwrap_or_else(|| "SMB support is not available".to_string()));
         }
     }
 
@@ -686,11 +712,8 @@ pub fn download_file_from_smb(
         "dest_path": dest_path.to_string_lossy()
     });
 
-    let _result: serde_json::Value = client::call_method_with_timeout(
-        "download_file",
-        params,
-        client::DOWNLOAD_TIMEOUT_MS,
-    )?;
+    let _result: serde_json::Value =
+        client::call_method_with_timeout("download_file", params, client::DOWNLOAD_TIMEOUT_MS)?;
 
     Ok(())
 }
@@ -701,7 +724,8 @@ mod tests {
 
     #[test]
     fn test_parse_smb_path() {
-        let (host, share, path) = parse_smb_path("server.local", "/myshare/folder/file.txt").unwrap();
+        let (host, share, path) =
+            parse_smb_path("server.local", "/myshare/folder/file.txt").unwrap();
         assert_eq!(host, "server.local");
         assert_eq!(share, "myshare");
         assert_eq!(path, "/folder/file.txt");
@@ -717,7 +741,8 @@ mod tests {
 
     #[test]
     fn test_parse_smb_url_lenient_hostname() {
-        let (host, share, path) = parse_smb_url("smb://nas_1/myshare/folder/file name.jpg").unwrap();
+        let (host, share, path) =
+            parse_smb_url("smb://nas_1/myshare/folder/file name.jpg").unwrap();
         assert_eq!(host, "nas_1");
         assert_eq!(share, "myshare");
         assert_eq!(path, "/folder/file name.jpg");

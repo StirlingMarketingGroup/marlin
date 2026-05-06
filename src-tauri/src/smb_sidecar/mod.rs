@@ -25,7 +25,10 @@ use std::io::{BufRead, Write};
 /// This function reads JSON-RPC requests from stdin and writes responses to stdout.
 /// It exits when stdin is closed (EOF).
 pub fn run() {
-    eprintln!("[marlin-smb] Starting sidecar v{}", operations::SIDECAR_VERSION);
+    eprintln!(
+        "[marlin-smb] Starting sidecar v{}",
+        operations::SIDECAR_VERSION
+    );
 
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
@@ -51,7 +54,8 @@ pub fn run() {
             Err(e) => {
                 eprintln!("[marlin-smb] Failed to parse request: {}", e);
                 // Write a parse error response (use id 0 since we can't get the real id)
-                let response = Response::error(0, error_codes::PARSE_ERROR, format!("Parse error: {}", e));
+                let response =
+                    Response::error(0, error_codes::PARSE_ERROR, format!("Parse error: {}", e));
                 write_response(&mut stdout_lock, &response);
                 continue;
             }

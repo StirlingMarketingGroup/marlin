@@ -85,7 +85,8 @@ pub fn start_native_drag(
         // Use the deprecated but more reliable dragImage method for better positioning control
         // Create NSDragPboard with file paths
         let drag_pboard_name = NSString::from_str("NSDragPboard");
-        let pb: *mut AnyObject = msg_send![class!(NSPasteboard), pasteboardWithName: &*drag_pboard_name];
+        let pb: *mut AnyObject =
+            msg_send![class!(NSPasteboard), pasteboardWithName: &*drag_pboard_name];
 
         if pb.is_null() {
             return Err("Failed to create NSDragPboard".into());

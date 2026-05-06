@@ -37,8 +37,7 @@ impl ZplGenerator {
         }
 
         // Read ZPL content as raw bytes — ZPL can contain binary graphic data
-        let zpl_bytes =
-            std::fs::read(path).map_err(|e| format!("Failed to read ZPL file: {e}"))?;
+        let zpl_bytes = std::fs::read(path).map_err(|e| format!("Failed to read ZPL file: {e}"))?;
 
         // Render to PNG (serialized due to Go runtime thread safety)
         let png_bytes = {
@@ -72,11 +71,8 @@ impl ZplGenerator {
         // Resize and encode as thumbnail
         let resized = ThumbnailGenerator::resize_image(image, request.size, request.quality)?;
 
-        let data_url = ThumbnailGenerator::encode_to_data_url(
-            &resized,
-            request.format,
-            request.quality,
-        )?;
+        let data_url =
+            ThumbnailGenerator::encode_to_data_url(&resized, request.format, request.quality)?;
 
         Ok(ThumbnailGenerationResult {
             data_url,
@@ -155,7 +151,10 @@ mod tests {
             accent: None,
         };
         let err = ZplGenerator::generate(&request).unwrap_err();
-        assert!(err.contains("too large"), "expected 'too large' error, got: {err}");
+        assert!(
+            err.contains("too large"),
+            "expected 'too large' error, got: {err}"
+        );
     }
 
     #[test]
@@ -170,6 +169,9 @@ mod tests {
             accent: None,
         };
         let err = ZplGenerator::generate(&request).unwrap_err();
-        assert!(err.contains("metadata"), "expected metadata error, got: {err}");
+        assert!(
+            err.contains("metadata"),
+            "expected metadata error, got: {err}"
+        );
     }
 }
