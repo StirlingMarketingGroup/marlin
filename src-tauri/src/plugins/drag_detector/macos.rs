@@ -14,7 +14,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Runtime, Window};
 
-use super::{DragDropEvent, DragEventType, DropLocation, DropZoneConfig, DragModifiers};
+use super::{DragDropEvent, DragEventType, DragModifiers, DropLocation, DropZoneConfig};
 
 type DragHandler = dyn Fn(DragDropEvent) + 'static;
 
@@ -43,8 +43,8 @@ static INITIALIZED_WINDOWS: Lazy<Mutex<HashMap<String, bool>>> =
 
 static DRAG_OVERLAY_CLASS: Lazy<&'static AnyClass> = Lazy::new(|| {
     let superclass = class!(NSView);
-    let name = CStr::from_bytes_with_nul(b"MarlinDragOverlayView\0")
-        .expect("valid overlay class name");
+    let name =
+        CStr::from_bytes_with_nul(b"MarlinDragOverlayView\0").expect("valid overlay class name");
     let mut decl = ClassBuilder::new(name, superclass).expect("create overlay class");
 
     unsafe {
@@ -67,7 +67,10 @@ static DRAG_OVERLAY_CLASS: Lazy<&'static AnyClass> = Lazy::new(|| {
 
         let prepare_for_drag_operation_fn: extern "C-unwind" fn(_, _, _) -> Bool =
             prepare_for_drag_operation;
-        decl.add_method(sel!(prepareForDragOperation:), prepare_for_drag_operation_fn);
+        decl.add_method(
+            sel!(prepareForDragOperation:),
+            prepare_for_drag_operation_fn,
+        );
 
         // Ensure normal pointer events pass through to the webview
         let hit_test_fn: extern "C-unwind" fn(_, _, _) -> Id = hit_test;
@@ -75,7 +78,10 @@ static DRAG_OVERLAY_CLASS: Lazy<&'static AnyClass> = Lazy::new(|| {
 
         let wants_periodic_dragging_updates_fn: extern "C-unwind" fn(_, _) -> Bool =
             wants_periodic_dragging_updates;
-        decl.add_method(sel!(wantsPeriodicDraggingUpdates), wants_periodic_dragging_updates_fn);
+        decl.add_method(
+            sel!(wantsPeriodicDraggingUpdates),
+            wants_periodic_dragging_updates_fn,
+        );
 
         // Add dealloc to clean up the event handler and prevent memory leaks
         let dealloc_fn: extern "C-unwind" fn(_, _) = overlay_dealloc;
@@ -144,19 +150,11 @@ extern "C-unwind" fn dragging_exited(this: Id, _sel: Sel, sender: Id) {
     }
 }
 
-extern "C-unwind" fn prepare_for_drag_operation(
-    _this: Id,
-    _sel: Sel,
-    _sender: Id,
-) -> Bool {
+extern "C-unwind" fn prepare_for_drag_operation(_this: Id, _sel: Sel, _sender: Id) -> Bool {
     Bool::YES
 }
 
-extern "C-unwind" fn perform_drag_operation(
-    this: Id,
-    _sel: Sel,
-    sender: Id,
-) -> Bool {
+extern "C-unwind" fn perform_drag_operation(this: Id, _sel: Sel, sender: Id) -> Bool {
     match catch_unwind(AssertUnwindSafe(|| {
         autoreleasepool(|_| unsafe {
             let (event, target_id) = compose_event(sender, DragEventType::Drop);
@@ -348,8 +346,7 @@ fn install_overlay<R: Runtime>(window: Window<R>) -> Result<(), String> {
         let overlay: Id = msg_send![overlay, initWithFrame: bounds];
         let _: () = msg_send![overlay, setAlphaValue: 0.0];
         let _: () = msg_send![overlay, setHidden: Bool::NO];
-        let _: () =
-            msg_send![overlay, setAutoresizingMask: NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable];
+        let _: () = msg_send![overlay, setAutoresizingMask: NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable];
 
         let handler_arc: Arc<DragHandler> = Arc::new({
             let window_clone = window.clone();

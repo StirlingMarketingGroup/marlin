@@ -51,8 +51,11 @@ fn keyring_user(hostname: &str, port: u16, username: &str) -> String {
 }
 
 fn keyring_entry(hostname: &str, port: u16, username: &str) -> Result<keyring::Entry, String> {
-    keyring::Entry::new(SFTP_KEYRING_SERVICE, &keyring_user(hostname, port, username))
-        .map_err(|e| format!("Failed to create keyring entry: {}", e))
+    keyring::Entry::new(
+        SFTP_KEYRING_SERVICE,
+        &keyring_user(hostname, port, username),
+    )
+    .map_err(|e| format!("Failed to create keyring entry: {}", e))
 }
 
 fn set_password(hostname: &str, port: u16, username: &str, password: &str) -> Result<(), String> {
@@ -186,11 +189,16 @@ pub fn get_server_credentials(hostname: &str, port: u16) -> Result<SftpServerCre
     {
         let cache = SERVERS_CACHE.read().map_err(|e| e.to_string())?;
         if let Some(servers) = &*cache {
-            if let Some(server) = servers.iter().find(|s| {
-                s.hostname.eq_ignore_ascii_case(hostname) && s.port == port
-            }) {
+            if let Some(server) = servers
+                .iter()
+                .find(|s| s.hostname.eq_ignore_ascii_case(hostname) && s.port == port)
+            {
                 let password = if server.auth_method == "password" {
-                    Some(get_password(&server.hostname, server.port, &server.username)?)
+                    Some(get_password(
+                        &server.hostname,
+                        server.port,
+                        &server.username,
+                    )?)
                 } else if server.auth_method == "key" {
                     // Key passphrase stored in keychain (may be empty string for no passphrase)
                     get_password(&server.hostname, server.port, &server.username).ok()
@@ -226,7 +234,11 @@ pub fn get_server_credentials(hostname: &str, port: u16) -> Result<SftpServerCre
         })?;
 
     let password = if server.auth_method == "password" {
-        Some(get_password(&server.hostname, server.port, &server.username)?)
+        Some(get_password(
+            &server.hostname,
+            server.port,
+            &server.username,
+        )?)
     } else if server.auth_method == "key" {
         get_password(&server.hostname, server.port, &server.username).ok()
     } else {
@@ -252,9 +264,10 @@ pub fn add_sftp_server(
 ) -> Result<SftpServerInfo, String> {
     let mut servers = load_servers_from_disk()?;
 
-    if let Some(existing) = servers.iter_mut().find(|s| {
-        s.hostname.eq_ignore_ascii_case(&hostname) && s.port == port
-    }) {
+    if let Some(existing) = servers
+        .iter_mut()
+        .find(|s| s.hostname.eq_ignore_ascii_case(&hostname) && s.port == port)
+    {
         existing.username = username.clone();
         existing.auth_method = auth_method.clone();
         existing.key_path = key_path.clone();

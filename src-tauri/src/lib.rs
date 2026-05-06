@@ -170,6 +170,7 @@ pub fn run() {
             commands::update_selection_menu_state,
             commands::calculate_folder_size,
             commands::cancel_folder_size_calculation,
+            commands::authorize_folder_access,
             commands::render_svg_to_png,
             commands::read_preferences,
             commands::write_preferences,

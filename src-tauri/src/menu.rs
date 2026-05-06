@@ -23,9 +23,7 @@ pub fn create_child_window_menu<R: Runtime>(
         .select_all()
         .build()?;
 
-    let menu = MenuBuilder::new(app)
-        .item(&edit_submenu)
-        .build()?;
+    let menu = MenuBuilder::new(app).item(&edit_submenu).build()?;
 
     Ok(menu)
 }

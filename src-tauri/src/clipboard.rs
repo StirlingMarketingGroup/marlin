@@ -187,8 +187,7 @@ mod macos {
                             msg_send![class!(NSBitmapImageRep), imageRepWithData: tiff_rep];
                         if !bitmap_rep.is_null() {
                             let png_type_num: u64 = 4; // NSBitmapImageFileTypePNG
-                            let props: *mut AnyObject =
-                                msg_send![class!(NSDictionary), dictionary];
+                            let props: *mut AnyObject = msg_send![class!(NSDictionary), dictionary];
                             let png_data: *mut AnyObject = msg_send![
                                 bitmap_rep,
                                 representationUsingType: png_type_num,
@@ -231,7 +230,8 @@ mod windows {
             return Err("No paths provided".into());
         }
 
-        let _clip = Clipboard::new_attempts(10).map_err(|e| format!("Failed to open clipboard: {}", e))?;
+        let _clip =
+            Clipboard::new_attempts(10).map_err(|e| format!("Failed to open clipboard: {}", e))?;
 
         // Build DROPFILES structure
         // Format: DROPFILES header followed by double-null-terminated wide string list
@@ -281,7 +281,8 @@ mod windows {
         // Copy paths
         let mut offset = header_size;
         for wide in &wide_paths {
-            let bytes = unsafe { std::slice::from_raw_parts(wide.as_ptr() as *const u8, wide.len() * 2) };
+            let bytes =
+                unsafe { std::slice::from_raw_parts(wide.as_ptr() as *const u8, wide.len() * 2) };
             buffer[offset..offset + bytes.len()].copy_from_slice(bytes);
             offset += bytes.len();
         }
@@ -293,7 +294,11 @@ mod windows {
             .map_err(|e| format!("Failed to write CF_HDROP: {}", e))?;
 
         // Set Preferred DropEffect
-        let effect: u32 = if is_cut { DROPEFFECT_MOVE } else { DROPEFFECT_COPY };
+        let effect: u32 = if is_cut {
+            DROPEFFECT_MOVE
+        } else {
+            DROPEFFECT_COPY
+        };
         let effect_bytes = effect.to_le_bytes();
 
         // Register and set "Preferred DropEffect" format
@@ -316,8 +321,11 @@ mod windows {
                     if !ptr.is_null() {
                         std::ptr::copy_nonoverlapping(effect_bytes.as_ptr(), ptr as *mut u8, 4);
                         GlobalUnlock(hmem);
-                        if SetClipboardData(format_id, windows::Win32::Foundation::HANDLE(hmem.0 as _))
-                            .is_err()
+                        if SetClipboardData(
+                            format_id,
+                            windows::Win32::Foundation::HANDLE(hmem.0 as _),
+                        )
+                        .is_err()
                         {
                             // `SetClipboardData` takes ownership on success; on failure we must free.
                             let _ = GlobalFree(hmem);
@@ -334,7 +342,8 @@ mod windows {
 
     /// Get clipboard contents information (Windows)
     pub fn get_clipboard_contents() -> Result<ClipboardInfo, String> {
-        let _clip = Clipboard::new_attempts(10).map_err(|e| format!("Failed to open clipboard: {}", e))?;
+        let _clip =
+            Clipboard::new_attempts(10).map_err(|e| format!("Failed to open clipboard: {}", e))?;
 
         let mut file_paths = Vec::new();
         let mut has_files = false;
@@ -427,7 +436,8 @@ mod windows {
 
     /// Get image data from clipboard as PNG bytes (Windows)
     pub fn get_clipboard_image() -> Result<Vec<u8>, String> {
-        let _clip = Clipboard::new_attempts(10).map_err(|e| format!("Failed to open clipboard: {}", e))?;
+        let _clip =
+            Clipboard::new_attempts(10).map_err(|e| format!("Failed to open clipboard: {}", e))?;
 
         // Get DIB data
         if let Ok(dib_data) = formats::CF_DIB.read_clipboard::<Vec<u8>>() {
@@ -443,7 +453,8 @@ mod windows {
                 // Reserved
                 bmp_data[6..10].copy_from_slice(&[0, 0, 0, 0]);
                 // Pixel data offset (after headers)
-                let header_size = u32::from_le_bytes([dib_data[0], dib_data[1], dib_data[2], dib_data[3]]);
+                let header_size =
+                    u32::from_le_bytes([dib_data[0], dib_data[1], dib_data[2], dib_data[3]]);
                 let pixel_offset = 14 + header_size;
                 bmp_data[10..14].copy_from_slice(&pixel_offset.to_le_bytes());
                 bmp_data[14..].copy_from_slice(&dib_data);
@@ -452,7 +463,10 @@ mod windows {
                 if let Ok(img) = image::load_from_memory(&bmp_data) {
                     let mut png_data = Vec::new();
                     if img
-                        .write_to(&mut std::io::Cursor::new(&mut png_data), image::ImageFormat::Png)
+                        .write_to(
+                            &mut std::io::Cursor::new(&mut png_data),
+                            image::ImageFormat::Png,
+                        )
                         .is_ok()
                     {
                         return Ok(png_data);
@@ -496,7 +510,12 @@ mod linux {
 
         // Try xclip first (most common)
         let xclip_result = Command::new("xclip")
-            .args(["-selection", "clipboard", "-t", "x-special/gnome-copied-files"])
+            .args([
+                "-selection",
+                "clipboard",
+                "-t",
+                "x-special/gnome-copied-files",
+            ])
             .stdin(std::process::Stdio::piped())
             .spawn();
 
@@ -551,7 +570,13 @@ mod linux {
 
         // Try x-special/gnome-copied-files first
         let gnome_result = Command::new("xclip")
-            .args(["-selection", "clipboard", "-t", "x-special/gnome-copied-files", "-o"])
+            .args([
+                "-selection",
+                "clipboard",
+                "-t",
+                "x-special/gnome-copied-files",
+                "-o",
+            ])
             .output();
 
         if let Ok(output) = gnome_result {
@@ -671,7 +696,10 @@ mod linux {
                 if let Ok(img) = image::load_from_memory(&output.stdout) {
                     let mut png_data = Vec::new();
                     if img
-                        .write_to(&mut std::io::Cursor::new(&mut png_data), image::ImageFormat::Png)
+                        .write_to(
+                            &mut std::io::Cursor::new(&mut png_data),
+                            image::ImageFormat::Png,
+                        )
                         .is_ok()
                     {
                         return Ok(png_data);
@@ -808,13 +836,12 @@ pub fn paste_files(destination: &str, is_cut: bool) -> Result<PasteResult, Strin
 
         let result = if should_move {
             // Move operation
-            std::fs::rename(source_path, &final_target)
-                .or_else(|_| {
-                    // If rename fails (cross-device), fall back to copy + delete
-                    std::fs::copy(source_path, &final_target)?;
-                    std::fs::remove_file(source_path)?;
-                    Ok::<_, std::io::Error>(())
-                })
+            std::fs::rename(source_path, &final_target).or_else(|_| {
+                // If rename fails (cross-device), fall back to copy + delete
+                std::fs::copy(source_path, &final_target)?;
+                std::fs::remove_file(source_path)?;
+                Ok::<_, std::io::Error>(())
+            })
         } else {
             // Copy operation
             std::fs::copy(source_path, &final_target).map(|_| ())
@@ -893,7 +920,10 @@ pub async fn clipboard_get_contents() -> Result<ClipboardInfo, String> {
 
 /// Paste files from clipboard to destination
 #[tauri::command]
-pub async fn clipboard_paste_files(destination: String, is_cut: bool) -> Result<PasteResult, String> {
+pub async fn clipboard_paste_files(
+    destination: String,
+    is_cut: bool,
+) -> Result<PasteResult, String> {
     tokio::task::spawn_blocking(move || paste_files(&destination, is_cut))
         .await
         .map_err(|e| format!("Task failed: {}", e))?

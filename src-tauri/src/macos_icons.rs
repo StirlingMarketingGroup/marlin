@@ -5,6 +5,8 @@ use crate::macos_security;
 #[cfg(target_os = "macos")]
 use base64::Engine as _; // bring encode() into scope
 #[cfg(target_os = "macos")]
+use dirs;
+#[cfg(target_os = "macos")]
 use objc2::class;
 #[cfg(target_os = "macos")]
 use objc2::msg_send;
@@ -14,8 +16,6 @@ use objc2::rc::autoreleasepool;
 use objc2::runtime::AnyObject;
 #[cfg(target_os = "macos")]
 use objc2_foundation::{NSSize, NSString};
-#[cfg(target_os = "macos")]
-use dirs;
 #[cfg(target_os = "macos")]
 use std::collections::hash_map::DefaultHasher;
 #[cfg(target_os = "macos")]

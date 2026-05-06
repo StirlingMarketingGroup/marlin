@@ -111,7 +111,10 @@ fn smb_temp_path(
 }
 
 /// Clone a ThumbnailRequest with a different local file path.
-fn request_with_local_path(request: &ThumbnailRequest, local_path: &std::path::Path) -> ThumbnailRequest {
+fn request_with_local_path(
+    request: &ThumbnailRequest,
+    local_path: &std::path::Path,
+) -> ThumbnailRequest {
     let mut r = request.clone();
     r.path = local_path.to_string_lossy().to_string();
     r
@@ -168,11 +171,8 @@ fn download_smb_file_partial_sync(
         "max_bytes": max_bytes
     });
 
-    let result: serde_json::Value = client::call_method_with_timeout(
-        "download_partial",
-        params,
-        client::DOWNLOAD_TIMEOUT_MS,
-    )?;
+    let result: serde_json::Value =
+        client::call_method_with_timeout("download_partial", params, client::DOWNLOAD_TIMEOUT_MS)?;
 
     let bytes_written = result
         .get("bytes_written")
@@ -270,7 +270,11 @@ fn generate_smb_video_thumbnail(
     let local_request = request_with_local_path(request, &partial_path);
     let result = super::ThumbnailGenerator::generate_local(&local_request);
     if let Err(e) = std::fs::remove_file(&partial_path) {
-        log::warn!("Failed to remove temp file {}: {}", partial_path.display(), e);
+        log::warn!(
+            "Failed to remove temp file {}: {}",
+            partial_path.display(),
+            e
+        );
     }
 
     match result {

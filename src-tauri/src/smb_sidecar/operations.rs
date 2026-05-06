@@ -66,25 +66,25 @@ fn is_hidden_file(name: &str) -> bool {
 
 /// Read directory contents.
 pub fn read_directory(params: ReadDirectoryParams) -> Result<ReadDirectoryResult, (i32, String)> {
-    let _guard = SMB_MUTEX
-        .lock()
-        .map_err(|e| (error_codes::INTERNAL_ERROR, format!("SMB mutex poisoned: {}", e)))?;
+    let _guard = SMB_MUTEX.lock().map_err(|e| {
+        (
+            error_codes::INTERNAL_ERROR,
+            format!("SMB mutex poisoned: {}", e),
+        )
+    })?;
 
     let credentials = build_credentials(&params.credentials, &params.share);
 
-    let client = SmbClient::new(credentials, SmbOptions::default())
-        .map_err(|e| {
-            let (code, msg) = map_smb_error(&e);
-            (code, format!("Failed to connect to SMB server: {}", msg))
-        })?;
+    let client = SmbClient::new(credentials, SmbOptions::default()).map_err(|e| {
+        let (code, msg) = map_smb_error(&e);
+        (code, format!("Failed to connect to SMB server: {}", msg))
+    })?;
 
     // Use list_dirplus to get file metadata inline with listing
-    let entries = client
-        .list_dirplus(&params.path)
-        .map_err(|e| {
-            let (code, msg) = map_smb_error(&e);
-            (code, format!("Failed to list directory: {}", msg))
-        })?;
+    let entries = client.list_dirplus(&params.path).map_err(|e| {
+        let (code, msg) = map_smb_error(&e);
+        (code, format!("Failed to list directory: {}", msg))
+    })?;
 
     let mut result_entries = Vec::new();
 
@@ -125,25 +125,27 @@ pub fn read_directory(params: ReadDirectoryParams) -> Result<ReadDirectoryResult
 }
 
 /// Get metadata for a single file or directory.
-pub fn get_file_metadata(params: GetFileMetadataParams) -> Result<FileMetadataResult, (i32, String)> {
-    let _guard = SMB_MUTEX
-        .lock()
-        .map_err(|e| (error_codes::INTERNAL_ERROR, format!("SMB mutex poisoned: {}", e)))?;
+pub fn get_file_metadata(
+    params: GetFileMetadataParams,
+) -> Result<FileMetadataResult, (i32, String)> {
+    let _guard = SMB_MUTEX.lock().map_err(|e| {
+        (
+            error_codes::INTERNAL_ERROR,
+            format!("SMB mutex poisoned: {}", e),
+        )
+    })?;
 
     let credentials = build_credentials(&params.credentials, &params.share);
 
-    let client = SmbClient::new(credentials, SmbOptions::default())
-        .map_err(|e| {
-            let (code, msg) = map_smb_error(&e);
-            (code, format!("Failed to connect to SMB server: {}", msg))
-        })?;
+    let client = SmbClient::new(credentials, SmbOptions::default()).map_err(|e| {
+        let (code, msg) = map_smb_error(&e);
+        (code, format!("Failed to connect to SMB server: {}", msg))
+    })?;
 
-    let stat = client
-        .stat(&params.path)
-        .map_err(|e| {
-            let (code, msg) = map_smb_error(&e);
-            (code, format!("Failed to get file metadata: {}", msg))
-        })?;
+    let stat = client.stat(&params.path).map_err(|e| {
+        let (code, msg) = map_smb_error(&e);
+        (code, format!("Failed to get file metadata: {}", msg))
+    })?;
 
     let name = std::path::Path::new(&params.path)
         .file_name()
@@ -173,17 +175,19 @@ pub fn get_file_metadata(params: GetFileMetadataParams) -> Result<FileMetadataRe
 
 /// Create a directory.
 pub fn create_directory(params: CreateDirectoryParams) -> Result<(), (i32, String)> {
-    let _guard = SMB_MUTEX
-        .lock()
-        .map_err(|e| (error_codes::INTERNAL_ERROR, format!("SMB mutex poisoned: {}", e)))?;
+    let _guard = SMB_MUTEX.lock().map_err(|e| {
+        (
+            error_codes::INTERNAL_ERROR,
+            format!("SMB mutex poisoned: {}", e),
+        )
+    })?;
 
     let credentials = build_credentials(&params.credentials, &params.share);
 
-    let client = SmbClient::new(credentials, SmbOptions::default())
-        .map_err(|e| {
-            let (code, msg) = map_smb_error(&e);
-            (code, format!("Failed to connect to SMB server: {}", msg))
-        })?;
+    let client = SmbClient::new(credentials, SmbOptions::default()).map_err(|e| {
+        let (code, msg) = map_smb_error(&e);
+        (code, format!("Failed to connect to SMB server: {}", msg))
+    })?;
 
     client
         .mkdir(&params.path, SmbMode::from(0o755))
@@ -195,55 +199,53 @@ pub fn create_directory(params: CreateDirectoryParams) -> Result<(), (i32, Strin
 
 /// Delete a file or directory.
 pub fn delete(params: DeleteParams) -> Result<(), (i32, String)> {
-    let _guard = SMB_MUTEX
-        .lock()
-        .map_err(|e| (error_codes::INTERNAL_ERROR, format!("SMB mutex poisoned: {}", e)))?;
+    let _guard = SMB_MUTEX.lock().map_err(|e| {
+        (
+            error_codes::INTERNAL_ERROR,
+            format!("SMB mutex poisoned: {}", e),
+        )
+    })?;
 
     let credentials = build_credentials(&params.credentials, &params.share);
 
-    let client = SmbClient::new(credentials, SmbOptions::default())
-        .map_err(|e| {
-            let (code, msg) = map_smb_error(&e);
-            (code, format!("Failed to connect to SMB server: {}", msg))
-        })?;
+    let client = SmbClient::new(credentials, SmbOptions::default()).map_err(|e| {
+        let (code, msg) = map_smb_error(&e);
+        (code, format!("Failed to connect to SMB server: {}", msg))
+    })?;
 
-    let stat = client
-        .stat(&params.path)
-        .map_err(|e| {
-            let (code, msg) = map_smb_error(&e);
-            (code, format!("Failed to stat path: {}", msg))
-        })?;
+    let stat = client.stat(&params.path).map_err(|e| {
+        let (code, msg) = map_smb_error(&e);
+        (code, format!("Failed to stat path: {}", msg))
+    })?;
 
     if stat.mode.is_dir() {
-        client
-            .rmdir(&params.path)
-            .map_err(|e| {
-                let (code, msg) = map_smb_error(&e);
-                (code, format!("Failed to delete directory: {}", msg))
-            })
+        client.rmdir(&params.path).map_err(|e| {
+            let (code, msg) = map_smb_error(&e);
+            (code, format!("Failed to delete directory: {}", msg))
+        })
     } else {
-        client
-            .unlink(&params.path)
-            .map_err(|e| {
-                let (code, msg) = map_smb_error(&e);
-                (code, format!("Failed to delete file: {}", msg))
-            })
+        client.unlink(&params.path).map_err(|e| {
+            let (code, msg) = map_smb_error(&e);
+            (code, format!("Failed to delete file: {}", msg))
+        })
     }
 }
 
 /// Rename a file or directory.
 pub fn rename(params: RenameParams) -> Result<(), (i32, String)> {
-    let _guard = SMB_MUTEX
-        .lock()
-        .map_err(|e| (error_codes::INTERNAL_ERROR, format!("SMB mutex poisoned: {}", e)))?;
+    let _guard = SMB_MUTEX.lock().map_err(|e| {
+        (
+            error_codes::INTERNAL_ERROR,
+            format!("SMB mutex poisoned: {}", e),
+        )
+    })?;
 
     let credentials = build_credentials(&params.credentials, &params.share);
 
-    let client = SmbClient::new(credentials, SmbOptions::default())
-        .map_err(|e| {
-            let (code, msg) = map_smb_error(&e);
-            (code, format!("Failed to connect to SMB server: {}", msg))
-        })?;
+    let client = SmbClient::new(credentials, SmbOptions::default()).map_err(|e| {
+        let (code, msg) = map_smb_error(&e);
+        (code, format!("Failed to connect to SMB server: {}", msg))
+    })?;
 
     client
         .rename(&params.from_path, &params.to_path)
@@ -255,17 +257,19 @@ pub fn rename(params: RenameParams) -> Result<(), (i32, String)> {
 
 /// Copy a file.
 pub fn copy(params: CopyParams) -> Result<(), (i32, String)> {
-    let _guard = SMB_MUTEX
-        .lock()
-        .map_err(|e| (error_codes::INTERNAL_ERROR, format!("SMB mutex poisoned: {}", e)))?;
+    let _guard = SMB_MUTEX.lock().map_err(|e| {
+        (
+            error_codes::INTERNAL_ERROR,
+            format!("SMB mutex poisoned: {}", e),
+        )
+    })?;
 
     let credentials = build_credentials(&params.credentials, &params.share);
 
-    let client = SmbClient::new(credentials, SmbOptions::default())
-        .map_err(|e| {
-            let (code, msg) = map_smb_error(&e);
-            (code, format!("Failed to connect to SMB server: {}", msg))
-        })?;
+    let client = SmbClient::new(credentials, SmbOptions::default()).map_err(|e| {
+        let (code, msg) = map_smb_error(&e);
+        (code, format!("Failed to connect to SMB server: {}", msg))
+    })?;
 
     let mut src = client
         .open_with(&params.from_path, SmbOpenOptions::default().read(true))
@@ -277,7 +281,10 @@ pub fn copy(params: CopyParams) -> Result<(), (i32, String)> {
     let mut dst = client
         .open_with(
             &params.to_path,
-            SmbOpenOptions::default().write(true).create(true).truncate(true),
+            SmbOpenOptions::default()
+                .write(true)
+                .create(true)
+                .truncate(true),
         )
         .map_err(|e| {
             let (code, msg) = map_smb_error(&e);
@@ -320,8 +327,12 @@ pub fn list_shares(params: ListSharesParams) -> Result<ListSharesResult, (i32, S
         s
     };
 
-    std::fs::write(&auth_file_path, auth_file_contents)
-        .map_err(|e| (error_codes::INTERNAL_ERROR, format!("Failed to create smbclient auth file: {}", e)))?;
+    std::fs::write(&auth_file_path, auth_file_contents).map_err(|e| {
+        (
+            error_codes::INTERNAL_ERROR,
+            format!("Failed to create smbclient auth file: {}", e),
+        )
+    })?;
 
     #[cfg(unix)]
     {
@@ -354,7 +365,10 @@ pub fn list_shares(params: ListSharesParams) -> Result<ListSharesResult, (i32, S
                 "Authentication failed. Try using your full email as username (e.g., user@domain.com)".to_string(),
             ));
         }
-        return Err((error_codes::SMB_ERROR, format!("Failed to list shares: {}", stderr.trim())));
+        return Err((
+            error_codes::SMB_ERROR,
+            format!("Failed to list shares: {}", stderr.trim()),
+        ));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -393,10 +407,15 @@ pub fn list_shares(params: ListSharesParams) -> Result<ListSharesResult, (i32, S
 }
 
 /// Test connection to an SMB server.
-pub fn test_connection(params: TestConnectionParams) -> Result<TestConnectionResult, (i32, String)> {
-    let _guard = SMB_MUTEX
-        .lock()
-        .map_err(|e| (error_codes::INTERNAL_ERROR, format!("SMB mutex poisoned: {}", e)))?;
+pub fn test_connection(
+    params: TestConnectionParams,
+) -> Result<TestConnectionResult, (i32, String)> {
+    let _guard = SMB_MUTEX.lock().map_err(|e| {
+        (
+            error_codes::INTERNAL_ERROR,
+            format!("SMB mutex poisoned: {}", e),
+        )
+    })?;
 
     let smb_url = format!("smb://{}", params.credentials.hostname);
 
@@ -421,17 +440,19 @@ pub fn test_connection(params: TestConnectionParams) -> Result<TestConnectionRes
 
 /// Download a file to a local path.
 pub fn download_file(params: DownloadFileParams) -> Result<DownloadFileResult, (i32, String)> {
-    let _guard = SMB_MUTEX
-        .lock()
-        .map_err(|e| (error_codes::INTERNAL_ERROR, format!("SMB mutex poisoned: {}", e)))?;
+    let _guard = SMB_MUTEX.lock().map_err(|e| {
+        (
+            error_codes::INTERNAL_ERROR,
+            format!("SMB mutex poisoned: {}", e),
+        )
+    })?;
 
     let credentials = build_credentials(&params.credentials, &params.share);
 
-    let client = SmbClient::new(credentials, SmbOptions::default())
-        .map_err(|e| {
-            let (code, msg) = map_smb_error(&e);
-            (code, format!("Failed to connect to SMB server: {}", msg))
-        })?;
+    let client = SmbClient::new(credentials, SmbOptions::default()).map_err(|e| {
+        let (code, msg) = map_smb_error(&e);
+        (code, format!("Failed to connect to SMB server: {}", msg))
+    })?;
 
     // Open the remote file for reading
     let mut smb_file = client
@@ -443,20 +464,35 @@ pub fn download_file(params: DownloadFileParams) -> Result<DownloadFileResult, (
 
     // Create parent directories if needed
     if let Some(parent) = std::path::Path::new(&params.dest_path).parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| (error_codes::INTERNAL_ERROR, format!("Failed to create temp directory: {}", e)))?;
+        std::fs::create_dir_all(parent).map_err(|e| {
+            (
+                error_codes::INTERNAL_ERROR,
+                format!("Failed to create temp directory: {}", e),
+            )
+        })?;
     }
 
     // Write to local file
-    let mut local_file = std::fs::File::create(&params.dest_path)
-        .map_err(|e| (error_codes::INTERNAL_ERROR, format!("Failed to create temp file: {}", e)))?;
+    let mut local_file = std::fs::File::create(&params.dest_path).map_err(|e| {
+        (
+            error_codes::INTERNAL_ERROR,
+            format!("Failed to create temp file: {}", e),
+        )
+    })?;
 
-    let size = std::io::copy(&mut smb_file, &mut local_file)
-        .map_err(|e| (error_codes::SMB_ERROR, format!("Failed to copy SMB file to temp: {}", e)))?;
+    let size = std::io::copy(&mut smb_file, &mut local_file).map_err(|e| {
+        (
+            error_codes::SMB_ERROR,
+            format!("Failed to copy SMB file to temp: {}", e),
+        )
+    })?;
 
-    local_file
-        .flush()
-        .map_err(|e| (error_codes::INTERNAL_ERROR, format!("Failed to flush temp file: {}", e)))?;
+    local_file.flush().map_err(|e| {
+        (
+            error_codes::INTERNAL_ERROR,
+            format!("Failed to flush temp file: {}", e),
+        )
+    })?;
 
     Ok(DownloadFileResult {
         path: params.dest_path,
@@ -469,9 +505,12 @@ pub fn download_file(params: DownloadFileParams) -> Result<DownloadFileResult, (
 pub fn download_partial(
     params: DownloadPartialParams,
 ) -> Result<DownloadPartialResult, (i32, String)> {
-    let _guard = SMB_MUTEX
-        .lock()
-        .map_err(|e| (error_codes::INTERNAL_ERROR, format!("SMB mutex poisoned: {}", e)))?;
+    let _guard = SMB_MUTEX.lock().map_err(|e| {
+        (
+            error_codes::INTERNAL_ERROR,
+            format!("SMB mutex poisoned: {}", e),
+        )
+    })?;
 
     let credentials = build_credentials(&params.credentials, &params.share);
 
@@ -537,20 +576,26 @@ pub fn download_partial(
 
 /// Upload a local file to SMB.
 pub fn upload_file(params: UploadFileParams) -> Result<UploadFileResult, (i32, String)> {
-    let _guard = SMB_MUTEX
-        .lock()
-        .map_err(|e| (error_codes::INTERNAL_ERROR, format!("SMB mutex poisoned: {}", e)))?;
+    let _guard = SMB_MUTEX.lock().map_err(|e| {
+        (
+            error_codes::INTERNAL_ERROR,
+            format!("SMB mutex poisoned: {}", e),
+        )
+    })?;
 
     let credentials = build_credentials(&params.credentials, &params.share);
 
-    let client = SmbClient::new(credentials, SmbOptions::default())
-        .map_err(|e| {
-            let (code, msg) = map_smb_error(&e);
-            (code, format!("Failed to connect to SMB server: {}", msg))
-        })?;
+    let client = SmbClient::new(credentials, SmbOptions::default()).map_err(|e| {
+        let (code, msg) = map_smb_error(&e);
+        (code, format!("Failed to connect to SMB server: {}", msg))
+    })?;
 
-    let mut local_file = std::fs::File::open(&params.source_path)
-        .map_err(|e| (error_codes::INTERNAL_ERROR, format!("Failed to open source file: {}", e)))?;
+    let mut local_file = std::fs::File::open(&params.source_path).map_err(|e| {
+        (
+            error_codes::INTERNAL_ERROR,
+            format!("Failed to open source file: {}", e),
+        )
+    })?;
 
     let mut smb_file = client
         .open_with(
@@ -565,12 +610,19 @@ pub fn upload_file(params: UploadFileParams) -> Result<UploadFileResult, (i32, S
             (code, format!("Failed to open SMB destination: {}", msg))
         })?;
 
-    let size = std::io::copy(&mut local_file, &mut smb_file)
-        .map_err(|e| (error_codes::SMB_ERROR, format!("Failed to upload file: {}", e)))?;
+    let size = std::io::copy(&mut local_file, &mut smb_file).map_err(|e| {
+        (
+            error_codes::SMB_ERROR,
+            format!("Failed to upload file: {}", e),
+        )
+    })?;
 
-    smb_file
-        .flush()
-        .map_err(|e| (error_codes::SMB_ERROR, format!("Failed to flush SMB file: {}", e)))?;
+    smb_file.flush().map_err(|e| {
+        (
+            error_codes::SMB_ERROR,
+            format!("Failed to flush SMB file: {}", e),
+        )
+    })?;
 
     Ok(UploadFileResult { size })
 }

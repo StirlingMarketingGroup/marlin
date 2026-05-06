@@ -163,8 +163,13 @@ impl ThumbnailWorker {
                         let prepared = match ThumbnailGenerator::prepare(request.clone()).await {
                             Ok(p) => p,
                             Err(e) => {
-                                log::warn!("THUMBNAIL PREPARE FAILED: path={}, error={}", request.path, e);
-                                let _ = response_sender.send(Err(format!("Thumbnail preparation failed: {}", e)));
+                                log::warn!(
+                                    "THUMBNAIL PREPARE FAILED: path={}, error={}",
+                                    request.path,
+                                    e
+                                );
+                                let _ = response_sender
+                                    .send(Err(format!("Thumbnail preparation failed: {}", e)));
                                 drop(permit);
                                 return;
                             }
@@ -221,7 +226,11 @@ impl ThumbnailWorker {
                                 })
                             }
                             Ok(Err(e)) => {
-                                log::warn!("THUMBNAIL GENERATION FAILED: path={}, error={}", request.path, e);
+                                log::warn!(
+                                    "THUMBNAIL GENERATION FAILED: path={}, error={}",
+                                    request.path,
+                                    e
+                                );
                                 Err(format!("Thumbnail generation failed: {}", e))
                             }
                             Err(e) => {

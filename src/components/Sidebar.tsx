@@ -47,6 +47,18 @@ type SidebarLink = {
   weight: 'fill' | 'regular';
 };
 
+const SYSTEM_DRIVE_REFRESH_INTERVAL_MS = 5000;
+
+const areSystemDrivesEqual = (a: SystemDrive[], b: SystemDrive[]) =>
+  a.length === b.length &&
+  a.every(
+    (drive, index) =>
+      drive.name === b[index]?.name &&
+      drive.path === b[index]?.path &&
+      drive.drive_type === b[index]?.drive_type &&
+      drive.is_ejectable === b[index]?.is_ejectable
+  );
+
 export default function Sidebar() {
   const {
     currentPath,
@@ -233,22 +245,46 @@ export default function Sidebar() {
     }
   );
 
-  // Fetch system drives, Google accounts, and SMB servers on component mount
-  useEffect(() => {
-    fetchSystemDrives();
-    loadGoogleAccounts();
-    loadSmbServers();
-    loadSftpServers();
-  }, [loadGoogleAccounts, loadSmbServers, loadSftpServers]);
-
-  const fetchSystemDrives = async () => {
+  const fetchSystemDrives = useCallback(async () => {
     try {
       const drives = await invoke<SystemDrive[]>('get_system_drives');
-      setSystemDrives(drives);
+      setSystemDrives((current) => (areSystemDrivesEqual(current, drives) ? current : drives));
     } catch (error) {
       console.error('Failed to fetch system drives:', error);
     }
-  };
+  }, []);
+
+  // Fetch system drives, Google accounts, and SMB servers on component mount
+  useEffect(() => {
+    void fetchSystemDrives();
+    loadGoogleAccounts();
+    loadSmbServers();
+    loadSftpServers();
+  }, [fetchSystemDrives, loadGoogleAccounts, loadSmbServers, loadSftpServers]);
+
+  // Removable drives can mount after the sidebar is already rendered.
+  useEffect(() => {
+    const refreshVisibleDrives = () => {
+      if (document.visibilityState === 'visible') {
+        void fetchSystemDrives();
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      refreshVisibleDrives();
+    };
+
+    window.addEventListener('focus', refreshVisibleDrives);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    const intervalId = window.setInterval(refreshVisibleDrives, SYSTEM_DRIVE_REFRESH_INTERVAL_MS);
+
+    return () => {
+      window.removeEventListener('focus', refreshVisibleDrives);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.clearInterval(intervalId);
+    };
+  }, [fetchSystemDrives]);
 
   const handleEjectDrive = async (drive: SystemDrive, event: React.MouseEvent) => {
     event.stopPropagation(); // Prevent navigation when clicking eject

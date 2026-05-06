@@ -8,13 +8,13 @@ mod imp {
     use std::sync::{Mutex, OnceLock};
 
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+    use dirs;
+    use log::warn;
     use objc2::class;
     use objc2::msg_send;
     use objc2::rc::{autoreleasepool, Retained};
     use objc2::runtime::{AnyObject, Bool};
     use objc2_foundation::{NSData, NSString, NSURL};
-    use dirs;
-    use log::warn;
     use serde::{Deserialize, Serialize};
 
     const NS_URL_BOOKMARK_CREATION_WITH_SECURITY_SCOPE: u64 = 1 << 11;
@@ -183,8 +183,7 @@ mod imp {
     unsafe fn url_for_path(path: &str) -> Result<Retained<NSURL>, String> {
         autoreleasepool(|_| unsafe {
             let ns_path = NSString::from_str(path);
-            let url: Option<Retained<NSURL>> =
-                msg_send![class!(NSURL), fileURLWithPath: &*ns_path];
+            let url: Option<Retained<NSURL>> = msg_send![class!(NSURL), fileURLWithPath: &*ns_path];
             url.ok_or_else(|| "Failed to create NSURL".to_string())
         })
     }
@@ -220,7 +219,8 @@ mod imp {
             }
             let nsdata: Option<Retained<NSData>> =
                 msg_send![class!(NSData), dataWithBytes: data.as_ptr(), length: data.len()];
-            let nsdata = nsdata.ok_or_else(|| "Failed to build NSData from bookmark".to_string())?;
+            let nsdata =
+                nsdata.ok_or_else(|| "Failed to build NSData from bookmark".to_string())?;
             let mut error: *mut AnyObject = std::ptr::null_mut();
             let mut is_stale = Bool::NO;
             let resolved: Option<Retained<NSURL>> = msg_send![

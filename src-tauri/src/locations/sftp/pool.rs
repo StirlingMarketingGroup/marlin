@@ -78,7 +78,12 @@ async fn create_session(
         client::connect(Arc::new(config), (hostname, port), SshHandler),
     )
     .await
-    .map_err(|_| format!("SSH connection to {}:{} timed out after {}s", hostname, port, CONNECT_TIMEOUT_SECS))?
+    .map_err(|_| {
+        format!(
+            "SSH connection to {}:{} timed out after {}s",
+            hostname, port, CONNECT_TIMEOUT_SECS
+        )
+    })?
     .map_err(|e| format!("SSH connection failed: {}", e))?;
 
     // Authenticate
@@ -121,10 +126,7 @@ async fn create_session(
                     .map_err(|e| format!("Failed to load SSH key: {}", e))?
             };
 
-            let key_with_alg = russh::keys::PrivateKeyWithHashAlg::new(
-                Arc::new(private_key),
-                None,
-            );
+            let key_with_alg = russh::keys::PrivateKeyWithHashAlg::new(Arc::new(private_key), None);
 
             let auth_result = session
                 .authenticate_publickey(&creds.username, key_with_alg)
@@ -274,7 +276,10 @@ pub async fn get_sftp_session(hostname: &str, port: u16) -> Result<Arc<SftpSessi
 /// Acquire a concurrency permit for the given server.
 /// Limits parallel SFTP operations to avoid overwhelming servers.
 /// Hold the returned permit for the duration of the operation.
-pub async fn acquire_permit(hostname: &str, port: u16) -> Result<tokio::sync::OwnedSemaphorePermit, String> {
+pub async fn acquire_permit(
+    hostname: &str,
+    port: u16,
+) -> Result<tokio::sync::OwnedSemaphorePermit, String> {
     let key = (hostname.to_lowercase(), port);
     let sem = {
         let pool = POOL.lock().await;

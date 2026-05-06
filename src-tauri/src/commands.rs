@@ -7,10 +7,10 @@ use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashSet;
-#[cfg(any(target_os = "windows", target_os = "linux"))]
-use std::ffi::OsString;
 #[cfg(target_os = "linux")]
 use std::env;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+use std::ffi::OsString;
 use std::fs;
 use std::io::{ErrorKind, Read, Seek, Write};
 use std::path::Path;
@@ -36,17 +36,19 @@ use crate::fs_utils::{
     resolve_symlink_parent, DiskUsage, FileItem, SymlinkResolution,
 };
 use crate::fs_watcher;
-use crate::locations::{resolve_location, Location, LocationCapabilities, LocationInput, LocationSummary};
+use crate::locations::gdrive::provider::{
+    download_file_to_temp, extract_gdrive_zip, fetch_url_with_auth, get_file_id_by_path,
+    get_folder_id_by_path, name_exists_in_folder, resolve_file_id_to_path, resolve_folder_id,
+    upload_file_to_gdrive,
+};
+use crate::locations::gdrive::url_parser::{is_google_drive_url, parse_google_drive_url};
 use crate::locations::gdrive::{
     add_google_account as add_gdrive_account, get_google_accounts as get_gdrive_accounts,
     remove_google_account as remove_gdrive_account, GoogleAccountInfo,
 };
-use crate::locations::gdrive::provider::{
-    download_file_to_temp, extract_gdrive_zip, fetch_url_with_auth, get_folder_id_by_path,
-    get_file_id_by_path, name_exists_in_folder, resolve_file_id_to_path, resolve_folder_id,
-    upload_file_to_gdrive,
+use crate::locations::{
+    resolve_location, Location, LocationCapabilities, LocationInput, LocationSummary,
 };
-use crate::locations::gdrive::url_parser::{is_google_drive_url, parse_google_drive_url};
 #[cfg(target_os = "macos")]
 use crate::macos_security;
 #[cfg(target_os = "macos")]
@@ -58,8 +60,8 @@ use crate::state::{
 use bzip2::read::BzDecoder;
 use flate2::read::GzDecoder;
 use tar::Archive as TarArchive;
-use xz2::read::XzDecoder;
 use unrar::Archive as RarArchive;
+use xz2::read::XzDecoder;
 use zip::{ZipArchive, ZipWriter};
 use zstd::stream::read::Decoder as ZstdDecoder;
 
@@ -186,7 +188,10 @@ impl<T: Clone + Serialize> WindowPayloadQueue<T> {
             }
 
             if should_requeue {
-                let mut pending = self.pending.lock().expect("Failed to relock pending payload");
+                let mut pending = self
+                    .pending
+                    .lock()
+                    .expect("Failed to relock pending payload");
                 *pending = Some(payload);
             }
         }
@@ -210,22 +215,25 @@ static FOLDER_SIZE_QUEUE: Lazy<WindowPayloadQueue<FolderSizeInitPayload>> =
     Lazy::new(|| WindowPayloadQueue::new(FOLDER_SIZE_WINDOW_LABEL, FOLDER_SIZE_INIT_EVENT));
 static ARCHIVE_PROGRESS_QUEUE: Lazy<WindowPayloadQueue<ArchiveProgressPayload>> =
     Lazy::new(|| WindowPayloadQueue::new(ARCHIVE_PROGRESS_WINDOW_LABEL, ARCHIVE_PROGRESS_EVENT));
-static COMPRESS_PROGRESS_QUEUE: Lazy<WindowPayloadQueue<CompressProgressPayload>> = Lazy::new(
-    || WindowPayloadQueue::new(COMPRESS_PROGRESS_WINDOW_LABEL, COMPRESS_PROGRESS_INIT_EVENT),
-);
+static COMPRESS_PROGRESS_QUEUE: Lazy<WindowPayloadQueue<CompressProgressPayload>> =
+    Lazy::new(|| {
+        WindowPayloadQueue::new(COMPRESS_PROGRESS_WINDOW_LABEL, COMPRESS_PROGRESS_INIT_EVENT)
+    });
 static DELETE_PROGRESS_QUEUE: Lazy<WindowPayloadQueue<DeleteProgressPayload>> =
     Lazy::new(|| WindowPayloadQueue::new(DELETE_PROGRESS_WINDOW_LABEL, DELETE_PROGRESS_EVENT));
-static CLIPBOARD_PROGRESS_QUEUE: Lazy<WindowPayloadQueue<ClipboardProgressPayload>> = Lazy::new(
-    || WindowPayloadQueue::new(CLIPBOARD_PROGRESS_WINDOW_LABEL, CLIPBOARD_PROGRESS_EVENT),
-);
+static CLIPBOARD_PROGRESS_QUEUE: Lazy<WindowPayloadQueue<ClipboardProgressPayload>> =
+    Lazy::new(|| {
+        WindowPayloadQueue::new(CLIPBOARD_PROGRESS_WINDOW_LABEL, CLIPBOARD_PROGRESS_EVENT)
+    });
 static SMB_CONNECT_QUEUE: Lazy<WindowPayloadQueue<SmbConnectInitPayload>> =
     Lazy::new(|| WindowPayloadQueue::new(SMB_CONNECT_WINDOW_LABEL, SMB_CONNECT_INIT_EVENT));
 static SFTP_CONNECT_QUEUE: Lazy<WindowPayloadQueue<SftpConnectInitPayload>> =
     Lazy::new(|| WindowPayloadQueue::new(SFTP_CONNECT_WINDOW_LABEL, SFTP_CONNECT_INIT_EVENT));
 static CONFLICT_QUEUE: Lazy<WindowPayloadQueue<ConflictPayload>> =
     Lazy::new(|| WindowPayloadQueue::new(CONFLICT_WINDOW_LABEL, CONFLICT_INIT_EVENT));
-static CONFLICT_SENDER: Lazy<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<ConflictResolution>>>> =
-    Lazy::new(|| std::sync::Mutex::new(None));
+static CONFLICT_SENDER: Lazy<
+    std::sync::Mutex<Option<tokio::sync::oneshot::Sender<ConflictResolution>>>,
+> = Lazy::new(|| std::sync::Mutex::new(None));
 /// Stores the last conflict payload for re-delivery when React StrictMode
 /// remounts the conflict window component (mount→unmount→remount in dev).
 static CONFLICT_PENDING_PAYLOAD: Lazy<std::sync::Mutex<Option<ConflictPayload>>> =
@@ -374,9 +382,8 @@ fn macos_trash_items(paths: &[PathBuf]) -> Result<Vec<MacTrashUndoItem>, String>
                 ));
             }
 
-            let trashed_path = nsurl_path(resulting_url).ok_or_else(|| {
-                String::from("Failed to resolve trash destination path")
-            })?;
+            let trashed_path = nsurl_path(resulting_url)
+                .ok_or_else(|| String::from("Failed to resolve trash destination path"))?;
 
             let trashed_path_buf = Path::new(&trashed_path).to_path_buf();
             macos_security::persist_bookmark(&trashed_path_buf, "trashing item");
@@ -1360,7 +1367,10 @@ pub struct DropOperationInfo {
 
 fn is_remote_fs(fs_type: &str) -> bool {
     let lower = fs_type.to_lowercase();
-    lower.contains("smb") || lower.contains("nfs") || lower.contains("afp") || lower.contains("webdav")
+    lower.contains("smb")
+        || lower.contains("nfs")
+        || lower.contains("afp")
+        || lower.contains("webdav")
 }
 
 #[command]
@@ -1379,33 +1389,33 @@ pub async fn resolve_drop_operation(
 
     // Validation
     let dest_canon = dest_path.canonicalize().ok();
-    
+
     if let Some(ref d_canon) = dest_canon {
         for source in &sources {
             let source_path_buf = match fs_utils::expand_path(source) {
                 Ok(p) => p,
                 Err(_) => continue,
             };
-            
+
             if let Ok(s_canon) = source_path_buf.canonicalize() {
                 // Cannot drop item onto itself
                 if s_canon == *d_canon {
-                     return Ok(DropOperationInfo {
-                         operation: "none".to_string(),
-                         is_remote: false,
-                         valid: false,
-                         reason: Some("Cannot drop item onto itself".to_string()),
-                     });
+                    return Ok(DropOperationInfo {
+                        operation: "none".to_string(),
+                        is_remote: false,
+                        valid: false,
+                        reason: Some("Cannot drop item onto itself".to_string()),
+                    });
                 }
-                
+
                 // Cannot drop folder into itself or descendant
                 if source_path_buf.is_dir() && d_canon.starts_with(&s_canon) {
-                      return Ok(DropOperationInfo {
-                         operation: "none".to_string(),
-                         is_remote: false,
-                         valid: false,
-                         reason: Some("Cannot drop folder into itself".to_string()),
-                     });
+                    return Ok(DropOperationInfo {
+                        operation: "none".to_string(),
+                        is_remote: false,
+                        valid: false,
+                        reason: Some("Cannot drop folder into itself".to_string()),
+                    });
                 }
             }
         }
@@ -1545,6 +1555,11 @@ pub async fn read_directory_streaming_command(
         return Err("Path is not a directory".to_string());
     }
 
+    #[cfg(target_os = "macos")]
+    let _scope_guard = macos_security::retain_access(&expanded_path)?;
+
+    fs::read_dir(&expanded_path).map_err(|e| format!("Failed to read directory: {}", e))?;
+
     // Use the session_id provided by the frontend
     let cancel_flag = Arc::new(AtomicBool::new(false));
 
@@ -1617,6 +1632,31 @@ pub async fn read_directory_streaming_command(
         location: location_summary,
         capabilities,
     })
+}
+
+#[command]
+pub fn authorize_folder_access(path: String) -> Result<(), String> {
+    let path_buf = expand_path(&path)?;
+
+    if !path_buf.exists() {
+        return Err("Path does not exist".to_string());
+    }
+
+    if !path_buf.is_dir() {
+        return Err("Path is not a directory".to_string());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        macos_security::store_bookmark_if_needed(&path_buf)?;
+        let _scope_guard = macos_security::retain_access(&path_buf)?;
+        fs::read_dir(&path_buf).map_err(|e| format!("Failed to read directory: {}", e))?;
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fs::read_dir(&path_buf).map_err(|e| format!("Failed to read directory: {}", e))?;
+
+    Ok(())
 }
 
 /// Cancel an active directory streaming session
@@ -1909,10 +1949,7 @@ pub fn create_nested_folders(base_dir: String, nested_path: String) -> Result<St
     }
 
     // Split into segments and validate each
-    let segments: Vec<&str> = normalized
-        .split('/')
-        .filter(|s| !s.is_empty())
-        .collect();
+    let segments: Vec<&str> = normalized.split('/').filter(|s| !s.is_empty()).collect();
 
     if segments.is_empty() {
         return Err("Nested path cannot be empty".to_string());
@@ -1997,17 +2034,17 @@ pub async fn trash_paths(app: AppHandle, paths: Vec<String>) -> Result<TrashPath
     // Capture trash state BEFORE deletion on Windows/Linux for undo tracking
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     let before_ids: HashSet<OsString> = {
-        let before =
-            os_limited::list().map_err(|err| format!("Failed to inspect trash: {err}"))?;
+        let before = os_limited::list().map_err(|err| format!("Failed to inspect trash: {err}"))?;
         before.into_iter().map(|item| item.id).collect()
     };
 
     #[cfg(target_os = "macos")]
     let mac_records = {
         let task_paths = delete_targets.clone();
-        let task_result = tauri::async_runtime::spawn_blocking(move || macos_trash_items(&task_paths))
-            .await
-            .map_err(|err| format!("Failed to join trash task: {err}"))?;
+        let task_result =
+            tauri::async_runtime::spawn_blocking(move || macos_trash_items(&task_paths))
+                .await
+                .map_err(|err| format!("Failed to join trash task: {err}"))?;
 
         match task_result {
             Ok(records) => records,
@@ -2027,11 +2064,10 @@ pub async fn trash_paths(app: AppHandle, paths: Vec<String>) -> Result<TrashPath
 
     #[cfg(not(target_os = "macos"))]
     {
-        let delete_result = tauri::async_runtime::spawn_blocking(move || {
-            trash::delete_all(delete_targets.iter())
-        })
-        .await
-        .map_err(|err| format!("Failed to join trash task: {err}"))?;
+        let delete_result =
+            tauri::async_runtime::spawn_blocking(move || trash::delete_all(delete_targets.iter()))
+                .await
+                .map_err(|err| format!("Failed to join trash task: {err}"))?;
 
         if let Err(err) = delete_result {
             return Err(err.to_string());
@@ -2343,7 +2379,12 @@ fn join_dest_raw(dest_scheme: &str, dest_dir_raw: &str, name: &str) -> String {
     }
 }
 
-fn emit_clipboard_progress_init(app: &AppHandle, operation: String, destination: String, total: usize) {
+fn emit_clipboard_progress_init(
+    app: &AppHandle,
+    operation: String,
+    destination: String,
+    total: usize,
+) {
     emit_clipboard_progress_update(
         app,
         ClipboardProgressUpdatePayload {
@@ -2432,7 +2473,10 @@ pub async fn paste_items_to_location(
     let dest_dir_path: Option<PathBuf> = if dest_scheme == "file" {
         let p = PathBuf::from(&dest_dir_raw);
         if !p.exists() {
-            return Err(format!("Destination does not exist: {}", p.to_string_lossy()));
+            return Err(format!(
+                "Destination does not exist: {}",
+                p.to_string_lossy()
+            ));
         }
         if !p.is_dir() {
             return Err(format!(
@@ -2450,7 +2494,12 @@ pub async fn paste_items_to_location(
     } else {
         "Copying items".to_string()
     };
-    emit_clipboard_progress_init(&app, operation_label.clone(), dest_dir_raw.clone(), total_items);
+    emit_clipboard_progress_init(
+        &app,
+        operation_label.clone(),
+        dest_dir_raw.clone(),
+        total_items,
+    );
 
     let mut pasted_paths: Vec<String> = Vec::new();
     let mut skipped_count = 0usize;
@@ -2507,302 +2556,409 @@ pub async fn paste_items_to_location(
 
         emit_clipboard_progress_item(&app, Some(name.clone()), completed, total_items, None);
 
-        log::debug!("paste_items_to_location: source_scheme={}, dest_scheme={}, name={}", source_scheme, dest_scheme, name);
-        let result: Result<Option<String>, String> = match (source_scheme.as_str(), dest_scheme.as_str()) {
-            ("file", "file") => {
-                let Some(dest_dir) = dest_dir_path.as_ref() else {
-                    return Err("Local destination directory is required".to_string());
-                };
-                let candidate = dest_dir.join(&name);
-                let source_path = PathBuf::from(source_location.to_path_string());
+        log::debug!(
+            "paste_items_to_location: source_scheme={}, dest_scheme={}, name={}",
+            source_scheme,
+            dest_scheme,
+            name
+        );
+        let result: Result<Option<String>, String> =
+            match (source_scheme.as_str(), dest_scheme.as_str()) {
+                ("file", "file") => {
+                    let Some(dest_dir) = dest_dir_path.as_ref() else {
+                        return Err("Local destination directory is required".to_string());
+                    };
+                    let candidate = dest_dir.join(&name);
+                    let source_path = PathBuf::from(source_location.to_path_string());
 
-                if candidate.exists() {
-                    // Conflict detected — resolve it
-                    let (action, custom_name) = if let Some(ref stored) = apply_to_all_action {
-                        (stored.clone(), None)
-                    } else {
-                        conflict_index += 1;
-                        let remaining = total_items.saturating_sub(completed + 1);
-                        let source_info = build_local_conflict_info(&source_path)?;
-                        let dest_info = build_local_conflict_info(&candidate)?;
-                        match ask_user_about_conflict(
-                            &app, source_info, dest_info,
-                            conflict_index, remaining, operation_str,
-                        ).await {
-                            Ok(resolution) => {
-                                let a = resolution.action.clone();
-                                let cn = resolution.custom_name.clone();
-                                if resolution.apply_to_all {
-                                    apply_to_all_action = Some(resolution.action);
+                    if candidate.exists() {
+                        // Conflict detected — resolve it
+                        let (action, custom_name) = if let Some(ref stored) = apply_to_all_action {
+                            (stored.clone(), None)
+                        } else {
+                            conflict_index += 1;
+                            let remaining = total_items.saturating_sub(completed + 1);
+                            let source_info = build_local_conflict_info(&source_path)?;
+                            let dest_info = build_local_conflict_info(&candidate)?;
+                            match ask_user_about_conflict(
+                                &app,
+                                source_info,
+                                dest_info,
+                                conflict_index,
+                                remaining,
+                                operation_str,
+                            )
+                            .await
+                            {
+                                Ok(resolution) => {
+                                    let a = resolution.action.clone();
+                                    let cn = resolution.custom_name.clone();
+                                    if resolution.apply_to_all {
+                                        apply_to_all_action = Some(resolution.action);
+                                    }
+                                    (a, cn)
                                 }
-                                (a, cn)
-                            }
-                            Err(e) if e == "CONFLICT_CANCELLED" => {
-                                cancelled = true;
-                                skipped_count += 1;
-                                completed += 1;
-                                emit_clipboard_progress_item(&app, None, completed, total_items, None);
-                                continue;
-                            }
-                            Err(e) => return Err(e),
-                        }
-                    };
-
-                    execute_local_conflict_action(
-                        &action,
-                        custom_name.as_deref(),
-                        &source_path,
-                        dest_dir,
-                        &name,
-                        is_cut,
-                        source_provider.as_ref(),
-                        &source_location,
-                    ).await
-                } else {
-                    // No conflict — proceed normally
-                    let dest_raw = candidate.to_string_lossy().to_string();
-                    let (_, dest_item_location) = resolve_location(LI::Raw(dest_raw.clone()))?;
-                    if is_cut {
-                        source_provider.move_item(&source_location, &dest_item_location).await?;
-                    } else {
-                        source_provider.copy(&source_location, &dest_item_location).await?;
-                    }
-                    Ok(Some(dest_raw))
-                }
-            }
-            (src, dst) if src == dst => {
-                let dest_raw = join_dest_raw(&dest_scheme, &dest_dir_raw, &name);
-                let (dest_provider, dest_item_location) = resolve_location(LI::Raw(dest_raw.clone()))?;
-
-                // Check if destination already exists via provider metadata — reuse result for conflict info
-                let dest_meta_result = dest_provider.get_file_metadata(&dest_item_location).await;
-                let dest_exists = dest_meta_result.is_ok();
-
-                if dest_exists {
-                    let (action, custom_name) = if let Some(ref stored) = apply_to_all_action {
-                        (stored.clone(), None)
-                    } else {
-                        conflict_index += 1;
-                        let remaining = total_items.saturating_sub(completed + 1);
-                        // Build source info from provider metadata
-                        let source_meta = source_provider.get_file_metadata(&source_location).await;
-                        let source_info = match source_meta {
-                            Ok(meta) => ConflictFileInfo {
-                                name: meta.name.clone(),
-                                path: source_location.raw().to_string(),
-                                size: meta.size,
-                                modified: meta.modified.to_rfc3339(),
-                                is_directory: meta.is_directory,
-                                extension: meta.extension.clone(),
-                            },
-                            Err(_) => ConflictFileInfo {
-                                name: name.clone(),
-                                path: source_location.raw().to_string(),
-                                size: 0,
-                                modified: String::new(),
-                                is_directory: false,
-                                extension: Path::new(&name).extension().and_then(|e| e.to_str()).map(|s| s.to_string()),
-                            },
-                        };
-                        // Reuse the metadata we already fetched for existence check
-                        let dest_info = match dest_meta_result {
-                            Ok(ref meta) => ConflictFileInfo {
-                                name: meta.name.clone(),
-                                path: dest_raw.clone(),
-                                size: meta.size,
-                                modified: meta.modified.to_rfc3339(),
-                                is_directory: meta.is_directory,
-                                extension: meta.extension.clone(),
-                            },
-                            Err(_) => ConflictFileInfo {
-                                name: name.clone(),
-                                path: dest_raw.clone(),
-                                size: 0,
-                                modified: String::new(),
-                                is_directory: false,
-                                extension: Path::new(&name).extension().and_then(|e| e.to_str()).map(|s| s.to_string()),
-                            },
-                        };
-                        match ask_user_about_conflict(
-                            &app, source_info, dest_info,
-                            conflict_index, remaining, operation_str,
-                        ).await {
-                            Ok(res) => {
-                                let a = res.action.clone();
-                                let cn = res.custom_name.clone();
-                                if res.apply_to_all { apply_to_all_action = Some(res.action); }
-                                (a, cn)
-                            }
-                            Err(e) if e == "CONFLICT_CANCELLED" => {
-                                cancelled = true;
-                                skipped_count += 1;
-                                completed += 1;
-                                emit_clipboard_progress_item(&app, None, completed, total_items, None);
-                                continue;
-                            }
-                            Err(e) => return Err(e),
-                        }
-                    };
-                    match action {
-                        ConflictAction::Skip => Ok(None),
-                        ConflictAction::Replace => {
-                            // Guard: don't delete+copy if source and dest are the same location
-                            if source_location.raw() == dest_item_location.raw() {
-                                Ok(Some(dest_raw))
-                            } else {
-                                let _ = dest_provider.delete(&dest_item_location).await;
-                                let op = if is_cut {
-                                    source_provider.move_item(&source_location, &dest_item_location).await
-                                } else {
-                                    source_provider.copy(&source_location, &dest_item_location).await
-                                };
-                                op.map(|()| Some(dest_raw))
-                            }
-                        }
-                        // Merge not supported for remote providers — fall back to KeepBoth
-                        ConflictAction::Merge | ConflictAction::KeepBoth => {
-                            let stem = Path::new(&name).file_stem().and_then(|s| s.to_str()).unwrap_or(&name);
-                            let ext = Path::new(&name).extension().and_then(|e| e.to_str());
-                            let mut resolved: Option<String> = None;
-                            for i in 2..1000usize {
-                                let candidate_name = if let Some(e) = ext {
-                                    format!("{stem} ({i}).{e}")
-                                } else {
-                                    format!("{stem} ({i})")
-                                };
-                                let candidate_raw = join_dest_raw(&dest_scheme, &dest_dir_raw, &candidate_name);
-                                let (_, candidate_loc) = resolve_location(LI::Raw(candidate_raw.clone()))?;
-                                if dest_provider.get_file_metadata(&candidate_loc).await.is_err() {
-                                    let op = if is_cut {
-                                        source_provider.move_item(&source_location, &candidate_loc).await
-                                    } else {
-                                        source_provider.copy(&source_location, &candidate_loc).await
-                                    };
-                                    op?;
-                                    resolved = Some(candidate_raw);
-                                    break;
+                                Err(e) if e == "CONFLICT_CANCELLED" => {
+                                    cancelled = true;
+                                    skipped_count += 1;
+                                    completed += 1;
+                                    emit_clipboard_progress_item(
+                                        &app,
+                                        None,
+                                        completed,
+                                        total_items,
+                                        None,
+                                    );
+                                    continue;
                                 }
+                                Err(e) => return Err(e),
                             }
-                            match resolved {
-                                Some(path) => Ok(Some(path)),
-                                None => Err("Unable to allocate unique destination name after 999 attempts".to_string()),
-                            }
-                        }
-                        ConflictAction::Rename => {
-                            let raw_name = custom_name.ok_or("Rename requires a custom name")?;
-                            let safe_name = sanitize_conflict_name(&raw_name)?;
-                            let renamed_raw = join_dest_raw(&dest_scheme, &dest_dir_raw, &safe_name);
-                            let (rp, renamed_location) = resolve_location(LI::Raw(renamed_raw.clone()))?;
-                            // Check if the renamed target already exists
-                            if rp.get_file_metadata(&renamed_location).await.is_ok() {
-                                return Err(format!("A file named '{safe_name}' already exists"));
-                            }
-                            let op = if is_cut {
-                                source_provider.move_item(&source_location, &renamed_location).await
-                            } else {
-                                source_provider.copy(&source_location, &renamed_location).await
-                            };
-                            op.map(|()| Some(renamed_raw))
-                        }
-                    }
-                } else {
-                    let op = if is_cut {
-                        source_provider.move_item(&source_location, &dest_item_location).await
+                        };
+
+                        execute_local_conflict_action(
+                            &action,
+                            custom_name.as_deref(),
+                            &source_path,
+                            dest_dir,
+                            &name,
+                            is_cut,
+                            source_provider.as_ref(),
+                            &source_location,
+                        )
+                        .await
                     } else {
-                        source_provider.copy(&source_location, &dest_item_location).await
-                    };
-                    op.map(|()| Some(dest_raw))
+                        // No conflict — proceed normally
+                        let dest_raw = candidate.to_string_lossy().to_string();
+                        let (_, dest_item_location) = resolve_location(LI::Raw(dest_raw.clone()))?;
+                        if is_cut {
+                            source_provider
+                                .move_item(&source_location, &dest_item_location)
+                                .await?;
+                        } else {
+                            source_provider
+                                .copy(&source_location, &dest_item_location)
+                                .await?;
+                        }
+                        Ok(Some(dest_raw))
+                    }
                 }
-            }
-            ("file", "gdrive") => {
-                let email = dest_location
-                    .authority()
-                    .ok_or_else(|| "Google Drive destination missing account".to_string())?;
-                let folder_id = get_folder_id_by_path(email, dest_location.path()).await?;
-                let local_path = PathBuf::from(source_location.to_path_string());
-                if !local_path.exists() || !local_path.is_file() {
-                    Ok(None)
-                } else {
-                    upload_file_to_gdrive(email, &local_path, &folder_id, &name).await?;
+                (src, dst) if src == dst => {
                     let dest_raw = join_dest_raw(&dest_scheme, &dest_dir_raw, &name);
-                    if is_cut {
-                        if let Err(e) = fs::remove_file(&local_path) {
-                            last_error = Some(format!("Uploaded but failed to delete source: {e}"));
-                        }
-                    }
-                    Ok(Some(dest_raw))
-                }
-            }
-            ("gdrive", "file") => {
-                let Some(dest_dir) = dest_dir_path.as_ref() else {
-                    return Err("Local destination directory is required".to_string());
-                };
-                let email = source_location
-                    .authority()
-                    .ok_or_else(|| "Google Drive source missing account".to_string())?;
-                let file_id = get_file_id_by_path(email, source_location.path()).await?;
-                let temp_path = download_file_to_temp(email, &file_id, &name).await?;
+                    let (dest_provider, dest_item_location) =
+                        resolve_location(LI::Raw(dest_raw.clone()))?;
 
-                let candidate = dest_dir.join(&name);
-                let op_result = if candidate.exists() {
-                    // Conflict
-                    let (action, custom_name) = if let Some(ref stored) = apply_to_all_action {
-                        (stored.clone(), None)
-                    } else {
-                        conflict_index += 1;
-                        let remaining = total_items.saturating_sub(completed + 1);
-                        let mut source_info = build_local_conflict_info(Path::new(&temp_path))?;
-                        // Override temp filename/path with real Google Drive name
-                        source_info.name = name.clone();
-                        source_info.path = source_location.raw().to_string();
-                        let dest_info = build_local_conflict_info(&candidate)?;
-                        match ask_user_about_conflict(
-                            &app, source_info, dest_info,
-                            conflict_index, remaining, operation_str,
-                        ).await {
-                            Ok(res) => {
-                                let a = res.action.clone();
-                                let cn = res.custom_name.clone();
-                                if res.apply_to_all { apply_to_all_action = Some(res.action); }
-                                (a, cn)
+                    // Check if destination already exists via provider metadata — reuse result for conflict info
+                    let dest_meta_result =
+                        dest_provider.get_file_metadata(&dest_item_location).await;
+                    let dest_exists = dest_meta_result.is_ok();
+
+                    if dest_exists {
+                        let (action, custom_name) = if let Some(ref stored) = apply_to_all_action {
+                            (stored.clone(), None)
+                        } else {
+                            conflict_index += 1;
+                            let remaining = total_items.saturating_sub(completed + 1);
+                            // Build source info from provider metadata
+                            let source_meta =
+                                source_provider.get_file_metadata(&source_location).await;
+                            let source_info = match source_meta {
+                                Ok(meta) => ConflictFileInfo {
+                                    name: meta.name.clone(),
+                                    path: source_location.raw().to_string(),
+                                    size: meta.size,
+                                    modified: meta.modified.to_rfc3339(),
+                                    is_directory: meta.is_directory,
+                                    extension: meta.extension.clone(),
+                                },
+                                Err(_) => ConflictFileInfo {
+                                    name: name.clone(),
+                                    path: source_location.raw().to_string(),
+                                    size: 0,
+                                    modified: String::new(),
+                                    is_directory: false,
+                                    extension: Path::new(&name)
+                                        .extension()
+                                        .and_then(|e| e.to_str())
+                                        .map(|s| s.to_string()),
+                                },
+                            };
+                            // Reuse the metadata we already fetched for existence check
+                            let dest_info = match dest_meta_result {
+                                Ok(ref meta) => ConflictFileInfo {
+                                    name: meta.name.clone(),
+                                    path: dest_raw.clone(),
+                                    size: meta.size,
+                                    modified: meta.modified.to_rfc3339(),
+                                    is_directory: meta.is_directory,
+                                    extension: meta.extension.clone(),
+                                },
+                                Err(_) => ConflictFileInfo {
+                                    name: name.clone(),
+                                    path: dest_raw.clone(),
+                                    size: 0,
+                                    modified: String::new(),
+                                    is_directory: false,
+                                    extension: Path::new(&name)
+                                        .extension()
+                                        .and_then(|e| e.to_str())
+                                        .map(|s| s.to_string()),
+                                },
+                            };
+                            match ask_user_about_conflict(
+                                &app,
+                                source_info,
+                                dest_info,
+                                conflict_index,
+                                remaining,
+                                operation_str,
+                            )
+                            .await
+                            {
+                                Ok(res) => {
+                                    let a = res.action.clone();
+                                    let cn = res.custom_name.clone();
+                                    if res.apply_to_all {
+                                        apply_to_all_action = Some(res.action);
+                                    }
+                                    (a, cn)
+                                }
+                                Err(e) if e == "CONFLICT_CANCELLED" => {
+                                    cancelled = true;
+                                    skipped_count += 1;
+                                    completed += 1;
+                                    emit_clipboard_progress_item(
+                                        &app,
+                                        None,
+                                        completed,
+                                        total_items,
+                                        None,
+                                    );
+                                    continue;
+                                }
+                                Err(e) => return Err(e),
                             }
-                            Err(e) if e == "CONFLICT_CANCELLED" => {
+                        };
+                        match action {
+                            ConflictAction::Skip => Ok(None),
+                            ConflictAction::Replace => {
+                                // Guard: don't delete+copy if source and dest are the same location
+                                if source_location.raw() == dest_item_location.raw() {
+                                    Ok(Some(dest_raw))
+                                } else {
+                                    let _ = dest_provider.delete(&dest_item_location).await;
+                                    let op = if is_cut {
+                                        source_provider
+                                            .move_item(&source_location, &dest_item_location)
+                                            .await
+                                    } else {
+                                        source_provider
+                                            .copy(&source_location, &dest_item_location)
+                                            .await
+                                    };
+                                    op.map(|()| Some(dest_raw))
+                                }
+                            }
+                            // Merge not supported for remote providers — fall back to KeepBoth
+                            ConflictAction::Merge | ConflictAction::KeepBoth => {
+                                let stem = Path::new(&name)
+                                    .file_stem()
+                                    .and_then(|s| s.to_str())
+                                    .unwrap_or(&name);
+                                let ext = Path::new(&name).extension().and_then(|e| e.to_str());
+                                let mut resolved: Option<String> = None;
+                                for i in 2..1000usize {
+                                    let candidate_name = if let Some(e) = ext {
+                                        format!("{stem} ({i}).{e}")
+                                    } else {
+                                        format!("{stem} ({i})")
+                                    };
+                                    let candidate_raw =
+                                        join_dest_raw(&dest_scheme, &dest_dir_raw, &candidate_name);
+                                    let (_, candidate_loc) =
+                                        resolve_location(LI::Raw(candidate_raw.clone()))?;
+                                    if dest_provider
+                                        .get_file_metadata(&candidate_loc)
+                                        .await
+                                        .is_err()
+                                    {
+                                        let op = if is_cut {
+                                            source_provider
+                                                .move_item(&source_location, &candidate_loc)
+                                                .await
+                                        } else {
+                                            source_provider
+                                                .copy(&source_location, &candidate_loc)
+                                                .await
+                                        };
+                                        op?;
+                                        resolved = Some(candidate_raw);
+                                        break;
+                                    }
+                                }
+                                match resolved {
+                                Some(path) => Ok(Some(path)),
+                                None => Err(
+                                    "Unable to allocate unique destination name after 999 attempts"
+                                        .to_string(),
+                                ),
+                            }
+                            }
+                            ConflictAction::Rename => {
+                                let raw_name =
+                                    custom_name.ok_or("Rename requires a custom name")?;
+                                let safe_name = sanitize_conflict_name(&raw_name)?;
+                                let renamed_raw =
+                                    join_dest_raw(&dest_scheme, &dest_dir_raw, &safe_name);
+                                let (rp, renamed_location) =
+                                    resolve_location(LI::Raw(renamed_raw.clone()))?;
+                                // Check if the renamed target already exists
+                                if rp.get_file_metadata(&renamed_location).await.is_ok() {
+                                    return Err(format!(
+                                        "A file named '{safe_name}' already exists"
+                                    ));
+                                }
+                                let op = if is_cut {
+                                    source_provider
+                                        .move_item(&source_location, &renamed_location)
+                                        .await
+                                } else {
+                                    source_provider
+                                        .copy(&source_location, &renamed_location)
+                                        .await
+                                };
+                                op.map(|()| Some(renamed_raw))
+                            }
+                        }
+                    } else {
+                        let op = if is_cut {
+                            source_provider
+                                .move_item(&source_location, &dest_item_location)
+                                .await
+                        } else {
+                            source_provider
+                                .copy(&source_location, &dest_item_location)
+                                .await
+                        };
+                        op.map(|()| Some(dest_raw))
+                    }
+                }
+                ("file", "gdrive") => {
+                    let email = dest_location
+                        .authority()
+                        .ok_or_else(|| "Google Drive destination missing account".to_string())?;
+                    let folder_id = get_folder_id_by_path(email, dest_location.path()).await?;
+                    let local_path = PathBuf::from(source_location.to_path_string());
+                    if !local_path.exists() || !local_path.is_file() {
+                        Ok(None)
+                    } else {
+                        upload_file_to_gdrive(email, &local_path, &folder_id, &name).await?;
+                        let dest_raw = join_dest_raw(&dest_scheme, &dest_dir_raw, &name);
+                        if is_cut {
+                            if let Err(e) = fs::remove_file(&local_path) {
+                                last_error =
+                                    Some(format!("Uploaded but failed to delete source: {e}"));
+                            }
+                        }
+                        Ok(Some(dest_raw))
+                    }
+                }
+                ("gdrive", "file") => {
+                    let Some(dest_dir) = dest_dir_path.as_ref() else {
+                        return Err("Local destination directory is required".to_string());
+                    };
+                    let email = source_location
+                        .authority()
+                        .ok_or_else(|| "Google Drive source missing account".to_string())?;
+                    let file_id = get_file_id_by_path(email, source_location.path()).await?;
+                    let temp_path = download_file_to_temp(email, &file_id, &name).await?;
+
+                    let candidate = dest_dir.join(&name);
+                    let op_result = if candidate.exists() {
+                        // Conflict
+                        let (action, custom_name) = if let Some(ref stored) = apply_to_all_action {
+                            (stored.clone(), None)
+                        } else {
+                            conflict_index += 1;
+                            let remaining = total_items.saturating_sub(completed + 1);
+                            let mut source_info = build_local_conflict_info(Path::new(&temp_path))?;
+                            // Override temp filename/path with real Google Drive name
+                            source_info.name = name.clone();
+                            source_info.path = source_location.raw().to_string();
+                            let dest_info = build_local_conflict_info(&candidate)?;
+                            match ask_user_about_conflict(
+                                &app,
+                                source_info,
+                                dest_info,
+                                conflict_index,
+                                remaining,
+                                operation_str,
+                            )
+                            .await
+                            {
+                                Ok(res) => {
+                                    let a = res.action.clone();
+                                    let cn = res.custom_name.clone();
+                                    if res.apply_to_all {
+                                        apply_to_all_action = Some(res.action);
+                                    }
+                                    (a, cn)
+                                }
+                                Err(e) if e == "CONFLICT_CANCELLED" => {
+                                    let _ = fs::remove_file(&temp_path);
+                                    cancelled = true;
+                                    skipped_count += 1;
+                                    completed += 1;
+                                    emit_clipboard_progress_item(
+                                        &app,
+                                        None,
+                                        completed,
+                                        total_items,
+                                        None,
+                                    );
+                                    continue;
+                                }
+                                Err(e) => {
+                                    let _ = fs::remove_file(&temp_path);
+                                    return Err(e);
+                                }
+                            }
+                        };
+                        match action {
+                            ConflictAction::Skip => {
                                 let _ = fs::remove_file(&temp_path);
-                                cancelled = true;
                                 skipped_count += 1;
                                 completed += 1;
-                                emit_clipboard_progress_item(&app, None, completed, total_items, None);
+                                emit_clipboard_progress_item(
+                                    &app,
+                                    None,
+                                    completed,
+                                    total_items,
+                                    None,
+                                );
                                 continue;
                             }
-                            Err(e) => {
-                                let _ = fs::remove_file(&temp_path);
-                                return Err(e);
-                            }
-                        }
-                    };
-                    match action {
-                        ConflictAction::Skip => {
-                            let _ = fs::remove_file(&temp_path);
-                            skipped_count += 1;
-                            completed += 1;
-                            emit_clipboard_progress_item(&app, None, completed, total_items, None);
-                            continue;
-                        }
-                        ConflictAction::Replace => {
-                            delete_file_or_directory(&candidate)
-                                .and_then(|_| crate::fs_utils::copy_file_or_directory(Path::new(&temp_path), &candidate))
-                                .map(|_| Some(candidate.to_string_lossy().to_string()))
-                        }
-                        // Merge not supported for cross-provider — use KeepBoth
-                        ConflictAction::KeepBoth | ConflictAction::Merge => {
-                            allocate_unique_path(dest_dir.as_path(), &name)
-                                .and_then(|dest_path| {
-                                    crate::fs_utils::copy_file_or_directory(Path::new(&temp_path), &dest_path)
-                                        .map(|_| Some(dest_path.to_string_lossy().to_string()))
+                            ConflictAction::Replace => delete_file_or_directory(&candidate)
+                                .and_then(|_| {
+                                    crate::fs_utils::copy_file_or_directory(
+                                        Path::new(&temp_path),
+                                        &candidate,
+                                    )
                                 })
-                        }
-                        ConflictAction::Rename => {
-                            custom_name.as_deref()
+                                .map(|_| Some(candidate.to_string_lossy().to_string())),
+                            // Merge not supported for cross-provider — use KeepBoth
+                            ConflictAction::KeepBoth | ConflictAction::Merge => {
+                                allocate_unique_path(dest_dir.as_path(), &name).and_then(
+                                    |dest_path| {
+                                        crate::fs_utils::copy_file_or_directory(
+                                            Path::new(&temp_path),
+                                            &dest_path,
+                                        )
+                                        .map(|_| Some(dest_path.to_string_lossy().to_string()))
+                                    },
+                                )
+                            }
+                            ConflictAction::Rename => custom_name
+                                .as_deref()
                                 .ok_or_else(|| "Rename requires a custom name".to_string())
                                 .and_then(|raw_name| sanitize_conflict_name(raw_name))
                                 .and_then(|safe_name| {
@@ -2810,428 +2966,481 @@ pub async fn paste_items_to_location(
                                     if dest_path.exists() {
                                         Err(format!("A file named '{safe_name}' already exists"))
                                     } else {
-                                        crate::fs_utils::copy_file_or_directory(Path::new(&temp_path), &dest_path)
-                                            .map(|_| Some(dest_path.to_string_lossy().to_string()))
+                                        crate::fs_utils::copy_file_or_directory(
+                                            Path::new(&temp_path),
+                                            &dest_path,
+                                        )
+                                        .map(|_| Some(dest_path.to_string_lossy().to_string()))
                                     }
-                                })
+                                }),
                         }
-                    }
-                } else {
-                    crate::fs_utils::copy_file_or_directory(Path::new(&temp_path), &candidate)
-                        .map(|_| Some(candidate.to_string_lossy().to_string()))
-                };
-
-                // Ensure temp file is removed after copy/move logic
-                let _ = fs::remove_file(&temp_path);
-
-                match op_result {
-                    Ok(Some(out)) => {
-                        if is_cut {
-                             if let Err(e) = source_provider.delete(&source_location).await {
-                                 last_error = Some(format!("Moved but failed to delete source: {e}"));
-                             }
-                        }
-                        Ok(Some(out))
-                    }
-                    Ok(None) => Ok(None),
-                    Err(e) => Err(e),
-                }
-            }
-            #[cfg(not(target_os = "windows"))]
-            ("smb", "file") => {
-                let Some(dest_dir) = dest_dir_path.as_ref() else {
-                    return Err("Local destination directory is required".to_string());
-                };
-
-                let from_authority = source_location
-                    .authority()
-                    .ok_or_else(|| "SMB source missing server".to_string())?;
-                let (hostname, share, from_rel) =
-                    crate::locations::smb::parse_smb_path(from_authority, source_location.path())?;
-
-                let candidate = dest_dir.join(&name);
-                let resolved_dest: Result<PathBuf, String> = if candidate.exists() {
-                    let (action, custom_name) = if let Some(ref stored) = apply_to_all_action {
-                        (stored.clone(), None)
                     } else {
-                        conflict_index += 1;
-                        let remaining = total_items.saturating_sub(completed + 1);
-                        // We don't have local source info for SMB, so build dest info only
-                        let dest_info = build_local_conflict_info(&candidate)?;
-                        let source_info = ConflictFileInfo {
-                            name: name.clone(),
-                            path: source_location.raw().to_string(),
-                            size: 0, // SMB file size not easily available here
-                            modified: String::new(),
-                            is_directory: false,
-                            extension: Path::new(&name).extension().and_then(|e| e.to_str()).map(|s| s.to_string()),
-                        };
-                        match ask_user_about_conflict(
-                            &app, source_info, dest_info,
-                            conflict_index, remaining, operation_str,
-                        ).await {
-                            Ok(res) => {
-                                let a = res.action.clone();
-                                let cn = res.custom_name.clone();
-                                if res.apply_to_all { apply_to_all_action = Some(res.action); }
-                                (a, cn)
+                        crate::fs_utils::copy_file_or_directory(Path::new(&temp_path), &candidate)
+                            .map(|_| Some(candidate.to_string_lossy().to_string()))
+                    };
+
+                    // Ensure temp file is removed after copy/move logic
+                    let _ = fs::remove_file(&temp_path);
+
+                    match op_result {
+                        Ok(Some(out)) => {
+                            if is_cut {
+                                if let Err(e) = source_provider.delete(&source_location).await {
+                                    last_error =
+                                        Some(format!("Moved but failed to delete source: {e}"));
+                                }
                             }
-                            Err(e) if e == "CONFLICT_CANCELLED" => {
-                                cancelled = true;
+                            Ok(Some(out))
+                        }
+                        Ok(None) => Ok(None),
+                        Err(e) => Err(e),
+                    }
+                }
+                #[cfg(not(target_os = "windows"))]
+                ("smb", "file") => {
+                    let Some(dest_dir) = dest_dir_path.as_ref() else {
+                        return Err("Local destination directory is required".to_string());
+                    };
+
+                    let from_authority = source_location
+                        .authority()
+                        .ok_or_else(|| "SMB source missing server".to_string())?;
+                    let (hostname, share, from_rel) = crate::locations::smb::parse_smb_path(
+                        from_authority,
+                        source_location.path(),
+                    )?;
+
+                    let candidate = dest_dir.join(&name);
+                    let resolved_dest: Result<PathBuf, String> = if candidate.exists() {
+                        let (action, custom_name) = if let Some(ref stored) = apply_to_all_action {
+                            (stored.clone(), None)
+                        } else {
+                            conflict_index += 1;
+                            let remaining = total_items.saturating_sub(completed + 1);
+                            // We don't have local source info for SMB, so build dest info only
+                            let dest_info = build_local_conflict_info(&candidate)?;
+                            let source_info = ConflictFileInfo {
+                                name: name.clone(),
+                                path: source_location.raw().to_string(),
+                                size: 0, // SMB file size not easily available here
+                                modified: String::new(),
+                                is_directory: false,
+                                extension: Path::new(&name)
+                                    .extension()
+                                    .and_then(|e| e.to_str())
+                                    .map(|s| s.to_string()),
+                            };
+                            match ask_user_about_conflict(
+                                &app,
+                                source_info,
+                                dest_info,
+                                conflict_index,
+                                remaining,
+                                operation_str,
+                            )
+                            .await
+                            {
+                                Ok(res) => {
+                                    let a = res.action.clone();
+                                    let cn = res.custom_name.clone();
+                                    if res.apply_to_all {
+                                        apply_to_all_action = Some(res.action);
+                                    }
+                                    (a, cn)
+                                }
+                                Err(e) if e == "CONFLICT_CANCELLED" => {
+                                    cancelled = true;
+                                    skipped_count += 1;
+                                    completed += 1;
+                                    emit_clipboard_progress_item(
+                                        &app,
+                                        None,
+                                        completed,
+                                        total_items,
+                                        None,
+                                    );
+                                    continue;
+                                }
+                                Err(e) => return Err(e),
+                            }
+                        };
+                        match action {
+                            ConflictAction::Skip => {
                                 skipped_count += 1;
                                 completed += 1;
-                                emit_clipboard_progress_item(&app, None, completed, total_items, None);
+                                emit_clipboard_progress_item(
+                                    &app,
+                                    None,
+                                    completed,
+                                    total_items,
+                                    None,
+                                );
                                 continue;
                             }
-                            Err(e) => return Err(e),
-                        }
-                    };
-                    match action {
-                        ConflictAction::Skip => { skipped_count += 1; completed += 1; emit_clipboard_progress_item(&app, None, completed, total_items, None); continue; }
-                        ConflictAction::Replace => {
-                            delete_file_or_directory(&candidate)?;
-                            Ok(candidate)
-                        }
-                        // Merge not supported for cross-provider — use KeepBoth
-                        ConflictAction::KeepBoth | ConflictAction::Merge => Ok(allocate_unique_path(dest_dir.as_path(), &name)?),
-                        ConflictAction::Rename => {
-                            let raw_name = custom_name.as_deref().ok_or("Rename requires a custom name")?;
-                            let safe_name = sanitize_conflict_name(raw_name)?;
-                            let dest_path = dest_dir.join(&safe_name);
-                            if dest_path.exists() {
-                                Err(format!("A file named '{safe_name}' already exists"))
-                            } else {
-                                Ok(dest_path)
+                            ConflictAction::Replace => {
+                                delete_file_or_directory(&candidate)?;
+                                Ok(candidate)
+                            }
+                            // Merge not supported for cross-provider — use KeepBoth
+                            ConflictAction::KeepBoth | ConflictAction::Merge => {
+                                Ok(allocate_unique_path(dest_dir.as_path(), &name)?)
+                            }
+                            ConflictAction::Rename => {
+                                let raw_name = custom_name
+                                    .as_deref()
+                                    .ok_or("Rename requires a custom name")?;
+                                let safe_name = sanitize_conflict_name(raw_name)?;
+                                let dest_path = dest_dir.join(&safe_name);
+                                if dest_path.exists() {
+                                    Err(format!("A file named '{safe_name}' already exists"))
+                                } else {
+                                    Ok(dest_path)
+                                }
                             }
                         }
-                    }
-                } else {
-                    Ok(candidate)
-                };
-                let dest_path = match resolved_dest {
-                    Ok(p) => p,
-                    Err(e) => {
-                        // Item-level error — record and continue
-                        Err(e)?
-                    }
-                };
-                let dest_path_string = dest_path.to_string_lossy().to_string();
-                let dest_path_clone = dest_path.clone();
-                let hostname_clone = hostname.clone();
-                let share_clone = share.clone();
-                let from_rel_clone = from_rel.clone();
+                    } else {
+                        Ok(candidate)
+                    };
+                    let dest_path = match resolved_dest {
+                        Ok(p) => p,
+                        Err(e) => {
+                            // Item-level error — record and continue
+                            Err(e)?
+                        }
+                    };
+                    let dest_path_string = dest_path.to_string_lossy().to_string();
+                    let dest_path_clone = dest_path.clone();
+                    let hostname_clone = hostname.clone();
+                    let share_clone = share.clone();
+                    let from_rel_clone = from_rel.clone();
 
-                tokio::task::spawn_blocking(move || -> Result<(), String> {
-                    crate::locations::smb::download_file_from_smb(
-                        &hostname_clone,
-                        &share_clone,
-                        &from_rel_clone,
-                        &dest_path_clone,
-                    )
-                })
-                .await
-                .map_err(|e| format!("Task failed: {e}"))??;
-
-                if is_cut {
-                    let _ = source_provider.delete(&source_location).await;
-                }
-                Ok(Some(dest_path_string))
-            }
-            #[cfg(not(target_os = "windows"))]
-            ("file", "smb") => {
-                let dest_authority = dest_location
-                    .authority()
-                    .ok_or_else(|| "SMB destination missing server".to_string())?;
-                let (hostname, share, dir_path) =
-                    crate::locations::smb::parse_smb_path(dest_authority, dest_location.path())?;
-
-                let local_path = PathBuf::from(source_location.to_path_string());
-                if !local_path.exists() || !local_path.is_file() {
-                    Ok(None)
-                } else {
-                    let name_clone = name.clone();
-                    let local_path_for_task = local_path.clone();
-
-                    let uploaded_name = tokio::task::spawn_blocking(move || -> Result<String, String> {
-                        crate::locations::smb::upload_file_to_smb(
-                            &local_path_for_task,
-                            &hostname,
-                            &share,
-                            &dir_path,
-                            &name_clone,
+                    tokio::task::spawn_blocking(move || -> Result<(), String> {
+                        crate::locations::smb::download_file_from_smb(
+                            &hostname_clone,
+                            &share_clone,
+                            &from_rel_clone,
+                            &dest_path_clone,
                         )
                     })
                     .await
                     .map_err(|e| format!("Task failed: {e}"))??;
 
+                    if is_cut {
+                        let _ = source_provider.delete(&source_location).await;
+                    }
+                    Ok(Some(dest_path_string))
+                }
+                #[cfg(not(target_os = "windows"))]
+                ("file", "smb") => {
+                    let dest_authority = dest_location
+                        .authority()
+                        .ok_or_else(|| "SMB destination missing server".to_string())?;
+                    let (hostname, share, dir_path) = crate::locations::smb::parse_smb_path(
+                        dest_authority,
+                        dest_location.path(),
+                    )?;
+
+                    let local_path = PathBuf::from(source_location.to_path_string());
+                    if !local_path.exists() || !local_path.is_file() {
+                        Ok(None)
+                    } else {
+                        let name_clone = name.clone();
+                        let local_path_for_task = local_path.clone();
+
+                        let uploaded_name =
+                            tokio::task::spawn_blocking(move || -> Result<String, String> {
+                                crate::locations::smb::upload_file_to_smb(
+                                    &local_path_for_task,
+                                    &hostname,
+                                    &share,
+                                    &dir_path,
+                                    &name_clone,
+                                )
+                            })
+                            .await
+                            .map_err(|e| format!("Task failed: {e}"))??;
+
+                        let dest_raw = join_dest_raw(&dest_scheme, &dest_dir_raw, &uploaded_name);
+                        if is_cut {
+                            if let Err(e) = fs::remove_file(&local_path) {
+                                last_error =
+                                    Some(format!("Uploaded but failed to delete source: {e}"));
+                            }
+                        }
+                        Ok(Some(dest_raw))
+                    }
+                }
+                #[cfg(target_os = "windows")]
+                ("file", "smb") => Err("SMB support is not available on Windows".to_string()),
+                #[cfg(not(target_os = "windows"))]
+                ("gdrive", "smb") => {
+                    // Download from Google Drive to temp, then upload to SMB
+                    log::debug!("gdrive→smb: starting for name={}", name);
+                    let email = source_location
+                        .authority()
+                        .ok_or_else(|| "Google Drive source missing account".to_string())?;
+                    let file_id = get_file_id_by_path(email, source_location.path()).await?;
+                    let temp_path = download_file_to_temp(email, &file_id, &name).await?;
+                    log::debug!("gdrive→smb: downloaded to temp_path={}", temp_path);
+                    let local_path = PathBuf::from(&temp_path);
+
+                    let dest_authority = dest_location
+                        .authority()
+                        .ok_or_else(|| "SMB destination missing server".to_string())?;
+                    let (hostname, share, dir_path) = crate::locations::smb::parse_smb_path(
+                        dest_authority,
+                        dest_location.path(),
+                    )?;
+
+                    let name_clone = name.clone();
+                    let local_path_clone = local_path.clone();
+                    let uploaded_name =
+                        tokio::task::spawn_blocking(move || -> Result<String, String> {
+                            crate::locations::smb::upload_file_to_smb(
+                                &local_path_clone,
+                                &hostname,
+                                &share,
+                                &dir_path,
+                                &name_clone,
+                            )
+                        })
+                        .await
+                        .map_err(|e| format!("Task failed: {e}"));
+
+                    // Clean up temp file regardless of upload outcome
+                    let _ = fs::remove_file(&local_path);
+
+                    let uploaded_name = uploaded_name??;
                     let dest_raw = join_dest_raw(&dest_scheme, &dest_dir_raw, &uploaded_name);
                     if is_cut {
-                        if let Err(e) = fs::remove_file(&local_path) {
-                            last_error = Some(format!("Uploaded but failed to delete source: {e}"));
-                        }
+                        let _ = source_provider.delete(&source_location).await;
                     }
                     Ok(Some(dest_raw))
                 }
-            }
-            #[cfg(target_os = "windows")]
-            ("file", "smb") => Err("SMB support is not available on Windows".to_string()),
-            #[cfg(not(target_os = "windows"))]
-            ("gdrive", "smb") => {
-                // Download from Google Drive to temp, then upload to SMB
-                log::debug!("gdrive→smb: starting for name={}", name);
-                let email = source_location
-                    .authority()
-                    .ok_or_else(|| "Google Drive source missing account".to_string())?;
-                let file_id = get_file_id_by_path(email, source_location.path()).await?;
-                let temp_path = download_file_to_temp(email, &file_id, &name).await?;
-                log::debug!("gdrive→smb: downloaded to temp_path={}", temp_path);
-                let local_path = PathBuf::from(&temp_path);
+                #[cfg(target_os = "windows")]
+                ("gdrive", "smb") => Err("SMB support is not available on Windows".to_string()),
+                // SFTP cross-provider paste
+                ("sftp", "file") => {
+                    let Some(dest_dir) = dest_dir_path.as_ref() else {
+                        return Err("Local destination directory is required".to_string());
+                    };
 
-                let dest_authority = dest_location
-                    .authority()
-                    .ok_or_else(|| "SMB destination missing server".to_string())?;
-                let (hostname, share, dir_path) =
-                    crate::locations::smb::parse_smb_path(dest_authority, dest_location.path())?;
+                    let (_, sftp_host, sftp_port, sftp_remote_path) =
+                        crate::locations::sftp::parse_sftp_url(source_location.raw())?;
 
-                let name_clone = name.clone();
-                let local_path_clone = local_path.clone();
-                let uploaded_name = tokio::task::spawn_blocking(move || -> Result<String, String> {
-                    crate::locations::smb::upload_file_to_smb(
-                        &local_path_clone,
-                        &hostname,
-                        &share,
-                        &dir_path,
-                        &name_clone,
+                    let dest_path = allocate_unique_path(dest_dir.as_path(), &name)?;
+                    let dest_path_string = dest_path.to_string_lossy().to_string();
+
+                    crate::locations::sftp::download_file_from_sftp(
+                        &sftp_host,
+                        sftp_port,
+                        &sftp_remote_path,
+                        &dest_path,
                     )
-                })
-                .await
-                .map_err(|e| format!("Task failed: {e}"));
+                    .await?;
 
-                // Clean up temp file regardless of upload outcome
-                let _ = fs::remove_file(&local_path);
-
-                let uploaded_name = uploaded_name??;
-                let dest_raw = join_dest_raw(&dest_scheme, &dest_dir_raw, &uploaded_name);
-                if is_cut {
-                    let _ = source_provider.delete(&source_location).await;
+                    if is_cut {
+                        let _ = source_provider.delete(&source_location).await;
+                    }
+                    Ok(Some(dest_path_string))
                 }
-                Ok(Some(dest_raw))
-            }
-            #[cfg(target_os = "windows")]
-            ("gdrive", "smb") => Err("SMB support is not available on Windows".to_string()),
-            // SFTP cross-provider paste
-            ("sftp", "file") => {
-                let Some(dest_dir) = dest_dir_path.as_ref() else {
-                    return Err("Local destination directory is required".to_string());
-                };
+                ("file", "sftp") => {
+                    let (_, sftp_host, sftp_port, sftp_dir_path) =
+                        crate::locations::sftp::parse_sftp_url(dest_location.raw())?;
 
-                let (_, sftp_host, sftp_port, sftp_remote_path) =
-                    crate::locations::sftp::parse_sftp_url(source_location.raw())?;
+                    let local_path = PathBuf::from(source_location.to_path_string());
+                    if !local_path.exists() || !local_path.is_file() {
+                        Ok(None)
+                    } else {
+                        let uploaded_name = crate::locations::sftp::upload_file_to_sftp(
+                            &local_path,
+                            &sftp_host,
+                            sftp_port,
+                            &sftp_dir_path,
+                            &name,
+                        )
+                        .await?;
 
-                let dest_path = allocate_unique_path(dest_dir.as_path(), &name)?;
-                let dest_path_string = dest_path.to_string_lossy().to_string();
-
-                crate::locations::sftp::download_file_from_sftp(
-                    &sftp_host,
-                    sftp_port,
-                    &sftp_remote_path,
-                    &dest_path,
-                )
-                .await?;
-
-                if is_cut {
-                    let _ = source_provider.delete(&source_location).await;
+                        let dest_raw = join_dest_raw(&dest_scheme, &dest_dir_raw, &uploaded_name);
+                        if is_cut {
+                            if let Err(e) = fs::remove_file(&local_path) {
+                                last_error =
+                                    Some(format!("Uploaded but failed to delete source: {e}"));
+                            }
+                        }
+                        Ok(Some(dest_raw))
+                    }
                 }
-                Ok(Some(dest_path_string))
-            }
-            ("file", "sftp") => {
-                let (_, sftp_host, sftp_port, sftp_dir_path) =
-                    crate::locations::sftp::parse_sftp_url(dest_location.raw())?;
+                ("gdrive", "sftp") => {
+                    let email = source_location
+                        .authority()
+                        .ok_or_else(|| "Google Drive source missing account".to_string())?;
+                    let file_id = get_file_id_by_path(email, source_location.path()).await?;
+                    let temp_path_str = download_file_to_temp(email, &file_id, &name).await?;
+                    let local_path = PathBuf::from(&temp_path_str);
 
-                let local_path = PathBuf::from(source_location.to_path_string());
-                if !local_path.exists() || !local_path.is_file() {
-                    Ok(None)
-                } else {
-                    let uploaded_name = crate::locations::sftp::upload_file_to_sftp(
+                    let (_, sftp_host, sftp_port, sftp_dir_path) =
+                        crate::locations::sftp::parse_sftp_url(dest_location.raw())?;
+
+                    let upload_result = crate::locations::sftp::upload_file_to_sftp(
                         &local_path,
                         &sftp_host,
                         sftp_port,
                         &sftp_dir_path,
                         &name,
                     )
-                    .await?;
+                    .await;
 
+                    let _ = fs::remove_file(&local_path);
+
+                    let uploaded_name = upload_result?;
                     let dest_raw = join_dest_raw(&dest_scheme, &dest_dir_raw, &uploaded_name);
                     if is_cut {
-                        if let Err(e) = fs::remove_file(&local_path) {
-                            last_error = Some(format!("Uploaded but failed to delete source: {e}"));
-                        }
+                        let _ = source_provider.delete(&source_location).await;
                     }
                     Ok(Some(dest_raw))
                 }
-            }
-            ("gdrive", "sftp") => {
-                let email = source_location
-                    .authority()
-                    .ok_or_else(|| "Google Drive source missing account".to_string())?;
-                let file_id = get_file_id_by_path(email, source_location.path()).await?;
-                let temp_path_str = download_file_to_temp(email, &file_id, &name).await?;
-                let local_path = PathBuf::from(&temp_path_str);
+                ("sftp", "gdrive") => {
+                    let (_, sftp_host, sftp_port, sftp_remote_path) =
+                        crate::locations::sftp::parse_sftp_url(source_location.raw())?;
 
-                let (_, sftp_host, sftp_port, sftp_dir_path) =
-                    crate::locations::sftp::parse_sftp_url(dest_location.raw())?;
+                    let temp_dir = std::env::temp_dir().join("marlin-sftp-paste");
+                    tokio::fs::create_dir_all(&temp_dir)
+                        .await
+                        .map_err(|e| format!("Failed to create temp dir: {e}"))?;
+                    let temp_path = temp_dir.join(format!("{}_{}", uuid::Uuid::new_v4(), name));
 
-                let upload_result = crate::locations::sftp::upload_file_to_sftp(
-                    &local_path,
-                    &sftp_host,
-                    sftp_port,
-                    &sftp_dir_path,
-                    &name,
-                )
-                .await;
-
-                let _ = fs::remove_file(&local_path);
-
-                let uploaded_name = upload_result?;
-                let dest_raw = join_dest_raw(&dest_scheme, &dest_dir_raw, &uploaded_name);
-                if is_cut {
-                    let _ = source_provider.delete(&source_location).await;
-                }
-                Ok(Some(dest_raw))
-            }
-            ("sftp", "gdrive") => {
-                let (_, sftp_host, sftp_port, sftp_remote_path) =
-                    crate::locations::sftp::parse_sftp_url(source_location.raw())?;
-
-                let temp_dir = std::env::temp_dir().join("marlin-sftp-paste");
-                tokio::fs::create_dir_all(&temp_dir)
-                    .await
-                    .map_err(|e| format!("Failed to create temp dir: {e}"))?;
-                let temp_path = temp_dir.join(format!("{}_{}", uuid::Uuid::new_v4(), name));
-
-                crate::locations::sftp::download_file_from_sftp(
-                    &sftp_host,
-                    sftp_port,
-                    &sftp_remote_path,
-                    &temp_path,
-                )
-                .await?;
-
-                let email = dest_location
-                    .authority()
-                    .ok_or_else(|| "Google Drive destination missing account".to_string())?;
-                let folder_id = get_folder_id_by_path(email, dest_location.path()).await?;
-                let upload_result = upload_file_to_gdrive(email, &temp_path, &folder_id, &name).await;
-
-                let _ = tokio::fs::remove_file(&temp_path).await;
-
-                upload_result?;
-                let dest_raw = join_dest_raw(&dest_scheme, &dest_dir_raw, &name);
-                if is_cut {
-                    let _ = source_provider.delete(&source_location).await;
-                }
-                Ok(Some(dest_raw))
-            }
-            #[cfg(not(target_os = "windows"))]
-            ("smb", "sftp") => {
-                let from_authority = source_location
-                    .authority()
-                    .ok_or_else(|| "SMB source missing server".to_string())?;
-                let (smb_host, smb_share, smb_path) =
-                    crate::locations::smb::parse_smb_path(from_authority, source_location.path())?;
-
-                let temp_dir = std::env::temp_dir().join("marlin-cross-paste");
-                tokio::fs::create_dir_all(&temp_dir)
-                    .await
-                    .map_err(|e| format!("Failed to create temp dir: {e}"))?;
-                let temp_path = temp_dir.join(format!("{}_{}", uuid::Uuid::new_v4(), name));
-
-                let temp_path_clone = temp_path.clone();
-                let smb_host_clone = smb_host.clone();
-                let smb_share_clone = smb_share.clone();
-                let smb_path_clone = smb_path.clone();
-                tokio::task::spawn_blocking(move || {
-                    crate::locations::smb::download_file_from_smb(
-                        &smb_host_clone,
-                        &smb_share_clone,
-                        &smb_path_clone,
-                        &temp_path_clone,
+                    crate::locations::sftp::download_file_from_sftp(
+                        &sftp_host,
+                        sftp_port,
+                        &sftp_remote_path,
+                        &temp_path,
                     )
-                })
-                .await
-                .map_err(|e| format!("Task failed: {e}"))??;
+                    .await?;
 
-                let (_, sftp_host, sftp_port, sftp_dir_path) =
-                    crate::locations::sftp::parse_sftp_url(dest_location.raw())?;
+                    let email = dest_location
+                        .authority()
+                        .ok_or_else(|| "Google Drive destination missing account".to_string())?;
+                    let folder_id = get_folder_id_by_path(email, dest_location.path()).await?;
+                    let upload_result =
+                        upload_file_to_gdrive(email, &temp_path, &folder_id, &name).await;
 
-                let upload_result = crate::locations::sftp::upload_file_to_sftp(
-                    &temp_path,
-                    &sftp_host,
-                    sftp_port,
-                    &sftp_dir_path,
-                    &name,
-                )
-                .await;
+                    let _ = tokio::fs::remove_file(&temp_path).await;
 
-                let _ = tokio::fs::remove_file(&temp_path).await;
-
-                let uploaded_name = upload_result?;
-                let dest_raw = join_dest_raw(&dest_scheme, &dest_dir_raw, &uploaded_name);
-                if is_cut {
-                    let _ = source_provider.delete(&source_location).await;
+                    upload_result?;
+                    let dest_raw = join_dest_raw(&dest_scheme, &dest_dir_raw, &name);
+                    if is_cut {
+                        let _ = source_provider.delete(&source_location).await;
+                    }
+                    Ok(Some(dest_raw))
                 }
-                Ok(Some(dest_raw))
-            }
-            #[cfg(not(target_os = "windows"))]
-            ("sftp", "smb") => {
-                let (_, sftp_host, sftp_port, sftp_remote_path) =
-                    crate::locations::sftp::parse_sftp_url(source_location.raw())?;
+                #[cfg(not(target_os = "windows"))]
+                ("smb", "sftp") => {
+                    let from_authority = source_location
+                        .authority()
+                        .ok_or_else(|| "SMB source missing server".to_string())?;
+                    let (smb_host, smb_share, smb_path) = crate::locations::smb::parse_smb_path(
+                        from_authority,
+                        source_location.path(),
+                    )?;
 
-                let temp_dir = std::env::temp_dir().join("marlin-cross-paste");
-                tokio::fs::create_dir_all(&temp_dir)
+                    let temp_dir = std::env::temp_dir().join("marlin-cross-paste");
+                    tokio::fs::create_dir_all(&temp_dir)
+                        .await
+                        .map_err(|e| format!("Failed to create temp dir: {e}"))?;
+                    let temp_path = temp_dir.join(format!("{}_{}", uuid::Uuid::new_v4(), name));
+
+                    let temp_path_clone = temp_path.clone();
+                    let smb_host_clone = smb_host.clone();
+                    let smb_share_clone = smb_share.clone();
+                    let smb_path_clone = smb_path.clone();
+                    tokio::task::spawn_blocking(move || {
+                        crate::locations::smb::download_file_from_smb(
+                            &smb_host_clone,
+                            &smb_share_clone,
+                            &smb_path_clone,
+                            &temp_path_clone,
+                        )
+                    })
                     .await
-                    .map_err(|e| format!("Failed to create temp dir: {e}"))?;
-                let temp_path = temp_dir.join(format!("{}_{}", uuid::Uuid::new_v4(), name));
+                    .map_err(|e| format!("Task failed: {e}"))??;
 
-                crate::locations::sftp::download_file_from_sftp(
-                    &sftp_host,
-                    sftp_port,
-                    &sftp_remote_path,
-                    &temp_path,
-                )
-                .await?;
+                    let (_, sftp_host, sftp_port, sftp_dir_path) =
+                        crate::locations::sftp::parse_sftp_url(dest_location.raw())?;
 
-                let dest_authority = dest_location
-                    .authority()
-                    .ok_or_else(|| "SMB destination missing server".to_string())?;
-                let (smb_host, smb_share, smb_dir_path) =
-                    crate::locations::smb::parse_smb_path(dest_authority, dest_location.path())?;
-
-                let name_clone = name.clone();
-                let temp_path_clone = temp_path.clone();
-                let upload_result = tokio::task::spawn_blocking(move || {
-                    crate::locations::smb::upload_file_to_smb(
-                        &temp_path_clone,
-                        &smb_host,
-                        &smb_share,
-                        &smb_dir_path,
-                        &name_clone,
+                    let upload_result = crate::locations::sftp::upload_file_to_sftp(
+                        &temp_path,
+                        &sftp_host,
+                        sftp_port,
+                        &sftp_dir_path,
+                        &name,
                     )
-                })
-                .await
-                .map_err(|e| format!("Task failed: {e}"));
+                    .await;
 
-                let _ = tokio::fs::remove_file(&temp_path).await;
+                    let _ = tokio::fs::remove_file(&temp_path).await;
 
-                let uploaded_name = upload_result??;
-                let dest_raw = join_dest_raw(&dest_scheme, &dest_dir_raw, &uploaded_name);
-                if is_cut {
-                    let _ = source_provider.delete(&source_location).await;
+                    let uploaded_name = upload_result?;
+                    let dest_raw = join_dest_raw(&dest_scheme, &dest_dir_raw, &uploaded_name);
+                    if is_cut {
+                        let _ = source_provider.delete(&source_location).await;
+                    }
+                    Ok(Some(dest_raw))
                 }
-                Ok(Some(dest_raw))
-            }
-            _ => Err("Pasting across providers is not supported for these locations yet".to_string()),
-        };
+                #[cfg(not(target_os = "windows"))]
+                ("sftp", "smb") => {
+                    let (_, sftp_host, sftp_port, sftp_remote_path) =
+                        crate::locations::sftp::parse_sftp_url(source_location.raw())?;
+
+                    let temp_dir = std::env::temp_dir().join("marlin-cross-paste");
+                    tokio::fs::create_dir_all(&temp_dir)
+                        .await
+                        .map_err(|e| format!("Failed to create temp dir: {e}"))?;
+                    let temp_path = temp_dir.join(format!("{}_{}", uuid::Uuid::new_v4(), name));
+
+                    crate::locations::sftp::download_file_from_sftp(
+                        &sftp_host,
+                        sftp_port,
+                        &sftp_remote_path,
+                        &temp_path,
+                    )
+                    .await?;
+
+                    let dest_authority = dest_location
+                        .authority()
+                        .ok_or_else(|| "SMB destination missing server".to_string())?;
+                    let (smb_host, smb_share, smb_dir_path) =
+                        crate::locations::smb::parse_smb_path(
+                            dest_authority,
+                            dest_location.path(),
+                        )?;
+
+                    let name_clone = name.clone();
+                    let temp_path_clone = temp_path.clone();
+                    let upload_result = tokio::task::spawn_blocking(move || {
+                        crate::locations::smb::upload_file_to_smb(
+                            &temp_path_clone,
+                            &smb_host,
+                            &smb_share,
+                            &smb_dir_path,
+                            &name_clone,
+                        )
+                    })
+                    .await
+                    .map_err(|e| format!("Task failed: {e}"));
+
+                    let _ = tokio::fs::remove_file(&temp_path).await;
+
+                    let uploaded_name = upload_result??;
+                    let dest_raw = join_dest_raw(&dest_scheme, &dest_dir_raw, &uploaded_name);
+                    if is_cut {
+                        let _ = source_provider.delete(&source_location).await;
+                    }
+                    Ok(Some(dest_raw))
+                }
+                _ => Err(
+                    "Pasting across providers is not supported for these locations yet".to_string(),
+                ),
+            };
 
         match result {
             Ok(Some(p)) => pasted_paths.push(p),
@@ -3243,13 +3452,7 @@ pub async fn paste_items_to_location(
         }
 
         completed += 1;
-        emit_clipboard_progress_item(
-            &app,
-            None,
-            completed,
-            total_items,
-            last_error.clone(),
-        );
+        emit_clipboard_progress_item(&app, None, completed, total_items, last_error.clone());
     }
 
     // Clean up: hide the conflict dialog if it was shown
@@ -3344,7 +3547,9 @@ pub async fn clipboard_paste_image_to_location(
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("Screenshot");
-        let ext = std::path::Path::new(&base_name).extension().and_then(|e| e.to_str());
+        let ext = std::path::Path::new(&base_name)
+            .extension()
+            .and_then(|e| e.to_str());
         for i in 1..1000usize {
             if i == 1 {
                 candidate = base_name.clone();
@@ -3363,7 +3568,8 @@ pub async fn clipboard_paste_image_to_location(
         std::fs::create_dir_all(&temp_dir)
             .map_err(|e| format!("Failed to create temp directory: {e}"))?;
         let temp_path = temp_dir.join(format!("gdrive_upload_{}", uuid::Uuid::new_v4()));
-        std::fs::write(&temp_path, &image_bytes).map_err(|e| format!("Failed to write temp file: {e}"))?;
+        std::fs::write(&temp_path, &image_bytes)
+            .map_err(|e| format!("Failed to write temp file: {e}"))?;
 
         upload_file_to_gdrive(email, &temp_path, &folder_id, &candidate).await?;
 
@@ -3440,8 +3646,15 @@ pub async fn clipboard_paste_image_to_location(
 
             let (stem, ext) = {
                 let p = std::path::Path::new(&base_name);
-                let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("Screenshot").to_string();
-                let ext = p.extension().and_then(|e| e.to_str()).map(|s| s.to_string());
+                let stem = p
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("Screenshot")
+                    .to_string();
+                let ext = p
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|s| s.to_string());
                 (stem, ext)
             };
 
@@ -3469,10 +3682,14 @@ pub async fn clipboard_paste_image_to_location(
                         let mut cursor = Cursor::new(&image_bytes[..]);
                         std::io::copy(&mut cursor, &mut dest_file)
                             .map_err(|e| format!("Failed to upload: {e}"))?;
-                        dest_file.flush().map_err(|e| format!("Failed to flush: {e}"))?;
+                        dest_file
+                            .flush()
+                            .map_err(|e| format!("Failed to flush: {e}"))?;
                         return Ok(candidate);
                     }
-                    Err(pavao::SmbError::Io(io)) if io.kind() == ErrorKind::AlreadyExists => continue,
+                    Err(pavao::SmbError::Io(io)) if io.kind() == ErrorKind::AlreadyExists => {
+                        continue
+                    }
                     Err(e) => return Err(format!("Failed to create destination: {e}")),
                 }
             }
@@ -3986,10 +4203,7 @@ fn numbered_name_variant(name: &str, index: usize) -> String {
         return name.to_string();
     }
     let path = Path::new(name);
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or(name);
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or(name);
     let ext = path.extension().and_then(|s| s.to_str());
     if let Some(ext) = ext {
         format!("{stem} ({index}).{ext}")
@@ -4034,13 +4248,8 @@ fn collect_local_zip_entries(
             });
 
         for entry in walker {
-            let entry = entry.map_err(|err| {
-                format!(
-                    "Failed to walk {}: {}",
-                    root.to_string_lossy(),
-                    err
-                )
-            })?;
+            let entry = entry
+                .map_err(|err| format!("Failed to walk {}: {}", root.to_string_lossy(), err))?;
 
             let file_type = entry.file_type();
             if file_type.is_symlink() {
@@ -4301,9 +4510,8 @@ fn write_zip_from_smb_entries(
     }
 
     for entry in entries {
-        let temp_path = crate::thumbnails::generators::smb::download_smb_file_sync(
-            &entry.source_path,
-        )?;
+        let temp_path =
+            crate::thumbnails::generators::smb::download_smb_file_sync(&entry.source_path)?;
 
         // Use a closure to ensure temp file cleanup on all paths
         let mut add_to_zip = || -> Result<(), String> {
@@ -4736,7 +4944,8 @@ pub async fn compress_to_zip(
                 }
                 sources.push(path);
             }
-            let strip_root = sources.len() == 1 && sources.first().map(|p| p.is_dir()).unwrap_or(false);
+            let strip_root =
+                sources.len() == 1 && sources.first().map(|p| p.is_dir()).unwrap_or(false);
 
             let final_path = allocate_unique_path(&dest_path, &sanitized_name)?;
             let archive_name = final_path
@@ -4753,47 +4962,48 @@ pub async fn compress_to_zip(
             let archive_name_for_task = archive_name.clone();
 
             let strip_root_for_task = strip_root;
-            let created_path = tauri::async_runtime::spawn_blocking(move || -> Result<PathBuf, String> {
-                let (entries, empty_dirs) =
-                    collect_local_zip_entries(&sources_for_task, strip_root_for_task)?;
-                if entries.is_empty() && empty_dirs.is_empty() && !strip_root_for_task {
-                    return Err("No files to compress".to_string());
-                }
-                let emit_progress = entries.len() >= COMPRESS_PROGRESS_ENTRY_THRESHOLD;
-                let write_result = write_zip_from_local_entries(
-                    &app_handle,
-                    &archive_name_for_task,
-                    &temp_path_for_task,
-                    &entries,
-                    &empty_dirs,
-                );
-                if let Err(err) = write_result {
-                    if emit_progress {
-                        emit_compress_progress_update(
-                            &app_handle,
-                            CompressProgressPayload {
-                                archive_name: archive_name_for_task.clone(),
-                                entry_name: None,
-                                completed: 0,
-                                total: entries.len(),
-                                finished: true,
-                                error: Some(err.clone()),
-                            },
-                        );
+            let created_path =
+                tauri::async_runtime::spawn_blocking(move || -> Result<PathBuf, String> {
+                    let (entries, empty_dirs) =
+                        collect_local_zip_entries(&sources_for_task, strip_root_for_task)?;
+                    if entries.is_empty() && empty_dirs.is_empty() && !strip_root_for_task {
+                        return Err("No files to compress".to_string());
                     }
-                    let _ = fs::remove_file(&temp_path_for_task);
-                    return Err(err);
-                }
+                    let emit_progress = entries.len() >= COMPRESS_PROGRESS_ENTRY_THRESHOLD;
+                    let write_result = write_zip_from_local_entries(
+                        &app_handle,
+                        &archive_name_for_task,
+                        &temp_path_for_task,
+                        &entries,
+                        &empty_dirs,
+                    );
+                    if let Err(err) = write_result {
+                        if emit_progress {
+                            emit_compress_progress_update(
+                                &app_handle,
+                                CompressProgressPayload {
+                                    archive_name: archive_name_for_task.clone(),
+                                    entry_name: None,
+                                    completed: 0,
+                                    total: entries.len(),
+                                    finished: true,
+                                    error: Some(err.clone()),
+                                },
+                            );
+                        }
+                        let _ = fs::remove_file(&temp_path_for_task);
+                        return Err(err);
+                    }
 
-                if let Err(err) = fs::rename(&temp_path_for_task, &final_path_for_task) {
-                    let _ = fs::remove_file(&temp_path_for_task);
-                    return Err(format!("Failed to finalize zip: {}", err));
-                }
+                    if let Err(err) = fs::rename(&temp_path_for_task, &final_path_for_task) {
+                        let _ = fs::remove_file(&temp_path_for_task);
+                        return Err(format!("Failed to finalize zip: {}", err));
+                    }
 
-                Ok(final_path_for_task)
-            })
-            .await
-            .map_err(|err| format!("Failed to join compression task: {}", err))??;
+                    Ok(final_path_for_task)
+                })
+                .await
+                .map_err(|err| format!("Failed to join compression task: {}", err))??;
 
             Ok(CompressToZipResponse {
                 path: created_path.to_string_lossy().to_string(),
@@ -4802,24 +5012,26 @@ pub async fn compress_to_zip(
         "smb" => {
             dest_provider.read_directory(&dest_location).await?;
             let strip_root = if source_locations.len() == 1 {
-                let metadata = dest_provider.get_file_metadata(&source_locations[0]).await?;
+                let metadata = dest_provider
+                    .get_file_metadata(&source_locations[0])
+                    .await?;
                 metadata.is_directory
             } else {
                 false
             };
-            let (entries, empty_dirs) = collect_remote_zip_entries(
-                &dest_provider,
-                source_locations.clone(),
-                strip_root,
-            )
-            .await?;
+            let (entries, empty_dirs) =
+                collect_remote_zip_entries(&dest_provider, source_locations.clone(), strip_root)
+                    .await?;
             if entries.is_empty() && empty_dirs.is_empty() && !strip_root {
                 return Err("No files to compress".to_string());
             }
 
             let existing = dest_provider.read_directory(&dest_location).await?;
-            let existing_names: HashSet<String> =
-                existing.entries.iter().map(|item| item.name.clone()).collect();
+            let existing_names: HashSet<String> = existing
+                .entries
+                .iter()
+                .map(|item| item.name.clone())
+                .collect();
             let mut final_name: Option<String> = None;
             for i in 1..1000usize {
                 let candidate = numbered_name_variant(&sanitized_name, i);
@@ -4886,9 +5098,9 @@ pub async fn compress_to_zip(
                 if !client::is_available() {
                     let status = client::initialize();
                     if status != SidecarStatus::Available {
-                        return Err(status.error_message().unwrap_or_else(|| {
-                            "SMB support is not available".to_string()
-                        }));
+                        return Err(status
+                            .error_message()
+                            .unwrap_or_else(|| "SMB support is not available".to_string()));
                     }
                 }
 
@@ -4926,17 +5138,16 @@ pub async fn compress_to_zip(
         "gdrive" => {
             dest_provider.read_directory(&dest_location).await?;
             let strip_root = if source_locations.len() == 1 {
-                let metadata = dest_provider.get_file_metadata(&source_locations[0]).await?;
+                let metadata = dest_provider
+                    .get_file_metadata(&source_locations[0])
+                    .await?;
                 metadata.is_directory
             } else {
                 false
             };
-            let (entries, empty_dirs) = collect_remote_zip_entries(
-                &dest_provider,
-                source_locations.clone(),
-                strip_root,
-            )
-            .await?;
+            let (entries, empty_dirs) =
+                collect_remote_zip_entries(&dest_provider, source_locations.clone(), strip_root)
+                    .await?;
             if entries.is_empty() && empty_dirs.is_empty() && !strip_root {
                 return Err("No files to compress".to_string());
             }
@@ -5635,10 +5846,7 @@ pub fn reveal_in_file_browser(path: String) -> Result<(), String> {
                 .parent()
                 .map(|parent| parent.to_string_lossy().to_string())
                 .ok_or_else(|| {
-                    format_error(
-                        error_codes::EOPEN,
-                        "Unable to resolve parent directory.",
-                    )
+                    format_error(error_codes::EOPEN, "Unable to resolve parent directory.")
                 })?
         };
 
@@ -6241,13 +6449,12 @@ pub fn open_smb_connect_window(
     }
 
     let url = tauri::WebviewUrl::App("index.html?view=smb-connect".into());
-    let builder = configure_modal_utility_window(&app, tauri::WebviewWindowBuilder::new(
+    let builder = configure_modal_utility_window(
         &app,
-        SMB_CONNECT_WINDOW_LABEL,
-        url,
-    ))
-        .title("Add Network Share")
-        .inner_size(460.0, 520.0);
+        tauri::WebviewWindowBuilder::new(&app, SMB_CONNECT_WINDOW_LABEL, url),
+    )
+    .title("Add Network Share")
+    .inner_size(460.0, 520.0);
 
     #[cfg(target_os = "macos")]
     let builder = builder
@@ -6300,13 +6507,12 @@ pub fn open_permissions_window(app: AppHandle) -> Result<(), String> {
     }
 
     let url = tauri::WebviewUrl::App("index.html?view=permissions".into());
-    let builder = configure_modal_utility_window(&app, tauri::WebviewWindowBuilder::new(
+    let builder = configure_modal_utility_window(
         &app,
-        PERMISSIONS_WINDOW_LABEL,
-        url,
-    ))
-        .title("Full Disk Access")
-        .inner_size(520.0, 560.0);
+        tauri::WebviewWindowBuilder::new(&app, PERMISSIONS_WINDOW_LABEL, url),
+    )
+    .title("Full Disk Access")
+    .inner_size(520.0, 560.0);
 
     #[cfg(target_os = "macos")]
     let builder = builder
@@ -6330,11 +6536,10 @@ pub fn open_preferences_window(app: AppHandle) -> Result<(), String> {
     }
 
     let url = tauri::WebviewUrl::App("index.html?view=preferences".into());
-    let builder = configure_modal_utility_window(&app, tauri::WebviewWindowBuilder::new(
+    let builder = configure_modal_utility_window(
         &app,
-        PREFERENCES_WINDOW_LABEL,
-        url,
-    ))
+        tauri::WebviewWindowBuilder::new(&app, PREFERENCES_WINDOW_LABEL, url),
+    )
     .title("Preferences")
     .inner_size(520.0, 560.0);
 
@@ -6609,9 +6814,12 @@ pub fn show_native_context_menu(
             .unwrap_or(false);
         let reveal_in_browser_item = if first_path_is_local {
             Some(
-                MenuItemBuilder::with_id("ctx:reveal_in_file_browser", get_reveal_in_browser_label())
-                    .build(&app)
-                    .map_err(|e| e.to_string())?,
+                MenuItemBuilder::with_id(
+                    "ctx:reveal_in_file_browser",
+                    get_reveal_in_browser_label(),
+                )
+                .build(&app)
+                .map_err(|e| e.to_string())?,
             )
         } else {
             None
@@ -7389,7 +7597,11 @@ pub async fn resolve_google_drive_url(url: String) -> Result<ResolveGoogleDriveU
 /// Download a Google Drive file to a temporary location and open it
 /// Returns the temporary file path
 #[command]
-pub async fn download_gdrive_file(email: String, file_id: String, file_name: String) -> Result<String, String> {
+pub async fn download_gdrive_file(
+    email: String,
+    file_id: String,
+    file_name: String,
+) -> Result<String, String> {
     download_file_to_temp(&email, &file_id, &file_name).await
 }
 
@@ -7563,7 +7775,9 @@ pub fn get_smb_status() -> SmbStatusResponse {
 pub fn get_smb_status() -> SmbStatusResponse {
     SmbStatusResponse {
         available: true,
-        reason: Some("Windows uses native UNC paths. Navigate to \\\\server\\share directly.".to_string()),
+        reason: Some(
+            "Windows uses native UNC paths. Navigate to \\\\server\\share directly.".to_string(),
+        ),
     }
 }
 
@@ -7606,7 +7820,14 @@ pub fn add_sftp_server(
     auth_method: String,
     key_path: Option<String>,
 ) -> Result<crate::locations::sftp::SftpServerInfo, String> {
-    crate::locations::sftp::add_sftp_server(hostname, port, username, password, auth_method, key_path)
+    crate::locations::sftp::add_sftp_server(
+        hostname,
+        port,
+        username,
+        password,
+        auth_method,
+        key_path,
+    )
 }
 
 /// Remove an SFTP server
@@ -7672,13 +7893,12 @@ pub fn open_sftp_connect_window(
     }
 
     let url = tauri::WebviewUrl::App("index.html?view=sftp-connect".into());
-    let builder = configure_modal_utility_window(&app, tauri::WebviewWindowBuilder::new(
+    let builder = configure_modal_utility_window(
         &app,
-        SFTP_CONNECT_WINDOW_LABEL,
-        url,
-    ))
-        .title("Add SFTP Server")
-        .inner_size(460.0, 600.0);
+        tauri::WebviewWindowBuilder::new(&app, SFTP_CONNECT_WINDOW_LABEL, url),
+    )
+    .title("Add SFTP Server")
+    .inner_size(460.0, 600.0);
 
     #[cfg(target_os = "macos")]
     let builder = builder
@@ -7735,11 +7955,10 @@ fn show_conflict_window_internal(app: &AppHandle) -> Result<(), String> {
     }
 
     let url = tauri::WebviewUrl::App("index.html?view=conflict".into());
-    let builder = configure_modal_utility_window(app, tauri::WebviewWindowBuilder::new(
+    let builder = configure_modal_utility_window(
         app,
-        CONFLICT_WINDOW_LABEL,
-        url,
-    ))
+        tauri::WebviewWindowBuilder::new(app, CONFLICT_WINDOW_LABEL, url),
+    )
     .title("File Conflict")
     .inner_size(520.0, 600.0);
 
@@ -7813,7 +8032,9 @@ pub fn conflict_window_unready() -> Result<(), String> {
 pub fn resolve_conflict(resolution: ConflictResolution) -> Result<(), String> {
     // Validate that the resolution matches the pending conflict
     {
-        let guard = CONFLICT_PENDING_PAYLOAD.lock().map_err(|e| format!("Lock failed: {e}"))?;
+        let guard = CONFLICT_PENDING_PAYLOAD
+            .lock()
+            .map_err(|e| format!("Lock failed: {e}"))?;
         if let Some(ref pending) = *guard {
             if pending.conflict_id != resolution.conflict_id {
                 return Err(format!(
@@ -7825,7 +8046,9 @@ pub fn resolve_conflict(resolution: ConflictResolution) -> Result<(), String> {
     }
 
     let sender = {
-        let mut guard = CONFLICT_SENDER.lock().map_err(|e| format!("Lock failed: {e}"))?;
+        let mut guard = CONFLICT_SENDER
+            .lock()
+            .map_err(|e| format!("Lock failed: {e}"))?;
         guard.take()
     };
     match sender {
@@ -7852,7 +8075,10 @@ fn build_local_conflict_info(path: &Path) -> Result<ConflictFileInfo, String> {
         .and_then(|n| n.to_str())
         .unwrap_or("")
         .to_string();
-    let extension = path.extension().and_then(|e| e.to_str()).map(|s| s.to_string());
+    let extension = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_string());
     Ok(ConflictFileInfo {
         name,
         path: path.to_string_lossy().to_string(),
@@ -7906,8 +8132,7 @@ async fn ask_user_about_conflict(
     CONFLICT_QUEUE.queue(app, payload);
 
     // Wait for user response (blocks until user picks an action or closes window)
-    rx.await
-        .map_err(|_| "CONFLICT_CANCELLED".to_string())
+    rx.await.map_err(|_| "CONFLICT_CANCELLED".to_string())
 }
 
 /// Hide the conflict dialog window.
@@ -7956,7 +8181,8 @@ async fn execute_local_conflict_action(
             let dest_path = dest_dir.join(name);
             // Guard: don't delete+copy if source IS the destination (same-folder paste)
             // Use canonicalize to handle case-insensitivity on macOS/Windows
-            let source_canon = fs::canonicalize(source_path).unwrap_or_else(|_| source_path.to_path_buf());
+            let source_canon =
+                fs::canonicalize(source_path).unwrap_or_else(|_| source_path.to_path_buf());
             let dest_canon = fs::canonicalize(&dest_path).unwrap_or_else(|_| dest_path.clone());
 
             if source_canon == dest_canon {
@@ -7967,9 +8193,13 @@ async fn execute_local_conflict_action(
             let dest_raw = dest_path.to_string_lossy().to_string();
             let (_, dest_item_location) = resolve_location(LI::Raw(dest_raw.clone()))?;
             if is_cut {
-                source_provider.move_item(source_location, &dest_item_location).await?;
+                source_provider
+                    .move_item(source_location, &dest_item_location)
+                    .await?;
             } else {
-                source_provider.copy(source_location, &dest_item_location).await?;
+                source_provider
+                    .copy(source_location, &dest_item_location)
+                    .await?;
             }
             Ok(Some(dest_raw))
         }
@@ -7983,9 +8213,13 @@ async fn execute_local_conflict_action(
             let dest_raw = dest_path.to_string_lossy().to_string();
             let (_, dest_item_location) = resolve_location(LI::Raw(dest_raw.clone()))?;
             if is_cut {
-                source_provider.move_item(source_location, &dest_item_location).await?;
+                source_provider
+                    .move_item(source_location, &dest_item_location)
+                    .await?;
             } else {
-                source_provider.copy(source_location, &dest_item_location).await?;
+                source_provider
+                    .copy(source_location, &dest_item_location)
+                    .await?;
             }
             Ok(Some(dest_raw))
         }
@@ -7993,7 +8227,8 @@ async fn execute_local_conflict_action(
         ConflictAction::Merge if source_path.is_dir() && dest_dir.join(name).is_dir() => {
             let dest_path = dest_dir.join(name);
             // Guard: don't merge a directory into itself
-            let source_canon = fs::canonicalize(source_path).unwrap_or_else(|_| source_path.to_path_buf());
+            let source_canon =
+                fs::canonicalize(source_path).unwrap_or_else(|_| source_path.to_path_buf());
             let dest_canon = fs::canonicalize(&dest_path).unwrap_or_else(|_| dest_path.clone());
             if source_canon == dest_canon {
                 return Ok(Some(dest_path.to_string_lossy().to_string()));
@@ -8011,9 +8246,13 @@ async fn execute_local_conflict_action(
             let dest_raw = dest_path.to_string_lossy().to_string();
             let (_, dest_item_location) = resolve_location(LI::Raw(dest_raw.clone()))?;
             if is_cut {
-                source_provider.move_item(source_location, &dest_item_location).await?;
+                source_provider
+                    .move_item(source_location, &dest_item_location)
+                    .await?;
             } else {
-                source_provider.copy(source_location, &dest_item_location).await?;
+                source_provider
+                    .copy(source_location, &dest_item_location)
+                    .await?;
             }
             Ok(Some(dest_raw))
         }
@@ -8024,14 +8263,17 @@ fn copy_symlink(src: &Path, dst: &Path) -> Result<(), String> {
     let target = fs::read_link(src).map_err(|e| format!("Failed to read link: {e}"))?;
     #[cfg(unix)]
     {
-        std::os::unix::fs::symlink(target, dst).map_err(|e| format!("Failed to create symlink: {e}"))
+        std::os::unix::fs::symlink(target, dst)
+            .map_err(|e| format!("Failed to create symlink: {e}"))
     }
     #[cfg(windows)]
     {
         if src.is_dir() {
-            std::os::windows::fs::symlink_dir(target, dst).map_err(|e| format!("Failed to create symlink: {e}"))
+            std::os::windows::fs::symlink_dir(target, dst)
+                .map_err(|e| format!("Failed to create symlink: {e}"))
         } else {
-            std::os::windows::fs::symlink_file(target, dst).map_err(|e| format!("Failed to create symlink: {e}"))
+            std::os::windows::fs::symlink_file(target, dst)
+                .map_err(|e| format!("Failed to create symlink: {e}"))
         }
     }
     #[cfg(not(any(unix, windows)))]
@@ -8050,31 +8292,30 @@ fn merge_local_directory(source: &Path, dest: &Path, is_cut: bool) -> Result<(),
     for entry in entries {
         let entry = entry.map_err(|e| format!("Failed to read entry: {e}"))?;
         let entry_path = entry.path();
-        let entry_name = entry
-            .file_name()
-            .to_string_lossy()
-            .to_string();
+        let entry_name = entry.file_name().to_string_lossy().to_string();
         let dest_path = dest.join(&entry_name);
 
-        let file_type = entry.file_type().map_err(|e| format!("Failed to get file type: {e}"))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|e| format!("Failed to get file type: {e}"))?;
 
         if file_type.is_symlink() {
-             if dest_path.exists() {
-                 let unique = allocate_unique_path(dest, &entry_name)?;
-                 if is_cut {
+            if dest_path.exists() {
+                let unique = allocate_unique_path(dest, &entry_name)?;
+                if is_cut {
                     fs::rename(&entry_path, &unique)
                         .map_err(|e| format!("Failed to move {}: {e}", entry_path.display()))?;
-                 } else {
+                } else {
                     copy_symlink(&entry_path, &unique)?;
-                 }
-             } else {
-                 if is_cut {
+                }
+            } else {
+                if is_cut {
                     fs::rename(&entry_path, &dest_path)
                         .map_err(|e| format!("Failed to move {}: {e}", entry_path.display()))?;
-                 } else {
+                } else {
                     copy_symlink(&entry_path, &dest_path)?;
-                 }
-             }
+                }
+            }
         } else if file_type.is_dir() {
             if dest_path.exists() && dest_path.is_dir() {
                 // Recursively merge subdirectories
@@ -8190,7 +8431,9 @@ pub async fn show_file_properties(paths: Vec<String>) -> Result<(), String> {
         use std::os::windows::ffi::OsStrExt;
         use windows::core::PCWSTR;
         use windows::Win32::Foundation::HWND;
-        use windows::Win32::UI::Shell::{ShellExecuteExW, SHELLEXECUTEINFOW, SEE_MASK_INVOKEIDLIST};
+        use windows::Win32::UI::Shell::{
+            ShellExecuteExW, SEE_MASK_INVOKEIDLIST, SHELLEXECUTEINFOW,
+        };
 
         for path in paths.iter().take(MAX_PROPERTIES_WINDOWS) {
             let expanded = expand_path(path)?;

@@ -1,16 +1,14 @@
 pub mod auth;
 pub mod pool;
 
-use async_trait::async_trait;
-use chrono::{TimeZone, Utc};
 use crate::fs_utils::FileItem;
 use crate::locations::{
     Location, LocationCapabilities, LocationProvider, LocationSummary, ProviderDirectoryEntries,
 };
+use async_trait::async_trait;
+use chrono::{TimeZone, Utc};
 
-pub use auth::{
-    add_sftp_server, get_sftp_servers, remove_sftp_server, SftpServerInfo,
-};
+pub use auth::{add_sftp_server, get_sftp_servers, remove_sftp_server, SftpServerInfo};
 
 #[derive(Default)]
 pub struct SftpProvider;
@@ -35,7 +33,11 @@ impl LocationProvider for SftpProvider {
 
         let (username, hostname, port) = parse_sftp_authority(authority)?;
         let path = location.path().to_string();
-        let remote_path = if path.is_empty() || path == "/" { "/" } else { &path };
+        let remote_path = if path.is_empty() || path == "/" {
+            "/"
+        } else {
+            &path
+        };
 
         let sftp = pool::get_sftp_session(&hostname, port).await?;
 
@@ -57,7 +59,10 @@ impl LocationProvider for SftpProvider {
             let is_symlink = entry.file_type().is_symlink();
             let size = entry.metadata().len();
             let mtime = entry.metadata().mtime.unwrap_or(0);
-            let modified = Utc.timestamp_opt(mtime as i64, 0).single().unwrap_or_else(Utc::now);
+            let modified = Utc
+                .timestamp_opt(mtime as i64, 0)
+                .single()
+                .unwrap_or_else(Utc::now);
 
             let extension = if !is_directory {
                 std::path::Path::new(&name)
@@ -167,7 +172,10 @@ impl LocationProvider for SftpProvider {
         let is_directory = attrs.is_dir();
         let size = attrs.len();
         let mtime = attrs.mtime.unwrap_or(0);
-        let modified = Utc.timestamp_opt(mtime as i64, 0).single().unwrap_or_else(Utc::now);
+        let modified = Utc
+            .timestamp_opt(mtime as i64, 0)
+            .single()
+            .unwrap_or_else(Utc::now);
 
         let extension = if !is_directory {
             std::path::Path::new(&name)
@@ -295,7 +303,10 @@ impl LocationProvider for SftpProvider {
 }
 
 /// Recursively delete a directory and all its contents.
-async fn recursive_delete(sftp: &russh_sftp::client::SftpSession, path: &str) -> Result<(), String> {
+async fn recursive_delete(
+    sftp: &russh_sftp::client::SftpSession,
+    path: &str,
+) -> Result<(), String> {
     let entries = sftp
         .read_dir(path)
         .await
@@ -331,9 +342,12 @@ async fn recursive_delete(sftp: &russh_sftp::client::SftpSession, path: &str) ->
 
 /// Parse authority part: "user@host:port" -> (user, host, port)
 pub fn parse_sftp_authority(authority: &str) -> Result<(String, String, u16), String> {
-    let (user_part, host_part) = authority
-        .rsplit_once('@')
-        .ok_or_else(|| format!("SFTP authority must include username: user@host (got '{}')", authority))?;
+    let (user_part, host_part) = authority.rsplit_once('@').ok_or_else(|| {
+        format!(
+            "SFTP authority must include username: user@host (got '{}')",
+            authority
+        )
+    })?;
 
     let username = user_part.to_string();
     if username.is_empty() {
