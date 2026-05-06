@@ -106,13 +106,21 @@ fn setup_libzpl() {
                         println!("cargo:warning=libzpl: copy failed: {}", e);
                     }
 
-                    // Also copy to CARGO_MANIFEST_DIR/lib/ so Tauri's bundler can
-                    // find it: macOS uses `bundle.macOS.frameworks` to bundle into
-                    // Contents/Frameworks/, Linux uses `bundle.linux.deb.files` to
-                    // install into the configured directory.
-                    if target_os == "macos" || target_os == "linux" {
-                        let manifest_dir =
-                            PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+                    // Also copy so Tauri's bundler can find the library:
+                    // - macOS: lib/ dir → bundle.macOS.frameworks → Contents/Frameworks/
+                    // - Linux: lib/ dir → bundle.linux.deb.files → /usr/lib/marlin/
+                    // - Windows: root dir → bundle.resources → install dir (next to exe)
+                    let manifest_dir =
+                        PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+                    if target_os == "windows" {
+                        // Windows DLLs must be next to the exe for the loader to find
+                        // them. bundle.resources["zpl.dll"] copies from src-tauri/ root
+                        // into the NSIS install directory alongside the binary.
+                        if let Err(e) = std::fs::copy(&lib_path, manifest_dir.join(lib_name))
+                        {
+                            println!("cargo:warning=libzpl: bundler copy failed: {}", e);
+                        }
+                    } else {
                         let fw_dir = manifest_dir.join("lib");
                         let _ = std::fs::create_dir_all(&fw_dir);
                         if let Err(e) = std::fs::copy(&lib_path, fw_dir.join(lib_name)) {
