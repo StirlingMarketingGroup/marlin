@@ -64,12 +64,21 @@ function isPermissionErrorMessage(errorCode: string | null, errorMessage: string
   return errorCode === ErrorCodes.EPERM || errorMessage.includes('Operation not permitted');
 }
 
+function isMacTrashPath(path: string) {
+  return path.replace(/\/+$/, '').endsWith('/.Trash');
+}
+
 async function requestFolderAccessForPath(path: string): Promise<boolean> {
   if (platform() !== 'macos') return false;
 
-  const folderName = basename(path) || path;
+  const requestsTrashAccess = isMacTrashPath(path);
+  const folderName = requestsTrashAccess ? 'Trash' : basename(path) || path;
+  const folderToSelect = requestsTrashAccess ? dirname(path) : path;
+  const folderToSelectLabel = requestsTrashAccess
+    ? basename(folderToSelect) || folderToSelect
+    : folderName;
   const shouldSelectFolder = await ask(
-    `Marlin needs permission to open "${folderName}". Select this folder in the next dialog to grant access.`,
+    `Marlin needs permission to open "${folderName}". Select "${folderToSelectLabel}" in the next dialog to grant access.`,
     {
       title: 'Folder Access Required',
       okLabel: 'Select Folder',
@@ -81,12 +90,12 @@ async function requestFolderAccessForPath(path: string): Promise<boolean> {
   if (!shouldSelectFolder) return false;
 
   const selection = await openDialog({
-    title: `Grant Access to ${folderName}`,
+    title: `Grant Access to ${folderToSelectLabel}`,
     directory: true,
     multiple: false,
     recursive: true,
     canCreateDirectories: false,
-    defaultPath: path,
+    defaultPath: folderToSelect,
     fileAccessMode: 'scoped',
   });
 
