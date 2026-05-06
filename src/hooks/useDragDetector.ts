@@ -10,6 +10,8 @@ export interface DragModifiers {
   cmdCtrl: boolean;
 }
 
+const SAME_LOCATION_DROP_REASON = 'NO_OP_SAME_LOCATION';
+
 export interface DragDropEvent {
   paths: string[];
   location: {
@@ -359,6 +361,10 @@ export function useFilePanelDropZone(
 
         // Final validation and execution
         void resolveOperation(event.paths, targetPath, event.modifiers).then(async (opInfo) => {
+          if (opInfo.reason === SAME_LOCATION_DROP_REASON) {
+            return;
+          }
+
           if (!opInfo.valid) {
             useToastStore.getState().addToast({
               type: 'error',

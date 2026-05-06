@@ -1365,6 +1365,8 @@ pub struct DropOperationInfo {
     pub reason: Option<String>,
 }
 
+const SAME_LOCATION_DROP_REASON: &str = "NO_OP_SAME_LOCATION";
+
 fn is_remote_fs(fs_type: &str) -> bool {
     let lower = fs_type.to_lowercase();
     lower.contains("smb")
@@ -1391,6 +1393,9 @@ pub async fn resolve_drop_operation(
     let dest_canon = dest_path.canonicalize().ok();
 
     if let Some(ref d_canon) = dest_canon {
+        let mut checked_sources = 0usize;
+        let mut all_sources_already_in_destination = true;
+
         for source in &sources {
             let source_path_buf = match fs_utils::expand_path(source) {
                 Ok(p) => p,
@@ -1398,14 +1403,26 @@ pub async fn resolve_drop_operation(
             };
 
             if let Ok(s_canon) = source_path_buf.canonicalize() {
+                checked_sources += 1;
+
                 // Cannot drop item onto itself
                 if s_canon == *d_canon {
                     return Ok(DropOperationInfo {
                         operation: "none".to_string(),
                         is_remote: false,
                         valid: false,
-                        reason: Some("Cannot drop item onto itself".to_string()),
+                        reason: Some(SAME_LOCATION_DROP_REASON.to_string()),
                     });
+                }
+
+                let source_parent_matches_destination = s_canon
+                    .parent()
+                    .and_then(|parent| parent.canonicalize().ok())
+                    .as_ref()
+                    == Some(d_canon);
+
+                if !source_parent_matches_destination {
+                    all_sources_already_in_destination = false;
                 }
 
                 // Cannot drop folder into itself or descendant
@@ -1418,6 +1435,15 @@ pub async fn resolve_drop_operation(
                     });
                 }
             }
+        }
+
+        if checked_sources > 0 && all_sources_already_in_destination {
+            return Ok(DropOperationInfo {
+                operation: "none".to_string(),
+                is_remote: false,
+                valid: false,
+                reason: Some(SAME_LOCATION_DROP_REASON.to_string()),
+            });
         }
     }
 
@@ -2571,7 +2597,14 @@ pub async fn paste_items_to_location(
                     let candidate = dest_dir.join(&name);
                     let source_path = PathBuf::from(source_location.to_path_string());
 
-                    if candidate.exists() {
+                    if candidate
+                        .canonicalize()
+                        .ok()
+                        .zip(source_path.canonicalize().ok())
+                        .is_some_and(|(candidate, source)| candidate == source)
+                    {
+                        Ok(None)
+                    } else if candidate.exists() {
                         // Conflict detected — resolve it
                         let (action, custom_name) = if let Some(ref stored) = apply_to_all_action {
                             (stored.clone(), None)
