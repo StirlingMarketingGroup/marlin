@@ -55,7 +55,7 @@ tokio = { version = "1.50", features = ["full"] }
 base64 = "0.22"
 # Thumbnail system dependencies
 image = { version = "0.25", features = ["png", "jpeg", "webp", "gif"] }
-lru = "0.17"
+lru = "0.18"
 dashmap = "6.2"
 rayon = "1.12"
 uuid = { version = "1.23", features = ["v4"] }
