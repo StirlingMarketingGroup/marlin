@@ -310,7 +310,7 @@ jobs:
 
       - name: Cache Tauri downloads (Linux)
         if: runner.os == 'Linux' && !matrix.self_hosted
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ~/.cache/tauri
           key: tauri-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('src-tauri/tauri.conf.json') }}
@@ -324,7 +324,7 @@ jobs:
 
       - name: Cache Tauri downloads (macOS)
         if: runner.os == 'macOS' && !matrix.self_hosted
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ~/Library/Caches/tauri
           key: tauri-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('src-tauri/tauri.conf.json') }}
@@ -688,7 +688,7 @@ jobs:
 
       - name: Cache Tauri downloads (Linux)
         if: runner.os == 'Linux' && !matrix.self_hosted
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ~/.cache/tauri
           key: tauri-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('src-tauri/tauri.conf.json') }}
@@ -702,7 +702,7 @@ jobs:
 
       - name: Cache Tauri downloads (macOS)
         if: runner.os == 'macOS' && !matrix.self_hosted
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ~/Library/Caches/tauri
           key: tauri-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('src-tauri/tauri.conf.json') }}
