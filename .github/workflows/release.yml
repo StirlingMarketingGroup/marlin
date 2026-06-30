@@ -415,7 +415,7 @@ jobs:
           codesign --force --options runtime --sign "$APPLE_SIGNING_IDENTITY" src-tauri/binaries/marlin-smb-${{ matrix.target }}
 
       - name: Build and publish installers
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
