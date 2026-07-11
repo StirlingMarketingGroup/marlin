@@ -806,13 +806,13 @@ fn upstream_remote_url(repo: &Repository, upstream_branch: &Branch) -> Option<St
     let trimmed = upstream_name.strip_prefix("refs/remotes/")?;
     let (remote_name, _) = trimmed.split_once('/')?;
     let remote = repo.find_remote(remote_name).ok()?;
-    let url = remote.url()?;
+    let url = remote.url().ok()?;
     normalize_remote_url(url)
 }
 
 fn fallback_remote_url(repo: &Repository) -> Option<String> {
     if let Ok(remote) = repo.find_remote("origin") {
-        if let Some(url) = remote.url() {
+        if let Ok(url) = remote.url() {
             if let Some(normalized) = normalize_remote_url(url) {
                 return Some(normalized);
             }
@@ -820,9 +820,9 @@ fn fallback_remote_url(repo: &Repository) -> Option<String> {
     }
 
     if let Ok(remotes) = repo.remotes() {
-        for name in remotes.iter().flatten() {
+        for name in remotes.iter().filter_map(|name| name.ok().flatten()) {
             if let Ok(remote) = repo.find_remote(name) {
-                if let Some(url) = remote.url() {
+                if let Ok(url) = remote.url() {
                     if let Some(normalized) = normalize_remote_url(url) {
                         return Some(normalized);
                     }
@@ -845,14 +845,14 @@ fn resolve_branch_state(repo: &Repository) -> BranchState {
         }
     };
 
-    state.name = head.shorthand().map(|s| s.to_string());
+    state.name = head.shorthand().ok().map(|s| s.to_string());
     state.detached = !head.is_branch();
     state.head_oid = head
         .target()
         .or_else(|| head.peel_to_commit().ok().map(|commit| commit.id()));
 
     if head.is_branch() {
-        if let Some(short_name) = head.shorthand() {
+        if let Ok(short_name) = head.shorthand() {
             if let Ok(local_branch) = repo.find_branch(short_name, BranchType::Local) {
                 if let Ok(upstream_branch) = local_branch.upstream() {
                     if let (Some(local_oid), Some(upstream_oid)) =
