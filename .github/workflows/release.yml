@@ -2,6 +2,8 @@ name: Release
 
 on:
   push:
+    branches:
+      - master
     tags:
       - 'v*'
   pull_request:
@@ -74,7 +76,7 @@ jobs:
           echo "TARGET_BRANCH=$DEFAULT_BRANCH" >> "$GITHUB_ENV"
 
       - name: Checkout target branch
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ steps.context.outputs.default_branch }}
@@ -201,7 +203,7 @@ jobs:
           fi
 
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ env.RELEASE_REF }}
@@ -310,7 +312,7 @@ jobs:
 
       - name: Cache Tauri downloads (Linux)
         if: runner.os == 'Linux' && !matrix.self_hosted
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ~/.cache/tauri
           key: tauri-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('src-tauri/tauri.conf.json') }}
@@ -324,7 +326,7 @@ jobs:
 
       - name: Cache Tauri downloads (macOS)
         if: runner.os == 'macOS' && !matrix.self_hosted
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ~/Library/Caches/tauri
           key: tauri-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('src-tauri/tauri.conf.json') }}
@@ -415,7 +417,7 @@ jobs:
           codesign --force --options runtime --sign "$APPLE_SIGNING_IDENTITY" src-tauri/binaries/marlin-smb-${{ matrix.target }}
 
       - name: Build and publish installers
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
@@ -537,7 +539,10 @@ jobs:
 
   release-dry-run:
     name: Dry Run (${{ matrix.arch }}-${{ matrix.target }})
-    if: ${{ github.event_name == 'pull_request' }}
+    # GitHub only lets PR branches restore caches created on the default branch
+    # (not caches from sibling PRs). Running this matrix after each merge keeps a
+    # warm default-branch Rust cache available to subsequent dependency PRs.
+    if: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/master' }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -573,7 +578,7 @@ jobs:
             self_hosted: false
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -688,7 +693,7 @@ jobs:
 
       - name: Cache Tauri downloads (Linux)
         if: runner.os == 'Linux' && !matrix.self_hosted
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ~/.cache/tauri
           key: tauri-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('src-tauri/tauri.conf.json') }}
@@ -702,7 +707,7 @@ jobs:
 
       - name: Cache Tauri downloads (macOS)
         if: runner.os == 'macOS' && !matrix.self_hosted
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ~/Library/Caches/tauri
           key: tauri-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('src-tauri/tauri.conf.json') }}
