@@ -303,7 +303,9 @@ jobs:
             src-tauri -> target
           shared-key: release-${{ matrix.target }}
           cache-all-crates: true
+          cache-workspace-crates: true
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
       # Tauri caching only needed for GitHub-hosted runners
       - name: Prepare Tauri cache directory (Linux)
@@ -684,7 +686,9 @@ jobs:
             src-tauri -> target
           shared-key: release-${{ matrix.target }}
           cache-all-crates: true
+          cache-workspace-crates: true
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
       # Tauri caching only needed for GitHub-hosted runners
       - name: Prepare Tauri cache directory (Linux)
