@@ -301,7 +301,8 @@ jobs:
         with:
           workspaces: |
             src-tauri -> target
-          shared-key: release-${{ matrix.target }}
+          # v2 invalidates caches created before workspace crates were retained.
+          shared-key: release-v2-${{ matrix.target }}
           cache-all-crates: true
           cache-workspace-crates: true
           cache-on-failure: true
@@ -684,7 +685,8 @@ jobs:
         with:
           workspaces: |
             src-tauri -> target
-          shared-key: release-${{ matrix.target }}
+          # v2 invalidates caches created before workspace crates were retained.
+          shared-key: release-v2-${{ matrix.target }}
           cache-all-crates: true
           cache-workspace-crates: true
           cache-on-failure: true
