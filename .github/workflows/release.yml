@@ -308,17 +308,6 @@ jobs:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/master' }}
 
-      - name: Set up Rust compiler cache
-        if: ${{ !matrix.self_hosted }}
-        uses: mozilla-actions/sccache-action@v0.0.10
-
-      - name: Enable Rust compiler cache
-        if: ${{ !matrix.self_hosted }}
-        run: |
-          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
-          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-          echo "SCCACHE_GHA_RW_MODE=${{ github.event_name == 'pull_request' && 'READ_ONLY' || 'READ_WRITE' }}" >> "$GITHUB_ENV"
-
       # Tauri caching only needed for GitHub-hosted runners
       - name: Prepare Tauri cache directory (Linux)
         if: runner.os == 'Linux' && !matrix.self_hosted
@@ -702,17 +691,6 @@ jobs:
           cache-workspace-crates: true
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/master' }}
-
-      - name: Set up Rust compiler cache
-        if: ${{ !matrix.self_hosted }}
-        uses: mozilla-actions/sccache-action@v0.0.10
-
-      - name: Enable Rust compiler cache
-        if: ${{ !matrix.self_hosted }}
-        run: |
-          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
-          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-          echo "SCCACHE_GHA_RW_MODE=${{ github.event_name == 'pull_request' && 'READ_ONLY' || 'READ_WRITE' }}" >> "$GITHUB_ENV"
 
       # Tauri caching only needed for GitHub-hosted runners
       - name: Prepare Tauri cache directory (Linux)
