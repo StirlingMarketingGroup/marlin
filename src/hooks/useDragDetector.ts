@@ -325,8 +325,7 @@ export function useFilePanelDropZone(
         // Hit test for folder targets using data-folder-path attribute
         const elements = document.elementsFromPoint(event.location.x, event.location.y);
         const folderEl = elements.find((el) => el.hasAttribute('data-folder-path')) as
-          | HTMLElement
-          | undefined;
+          HTMLElement | undefined;
 
         if (folderEl) {
           const folderPath = folderEl.getAttribute('data-folder-path');
@@ -364,8 +363,7 @@ export function useFilePanelDropZone(
         let targetPath = currentPath;
         const elements = document.elementsFromPoint(event.location.x, event.location.y);
         const folderEl = elements.find((el) => el.hasAttribute('data-folder-path')) as
-          | HTMLElement
-          | undefined;
+          HTMLElement | undefined;
 
         if (folderEl) {
           const folderPath = folderEl.getAttribute('data-folder-path');
