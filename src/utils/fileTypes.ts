@@ -19,13 +19,7 @@ export const ARCHIVE_EXTENSIONS = new Set([
 ]);
 
 export type ExtractableArchiveFormat =
-  | 'zip'
-  | 'rar'
-  | 'tar'
-  | 'tar.gz'
-  | 'tar.bz2'
-  | 'tar.xz'
-  | 'tar.zst';
+  'zip' | 'rar' | 'tar' | 'tar.gz' | 'tar.bz2' | 'tar.xz' | 'tar.zst';
 
 const EXTRACTABLE_ARCHIVE_PATTERNS: Array<{
   format: ExtractableArchiveFormat;

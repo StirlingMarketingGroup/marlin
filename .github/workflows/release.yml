@@ -2,6 +2,8 @@ name: Release
 
 on:
   push:
+    branches:
+      - master
     tags:
       - 'v*'
   pull_request:
@@ -301,7 +303,9 @@ jobs:
             src-tauri -> target
           shared-key: release-${{ matrix.target }}
           cache-all-crates: true
+          cache-workspace-crates: true
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
       # Tauri caching only needed for GitHub-hosted runners
       - name: Prepare Tauri cache directory (Linux)
@@ -537,7 +541,10 @@ jobs:
 
   release-dry-run:
     name: Dry Run (${{ matrix.arch }}-${{ matrix.target }})
-    if: ${{ github.event_name == 'pull_request' }}
+    # GitHub only lets PR branches restore caches created on the default branch
+    # (not caches from sibling PRs). Running this matrix after each merge keeps a
+    # warm default-branch Rust cache available to subsequent dependency PRs.
+    if: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/master' }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -679,7 +686,9 @@ jobs:
             src-tauri -> target
           shared-key: release-${{ matrix.target }}
           cache-all-crates: true
+          cache-workspace-crates: true
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
       # Tauri caching only needed for GitHub-hosted runners
       - name: Prepare Tauri cache directory (Linux)
