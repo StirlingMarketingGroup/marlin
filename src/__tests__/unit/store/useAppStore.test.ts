@@ -254,6 +254,45 @@ describe('useAppStore', () => {
       expect(file?.image_width).toBe(1920);
       expect(file?.image_height).toBe(1080);
     });
+
+    it('deduplicates an authoritative listing by path', () => {
+      const path = '/test/download.zip';
+      const baseFile = {
+        name: 'download.zip',
+        path,
+        size: 10,
+        modified: '2024-01-01T00:00:00.000Z',
+        is_directory: false,
+        is_hidden: false,
+        is_symlink: false,
+        is_git_repo: false,
+        extension: 'zip',
+      };
+
+      useAppStore.getState().setFiles([baseFile, { ...baseFile, size: 20 }]);
+
+      expect(useAppStore.getState().files).toEqual([{ ...baseFile, size: 20 }]);
+    });
+
+    it('upserts repeated additions instead of appending duplicate rows', () => {
+      const path = '/test/download.zip';
+      const baseFile = {
+        name: 'download.zip',
+        path,
+        size: 10,
+        modified: '2024-01-01T00:00:00.000Z',
+        is_directory: false,
+        is_hidden: false,
+        is_symlink: false,
+        is_git_repo: false,
+        extension: 'zip',
+      };
+
+      useAppStore.getState().addFiles([baseFile]);
+      useAppStore.getState().addFiles([{ ...baseFile, size: 20 }]);
+
+      expect(useAppStore.getState().files).toEqual([{ ...baseFile, size: 20 }]);
+    });
   });
 
   describe('refreshCurrentDirectory', () => {
@@ -883,6 +922,23 @@ describe('useAppStore', () => {
 
         const state = useAppStore.getState();
         expect(state.streamingTotalCount).toBe(100);
+      });
+
+      it('should not duplicate a path repeated by overlapping batches', () => {
+        useAppStore.setState({
+          streamingSessionId: 'session-1',
+          files: [mockFile1],
+          isStreamingComplete: false,
+        });
+
+        useAppStore.getState().appendStreamingBatch({
+          sessionId: 'session-1',
+          batchIndex: 1,
+          entries: [{ ...mockFile1, size: 250 }],
+          isFinal: false,
+        });
+
+        expect(useAppStore.getState().files).toEqual([{ ...mockFile1, size: 250 }]);
       });
     });
 

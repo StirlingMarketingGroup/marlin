@@ -65,6 +65,39 @@ const GIT_STATUS_TTL_MS = 5_000;
 let lastOpenWithDefaultPath: string | undefined;
 const activeArchiveExtractions = new Set<string>();
 
+const mergeFileItem = (previous: FileItem, next: FileItem): FileItem => ({
+  ...next,
+  child_count: next.child_count ?? previous.child_count,
+  image_width: next.image_width ?? previous.image_width,
+  image_height: next.image_height ?? previous.image_height,
+  extension: next.extension ?? previous.extension,
+  remote_id: next.remote_id ?? previous.remote_id,
+  thumbnail_url: next.thumbnail_url ?? previous.thumbnail_url,
+  download_url: next.download_url ?? previous.download_url,
+});
+
+/**
+ * Enforce the core file-list invariant: one row per path. Later entries carry the
+ * newest filesystem metadata while locally-computed fields survive the merge.
+ */
+const uniqueFilesByPath = (files: FileItem[], previousFiles: FileItem[] = []): FileItem[] => {
+  const previousByPath = new Map<string, FileItem>();
+  for (const file of previousFiles) {
+    const previous = previousByPath.get(file.path);
+    previousByPath.set(file.path, previous ? mergeFileItem(previous, file) : file);
+  }
+
+  const order: string[] = [];
+  const filesByPath = new Map<string, FileItem>();
+  for (const file of files) {
+    const existing = filesByPath.get(file.path) ?? previousByPath.get(file.path);
+    if (!filesByPath.has(file.path)) order.push(file.path);
+    filesByPath.set(file.path, existing ? mergeFileItem(existing, file) : file);
+  }
+
+  return order.map((path) => filesByPath.get(path)!);
+};
+
 interface GitStatusCacheEntry {
   status: GitStatus | null;
   timestamp: number;
@@ -472,49 +505,21 @@ export const useAppStore = create<AppState>((set, get) => ({
     void get().refreshGitStatus({ path: norm });
   },
   setHomeDir: (path) => set({ homeDir: path }),
-  setFiles: (files) =>
-    set((state) => {
-      const prevByPath = new Map(state.files.map((file) => [file.path, file]));
-      const merged = files.map((file) => {
-        const prev = prevByPath.get(file.path);
-        if (!prev) return file;
-        return {
-          ...file,
-          child_count: file.child_count ?? prev.child_count,
-          image_width: file.image_width ?? prev.image_width,
-          image_height: file.image_height ?? prev.image_height,
-          extension: file.extension ?? prev.extension,
-          remote_id: file.remote_id ?? prev.remote_id,
-          thumbnail_url: file.thumbnail_url ?? prev.thumbnail_url,
-          download_url: file.download_url ?? prev.download_url,
-        };
-      });
-
-      return { files: merged };
-    }),
+  setFiles: (files) => set((state) => ({ files: uniqueFilesByPath(files, state.files) })),
   addFiles: (files) =>
     set((state) => ({
-      files: [...state.files, ...files],
+      files: uniqueFilesByPath([...state.files, ...files]),
     })),
   updateFiles: (updatedFiles) =>
     set((state) => {
       const updateMap = new Map(updatedFiles.map((f) => [f.path, f]));
       return {
-        files: state.files.map((f) => {
-          const updated = updateMap.get(f.path);
-          if (updated) {
-            // Merge updated file data, preserving any locally-computed fields
-            return {
-              ...f,
-              ...updated,
-              // Preserve fields that might have been computed locally
-              child_count: updated.child_count ?? f.child_count,
-              image_width: updated.image_width ?? f.image_width,
-              image_height: updated.image_height ?? f.image_height,
-            };
-          }
-          return f;
-        }),
+        files: uniqueFilesByPath(
+          state.files.map((file) => {
+            const updated = updateMap.get(file.path);
+            return updated ? mergeFileItem(file, updated) : file;
+          })
+        ),
       };
     }),
   removeFilesByPath: (paths) =>
@@ -872,21 +877,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         ? listing.location.raw
         : normalizePath(listing.location.displayPath || listing.location.path);
 
-      const prevByPath = new Map(get().files.map((file) => [file.path, file]));
-      const mergedEntries = listing.entries.map((file) => {
-        const prev = prevByPath.get(file.path);
-        if (!prev) return file;
-        return {
-          ...file,
-          child_count: file.child_count ?? prev.child_count,
-          image_width: file.image_width ?? prev.image_width,
-          image_height: file.image_height ?? prev.image_height,
-          extension: file.extension ?? prev.extension,
-          remote_id: file.remote_id ?? prev.remote_id,
-          thumbnail_url: file.thumbnail_url ?? prev.thumbnail_url,
-          download_url: file.download_url ?? prev.download_url,
-        };
-      });
+      const mergedEntries = uniqueFilesByPath(listing.entries, get().files);
 
       set((state) => {
         const updatedHistory = [...state.pathHistory];
@@ -1026,8 +1017,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         return {};
       }
 
-      // Append new files
-      const newFiles = [...state.files, ...batch.entries];
+      // Streaming retries or overlapping batches must remain idempotent by path.
+      const newFiles = uniqueFilesByPath([...state.files, ...batch.entries]);
 
       return {
         files: newFiles,
@@ -1068,7 +1059,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         };
       });
 
-      return { files: updatedFiles };
+      return { files: uniqueFilesByPath(updatedFiles) };
     });
   },
 
