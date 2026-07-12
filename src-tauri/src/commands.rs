@@ -3642,106 +3642,42 @@ pub async fn clipboard_paste_image_to_location(
         return Ok(result);
     }
 
-    #[cfg(all(feature = "smb", not(target_os = "windows")))]
+    #[cfg(not(target_os = "windows"))]
     if dest_scheme == "smb" {
-        use crate::locations::smb::get_server_credentials;
-        use crate::locations::smb::SMB_MUTEX;
-        use pavao::{SmbClient, SmbCredentials, SmbOpenOptions, SmbOptions};
-        use std::io::{Cursor, ErrorKind};
-
         let dest_authority = dest_location
             .authority()
             .ok_or_else(|| "SMB destination missing server".to_string())?;
         let (hostname, share, dir_path) =
             crate::locations::smb::parse_smb_path(dest_authority, dest_location.path())?;
-        let creds = get_server_credentials(&hostname)?;
 
-        let hostname_clone = hostname.clone();
-        let share_clone = share.clone();
-        let dir_path_clone = dir_path.clone();
-        let creds_username = creds.username.clone();
-        let creds_password = creds.password.clone();
-        let creds_domain = creds.domain.clone();
+        // The main app talks to SMB through the sidecar; it must never link pavao or
+        // libsmbclient directly. Write the clipboard image to a temporary local file
+        // and reuse the same collision-safe upload path as regular file pastes.
+        let temp_dir = std::env::temp_dir().join("marlin-clipboard-cache");
+        tokio::fs::create_dir_all(&temp_dir)
+            .await
+            .map_err(|e| format!("Failed to create temp directory: {e}"))?;
+        let temp_path = temp_dir.join(format!("smb_upload_{}.png", uuid::Uuid::new_v4()));
+        tokio::fs::write(&temp_path, &image_bytes)
+            .await
+            .map_err(|e| format!("Failed to write temp file: {e}"))?;
 
-        let candidate_name = tokio::task::spawn_blocking(move || -> Result<String, String> {
-            let _guard = SMB_MUTEX
-                .lock()
-                .map_err(|e| format!("SMB mutex poisoned: {e}"))?;
-
-            let smb_url = format!("smb://{}", hostname_clone);
-            let share_path = if share_clone.starts_with('/') {
-                share_clone.clone()
-            } else {
-                format!("/{}", share_clone)
-            };
-
-            let mut credentials = SmbCredentials::default()
-                .server(&smb_url)
-                .share(&share_path)
-                .username(&creds_username)
-                .password(&creds_password);
-
-            if let Some(domain) = &creds_domain {
-                credentials = credentials.workgroup(domain);
-            }
-
-            let client = SmbClient::new(credentials, SmbOptions::default())
-                .map_err(|e| format!("Failed to connect: {e}"))?;
-
-            let (stem, ext) = {
-                let p = std::path::Path::new(&base_name);
-                let stem = p
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("Screenshot")
-                    .to_string();
-                let ext = p
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .map(|s| s.to_string());
-                (stem, ext)
-            };
-
-            for i in 1..1000usize {
-                let candidate = if i == 1 {
-                    base_name.clone()
-                } else if let Some(ref e) = ext {
-                    format!("{stem} ({i}).{e}")
-                } else {
-                    format!("{stem} ({i})")
-                };
-
-                let dest_rel = if dir_path_clone == "/" {
-                    format!("/{}", candidate)
-                } else {
-                    format!("{}/{}", dir_path_clone.trim_end_matches('/'), candidate)
-                };
-
-                let options = SmbOpenOptions::default()
-                    .write(true)
-                    .create(true)
-                    .exclusive(true);
-                match client.open_with(&dest_rel, options) {
-                    Ok(mut dest_file) => {
-                        let mut cursor = Cursor::new(&image_bytes[..]);
-                        std::io::copy(&mut cursor, &mut dest_file)
-                            .map_err(|e| format!("Failed to upload: {e}"))?;
-                        dest_file
-                            .flush()
-                            .map_err(|e| format!("Failed to flush: {e}"))?;
-                        return Ok(candidate);
-                    }
-                    Err(pavao::SmbError::Io(io)) if io.kind() == ErrorKind::AlreadyExists => {
-                        continue
-                    }
-                    Err(e) => return Err(format!("Failed to create destination: {e}")),
-                }
-            }
-
-            Err("Unable to allocate unique destination name".to_string())
+        let temp_path_for_upload = temp_path.clone();
+        let base_name_for_upload = base_name.clone();
+        let upload_result = tokio::task::spawn_blocking(move || {
+            crate::locations::smb::upload_file_to_smb(
+                &temp_path_for_upload,
+                &hostname,
+                &share,
+                &dir_path,
+                &base_name_for_upload,
+            )
         })
         .await
-        .map_err(|e| format!("Task failed: {e}"))??;
+        .map_err(|e| format!("Task failed: {e}"));
+
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        let candidate_name = upload_result??;
 
         let dest_raw = if dest_location.raw().ends_with('/') {
             format!("{}{}", dest_location.raw(), candidate_name)

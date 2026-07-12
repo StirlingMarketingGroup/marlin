@@ -11,6 +11,7 @@ import { useToastStore } from './store/useToastStore';
 import { useUndoStore } from './store/useUndoStore';
 import { openFolderSizeWindow } from './store/useFolderSizeStore';
 import { useDirectoryStream } from './hooks/useDirectoryStream';
+import { useDirectoryWatcher } from '@/hooks/useDirectoryWatcher';
 import { ask, message, open as openDialog } from '@tauri-apps/plugin-dialog';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { platform } from '@tauri-apps/plugin-os';
@@ -28,10 +29,7 @@ import {
   SMB_CONNECT_SUCCESS_EVENT,
   SFTP_CONNECT_SUCCESS_EVENT,
 } from '@/utils/events';
-import { usePrefersReducedMotion } from '@/hooks/usePrefersReducedMotion';
-import { invalidateThumbnailsForPaths } from '@/hooks/useThumbnail';
 import type {
-  DirectoryChangeEventPayload,
   DirectoryListingResponse,
   FileItem,
   PersistedPreferences,
@@ -159,11 +157,9 @@ function App() {
   const globalPreferences = useAppStore((state) => state.globalPreferences);
   const loadPinnedDirectories = useAppStore((state) => state.loadPinnedDirectories);
 
-  // Animation preference hook (reactive to system changes)
-  const prefersReducedMotion = usePrefersReducedMotion();
-
   // Set up directory streaming event listener
   useDirectoryStream();
+  useDirectoryWatcher(currentPath);
 
   const initializedRef = useRef(false);
   const [showLoadingOverlay, setShowLoadingOverlay] = useState(false);
@@ -827,186 +823,6 @@ function App() {
 
     loadDirectory();
   }, [currentPath, navigateTo, setError, setLoading, setCurrentPath]);
-
-  // File system watcher for auto-reload
-  useEffect(() => {
-    if (!currentPath || loading) {
-      return;
-    }
-
-    let isActive = true;
-    let debounceTimer: number | undefined;
-    let cleanupFunction: (() => void) | undefined;
-
-    const handleDirectoryChanged = (event: Event<DirectoryChangeEventPayload>) => {
-      if (!isActive) return;
-
-      const payload = event.payload;
-
-      // Skip access-only changes (e.g., opening a file updates atime)
-      // Only refresh for actual content changes: create, delete, rename, write, modify
-      const changeType = (payload?.changeType || '').toLowerCase();
-      const isContentChange =
-        changeType === 'created' ||
-        changeType === 'removed' ||
-        changeType === 'modified' ||
-        changeType === 'renamed' ||
-        changeType === 'changed'; // Catch-all for other modification events
-
-      // Normalize paths for comparison (strip trailing slashes)
-      const normalizedPayloadPath = payload?.path?.replace(/\/+$/, '') || '';
-      const normalizedCurrentPath = currentPath.replace(/\/+$/, '');
-
-      if (payload && normalizedPayloadPath === normalizedCurrentPath && isContentChange) {
-        // Invalidate frontend thumbnail cache for modified/removed files
-        // (created files don't have cached thumbnails yet)
-        if (
-          (changeType === 'modified' || changeType === 'removed') &&
-          payload.affectedPaths &&
-          payload.affectedPaths.length > 0
-        ) {
-          invalidateThumbnailsForPaths(payload.affectedPaths);
-        }
-
-        // Clear any existing debounce timer
-        if (debounceTimer) {
-          window.clearTimeout(debounceTimer);
-        }
-
-        // Debounce the refresh to avoid excessive reloads
-        debounceTimer = window.setTimeout(async () => {
-          if (!isActive || loading) {
-            return;
-          }
-
-          try {
-            const state = useAppStore.getState();
-            const { files: currentFiles, selectedFiles } = state;
-            const affectedFiles = payload.affectedFiles || [];
-
-            // For small changes, try to update locally without full refresh
-            if (affectedFiles.length > 0 && affectedFiles.length <= 10) {
-              // Build paths of affected files using a Set for O(1) lookups
-              const affectedPaths = new Set(
-                affectedFiles.map((name: string) =>
-                  currentPath.endsWith('/') ? `${currentPath}${name}` : `${currentPath}/${name}`
-                )
-              );
-
-              // Check which affected files exist in our current list (potential removals)
-              const filesToRemove = currentFiles.filter((f) => affectedPaths.has(f.path));
-
-              // Verify they're actually gone by checking if they exist on disk
-              // We'll do this by checking if they're in the new file list after a quick refresh
-              const response = await invoke<{ entries: FileItem[] }>('read_directory', {
-                path: currentPath,
-              }).catch(() => null);
-
-              if (response) {
-                const newFilePaths = new Set(response.entries.map((f: FileItem) => f.path));
-                const confirmedRemovals = filesToRemove.filter((f) => !newFilePaths.has(f.path));
-
-                // O(N+M) lookup for new files instead of O(N*M)
-                const currentFilesByPath = new Map(currentFiles.map((cf) => [cf.path, cf]));
-                const newFiles = response.entries.filter(
-                  (f: FileItem) => !currentFilesByPath.has(f.path)
-                );
-
-                // Find modified files - either:
-                // 1. Files in affectedPaths (we KNOW they changed from fs-watcher)
-                // 2. Files with different mtime/size (fallback detection)
-                const modifiedFiles = response.entries.filter((f: FileItem) => {
-                  const existing = currentFilesByPath.get(f.path);
-                  if (!existing) return false;
-
-                  // If this file is in the affected list from fs-watcher, always consider it modified
-                  // This handles cases where mtime precision might not detect the change
-                  const isAffected = affectedPaths.has(f.path);
-
-                  // Also detect changes via mtime/size comparison
-                  const hasMetadataChange =
-                    existing.modified !== f.modified || existing.size !== f.size;
-
-                  return isAffected || hasMetadataChange;
-                });
-
-                // Handle removals with animation
-                if (confirmedRemovals.length > 0 && !prefersReducedMotion) {
-                  const removedPaths = confirmedRemovals.map((f) => f.path);
-                  state.markFilesExiting(removedPaths);
-                } else if (confirmedRemovals.length > 0) {
-                  // Reduced motion: remove immediately using store action
-                  const removedPathsSet = new Set(confirmedRemovals.map((r) => r.path));
-                  state.removeFilesByPath(removedPathsSet);
-                }
-
-                // Handle modified files - update metadata so thumbnails refresh
-                if (modifiedFiles.length > 0) {
-                  state.updateFiles(modifiedFiles);
-                }
-
-                // Handle new files - just add to list, components will handle entry animation
-                if (newFiles.length > 0) {
-                  state.addFiles(newFiles);
-                }
-
-                // Update selection
-                if (selectedFiles.length > 0) {
-                  const stillExist = selectedFiles.filter((path) => newFilePaths.has(path));
-                  if (stillExist.length !== selectedFiles.length) {
-                    state.setSelectedFiles(stillExist);
-                  }
-                }
-
-                return; // Skip full refresh
-              }
-            }
-
-            // Fallback: full refresh for large changes or when quick check fails
-            await useAppStore.getState().refreshCurrentDirectoryStreaming();
-          } catch (error) {
-            console.warn('Auto-refresh failed:', error);
-            // Fallback to full refresh on error
-            void useAppStore.getState().refreshCurrentDirectoryStreaming();
-          }
-        }, 500); // 500ms debounce
-      }
-    };
-
-    const setupWatcher = async () => {
-      if (!isActive) return;
-
-      try {
-        // Start watching current directory
-        await invoke('start_watching_directory', { path: currentPath });
-
-        // Listen for directory change events
-        const unlisten = await listen('directory-changed', handleDirectoryChanged);
-
-        // Store cleanup function
-        cleanupFunction = () => {
-          unlisten();
-          invoke('stop_watching_directory', { path: currentPath }).catch(() => {
-            // Ignore errors during cleanup
-          });
-        };
-      } catch (error) {
-        console.warn('Failed to setup file watcher:', error);
-      }
-    };
-
-    setupWatcher();
-
-    return () => {
-      isActive = false;
-      if (debounceTimer) {
-        window.clearTimeout(debounceTimer);
-      }
-      if (cleanupFunction) {
-        cleanupFunction();
-      }
-    };
-  }, [currentPath, loading, prefersReducedMotion]);
 
   // Persist only current directory prefs on change to avoid global clobbering
   useEffect(() => {

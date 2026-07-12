@@ -25,10 +25,8 @@ pub struct SmbServer {
 }
 
 /// Server credentials resolved from keychain (internal use)
-#[cfg_attr(not(feature = "smb"), allow(dead_code))]
 #[derive(Debug, Clone)]
 pub struct SmbServerCredentials {
-    pub hostname: String,
     pub username: String,
     pub password: String,
     pub domain: Option<String>,
@@ -218,7 +216,6 @@ pub fn get_smb_servers() -> Result<Vec<SmbServerInfo>, String> {
 }
 
 /// Get credentials for a specific server (internal use)
-#[cfg_attr(not(feature = "smb"), allow(dead_code))]
 pub fn get_server_credentials(hostname: &str) -> Result<SmbServerCredentials, String> {
     // Check cache first
     {
@@ -230,7 +227,6 @@ pub fn get_server_credentials(hostname: &str) -> Result<SmbServerCredentials, St
             {
                 let password = get_password(&server.hostname)?;
                 return Ok(SmbServerCredentials {
-                    hostname: server.hostname.clone(),
                     username: server.username.clone(),
                     password,
                     domain: server.domain.clone(),
@@ -261,7 +257,6 @@ pub fn get_server_credentials(hostname: &str) -> Result<SmbServerCredentials, St
 
     let password = get_password(&server.hostname)?;
     Ok(SmbServerCredentials {
-        hostname: server.hostname,
         username: server.username,
         password,
         domain: server.domain,

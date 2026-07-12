@@ -11,10 +11,16 @@ use crate::macos_security;
 
 #[derive(Debug)]
 pub struct FsWatcher {
-    watchers: Arc<Mutex<HashMap<String, RecommendedWatcher>>>,
+    watchers: Arc<Mutex<HashMap<String, WatchRegistration>>>,
     app_handle: AppHandle,
     #[cfg(target_os = "macos")]
     scope_tokens: Arc<Mutex<HashMap<String, macos_security::AccessToken>>>,
+}
+
+#[derive(Debug)]
+struct WatchRegistration {
+    _watcher: RecommendedWatcher,
+    subscribers: usize,
 }
 
 impl FsWatcher {
@@ -43,13 +49,15 @@ impl FsWatcher {
         #[cfg(target_os = "macos")]
         let scope_token = macos_security::retain_access(&path_buf)?;
 
-        // Check if already watching this path
+        // React effects can briefly overlap during navigation or Strict Mode. Keep a
+        // reference count so an older cleanup cannot tear down a newer registration.
         {
-            let watchers = self.watchers.lock().unwrap();
-            if watchers.contains_key(&normalized_path) {
+            let mut watchers = self.watchers.lock().unwrap();
+            if let Some(registration) = watchers.get_mut(&normalized_path) {
+                registration.subscribers += 1;
                 #[cfg(target_os = "macos")]
                 drop(scope_token);
-                return Ok(()); // Already watching
+                return Ok(());
             }
         }
 
@@ -77,10 +85,29 @@ impl FsWatcher {
             .watch(&path_buf, RecursiveMode::NonRecursive)
             .map_err(|e| format!("Failed to start watching: {}", e))?;
 
-        // Store the watcher
-        {
+        // Store the watcher. Check again under the insertion lock because another
+        // start may have completed while this watcher was being constructed.
+        let joined_existing_registration = {
             let mut watchers = self.watchers.lock().unwrap();
-            watchers.insert(normalized_path.clone(), watcher);
+            if let Some(registration) = watchers.get_mut(&normalized_path) {
+                registration.subscribers += 1;
+                true
+            } else {
+                watchers.insert(
+                    normalized_path.clone(),
+                    WatchRegistration {
+                        _watcher: watcher,
+                        subscribers: 1,
+                    },
+                );
+                false
+            }
+        };
+
+        if joined_existing_registration {
+            #[cfg(target_os = "macos")]
+            drop(scope_token);
+            return Ok(());
         }
 
         #[cfg(target_os = "macos")]
@@ -229,16 +256,25 @@ impl FsWatcher {
         let normalized_path = PathBuf::from(path).to_string_lossy().to_string();
 
         let mut watchers = self.watchers.lock().unwrap();
-        if watchers.remove(&normalized_path).is_some() {
+        let should_remove = match watchers.get_mut(&normalized_path) {
+            Some(registration) if registration.subscribers > 1 => {
+                registration.subscribers -= 1;
+                false
+            }
+            Some(_) => true,
+            None => return Err("Path is not being watched".to_string()),
+        };
+
+        if should_remove {
+            watchers.remove(&normalized_path);
             #[cfg(target_os = "macos")]
             {
                 let mut tokens = self.scope_tokens.lock().unwrap();
                 tokens.remove(&normalized_path);
             }
-            Ok(())
-        } else {
-            Err("Path is not being watched".to_string())
         }
+
+        Ok(())
     }
 
     pub fn stop_all_watchers(&self) {
