@@ -84,7 +84,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: '24'
 
       - name: Update npm metadata
         shell: bash
@@ -283,10 +283,9 @@ jobs:
           PY
 
       - uses: actions/setup-node@v7
-        if: ${{ !matrix.self_hosted }}
         with:
-          node-version: 20
-          cache: 'npm'
+          node-version: '24'
+          cache: ${{ !matrix.self_hosted && 'npm' || '' }}
           cache-dependency-path: package-lock.ci.json
 
       - name: Install Rust toolchain
@@ -667,10 +666,9 @@ jobs:
           PY
 
       - uses: actions/setup-node@v7
-        if: ${{ !matrix.self_hosted }}
         with:
-          node-version: 20
-          cache: 'npm'
+          node-version: '24'
+          cache: ${{ !matrix.self_hosted && 'npm' || '' }}
           cache-dependency-path: package-lock.ci.json
 
       - name: Install Rust toolchain

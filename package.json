@@ -2,6 +2,9 @@
   "name": "marlin-file-browser",
   "version": "0.1.25",
   "private": true,
+  "engines": {
+    "node": "^22.22.2 || ^24.15.0 || >=26.0.0"
+  },
   "type": "module",
   "description": "A modern, sleek file browser with native performance",
   "keywords": [
@@ -90,7 +93,7 @@
     "postcss": "^8.4.47",
     "prettier": "^3.6.2",
     "tailwindcss": "^4.1.13",
-    "typescript": "^7.0.2",
+    "typescript": "^6.0.3",
     "typescript-eslint": "^8.44.0",
     "vite": "8.3.0",
     "vitest": "^5.0.1"

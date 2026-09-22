@@ -16,7 +16,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### Platform-Specific Notes
 
 - macOS: Requires Xcode command line tools for native drag functionality
-- All platforms: Requires Rust 1.77+ and Node.js 18+
+- All platforms: Requires Rust 1.77+ and Node.js 24.15+ (CI uses Node.js 24)
 
 ## Development Server Management
 

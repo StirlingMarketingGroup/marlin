@@ -20,10 +20,12 @@ test.describe('Thumbnail Cache Invalidation', () => {
     await pathInput.fill(MOCK_DOWNLOADS_DIR);
     await pathInput.press('Enter');
 
-    // Wait for files to load
-    await expect(page.locator('[data-testid="file-item"][data-name="image.png"]')).toBeVisible({
-      timeout: 5000,
-    });
+    // Wait for initial thumbnails before measuring requests caused by a modification.
+    // A visible file row can still have its first thumbnail request queued.
+    for (const name of ['image.png', 'photo.jpg']) {
+      const thumbnail = page.locator(`[data-testid="file-item"][data-name="${name}"] img`);
+      await expect(thumbnail).toHaveAttribute('src', /^data:image\//, { timeout: 5000 });
+    }
   });
 
   test('should refresh thumbnail when file is modified', async ({ page }) => {
