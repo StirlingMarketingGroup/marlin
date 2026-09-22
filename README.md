@@ -139,7 +139,7 @@ curl -fsSL https://raw.githubusercontent.com/StirlingMarketingGroup/marlin/main/
 
 ### Requirements
 
-- Node.js 18+
+- Node.js 24.15+ (CI uses Node.js 24)
 - Rust 1.77+
 - Linux only: GTK/WebKit toolchain
 
