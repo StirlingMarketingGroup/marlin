@@ -190,9 +190,11 @@ jobs:
       - name: Setup persistent cargo target dir (self-hosted)
         if: matrix.self_hosted
         run: |
-          # Use persistent target dir outside workspace so it survives between different repo checkouts
-          echo "CARGO_TARGET_DIR=$HOME/.cache/cargo-target/marlin-${{ matrix.target }}" >> $GITHUB_ENV
-          mkdir -p "$HOME/.cache/cargo-target/marlin-${{ matrix.target }}"
+          # Keep each runner isolated: concurrent jobs must not delete or overwrite
+          # another runner's sidecars and AppImage bundle in a shared target dir.
+          target_dir="$HOME/.cache/cargo-target/$RUNNER_NAME/marlin-${{ matrix.target }}"
+          echo "CARGO_TARGET_DIR=$target_dir" >> $GITHUB_ENV
+          mkdir -p "$target_dir"
 
       - name: Validate release tag
         shell: bash
@@ -588,9 +590,11 @@ jobs:
       - name: Setup persistent cargo target dir (self-hosted)
         if: matrix.self_hosted
         run: |
-          # Use persistent target dir outside workspace so it survives between different repo checkouts
-          echo "CARGO_TARGET_DIR=$HOME/.cache/cargo-target/marlin-${{ matrix.target }}" >> $GITHUB_ENV
-          mkdir -p "$HOME/.cache/cargo-target/marlin-${{ matrix.target }}"
+          # Keep each runner isolated: concurrent jobs must not delete or overwrite
+          # another runner's sidecars and AppImage bundle in a shared target dir.
+          target_dir="$HOME/.cache/cargo-target/$RUNNER_NAME/marlin-${{ matrix.target }}"
+          echo "CARGO_TARGET_DIR=$target_dir" >> $GITHUB_ENV
+          mkdir -p "$target_dir"
 
       - name: Install dependencies (Ubuntu)
         if: runner.os == 'Linux'
