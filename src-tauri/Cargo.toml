@@ -81,7 +81,7 @@ tar = "0.4"
 flate2 = "1.1"
 bzip2 = "0.6"
 xz2 = { version = "0.1", features = ["static"] }
-zstd = "0.13"
+zstd = "0.14"
 filetime = "0.2"
 ab_glyph = "0.2"
 async-trait = "0.1"
