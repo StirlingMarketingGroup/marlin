@@ -124,7 +124,7 @@ gtk = { version = "0.18", package = "gtk" }
 # Enable with: cargo build --features smb
 # Requires: brew install samba (macOS) or apt install libsmbclient-dev (Linux)
 [target.'cfg(not(target_os = "windows"))'.dependencies]
-pavao = { version = "0.2", optional = true }
+pavao = { version = "0.3", optional = true }
 
 [dev-dependencies]
 tempfile = "3.27"

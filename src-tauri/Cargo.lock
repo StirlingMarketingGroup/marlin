@@ -5038,9 +5038,9 @@ checksum = "35fb2e5f958ec131621fdd531e9fc186ed768cbe395337403ae56c17a74c68ec"
 
 [[package]]
 name = "pavao"
-version = "0.2.16"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cca8302d5f1b5dc7a8dfb04e5ea7185b43571db5811e084746bf0aeb0d7b18f1"
+checksum = "637444e8cbc91d23a07688c41df5dcf5136c34964c8b746c4e40fc2127ef320d"
 dependencies = [
  "cfg_aliases",
  "lazy_static",
@@ -5052,9 +5052,9 @@ dependencies = [
 
 [[package]]
 name = "pavao-sys"
-version = "0.2.16"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "07b390d8c7372e94c7e0f7d92e36c98404634c554a52b1cb9ae030b4e7888cde"
+checksum = "9d77a20ad3376d6f0194f02b7314b4e89402eef920a7c78d7d970d3f2dcd4ac5"
 dependencies = [
  "libc",
  "pkg-config",
