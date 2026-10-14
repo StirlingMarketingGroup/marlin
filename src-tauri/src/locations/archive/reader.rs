@@ -354,8 +354,10 @@ pub fn list_directory(
                     return Err("Archive contains too many entries to list".to_string());
                 }
 
-                let entry_name = file.name();
-                let normalized = match normalize_entry_path(entry_name) {
+                let entry_name = file
+                    .name()
+                    .map_err(|e| format!("Failed to read zip entry name: {e}"))?;
+                let normalized = match normalize_entry_path(&entry_name) {
                     Ok(value) => value,
                     Err(_) => continue,
                 };
@@ -597,8 +599,10 @@ pub fn get_entry_metadata(
                 let file = archive
                     .by_index(i)
                     .map_err(|e| format!("Failed to read zip entry: {e}"))?;
-                let entry_name = file.name();
-                let normalized_entry = match normalize_entry_path(entry_name) {
+                let entry_name = file
+                    .name()
+                    .map_err(|e| format!("Failed to read zip entry name: {e}"))?;
+                let normalized_entry = match normalize_entry_path(&entry_name) {
                     Ok(value) => value,
                     Err(_) => continue,
                 };
@@ -740,13 +744,18 @@ pub fn extract_entry_to_dir(
             // Find the entry by normalized path (handles ./foo.txt, backslashes, etc.)
             let mut found_index: Option<usize> = None;
             for i in 0..archive.len() {
-                if let Ok(entry) = archive.by_index(i) {
-                    if let Ok(normalized) = normalize_entry_path(entry.name()) {
-                        if normalized == target_rel {
-                            found_index = Some(i);
-                            break;
-                        }
-                    }
+                let Ok(entry) = archive.by_index(i) else {
+                    continue;
+                };
+                let Ok(entry_name) = entry.name() else {
+                    continue;
+                };
+                let Ok(normalized) = normalize_entry_path(&entry_name) else {
+                    continue;
+                };
+                if normalized == target_rel {
+                    found_index = Some(i);
+                    break;
                 }
             }
 
@@ -955,4 +964,92 @@ fn create_tar_reader(format: ArchiveFormat, archive_path: &Path) -> Result<Box<d
         }
     };
     Ok(reader)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use zip::write::SimpleFileOptions;
+    use zip::ZipWriter;
+
+    fn write_test_zip(path: &Path, entries: &[(&str, &[u8])]) {
+        let mut writer = ZipWriter::new(File::create(path).unwrap());
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        for (name, contents) in entries {
+            if name.ends_with('/') {
+                writer.add_directory(*name, options).unwrap();
+            } else {
+                writer.start_file(*name, options).unwrap();
+                writer.write_all(contents).unwrap();
+            }
+        }
+        writer.finish().unwrap();
+    }
+
+    #[test]
+    fn zip_unicode_names_work_for_listing_metadata_and_extraction() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive_path = temp.path().join("unicode.zip");
+        write_test_zip(
+            &archive_path,
+            &[
+                ("données/", b""),
+                ("données/café.txt", b"bonjour"),
+                ("../escape.txt", b"unsafe"),
+            ],
+        );
+
+        // Check metadata before listing populates the structure cache.
+        let metadata = get_entry_metadata(&archive_path, "/données/café.txt").unwrap();
+        assert_eq!(metadata.name, "café.txt");
+        assert_eq!(metadata.size, 7);
+        assert!(!metadata.is_directory);
+
+        let root = list_directory(&archive_path, "/").unwrap();
+        assert_eq!(root.len(), 1);
+        assert_eq!(root[0].name, "données");
+        assert!(root[0].is_directory);
+        let children = list_directory(&archive_path, "/données").unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].name, "café.txt");
+
+        let output = temp.path().join("output");
+        fs::create_dir(&output).unwrap();
+        let extracted = extract_entry_to_dir(&archive_path, "/données/café.txt", &output).unwrap();
+        assert_eq!(fs::read(extracted).unwrap(), b"bonjour");
+        assert!(!temp.path().join("escape.txt").exists());
+        assert!(extract_entry_to_dir(&archive_path, "/données", &output).is_err());
+    }
+
+    #[test]
+    fn zip_cp437_names_work_for_listing_metadata_and_extraction() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive_path = temp.path().join("cp437.zip");
+        write_test_zip(&archive_path, &[("cafe.txt", b"content")]);
+
+        // Replace the ASCII name in both ZIP headers with the legacy CP437 é.
+        let mut bytes = fs::read(&archive_path).unwrap();
+        let positions: Vec<usize> = bytes
+            .windows(b"cafe.txt".len())
+            .enumerate()
+            .filter_map(|(index, window)| (window == b"cafe.txt").then_some(index))
+            .collect();
+        assert_eq!(positions.len(), 2);
+        for index in positions {
+            bytes[index + 3] = 0x82;
+        }
+        fs::write(&archive_path, bytes).unwrap();
+
+        let metadata = get_entry_metadata(&archive_path, "/café.txt").unwrap();
+        assert_eq!(metadata.name, "café.txt");
+        let entries = list_directory(&archive_path, "/").unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "café.txt");
+        let output = temp.path().join("output");
+        fs::create_dir(&output).unwrap();
+        let extracted = extract_entry_to_dir(&archive_path, "/café.txt", &output).unwrap();
+        assert_eq!(fs::read(extracted).unwrap(), b"content");
+    }
 }

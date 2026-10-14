@@ -3815,7 +3815,7 @@ fn extract_zip_contents<R: Read + Seek>(
 
         let entry_name = enclosed_path.to_string_lossy().to_string();
 
-        if entry.name().ends_with('/') || entry.is_dir() {
+        if entry.is_dir() {
             fs::create_dir_all(&out_path).map_err(|err| {
                 format!("Failed to create directory {}: {}", out_path.display(), err)
             })?;
@@ -8592,4 +8592,42 @@ pub async fn download_and_copy_to_clipboard(
     .map_err(|e| format!("Task join error: {e}"))??;
 
     Ok(temp_paths)
+}
+
+#[cfg(test)]
+mod zip_tests {
+    use super::extract_zip_contents;
+    use std::fs;
+    use std::io::{Cursor, Write};
+    use zip::write::SimpleFileOptions;
+    use zip::{ZipArchive, ZipWriter};
+
+    #[test]
+    fn zip_extraction_creates_directories_and_skips_unsafe_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("output");
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        writer.add_directory("empty/", options).unwrap();
+        writer.start_file("folder/café.txt", options).unwrap();
+        writer.write_all(b"contents").unwrap();
+        writer.start_file("../escape.txt", options).unwrap();
+        writer.write_all(b"unsafe").unwrap();
+        let mut archive = ZipArchive::new(writer.finish().unwrap()).unwrap();
+        let mut extracted_entries = Vec::new();
+
+        extract_zip_contents(&mut archive, &output, |name| {
+            extracted_entries.push(name.to_string());
+        })
+        .unwrap();
+
+        assert!(output.join("empty").is_dir());
+        assert_eq!(
+            fs::read(output.join("folder/café.txt")).unwrap(),
+            b"contents"
+        );
+        assert_eq!(extracted_entries, ["folder/café.txt"]);
+        assert!(!temp.path().join("escape.txt").exists());
+    }
 }
