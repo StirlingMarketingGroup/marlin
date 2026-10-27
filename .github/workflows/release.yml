@@ -210,6 +210,14 @@ jobs:
           fetch-depth: 0
           ref: ${{ env.RELEASE_REF }}
 
+      - name: Isolate AppImage temporary files (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          # AppImage extract-and-run reuses a checksum-based directory.
+          # Isolate jobs so cleanup cannot remove another job's linuxdeploy.
+          appimage_tmp="$(mktemp -d "$RUNNER_TEMP/marlin-appimage.XXXXXX")"
+          echo "TMPDIR=$appimage_tmp" >> "$GITHUB_ENV"
+
       - name: Install dependencies (Ubuntu)
         if: runner.os == 'Linux'
         run: |
@@ -594,6 +602,14 @@ jobs:
           target_dir="$HOME/.cache/cargo-target/$RUNNER_NAME/marlin-${{ matrix.target }}"
           echo "CARGO_TARGET_DIR=$target_dir" >> $GITHUB_ENV
           mkdir -p "$target_dir"
+
+      - name: Isolate AppImage temporary files (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          # AppImage extract-and-run reuses a checksum-based directory.
+          # Isolate jobs so cleanup cannot remove another job's linuxdeploy.
+          appimage_tmp="$(mktemp -d "$RUNNER_TEMP/marlin-appimage.XXXXXX")"
+          echo "TMPDIR=$appimage_tmp" >> "$GITHUB_ENV"
 
       - name: Install dependencies (Ubuntu)
         if: runner.os == 'Linux'
