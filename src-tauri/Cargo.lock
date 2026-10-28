@@ -9561,9 +9561,9 @@ dependencies = [
 
 [[package]]
 name = "zpl-rs"
-version = "0.1.9"
+version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "708b1459db31d748e7e13e95afe8893e9c4de7644e5035bf36e2d67f00128888"
+checksum = "07ec79e84cd8dae6406c0a9c23e78098f2ca54980fbcf5e6de1d6d7e9247a94a"
 dependencies = [
  "flate2",
  "reqwest 0.12.28",
