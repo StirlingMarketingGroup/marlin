@@ -1,6 +1,6 @@
 {
   "name": "marlin-file-browser",
-  "version": "0.1.26",
+  "version": "0.1.27",
   "private": true,
   "engines": {
     "node": "^22.22.2 || ^24.15.0 || >=26.0.0"
