@@ -68,6 +68,7 @@ src-tauri/binaries/marlin-smb-*
 
 # libzpl shared library (downloaded during cargo build by zpl-rs, copied for Tauri bundling)
 src-tauri/lib/
+src-tauri/zpl.dll
 
 # Google OAuth credentials (sensitive)
 src-tauri/google-credentials.json
