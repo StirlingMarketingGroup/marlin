@@ -160,6 +160,8 @@ jobs:
             rust-targets: aarch64-apple-darwin
             smb: true
             self_hosted: false
+            friendly_os: macos
+            friendly_arch: arm64
           # macOS Intel - GitHub-hosted
           - os: macos-15-intel
             target: x86_64-apple-darwin
@@ -167,6 +169,8 @@ jobs:
             rust-targets: x86_64-apple-darwin
             smb: false
             self_hosted: false
+            friendly_os: macos
+            friendly_arch: amd64
           # Linux x86_64
           - os: [self-hosted, Linux, X64, medium]
             target: x86_64-unknown-linux-gnu
@@ -174,6 +178,8 @@ jobs:
             rust-targets: x86_64-unknown-linux-gnu
             smb: true
             self_hosted: true
+            friendly_os: linux
+            friendly_arch: amd64
           # Linux arm64 - GitHub-hosted (no self-hosted arm64 runner yet)
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
@@ -181,6 +187,8 @@ jobs:
             rust-targets: aarch64-unknown-linux-gnu
             smb: true
             self_hosted: false
+            friendly_os: linux
+            friendly_arch: arm64
     permissions:
       contents: write
     env:
@@ -449,11 +457,13 @@ jobs:
           tagName: ${{ env.RELEASE_TAG }}
           releaseName: Marlin ${{ env.RELEASE_TAG }}
           releaseBody: |
-            Automated binaries for Marlin. Download the installer matching your platform.
+            Automated binaries for Marlin. Download the file matching your platform.
 
-            **macOS users**: Choose `arm64` for Apple Silicon (M1/M2/M3) or `x86_64` for Intel Macs.
+            **macOS**: `macos_arm64` for Apple Silicon (M1/M2/M3) or `macos_amd64` for Intel.
+            **Linux**: `linux_amd64` or `linux_arm64`.
           releaseDraft: false
           prerelease: ${{ startsWith(env.RELEASE_TAG, 'v0.') }}
+          releaseAssetNamePattern: 'marlin_[version]_${{ matrix.friendly_os }}_${{ matrix.friendly_arch }}[_setup][ext]'
           # macOS: skip DMG (create-dmg uses AppleScript/Finder which requires TCC approval)
           # We create a notarized DMG manually in the next step using hdiutil instead
           # arm64 Linux (GitHub-hosted): deb only (no AppImage on arm64)
@@ -471,7 +481,9 @@ jobs:
           APP_PATH="$TARGET_DIR/${{ matrix.target }}/release/bundle/macos/Marlin.app"
           ARCH="${{ matrix.arch }}"
           VERSION="${RELEASE_TAG#v}"
-          DMG_NAME="Marlin_${VERSION}_${ARCH}.dmg"
+          FRIENDLY_OS="${{ matrix.friendly_os }}"
+          FRIENDLY_ARCH="${{ matrix.friendly_arch }}"
+          DMG_NAME="marlin_${VERSION}_${FRIENDLY_OS}_${FRIENDLY_ARCH}.dmg"
           DMG_DIR="$TARGET_DIR/${{ matrix.target }}/release/bundle/dmg"
           DMG_PATH="$DMG_DIR/$DMG_NAME"
 
@@ -517,9 +529,10 @@ jobs:
         run: |
           set -euo pipefail
           TARGET_DIR="${CARGO_TARGET_DIR:-src-tauri/target}"
-          ARCH="${{ matrix.arch }}"
           VERSION="${RELEASE_TAG#v}"
-          DMG_NAME="Marlin_${VERSION}_${ARCH}.dmg"
+          FRIENDLY_OS="${{ matrix.friendly_os }}"
+          FRIENDLY_ARCH="${{ matrix.friendly_arch }}"
+          DMG_NAME="marlin_${VERSION}_${FRIENDLY_OS}_${FRIENDLY_ARCH}.dmg"
           DMG_PATH="$TARGET_DIR/${{ matrix.target }}/release/bundle/dmg/$DMG_NAME"
 
           if [ -z "${APPLE_ID:-}" ] || [ -z "${APPLE_PASSWORD:-}" ] || [ -z "${APPLE_TEAM_ID:-}" ]; then
@@ -543,9 +556,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TARGET_DIR="${CARGO_TARGET_DIR:-src-tauri/target}"
-          ARCH="${{ matrix.arch }}"
           VERSION="${RELEASE_TAG#v}"
-          DMG_NAME="Marlin_${VERSION}_${ARCH}.dmg"
+          FRIENDLY_OS="${{ matrix.friendly_os }}"
+          FRIENDLY_ARCH="${{ matrix.friendly_arch }}"
+          DMG_NAME="marlin_${VERSION}_${FRIENDLY_OS}_${FRIENDLY_ARCH}.dmg"
           DMG_PATH="$TARGET_DIR/${{ matrix.target }}/release/bundle/dmg/$DMG_NAME"
           gh release upload "${{ env.RELEASE_TAG }}" "$DMG_PATH" --clobber
 
