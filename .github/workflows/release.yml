@@ -462,7 +462,7 @@ jobs:
             **macOS**: `macos_arm64` for Apple Silicon (M1/M2/M3) or `macos_amd64` for Intel.
             **Linux**: `linux_amd64` or `linux_arm64`.
           releaseDraft: false
-          prerelease: ${{ startsWith(env.RELEASE_TAG, 'v0.') }}
+          prerelease: false
           releaseAssetNamePattern: 'marlin_[version]_${{ matrix.friendly_os }}_${{ matrix.friendly_arch }}[_setup][ext]'
           # macOS: skip DMG (create-dmg uses AppleScript/Finder which requires TCC approval)
           # We create a notarized DMG manually in the next step using hdiutil instead
