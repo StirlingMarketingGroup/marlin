@@ -132,7 +132,7 @@ Run these commands to find documentation files in the repo:
 git ls-files '*.md' 'CLAUDE.md' 'AGENTS.md' '**/*.md'
 
 # See which docs are near the files you changed
-git diff --name-only $(git merge-base HEAD main)..HEAD | xargs -I{} dirname {} | sort -u | while read dir; do
+git diff --name-only $(git merge-base HEAD master)..HEAD | xargs -I{} dirname {} | sort -u | while read dir; do
   ls "$dir"/*.md "$dir"/README* 2>/dev/null
 done
 ```

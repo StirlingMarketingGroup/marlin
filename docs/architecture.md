@@ -1,0 +1,76 @@
+# Architecture
+
+Marlin is one Tauri 2 desktop app: a Rust backend that owns all file access, and a React frontend that draws the UI in a webview. The frontend never touches the disk. It calls a Rust command and gets data back.
+
+**Covers:** `src-tauri/src/lib.rs`, `src-tauri/src/commands.rs`, `src-tauri/Cargo.toml`, `src/main.tsx`, `src/store/`, `src/windows/`
+**Checked against the code:** 2026-11-11
+
+## Processes
+
+| Process      | Built from                                                     | Job                                                                                                      |
+| ------------ | -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `marlin`     | `src-tauri/src/main.rs` → `app_lib::run()` in `lib.rs`         | The app. Hosts the webview, runs every command.                                                          |
+| `marlin-smb` | `src-tauri/src/bin/marlin-smb.rs`, Cargo feature `smb-sidecar` | SMB helper. Keeps `libsmbclient` out of the main app so the app starts even when samba is not installed. |
+
+The main app starts `marlin-smb` on demand and talks to it over stdin and stdout. See [Location providers](location-providers.md).
+
+## How the frontend and backend talk
+
+- **Commands.** The frontend calls `invoke('command_name', args)`. The backend registers about 130 commands in the `generate_handler!` list in `lib.rs`. Almost all of them live in `commands.rs`, which is 8,600 lines and the first place to look for any backend behavior.
+- **Events.** The backend pushes data with `emit`. Two matter most: `directory-batch` streams a folder listing in chunks, and `directory-changed` reports a change on disk from the file watcher.
+- **Types.** Shared shapes are hand-written twice: Rust structs with `serde(rename_all = "camelCase")`, and TypeScript types in `src/types/index.ts`. Nothing generates one from the other, so change both.
+
+## Backend modules (`src-tauri/src/`)
+
+| Module                   | Job                                                                                                  |
+| ------------------------ | ---------------------------------------------------------------------------------------------------- |
+| `lib.rs`                 | Entry point. Registers plugins, commands, and shared state.                                          |
+| `commands.rs`            | Nearly every command: listing, file operations, paste, archives, windows, preferences, remote setup. |
+| `locations/`             | Storage backends behind one trait. See [Location providers](location-providers.md).                  |
+| `thumbnails/`            | Thumbnail service, cache, and per-format generators. See [Thumbnails](thumbnails.md).                |
+| `clipboard.rs`           | File copy, cut, and paste through the OS clipboard, with one implementation per OS.                  |
+| `fs_utils.rs`            | Local path expansion, `FileItem` building, local copy helpers.                                       |
+| `fs_watcher.rs`          | Watches local folders and emits `directory-changed`.                                                 |
+| `state.rs`               | Shared state types: directory streams, folder-size jobs, menu state, trash undo.                     |
+| `menu.rs`                | The native menu bar.                                                                                 |
+| `native_drag.rs`         | macOS only. Starts a native drag of files out of the app.                                            |
+| `plugins/drag_detector/` | Detects files dragged into the window, with one file per OS.                                         |
+| `macos_security.rs`      | macOS security-scoped bookmarks, so folder access survives a restart.                                |
+| `macos_icons.rs`         | macOS only. Extracts app icons.                                                                      |
+| `smb_sidecar/`           | The code inside `marlin-smb`. Compiled only with the `smb-sidecar` feature.                          |
+
+## Frontend (`src/`)
+
+**Windows.** `src/main.tsx` reads the `view` query parameter and renders one root component. No parameter means the main browser window (`App.tsx`). Each other value is a small separate OS window from `src/windows/`: `folder-size`, `archive-progress`, `compress-progress`, `delete-progress`, `clipboard-progress`, `smb-connect`, `sftp-connect`, `permissions`, `preferences`, `conflict`. The backend opens these windows from commands in `commands.rs`.
+
+**Main window.** `App.tsx` lays out `Sidebar`, `PathBar`, `MainPanel`, and `StatusBar`. `MainPanel` shows either `FileGrid` or `FileList`. Both virtualize rows with `@tanstack/react-virtual`.
+
+**State.** Zustand stores in `src/store/`:
+
+| Store                                     | Holds                                                                                                                 |
+| ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `useAppStore`                             | Almost everything: current path, history, file list, selection, preferences, clipboard, remote accounts. 3,000 lines. |
+| `useUndoStore`                            | The undo stack for file operations.                                                                                   |
+| `useDragStore`                            | The drag in progress.                                                                                                 |
+| `useConflictStore`                        | The name-conflict question the backend is waiting on.                                                                 |
+| `useToastStore`                           | Toast messages.                                                                                                       |
+| `use*ProgressStore`, `useFolderSizeStore` | State for one progress window each.                                                                                   |
+
+**Hooks worth knowing.** `useDirectoryStream` consumes `directory-batch`. `useDirectoryWatcher` reacts to `directory-changed`. `useThumbnail` requests thumbnails. `useDragDetector` handles files dropped onto the window.
+
+## Where settings live
+
+| Data                                  | Place                                                                                      |
+| ------------------------------------- | ------------------------------------------------------------------------------------------ |
+| Preferences, per-folder view settings | `<config dir>/Marlin/preferences.json`, through `read_preferences` and `write_preferences` |
+| SMB servers                           | `<config dir>/marlin/smb-servers.json`, passwords in the OS keychain                       |
+| SFTP servers                          | `<config dir>/marlin/sftp-servers.json`, passwords in the OS keychain                      |
+| Google accounts and their tokens      | `<config dir>/marlin/gdrive-accounts.json`, as plain text (issue #463)                     |
+| Thumbnails                            | `<cache dir>/marlin_thumbnails`                                                            |
+| User themes                           | The themes folder listed in `README.md`                                                    |
+
+## Known rough spots
+
+- Preferences use the folder `Marlin` and everything else uses `marlin`. That is one folder on macOS and two on Linux.
+- `commands.rs` and `useAppStore.ts` are each one very large file that mixes unrelated concerns.
+- Code decides what to do by matching on the URI scheme string (`gdrive://`, `smb://`, ...) in many files on both sides. See [Location providers](location-providers.md) for why, and epic #368 for the plan to remove it.

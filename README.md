@@ -132,7 +132,7 @@ Download from [Releases](https://github.com/StirlingMarketingGroup/marlin/releas
 Or use the install script:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/StirlingMarketingGroup/marlin/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/StirlingMarketingGroup/marlin/master/scripts/install.sh | bash
 ```
 
 ## Development
@@ -199,23 +199,22 @@ After building the sidecar, run `npm run tauri dev` or `npm run tauri build` as 
 ```text
 marlin/
 ├── src/                # React frontend
-│   ├── components/
-│   ├── hooks/
-│   ├── store/
-│   └── types/
 ├── src-tauri/          # Rust backend
-│   └── src/
-└── public/
+├── e2e/                # Playwright tests
+└── docs/               # Developer wiki
 ```
+
+How the code works is written up in the wiki. Start at [`docs/index.md`](docs/index.md).
 
 ## Contributing
 
 1. Fork the repo
-2. Create a branch: `git checkout -b feature/thing`
-3. Make changes and commit
-4. Push and open a PR
+2. Create a branch from `master`: `git checkout -b feat/thing`
+3. Make one change per branch and commit
+4. Run `npm run check` and `npm run test:run`
+5. Push and open a PR
 
-Please run `npm run build` and `cargo build` before submitting to catch errors.
+The working rules are in [`AGENTS.md`](AGENTS.md).
 
 ## License
 
