@@ -29,6 +29,8 @@ There is no Windows build (issue #135).
 
 Both jobs set `MACOSX_DEPLOYMENT_TARGET` to `10.13`. `tauri build` sets that variable from `bundle.macOS.minimumSystemVersion` (default `10.13`), and the plain `cargo build` for the SMB helper does not. When the two disagree, every crate that compiles C is rebuilt by each step. If you set `minimumSystemVersion` in `tauri.conf.json`, change the workflow value to match.
 
+A newer push cancels a running PR build, but never a `master` build. Only `master` builds save the Rust cache, and a cancelled one would save a partial cache under a key that is never written again. If a cache does get poisoned, delete it with `gh cache delete <id>` and the next `master` build saves a full one.
+
 The dry run is skipped when a change touches nothing that goes into the bundle. The list of paths is in the `dry-run-changes` job. Add a path there when a new file starts to affect the build.
 
 ## Secrets
