@@ -30,7 +30,7 @@ This file holds the rules that always apply. Everything longer lives in the wiki
 ## Before you call work done
 
 1. Run `npm run check` and `npm run test:run`. Both must pass with no warnings.
-2. If you changed Rust, run `cargo test` in `src-tauri/`. CI does not run it yet (issue #462).
+2. If you changed Rust, run `cargo test` in `src-tauri/`. CI does not run it yet (issue #462). If you changed the SMB helper in `src-tauri/crates/marlin-smb/`, also run `cargo test -p marlin-smb` there.
 3. If you changed `src/` or `e2e/`, run `npm run test:e2e`.
 4. Update the wiki page that covers what you changed (see "Keeping the wiki true").
 

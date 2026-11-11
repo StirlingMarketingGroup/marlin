@@ -13,10 +13,6 @@ mod plugins;
 mod state;
 mod thumbnails;
 
-// SMB sidecar module - only compiled for the sidecar binary
-#[cfg(feature = "smb-sidecar")]
-pub mod smb_sidecar;
-
 use state::{DirectoryStreamState, FolderSizeState, MenuState, TrashUndoState};
 use std::sync::Mutex;
 use std::sync::OnceLock;

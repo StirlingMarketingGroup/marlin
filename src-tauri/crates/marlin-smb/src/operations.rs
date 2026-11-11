@@ -1,9 +1,8 @@
 //! SMB operations using pavao/libsmbclient.
 //!
-//! This module is only compiled when the `smb-sidecar` feature is enabled.
 //! All operations receive credentials as parameters (no keychain access).
 
-use crate::smb_sidecar::protocol::{
+use crate::protocol::{
     error_codes, CopyParams, CreateDirectoryParams, DeleteParams, DirectoryEntry,
     DownloadFileParams, DownloadFileResult, DownloadPartialParams, DownloadPartialResult,
     FileMetadataResult, GetFileMetadataParams, ListSharesParams, ListSharesResult,

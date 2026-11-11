@@ -12,8 +12,6 @@ pub const JSONRPC_VERSION: &str = "2.0";
 pub mod error_codes {
     /// JSON-RPC standard: Parse error
     pub const PARSE_ERROR: i32 = -32700;
-    /// JSON-RPC standard: Invalid request
-    pub const INVALID_REQUEST: i32 = -32600;
     /// JSON-RPC standard: Method not found
     pub const METHOD_NOT_FOUND: i32 = -32601;
     /// JSON-RPC standard: Invalid params
@@ -21,8 +19,6 @@ pub mod error_codes {
     /// JSON-RPC standard: Internal error
     pub const INTERNAL_ERROR: i32 = -32603;
 
-    /// SMB connection failed
-    pub const SMB_CONNECTION_FAILED: i32 = -1001;
     /// SMB authentication failed
     pub const SMB_AUTH_FAILED: i32 = -1002;
     /// SMB path not found
@@ -31,8 +27,6 @@ pub mod error_codes {
     pub const SMB_PERMISSION_DENIED: i32 = -1004;
     /// libsmbclient library missing
     pub const SMB_LIBRARY_MISSING: i32 = -1005;
-    /// Operation timeout
-    pub const SMB_TIMEOUT: i32 = -1006;
     /// Generic SMB error
     pub const SMB_ERROR: i32 = -1000;
 }
@@ -45,17 +39,6 @@ pub struct Request {
     pub method: String,
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub params: serde_json::Value,
-}
-
-impl Request {
-    pub fn new(id: u64, method: impl Into<String>, params: impl Serialize) -> Self {
-        Self {
-            jsonrpc: JSONRPC_VERSION.to_string(),
-            id,
-            method: method.into(),
-            params: serde_json::to_value(params).unwrap_or(serde_json::Value::Null),
-        }
-    }
 }
 
 /// JSON-RPC 2.0 response.
@@ -88,24 +71,6 @@ impl Response {
                 code,
                 message: message.into(),
                 data: None,
-            }),
-        }
-    }
-
-    pub fn error_with_data(
-        id: u64,
-        code: i32,
-        message: impl Into<String>,
-        data: serde_json::Value,
-    ) -> Self {
-        Self {
-            jsonrpc: JSONRPC_VERSION.to_string(),
-            id,
-            result: None,
-            error: Some(RpcError {
-                code,
-                message: message.into(),
-                data: Some(data),
             }),
         }
     }

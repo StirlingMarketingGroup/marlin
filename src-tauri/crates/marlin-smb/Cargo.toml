@@ -1,0 +1,15 @@
+[package]
+name = "marlin-smb"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Marlin's SMB helper process. Keeps libsmbclient out of the main app."
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+once_cell = "1.21"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+uuid = { version = "1.23", features = ["v4"] }
+pavao = "0.3"

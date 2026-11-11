@@ -3834,7 +3834,6 @@ dependencies = [
  "objc2-foundation",
  "once_cell",
  "open",
- "pavao",
  "psd",
  "rayon",
  "reqwest 0.13.5",
@@ -3873,6 +3872,18 @@ dependencies = [
  "zip 9.0.0",
  "zpl-rs",
  "zstd 0.14.3",
+]
+
+[[package]]
+name = "marlin-smb"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "once_cell",
+ "pavao",
+ "serde",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]
