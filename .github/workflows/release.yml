@@ -237,6 +237,9 @@ jobs:
 
       - name: Install dependencies (Ubuntu)
         if: runner.os == 'Linux'
+        # This step takes about a minute. A runner that cannot reach the
+        # Ubuntu mirror would otherwise try every package for hours.
+        timeout-minutes: 10
         run: |
           apt_retry() {
             for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
@@ -249,7 +252,8 @@ jobs:
             sudo DEBIAN_FRONTEND=noninteractive apt-get "$@"
           }
 
-          apt_retry update
+          # Fail on a mirror that does not answer, so the retry loop sees it.
+          apt_retry update -o APT::Update::Error-Mode=any
           apt_retry install -y \
             build-essential \
             clang \
@@ -676,6 +680,9 @@ jobs:
 
       - name: Install dependencies (Ubuntu)
         if: runner.os == 'Linux'
+        # This step takes about a minute. A runner that cannot reach the
+        # Ubuntu mirror would otherwise try every package for hours.
+        timeout-minutes: 10
         run: |
           apt_retry() {
             for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
@@ -688,7 +695,8 @@ jobs:
             sudo DEBIAN_FRONTEND=noninteractive apt-get "$@"
           }
 
-          apt_retry update
+          # Fail on a mirror that does not answer, so the retry loop sees it.
+          apt_retry update -o APT::Update::Error-Mode=any
           apt_retry install -y \
             build-essential \
             clang \
