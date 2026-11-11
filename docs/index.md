@@ -19,7 +19,11 @@ Start here. Each line says what a page answers. The rules for keeping these page
 
 ## Decisions
 
-[`decisions/`](decisions/README.md) holds numbered decision records. A record says what we chose, why, and what we rejected, so later work does not reopen it. There are none yet. The first one is the mount architecture from issue #369.
+[`decisions/`](decisions/README.md) holds numbered decision records. A record says what we chose, why, and what we rejected, so later work does not reopen it.
+
+| Record                                                           | Read it to learn                                                                                                        |
+| ---------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| [0001: Mount architecture](decisions/0001-mount-architecture.md) | How remotes become native mounts (epic #368): the portable core, the adapter per OS, the helper process, and the risks. |
 
 ## Frozen history
 

@@ -1,0 +1,12 @@
+[package]
+name = "mount-hello"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT"
+description = "Evidence spike: a minimal read-only FUSE filesystem for decision record 0001."
+
+[dependencies]
+fuser = "0.18"
+libc = "0.2"
+tokio = { version = "1", features = ["rt-multi-thread", "time", "macros", "signal"] }
