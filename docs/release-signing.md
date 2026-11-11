@@ -7,11 +7,12 @@ A release is built, signed, and notarized by `.github/workflows/release.yml`. Pu
 
 ## What the workflow does
 
-| Job               | Runs when                              | Does                                                                                                       |
-| ----------------- | -------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `sync-version`    | a `v*` tag, or a manual run with a tag | Writes the version into `package.json` and `tauri.conf.json`, commits it, and makes sure the tag exists.   |
-| `release`         | after `sync-version`, never on a PR    | Builds the SMB helper, builds and publishes installers, and on macOS signs, makes a DMG, and notarizes it. |
-| `release-dry-run` | every PR and every push to `master`    | Builds the bundle without publishing. It also keeps the Rust cache warm for PRs.                           |
+| Job               | Runs when                                                       | Does                                                                                                       |
+| ----------------- | --------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `sync-version`    | a `v*` tag, or a manual run with a tag                          | Writes the version into `package.json` and `tauri.conf.json`, commits it, and makes sure the tag exists.   |
+| `release`         | after `sync-version`, never on a PR                             | Builds the SMB helper, builds and publishes installers, and on macOS signs, makes a DMG, and notarizes it. |
+| `dry-run-changes` | every PR and every push to `master`                             | Checks which files changed and decides whether the dry run needs to build.                                 |
+| `release-dry-run` | a PR or a push to `master` that changes something in the bundle | Builds the bundle without publishing. It also keeps the Rust cache warm for PRs.                           |
 
 Build targets:
 
@@ -25,6 +26,10 @@ Build targets:
 There is no Windows build (issue #135).
 
 `release` and `release-dry-run` repeat about 200 lines of the same setup steps. Change both when you change one.
+
+Both jobs set `MACOSX_DEPLOYMENT_TARGET` to `10.13`. `tauri build` sets that variable from `bundle.macOS.minimumSystemVersion` (default `10.13`), and the plain `cargo build` for the SMB helper does not. When the two disagree, every crate that compiles C is rebuilt by each step. If you set `minimumSystemVersion` in `tauri.conf.json`, change the workflow value to match.
+
+The dry run is skipped when a change touches nothing that goes into the bundle. The list of paths is in the `dry-run-changes` job. Add a path there when a new file starts to affect the build.
 
 ## Secrets
 
