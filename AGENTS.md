@@ -1,47 +1,99 @@
-# Repository Guidelines
+# Marlin: rules for agents
 
-## Project Structure & Module Organization
+Marlin is a desktop file browser. The frontend is React + TypeScript + Tailwind in `src/`. The backend is Rust + Tauri 2 in `src-tauri/`.
 
-- Frontend: `src/` (React + TypeScript). Components in `src/components/` (PascalCase `.tsx`), state in `src/store/` (Zustand), types in `src/types/`.
-- Styles: `src/index.css` with Tailwind; config in `tailwind.config.js` and `postcss.config.js`.
-- Desktop backend: `src-tauri/` (Rust, Tauri). App entry `src-tauri/src/main.rs`, commands in `src-tauri/src/commands.rs`, config in `src-tauri/tauri.conf.json` and `src-tauri/capabilities/`.
-- Build output: `dist/`. Do not commit artifacts.
+This file holds the rules that always apply. Everything longer lives in the wiki under `docs/`. **Read [`docs/index.md`](docs/index.md) before you start a task**, then read the pages it routes you to. `CLAUDE.md` imports this file, so there is one rule set.
 
-## Build, Test, and Development Commands
+## Read before you touch
 
-- `npm run dev` — Start Vite dev server for the web UI.
-- `npm run preview` — Preview the built frontend locally.
-- `npm run build` — Production build of the web assets to `dist/`.
-- `npm run tauri dev` — Run the full desktop app (Tauri + frontend) in dev.
-- `npm run tauri build` — Build a desktop binary via Tauri.
-- Rust-only: `cd src-tauri && cargo build` (or `cargo run` for backend checks).
+| Task                                                                | Read first                                                 |
+| ------------------------------------------------------------------- | ---------------------------------------------------------- |
+| Anything, to find your way around                                   | [`docs/architecture.md`](docs/architecture.md)             |
+| Remote storage: Google Drive, SMB, SFTP, archives, paste, drag/drop | [`docs/location-providers.md`](docs/location-providers.md) |
+| Mounting remotes as native filesystems (epic #368)                  | `docs/location-providers.md`, then `docs/decisions/`       |
+| Thumbnails                                                          | [`docs/thumbnails.md`](docs/thumbnails.md)                 |
+| Writing or running tests                                            | [`docs/testing.md`](docs/testing.md)                       |
+| Releases, signing, notarization                                     | [`docs/release-signing.md`](docs/release-signing.md)       |
+| A design choice that later work must not reopen                     | [`docs/decisions/README.md`](docs/decisions/README.md)     |
 
-## Coding Style & Naming Conventions
+## Commands
 
-- TypeScript strict mode is enabled; keep types precise. Prefer `@/` path alias over long relatives (e.g., `import X from '@/components/X'`).
-- Components: PascalCase (`FileGrid.tsx`). Hooks: `useX.ts`. Store files: `useSomethingStore.ts`. Types live in `src/types/index.ts`.
-- Indentation: 2 spaces; favor functional components and hooks. Use Tailwind utility classes for styling.
+- `npm run tauri dev` starts the desktop app with hot reload.
+- `npm run dev` starts the frontend alone in Vite.
+- `npm run check` runs ESLint on changed files, Prettier, both TypeScript projects, and `cargo check` with warnings as errors. The pre-push hook runs it.
+- `npm run test:run` runs the unit tests once.
+- `npm run test:e2e` runs the Playwright tests. They start their own Vite server and mock Tauri, so the desktop app does not need to run.
+- `cd src-tauri && cargo test` runs the Rust tests.
+- `npm run format:fix` and `npm run lint:fix` fix formatting and lint errors.
+- `npm run build:smb-sidecar` builds the SMB helper binary. It needs samba installed (see `README.md`).
 
-## Testing Guidelines
+## Before you call work done
 
-- No formal test suite is configured yet. If adding tests: prefer Vitest + React Testing Library for UI and `cargo test` for Rust modules (`*_test.rs`).
-- Keep tests colocated (e.g., `Component.test.tsx`) and aim for critical-path coverage (navigation, sorting, file actions).
+1. Run `npm run check` and `npm run test:run`. Both must pass with no warnings.
+2. If you changed Rust, run `cargo test` in `src-tauri/`. CI does not run it yet (issue #462).
+3. If you changed `src/` or `e2e/`, run `npm run test:e2e`.
+4. Update the wiki page that covers what you changed (see "Keeping the wiki true").
 
-## Commit & Pull Request Guidelines
+## Never kill the dev server
 
-- Use concise, typed prefixes: `feat:`, `fix:`, `refactor:`, `docs:`, `chore:` (project history includes `Fix:` and `Refactor:`).
-- PRs should include: clear description, linked issues, platform(s) tested (Windows/macOS/Linux), and screenshots/GIFs for UI changes.
+`npm run tauri dev` reloads TypeScript changes at once and rebuilds and restarts on Rust changes. Do not kill it or search for its PID. If you think it needs a restart, ask the developer.
 
-## Development Process & Auto-Restart Behavior
+## Branch size
 
-- This project automatically restarts when Rust code changes are detected in `src-tauri/`.
-- The frontend also has hot reload capabilities for React/TypeScript changes.
-- **For agents**: DO NOT manually kill running processes or search for PIDs to restart the application. The auto-restart functionality handles this automatically.
-- If you believe a restart is truly necessary (rare), simply request the user to restart rather than attempting to kill processes.
-- Note: Manual restarts are typically unnecessary - the auto-reload on both Rust backend and client frontend handles most development scenarios effectively.
+One branch makes one semantic change. A reviewer must be able to hold the whole branch in their head.
 
-## Security & Configuration Tips
+- **Ceiling:** about 10 files and 1,300 added lines that a person has to read. Lockfiles, generated files, renames, and deletions do not count.
+- **Count the layers before you branch:** a Rust backend module, the Tauri command surface (`commands.rs`, `lib.rs`, `src/types/`), the Zustand store, components or windows, CI or packaging, and code for one more operating system. Assume the real work is twice what the issue says.
+- **Two layers or fewer and under the ceiling:** go.
+- **More than that:** stop before you branch. Split the work into spec issues, where each issue is one branch and names what blocks it. Start the first one.
+- **A branch that grows past the ceiling midway:** stop. Park it as a reference, file the issues it should have been, and restart the first piece on a fresh branch.
+- Branch from the latest `origin/master`, never from another feature branch.
 
-- Respect Tauri capabilities; only request permissions you use (`src-tauri/capabilities/`).
-- Avoid hardcoded user paths; use Tauri plugins (`@tauri-apps/plugin-fs`, `plugin-os`) and Rust helpers.
-- Never commit secrets; configuration belongs in environment or Tauri config.
+## Fix what you find
+
+Much of this code was written early and fast. Expect things that make no sense.
+
+- **Small and safe:** fix it in the branch you are on. Examples: a wrong comment, dead code, a stale doc line, a broken link.
+- **Too big for a drive-by:** file an issue with the evidence (file, line, what is wrong). Do not leave it unmentioned.
+- Never patch on top of a patch. If adding a feature needs contortions, redesign that piece first. Less code is better code.
+
+## Code conventions
+
+**TypeScript and React**
+
+- Strict mode. Keep types precise.
+- 2-space indent. Function components with hooks.
+- Components are PascalCase (`FileGrid.tsx`). Hooks are `useX.ts`. Stores are `useXStore.ts`. Shared types live in `src/types/index.ts`.
+- Import with the `@/` alias instead of long relative paths.
+- Style with Tailwind utility classes.
+
+**Rust**
+
+- Expose a function to the frontend with `#[tauri::command]` and register it in `src-tauri/src/lib.rs`.
+- Return `Result`. Use async for I/O.
+- Put platform code behind `#[cfg(target_os = "...")]`.
+- Warnings fail the check. Fix them, do not silence them.
+
+**Security**
+
+- Request only the Tauri capabilities you use (`src-tauri/capabilities/`).
+- Never commit secrets. Never put credentials or tokens in paths, logs, or error messages.
+- Do not hardcode user paths.
+
+## Commits and pull requests
+
+- Prefix the subject: `feat:`, `fix:`, `refactor:`, `docs:`, `chore:`. Keep it under 50 characters.
+- A PR links its issue, says which platforms you tested, and shows a screenshot for any UI change.
+
+## Keeping the wiki true
+
+The wiki follows the LLM wiki pattern: the code is the source, the pages in `docs/` are the compiled knowledge, and this file is the schema that says how to maintain them.
+
+- **Read:** start at `docs/index.md`. It lists every page with one line on what it answers.
+- **Write:** when a change makes a page wrong, fix the page in the same branch. When you learn something a future reader would have to rediscover, add it to the page that owns the topic.
+- **One topic per page.** A page states what the code does today, not how it got there. Git history is the log.
+- **Every page names the files it covers** and the date someone last checked it against the code.
+- **Every page is in the index.** A new page gets an index line in the same branch.
+- **Link, do not copy.** If two pages need the same fact, one owns it and the other links to it.
+- **Decisions** go in `docs/decisions/` as numbered records. **Old plans** in `docs/plans/` are frozen history. Never treat them as current, and never edit them.
+- **Lint when you pass through:** if you read a page and find a claim the code no longer supports, a dead file path, or two pages that disagree, fix it in your branch.
