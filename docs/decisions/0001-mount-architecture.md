@@ -1,6 +1,6 @@
 # 0001: Mount remotes through one portable core and a thin adapter per OS
 
-**Status:** proposed
+**Status:** accepted
 **Date:** 2026-11-11
 **Issue:** #369 (epic #368)
 
@@ -44,12 +44,12 @@ Marlin mounts each remote account as a native folder. Seven choices make that up
 
 The spike is `spikes/mount-hello/`. It mounts a read-only filesystem with two files. A read of `slow.txt` is answered three seconds later, to stand in for a slow network call.
 
-| Platform | What ran                                                                                                                                                                                                     | Result                                      |
-| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------- |
-| Linux    | `run-linux.sh`: the Rust program on `fuser` 0.18.0, in a Debian 12 container, kernel 7.0.14, `fuse3` 3.14.0, as a non-root user                                                                              | **Passed**, 2026-11-11                      |
-| macOS    | `run-macos.sh`: `macos-hello.c` on the low-level API of macFUSE 5.5.0's libfuse 3.18.3, FSKit backend, macOS 27.2 on Apple Silicon                                                                           | **Passed**, 2026-11-11                      |
-| macOS    | The Rust program on `fuser` 0.18.0, same machine, FSKit backend                                                                                                                                              | **Failed**: `fuser` cannot use this backend |
-| Windows  | A Rust program on WinFsp 2.1 through its own bindings, Windows 11 on ARM64 (Insider build 26300.9711), as an administrator and as a normal user. The program is not in this branch; a second branch adds it. | **Passed**, 2026-11-11                      |
+| Platform | What ran                                                                                                                                                              | Result                                      |
+| -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- |
+| Linux    | `run-linux.sh`: the Rust program on `fuser` 0.18.0, in a Debian 12 container, kernel 7.0.14, `fuse3` 3.14.0, as a non-root user                                       | **Passed**, 2026-11-11                      |
+| macOS    | `run-macos.sh`: `macos-hello.c` on the low-level API of macFUSE 5.5.0's libfuse 3.18.3, FSKit backend, macOS 27.2 on Apple Silicon                                    | **Passed**, 2026-11-11                      |
+| macOS    | The Rust program on `fuser` 0.18.0, same machine, FSKit backend                                                                                                       | **Failed**: `fuser` cannot use this backend |
+| Windows  | The Rust program in `windows/` on WinFsp 2.1.25156 through its own bindings, Windows 11 on ARM64 (Insider build 26300.9711), as an administrator and as a normal user | **Passed**, 2026-11-11                      |
 
 What the Linux run showed:
 
@@ -74,10 +74,12 @@ What the macOS runs showed:
 
 What the Windows runs showed:
 
-- **Marlin's own bindings work.** The program has no WinFsp files at build time. It finds the install folder in the registry and loads `winfsp-a64.dll` at run time. Before WinFsp was installed it started and printed "WinFsp is not installed".
+- **Marlin's own bindings work.** The program has no WinFsp files at build time. It finds the install folder in the registry and loads `winfsp-a64.dll` at run time. Before WinFsp was installed, an earlier build of the program started and printed "WinFsp is not installed". The program in the repo keeps that code, but it was not run again without WinFsp.
 - **WinFsp installs quietly.** `msiexec /i winfsp-2.1.25156.msi /qn /norestart` installed the driver from an administrator session with no restart.
-- **Mount, list, read, unmount** all passed at a directory mount under the user folder, both elevated and as a normal process in the desktop session. A write failed with `ERROR_WRITE_PROTECT`.
-- **A slow read does not block fast calls.** The read callback returned `STATUS_PENDING`, and a tokio task sent the answer later with `FspFileSystemSendResponse`. With one dispatcher thread, a listing and a read finished in about 2 ms while the slow read waited, and 24 callbacks arrived in that time. This covers reads only. WinFsp has no late answer for open, get attributes, or rename, and a slow one of those was not tested.
+- **Mount, list, read, unmount** all passed at a directory mount under the user folder, both elevated and as a normal process in the desktop session.
+- **The adapter must refuse writes itself.** Creating a file failed with `ERROR_WRITE_PROTECT` because the spike's create callback returns that status. WinFsp's `ReadOnlyVolume` flag only labels the volume. In the WinFsp 2.1 source the driver uses the flag for the volume's attributes and for nothing else, so every write call still reaches the filesystem. The spike refuses a create and an overwrite, and leaves the other write callbacks out. On the mount, a new file and an overwrite failed with "The media is write protected", and a rename failed with "Incorrect function". `del hello.txt` printed no error and the file stayed: with no delete callback, WinFsp reports success and deletes nothing.
+- **A slow read does not block fast calls.** The read callback returned `STATUS_PENDING`, and a tokio task sent the answer later with `FspFileSystemSendResponse`. With one dispatcher thread, a listing and a read finished in about 2 ms while the slow read waited, and 21 callbacks arrived in that time. This covers reads only. WinFsp has no late answer for open, get attributes, or rename, and a slow one of those was not tested.
+- **One read by an app can be several read calls, and one can start at the end of the file.** `fs::read_to_string` on the 5-byte slow file made three read calls: 4,096 bytes at offset 0, 32 bytes at offset 0, and 32 bytes at offset 5. Each waited three seconds, so the app waited nine. The spike turns WinFsp's cache of file information off, and this was not tried with it on. The adapter must answer a read at the end of a file without a provider call.
 - **A killed helper leaves nothing behind.** After `taskkill /F` the mount directory was gone, and the same path mounted again at once. This is better than the WinFsp FAQ promises.
 - **An elevated process cannot open a normal user's mount.** A mount made by a normal process could not be read from an administrator session: "The path cannot be traversed because it contains an untrusted mount point" (error 448). Windows does not trust a directory mount point that a non-administrator created.
 - **Zero timestamps break `dir`.** The spike sends no file times, and `dir` printed "The parameter is incorrect" for each file. The adapter must always send real times.

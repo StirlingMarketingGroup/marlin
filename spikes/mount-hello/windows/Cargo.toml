@@ -1,0 +1,17 @@
+[package]
+name = "mount-hello-windows"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT"
+description = "Evidence spike: a minimal read-only WinFsp filesystem for decision record 0001."
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "time", "signal"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+] }
