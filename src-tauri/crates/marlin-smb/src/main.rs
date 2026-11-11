@@ -1,8 +1,7 @@
-//! SMB sidecar - isolated process for SMB operations.
+//! SMB helper binary. Isolated process for SMB operations.
 //!
-//! This module implements a JSON-RPC 2.0 server over stdin/stdout.
-//! It is compiled as a separate binary (`marlin-smb`) that handles
-//! all SMB operations, isolating libsmbclient from the main app.
+//! This binary is a JSON-RPC 2.0 server over stdin/stdout.
+//! It handles all SMB operations, keeping libsmbclient out of the main app.
 //!
 //! The sidecar:
 //! - Reads JSON-RPC requests from stdin (one per line, NDJSON format)
@@ -11,8 +10,8 @@
 //! - Logs to stderr only (stdout is reserved for IPC)
 //! - Exits when stdin closes (prevents orphan processes)
 
-pub mod operations;
-pub mod protocol;
+mod operations;
+mod protocol;
 
 use protocol::{
     error_codes, methods, CopyParams, CreateDirectoryParams, DeleteParams, DownloadFileParams,
@@ -24,7 +23,7 @@ use std::io::{BufRead, Write};
 /// Run the sidecar main loop.
 /// This function reads JSON-RPC requests from stdin and writes responses to stdout.
 /// It exits when stdin is closed (EOF).
-pub fn run() {
+fn main() {
     eprintln!(
         "[marlin-smb] Starting sidecar v{}",
         operations::SIDECAR_VERSION

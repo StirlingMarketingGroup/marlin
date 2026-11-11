@@ -2,17 +2,19 @@
 
 Marlin is one Tauri 2 desktop app: a Rust backend that owns all file access, and a React frontend that draws the UI in a webview. The frontend never touches the disk. It calls a Rust command and gets data back.
 
-**Covers:** `src-tauri/src/lib.rs`, `src-tauri/src/commands.rs`, `src-tauri/Cargo.toml`, `src/main.tsx`, `src/store/`, `src/windows/`
+**Covers:** `src-tauri/src/lib.rs`, `src-tauri/src/commands.rs`, `src-tauri/Cargo.toml`, `src-tauri/crates/`, `src/main.tsx`, `src/store/`, `src/windows/`
 **Checked against the code:** 2026-11-11
 
 ## Processes
 
-| Process      | Built from                                                     | Job                                                                                                      |
-| ------------ | -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| `marlin`     | `src-tauri/src/main.rs` → `app_lib::run()` in `lib.rs`         | The app. Hosts the webview, runs every command.                                                          |
-| `marlin-smb` | `src-tauri/src/bin/marlin-smb.rs`, Cargo feature `smb-sidecar` | SMB helper. Keeps `libsmbclient` out of the main app so the app starts even when samba is not installed. |
+| Process      | Built from                                             | Job                                                                                                      |
+| ------------ | ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------- |
+| `marlin`     | `src-tauri/src/main.rs` → `app_lib::run()` in `lib.rs` | The app. Hosts the webview, runs every command.                                                          |
+| `marlin-smb` | `src-tauri/crates/marlin-smb/`, its own crate          | SMB helper. Keeps `libsmbclient` out of the main app so the app starts even when samba is not installed. |
 
 The main app starts `marlin-smb` on demand and talks to it over stdin and stdout. See [Location providers](location-providers.md).
+
+`src-tauri/Cargo.toml` is both the app package and the root of a Cargo workspace. The helper is a member, so it shares the lockfile and the `target/` folder but none of the app's code. A plain `cargo build`, `check`, or `test` in `src-tauri/` acts on the app only. Name the helper to build or test it: `cargo test -p marlin-smb`. It needs samba installed. New binaries and shared crates go under `src-tauri/crates/`.
 
 ## How the frontend and backend talk
 
@@ -37,7 +39,6 @@ The main app starts `marlin-smb` on demand and talks to it over stdin and stdout
 | `plugins/drag_detector/` | Detects files dragged into the window, with one file per OS.                                         |
 | `macos_security.rs`      | macOS security-scoped bookmarks, so folder access survives a restart.                                |
 | `macos_icons.rs`         | macOS only. Extracts app icons.                                                                      |
-| `smb_sidecar/`           | The code inside `marlin-smb`. Compiled only with the `smb-sidecar` feature.                          |
 
 ## Frontend (`src/`)
 

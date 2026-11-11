@@ -2,7 +2,7 @@
 
 Every path in Marlin is a URI, and its scheme picks a storage backend called a location provider. The provider trait covers listing and whole-item operations only. It has no way to read or write file contents, so every feature that moves bytes between two backends is written by hand for each pair. Epic #368 replaces this with native mounts.
 
-**Covers:** `src-tauri/src/locations/`, `src-tauri/src/smb_sidecar/`, and the paste, drop, and download commands in `src-tauri/src/commands.rs`
+**Covers:** `src-tauri/src/locations/`, `src-tauri/crates/marlin-smb/`, and the paste, drop, and download commands in `src-tauri/src/commands.rs`
 **Checked against the code:** 2026-11-11
 
 ## The model

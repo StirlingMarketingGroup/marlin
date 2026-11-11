@@ -9,20 +9,14 @@ edition = "2021"
 rust-version = "1.77.2"
 default-run = "marlin"
 
+[workspace]
+members = ["crates/marlin-smb"]
+
 [features]
 default = []
 cargo-clippy = []
-# SMB sidecar binary - compiled separately with libsmbclient
-# Build with: cargo build --bin marlin-smb --features smb-sidecar
-smb-sidecar = ["pavao"]
-# Legacy feature (deprecated) - kept for compatibility but does nothing
+# Gates the manual tests in tests/smb_integration.rs. They need a real SMB server.
 smb = []
-
-# SMB sidecar binary entry point
-[[bin]]
-name = "marlin-smb"
-path = "src/bin/marlin-smb.rs"
-required-features = ["smb-sidecar"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -119,12 +113,6 @@ clipboard-win = "5"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = { version = "0.18", package = "gtk" }
-
-# SMB support (macOS/Linux only - Windows uses native UNC paths)
-# Enable with: cargo build --features smb
-# Requires: brew install samba (macOS) or apt install libsmbclient-dev (Linux)
-[target.'cfg(not(target_os = "windows"))'.dependencies]
-pavao = { version = "0.3", optional = true }
 
 [dev-dependencies]
 tempfile = "3.27"
