@@ -79,7 +79,7 @@ Same-scheme pairs go through the provider's own `copy`. Anything from an `archiv
 
 ## Where this is going
 
-Epic #368 turns each connected account or server into a native mount, so the OS sees an ordinary folder. Then local-to-remote and remote-to-remote copies, drag and drop, the clipboard, and other apps all work through normal filesystem calls, and the pair table goes away. The provider code for API calls and sign-in stays. The work is split into issues #369 to #378. [Decision 0001](decisions/0001-mount-architecture.md) sets the architecture and the order of that work. Its evidence is the spike in `spikes/mount-hello/`, which the real adapters replace.
+Epic #368 turns each connected account or server into a native mount, so the OS sees an ordinary folder. Then local-to-remote and remote-to-remote copies, drag and drop, the clipboard, and other apps all work through normal filesystem calls, and the pair table goes away. The provider code for API calls and sign-in stays. The work is split into issues #369 to #378. [Decision 0001](decisions/0001-mount-architecture.md) sets the architecture and the order of that work. Its evidence is the spike in `spikes/mount-hello/`, which the real adapters replace. The first piece, the [mount core](mount-core.md), is in the repo, and nothing uses it yet.
 
 ## Adding a provider today
 
