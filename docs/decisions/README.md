@@ -41,4 +41,4 @@ What this makes easy, what it makes hard, and what work it unblocks.
 
 | Record                                                                  | Decides                                                                                                     |
 | ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| [0001: Mount architecture](0001-mount-architecture.md) (proposed, #369) | How remotes become native mounts: the portable core, the adapter per OS, the helper process, and the risks. |
+| [0001: Mount architecture](0001-mount-architecture.md) (accepted, #369) | How remotes become native mounts: the portable core, the adapter per OS, the helper process, and the risks. |
