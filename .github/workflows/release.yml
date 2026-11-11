@@ -15,7 +15,11 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Only PR runs are cancelled by a newer push. A cancelled master run still
+  # saves its Rust cache (cache-on-failure), under the final key, with whatever
+  # it had compiled so far. That key is never written again, so every later run
+  # restores the partial cache and recompiles the rest.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   sync-version:
@@ -194,6 +198,11 @@ jobs:
     env:
       RELEASE_TAG: ${{ needs.sync-version.outputs.release_tag || github.ref_name }}
       RELEASE_REF: ${{ needs.sync-version.outputs.release_ref || github.ref }}
+      # Must match bundle.macOS.minimumSystemVersion (Tauri's default is 10.13).
+      # `tauri build` sets this variable and plain `cargo build` does not. Every
+      # crate that compiles C watches it, so when the sidecar build and the bundle
+      # build disagree, each one rebuilds what the other just built.
+      MACOSX_DEPLOYMENT_TARGET: '10.13'
     steps:
       - name: Setup persistent cargo target dir (self-hosted)
         if: matrix.self_hosted
@@ -563,13 +572,53 @@ jobs:
           DMG_PATH="$TARGET_DIR/${{ matrix.target }}/release/bundle/dmg/$DMG_NAME"
           gh release upload "${{ env.RELEASE_TAG }}" "$DMG_PATH" --clobber
 
+  dry-run-changes:
+    name: Detect changes the dry run builds
+    if: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/master' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      build: ${{ steps.changes.outputs.build }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # Everything that ends up in the bundle or decides how it is built.
+      # A change outside this list (docs, tests, lint config) cannot break the build.
+      - name: Detect files that affect the bundle
+        id: changes
+        uses: dorny/paths-filter@v4
+        with:
+          filters: |
+            build:
+              - 'src-tauri/**'
+              - 'src/**'
+              - 'public/**'
+              - 'index.html'
+              - 'package.json'
+              - 'package-lock.json'
+              - 'vite.config.ts'
+              - 'tailwind.config.js'
+              - 'postcss.config.js'
+              - 'tsconfig.json'
+              - 'tsconfig.node.json'
+              - 'scripts/**'
+              - '.github/workflows/release.yml'
+
   release-dry-run:
     name: Dry Run (${{ matrix.arch }}-${{ matrix.target }})
     # GitHub only lets PR branches restore caches created on the default branch
     # (not caches from sibling PRs). Running this matrix after each merge keeps a
     # warm default-branch Rust cache available to subsequent dependency PRs.
-    if: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/master' }}
+    needs: dry-run-changes
+    if: ${{ needs.dry-run-changes.outputs.build == 'true' }}
     runs-on: ${{ matrix.os }}
+    env:
+      # Keep in step with the release job. See the comment there.
+      MACOSX_DEPLOYMENT_TARGET: '10.13'
     strategy:
       fail-fast: false
       matrix:
