@@ -300,7 +300,7 @@ impl FsWatcher {
     }
 }
 
-// Global watcher instance - will be initialized in main.rs
+// Global watcher instance. The setup hook in lib.rs sets it once with init_watcher.
 static GLOBAL_WATCHER: OnceLock<Arc<FsWatcher>> = OnceLock::new();
 
 pub fn init_watcher(app_handle: AppHandle) {
