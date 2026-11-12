@@ -9,21 +9,23 @@ Start here. Each line says what a page answers. The rules for keeping these page
 | [Architecture](architecture.md)             | What runs where: the two processes, the Rust modules, the React windows and stores, and how they talk. |
 | [Location providers](location-providers.md) | How local folders, archives, Google Drive, SMB, and SFTP work today, and where that model breaks.      |
 | [Thumbnails](thumbnails.md)                 | How a thumbnail gets requested, generated, and cached, for local and remote files.                     |
+| [Mount core](mount-core.md)                 | What the `marlin-vfs` crate gives a mount adapter and asks of a provider: nodes, names, limits.        |
 
 ## How to work on it
 
 | Page                                  | Read it to learn                                                             |
 | ------------------------------------- | ---------------------------------------------------------------------------- |
-| [Testing](testing.md)                 | The four test suites, what each one covers, and which ones CI runs.          |
+| [Testing](testing.md)                 | The five test suites, what each one covers, and which ones CI runs.          |
 | [Release signing](release-signing.md) | How a release gets built, signed, and notarized, and which secrets it needs. |
 
 ## Decisions
 
 [`decisions/`](decisions/README.md) holds numbered decision records. A record says what we chose, why, and what we rejected, so later work does not reopen it.
 
-| Record                                                           | Read it to learn                                                                                                        |
-| ---------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| [0001: Mount architecture](decisions/0001-mount-architecture.md) | How remotes become native mounts (epic #368): the portable core, the adapter per OS, the helper process, and the risks. |
+| Record                                                                                 | Read it to learn                                                                                                        |
+| -------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| [0001: Mount architecture](decisions/0001-mount-architecture.md)                       | How remotes become native mounts (epic #368): the portable core, the adapter per OS, the helper process, and the risks. |
+| [0002: Node IDs follow lookup counts](decisions/0002-node-ids-follow-lookup-counts.md) | How long a mount's node ID lasts, and why it is not the life of the mount.                                              |
 
 ## Frozen history
 

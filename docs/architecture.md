@@ -16,6 +16,8 @@ The main app starts `marlin-smb` on demand and talks to it over stdin and stdout
 
 `src-tauri/Cargo.toml` is both the app package and the root of a Cargo workspace. The helper is a member, so it shares the lockfile and the `target/` folder but none of the app's code. A plain `cargo build`, `check`, or `test` in `src-tauri/` acts on the app only. Name the helper to build or test it: `cargo test -p marlin-smb`. It needs samba installed. New binaries and shared crates go under `src-tauri/crates/`.
 
+The workspace has one library crate, `marlin-vfs` in `src-tauri/crates/marlin-vfs/`. It is the core for native mounts, and no process links it yet. See [Mount core](mount-core.md). `npm run check` checks it along with the app.
+
 ## How the frontend and backend talk
 
 - **Commands.** The frontend calls `invoke('command_name', args)`. The backend registers about 130 commands in the `generate_handler!` list in `lib.rs`. Almost all of them live in `commands.rs`, which is 8,600 lines and the first place to look for any backend behavior.
