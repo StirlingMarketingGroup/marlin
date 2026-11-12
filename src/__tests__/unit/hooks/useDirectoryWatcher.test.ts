@@ -48,9 +48,22 @@ const listing: DirectoryListingResponse = {
   },
 };
 
+const event: Event<DirectoryChangeEventPayload> = {
+  event: 'directory-changed',
+  id: 1,
+  payload: {
+    path: '/test',
+    changeType: 'modified',
+    affectedFiles: ['download.zip'],
+    affectedPaths: ['/test/download.zip'],
+  },
+};
+
 describe('useDirectoryWatcher', () => {
   let directoryChanged: ((event: Event<DirectoryChangeEventPayload>) => void) | undefined;
   const unlisten = vi.fn();
+  const directoryReads = () =>
+    mockInvoke.mock.calls.filter(([command]) => command === 'read_directory').length;
 
   beforeEach(() => {
     vi.useFakeTimers();
@@ -82,17 +95,6 @@ describe('useDirectoryWatcher', () => {
     const { unmount } = renderHook(() => useDirectoryWatcher('/test'));
     await act(async () => Promise.resolve());
 
-    const event: Event<DirectoryChangeEventPayload> = {
-      event: 'directory-changed',
-      id: 1,
-      payload: {
-        path: '/test',
-        changeType: 'modified',
-        affectedFiles: ['download.zip'],
-        affectedPaths: ['/test/download.zip'],
-      },
-    };
-
     act(() => {
       directoryChanged?.(event);
       directoryChanged?.(event);
@@ -107,5 +109,22 @@ describe('useDirectoryWatcher', () => {
 
     unmount();
     expect(unlisten).toHaveBeenCalledOnce();
+  });
+
+  it('reads the folder while a download keeps writing', async () => {
+    const { unmount } = renderHook(() => useDirectoryWatcher('/test'));
+    await act(async () => Promise.resolve());
+
+    // Measured on Linux: one event about every 310 ms until the download ends.
+    for (let elapsed = 0; elapsed < 6000; elapsed += 310) {
+      act(() => directoryChanged?.(event));
+      await act(async () => vi.advanceTimersByTimeAsync(310));
+    }
+    expect(directoryReads()).toBe(2);
+
+    await act(async () => vi.advanceTimersByTimeAsync(400));
+    expect(directoryReads()).toBe(3);
+
+    unmount();
   });
 });

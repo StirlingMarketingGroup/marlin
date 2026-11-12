@@ -2,7 +2,7 @@
 
 Marlin is one Tauri 2 desktop app: a Rust backend that owns all file access, and a React frontend that draws the UI in a webview. The frontend never touches the disk. It calls a Rust command and gets data back.
 
-**Covers:** `src-tauri/src/lib.rs`, `src-tauri/src/commands.rs`, `src-tauri/Cargo.toml`, `src-tauri/crates/`, `src/main.tsx`, `src/store/`, `src/windows/`
+**Covers:** `src-tauri/src/lib.rs`, `src-tauri/src/commands.rs`, `src-tauri/Cargo.toml`, `src-tauri/crates/`, `src-tauri/src/fs_watcher.rs`, `src/main.tsx`, `src/store/`, `src/windows/`, `src/hooks/useDirectoryWatcher.ts`
 **Checked against the code:** 2026-11-12
 
 ## Processes
@@ -61,6 +61,8 @@ The workspace has two library-only crates under `src-tauri/crates/`. `marlin-vfs
 | `use*ProgressStore`, `useFolderSizeStore` | State for one progress window each.                                                                                   |
 
 **Hooks worth knowing.** `useDirectoryStream` consumes `directory-batch`. `useDirectoryWatcher` reacts to `directory-changed`. `useThumbnail` requests thumbnails. `useDragDetector` handles files dropped onto the window.
+
+**How a change on disk reaches the list.** `fs_watcher.rs` collects watcher events for 300 ms and emits one `directory-changed`. `useDirectoryWatcher` treats that event only as a signal. It waits for 400 ms with no new event, reads the whole folder again with `read_directory`, and replaces the list. When events keep coming, it reads anyway 2 seconds after the first event it has not acted on. A folder that is still loading, or a read that is still running, puts the next read off until it is done. The 2-second cap matters on Linux: inotify reports every write, so a file that is still downloading sends an event about every 300 ms. macOS reports a file written through one open handle only when it is created and when it is closed or renamed.
 
 ## Where settings live
 

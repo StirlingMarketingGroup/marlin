@@ -56,7 +56,7 @@ test.describe('Thumbnail Cache Invalidation', () => {
       ).__TEST_UTILS__.simulateFileModification(path);
     }, imagePath);
 
-    // Wait for the debounced refresh (500ms debounce + processing time)
+    // Wait for the watcher hook's 400 ms quiet period and the folder read
     await page.waitForTimeout(1000);
 
     // Check that a new thumbnail was requested for the modified file

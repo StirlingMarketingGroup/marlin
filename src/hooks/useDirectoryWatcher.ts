@@ -6,6 +6,9 @@ import { invalidateThumbnailsForPaths } from '@/hooks/useThumbnail';
 import type { DirectoryChangeEventPayload, DirectoryListingResponse } from '@/types';
 
 const RECONCILE_DELAY_MS = 400;
+// Linux reports every write, so a file that is still downloading sends an event
+// about every 300 ms and the quiet period above never comes. Read anyway after this long.
+const RECONCILE_MAX_WAIT_MS = 2000;
 const STREAMING_RETRY_MS = 200;
 
 const comparablePath = (path: string) => path.replace(/[\\/]+$/, '');
@@ -22,6 +25,7 @@ export function useDirectoryWatcher(currentPath: string) {
     let watcherStarted = false;
     let unlisten: UnlistenFn | undefined;
     let reconcileTimer: number | undefined;
+    let unreadSince: number | undefined;
     let reconcileInFlight = false;
     let reconcileAgain = false;
 
@@ -29,11 +33,14 @@ export function useDirectoryWatcher(currentPath: string) {
 
     const scheduleReconciliation = (delay = RECONCILE_DELAY_MS) => {
       if (cancelled) return;
+      unreadSince ??= Date.now();
+      const wait = Math.min(delay, unreadSince + RECONCILE_MAX_WAIT_MS - Date.now());
       if (reconcileTimer !== undefined) window.clearTimeout(reconcileTimer);
       reconcileTimer = window.setTimeout(() => {
         reconcileTimer = undefined;
+        unreadSince = undefined;
         void reconcileDirectory();
-      }, delay);
+      }, wait);
     };
 
     const reconcileDirectory = async () => {
