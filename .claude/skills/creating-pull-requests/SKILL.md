@@ -117,6 +117,11 @@ List ALL changed files grouped by purpose. Example:
 - `config/settings.json` - Updated default values
 ```
 
+#### Drive-by Section
+- Each defect fixed on the way (see "Fix what you find" in `AGENTS.md`): the file, what was wrong, and what changed
+- List these files here and not under Files Changed
+- Leave the section out when there is none
+
 #### Test Plan Section
 - How to verify the changes work
 - Any manual testing steps required
@@ -173,6 +178,7 @@ Before creating the PR, verify:
 - [ ] The title contains searchable keywords related to the changes
 - [ ] The description explains WHY changes were made, not just WHAT changed
 - [ ] Any breaking changes or migration steps are clearly documented
+- [ ] **Drive-by fixes listed** - Each defect fixed on the way is under the "Drive-by" heading
 - [ ] **Issue search completed** - You searched GitHub issues with relevant keywords
 - [ ] **Issue linking resolved** - Either: (a) PR includes `Closes #XXX` for found issues, OR (b) You asked the user and confirmed no issue exists
 - [ ] **Documentation checked** - You reviewed README files, CLAUDE.md, AGENTS.md, and other docs near changed files for anything that needs updating based on the diff
@@ -222,6 +228,9 @@ Closes #XXX
 
 ### [Category 2]
 - `path/to/file.ext` - Description of change
+
+## Drive-by
+- `path/to/file.ext` - What was wrong and what changed
 
 ## Test Plan
 - [ ] Step to verify change 1
