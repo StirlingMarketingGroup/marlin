@@ -30,7 +30,7 @@ This file holds the rules that always apply. Everything longer lives in the wiki
 ## Before you call work done
 
 1. Run `npm run check` and `npm run test:run`. Both must pass with no warnings.
-2. If you changed Rust, run `cargo test` in `src-tauri/`. CI does not run it yet (issue #462). A plain `cargo test` skips the workspace crates. If you changed one under `src-tauri/crates/` (`marlin-smb`, `marlin-vfs`, `marlin-mount`), also run `cargo test -p <crate>` there. If you changed `marlin-fuse`, or the `Adapter` or `Session` trait or `main.rs` in `marlin-mount`, run `src-tauri/crates/marlin-fuse/test-in-docker.sh`: the Linux code is compiled out on a Mac.
+2. If you changed Rust, run `cargo test` in `src-tauri/`. CI does not run it yet (issue #462). [`docs/testing.md`](docs/testing.md) lists the tests that fail today and the issue for each. A failure listed there does not block your branch. Any other failure does. A plain `cargo test` skips the workspace crates. If you changed one under `src-tauri/crates/` (`marlin-smb`, `marlin-vfs`, `marlin-mount`), also run `cargo test -p <crate>` there. If you changed `marlin-fuse`, or the `Adapter` or `Session` trait or `main.rs` in `marlin-mount`, run `src-tauri/crates/marlin-fuse/test-in-docker.sh`: the Linux code is compiled out on a Mac.
 3. If you changed `src/` or `e2e/`, run `npm run test:e2e`.
 4. Update the wiki page that covers what you changed (see "Keeping the wiki true").
 
@@ -40,21 +40,29 @@ This file holds the rules that always apply. Everything longer lives in the wiki
 
 ## Branch size
 
-One branch makes one semantic change. A reviewer must be able to hold the whole branch in their head.
+One branch makes one semantic change. A reviewer must be able to hold the whole branch in their head. Drive-by fixes (see "Fix what you find") go in the same branch. They count toward the ceiling, not toward the layer count.
 
 - **Ceiling:** about 10 files and 1,300 added lines that a person has to read. Lockfiles, generated files, renames, and deletions do not count.
 - **Count the layers before you branch:** a Rust backend module, the Tauri command surface (`commands.rs`, `lib.rs`, `src/types/`), the Zustand store, components or windows, CI or packaging, and code for one more operating system. Assume the real work is twice what the issue says.
 - **Two layers or fewer and under the ceiling:** go.
 - **More than that:** stop before you branch. Split the work into spec issues, where each issue is one branch and names what blocks it. Start the first one.
-- **A branch that grows past the ceiling midway:** stop. Park it as a reference, file the issues it should have been, and restart the first piece on a fresh branch.
+- **A branch that grows past the ceiling midway:** stop. Move the drive-by fixes to one branch of their own first. If the branch is still over, park it as a reference, file the issues it should have been, and restart the first piece on a fresh branch.
 - Branch from the latest `origin/master`, never from another feature branch.
 
 ## Fix what you find
 
-Much of this code was written early and fast. Expect things that make no sense.
+Work on this code the way a mechanic works on an airplane. A mechanic who finds a defect does not close the panel and walk away. Expect to find defects as you work.
 
-- **Small and safe:** fix it in the branch you are on. Examples: a wrong comment, dead code, a stale doc line, a broken link.
-- **Too big for a drive-by:** file an issue with the evidence (file, line, what is wrong). Do not leave it unmentioned.
+- **Every defect you find ends up fixed or tracked.**
+- **A defect is something that is wrong:** the code, a test, or a page does not do or say what it should. Code you would have written another way, a missing feature, and a rough spot that a wiki page already lists are not defects.
+- **The default is to fix it now, in the branch you are on.** This covers a bug, a wrong comment, dead code, a stale doc line, a broken link, and a failing or flaky test. Fix the cause: do not skip, delete, or loosen a test to make it pass. Test the fix like any other change (see [`docs/testing.md`](docs/testing.md)). A fix made this way is a "drive-by".
+- **An issue is not a fix. File one only when the fix cannot go in this branch.** That is true in four cases:
+  - It would push the branch past the size ceiling.
+  - It needs a decision that is not yours to make. Either it changes behavior a user sees and you cannot tell which behavior is intended, or it reopens a record in `docs/decisions/`.
+  - You cannot check it from here. For example, it needs another operating system, a real server or account, or a hand test in the desktop app that you cannot do.
+  - Nobody asked you to change code, as in a review or an investigation. Report the defect to whoever asked, or file the issue.
+- **When you file an issue,** give the evidence: file, line, and what is wrong.
+- **A defect that an open issue already tracks** follows the same default. Fix it and close that issue from the PR. If one of the four cases holds, add what you learned to the issue. Do not file a second one.
 - Never patch on top of a patch. If adding a feature needs contortions, redesign that piece first. Less code is better code.
 
 ## Code conventions
@@ -84,6 +92,7 @@ Much of this code was written early and fast. Expect things that make no sense.
 
 - Prefix the subject: `feat:`, `fix:`, `refactor:`, `docs:`, `chore:`. Keep it under 50 characters.
 - A PR links its issue, says which platforms you tested, and shows a screenshot for any UI change.
+- A PR lists each drive-by fix under a "Drive-by" heading.
 
 ## Keeping the wiki true
 
