@@ -1,8 +1,9 @@
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
 
 const SMB_KEYRING_SERVICE: &str = "marlin-smb";
 
@@ -41,14 +42,25 @@ struct ServerStorage {
 /// In-memory cache of servers
 static SERVERS_CACHE: Lazy<RwLock<Option<Vec<SmbServer>>>> = Lazy::new(|| RwLock::new(None));
 
+/// macOS can ask the user on every keychain read, so the app keeps each password it has
+/// read or written for the rest of the run. The lock is held across the keychain call, so
+/// callers that arrive together cause one read, and the map never holds a password that
+/// Marlin has replaced or deleted. A change made outside Marlin is picked up on the next launch.
+static PASSWORDS: Lazy<Mutex<HashMap<String, String>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+
 fn keyring_entry(hostname: &str) -> Result<keyring::Entry, String> {
     keyring::Entry::new(SMB_KEYRING_SERVICE, hostname)
         .map_err(|e| format!("Failed to create keyring entry: {}", e))
 }
 
 fn set_password(hostname: &str, password: &str) -> Result<(), String> {
+    let mut passwords = PASSWORDS.lock().map_err(|e| e.to_string())?;
+    // A failed write must not leave the previous password in memory: the retry
+    // path deletes the keychain entry before it writes the new one.
+    passwords.remove(hostname);
+
     let entry = keyring_entry(hostname)?;
-    match entry.set_password(password) {
+    let result = match entry.set_password(password) {
         Ok(()) => Ok(()),
         Err(keyring::Error::Ambiguous(_)) => {
             // Entry already exists with a different attribute set — delete and recreate
@@ -74,20 +86,34 @@ fn set_password(hostname: &str, password: &str) -> Result<(), String> {
                 Err(format!("Failed to store password in keychain: {}", e))
             }
         }
+    };
+    if result.is_ok() {
+        passwords.insert(hostname.to_string(), password.to_string());
     }
+    result
 }
 
 fn get_password(hostname: &str) -> Result<String, String> {
+    let mut passwords = PASSWORDS.lock().map_err(|e| e.to_string())?;
+    if let Some(password) = passwords.get(hostname) {
+        return Ok(password.clone());
+    }
+
     let entry = keyring_entry(hostname)?;
-    entry.get_password().map_err(|e| {
+    let password = entry.get_password().map_err(|e| {
         format!(
             "[SMB_NO_CREDENTIALS] Failed to read password from keychain: {}",
             e
         )
-    })
+    })?;
+    passwords.insert(hostname.to_string(), password.clone());
+    Ok(password)
 }
 
 fn delete_password(hostname: &str) -> Result<(), String> {
+    let mut passwords = PASSWORDS.lock().map_err(|e| e.to_string())?;
+    passwords.remove(hostname);
+
     let entry = keyring_entry(hostname)?;
     // Ignore missing entries; we still want server removal to succeed.
     match entry.delete_credential() {
@@ -372,4 +398,134 @@ pub fn test_smb_connection(
         .unwrap_or(false);
 
     Ok(success)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{delete_password, get_password, set_password};
+    use keyring::credential::{CredentialApi, CredentialBuilderApi};
+    use once_cell::sync::Lazy;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    /// Shared stand-in for the OS keychain, keyed by the hostname the entry uses.
+    static STORE: Lazy<Mutex<HashMap<String, String>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+
+    struct TestCredential {
+        user: String,
+    }
+
+    impl CredentialApi for TestCredential {
+        fn set_secret(&self, secret: &[u8]) -> keyring::Result<()> {
+            let password = String::from_utf8(secret.to_vec()).expect("utf-8 password");
+            STORE
+                .lock()
+                .expect("test keychain lock")
+                .insert(self.user.clone(), password);
+            Ok(())
+        }
+
+        fn get_secret(&self) -> keyring::Result<Vec<u8>> {
+            STORE
+                .lock()
+                .expect("test keychain lock")
+                .get(&self.user)
+                .map(|password| password.as_bytes().to_vec())
+                .ok_or(keyring::Error::NoEntry)
+        }
+
+        fn delete_credential(&self) -> keyring::Result<()> {
+            STORE
+                .lock()
+                .expect("test keychain lock")
+                .remove(&self.user)
+                .map(|_| ())
+                .ok_or(keyring::Error::NoEntry)
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    struct TestCredentialBuilder;
+
+    impl CredentialBuilderApi for TestCredentialBuilder {
+        fn build(
+            &self,
+            _target: Option<&str>,
+            _service: &str,
+            user: &str,
+        ) -> keyring::Result<Box<keyring::Credential>> {
+            Ok(Box::new(TestCredential {
+                user: user.to_string(),
+            }))
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    #[test]
+    fn get_password_keeps_a_keychain_read() {
+        keyring::set_default_credential_builder(Box::new(TestCredentialBuilder));
+        let host = "kept.example";
+        STORE
+            .lock()
+            .unwrap()
+            .insert(host.to_string(), "secret".to_string());
+
+        assert_eq!(get_password(host).unwrap(), "secret");
+
+        STORE.lock().unwrap().remove(host);
+        assert_eq!(get_password(host).unwrap(), "secret");
+    }
+
+    #[test]
+    fn get_password_retries_a_failed_read() {
+        keyring::set_default_credential_builder(Box::new(TestCredentialBuilder));
+        let host = "retried.example";
+
+        let err = get_password(host).unwrap_err();
+        assert!(err.contains("[SMB_NO_CREDENTIALS]"), "{err}");
+
+        STORE
+            .lock()
+            .unwrap()
+            .insert(host.to_string(), "later".to_string());
+        assert_eq!(get_password(host).unwrap(), "later");
+    }
+
+    #[test]
+    fn set_password_replaces_what_was_kept() {
+        keyring::set_default_credential_builder(Box::new(TestCredentialBuilder));
+        let host = "replaced.example";
+        STORE
+            .lock()
+            .unwrap()
+            .insert(host.to_string(), "old".to_string());
+
+        assert_eq!(get_password(host).unwrap(), "old");
+        set_password(host, "new").unwrap();
+
+        assert_eq!(get_password(host).unwrap(), "new");
+        assert_eq!(
+            STORE.lock().unwrap().get(host).map(String::as_str),
+            Some("new")
+        );
+    }
+
+    #[test]
+    fn delete_password_forgets() {
+        keyring::set_default_credential_builder(Box::new(TestCredentialBuilder));
+        let host = "forgotten.example";
+
+        set_password(host, "gone").unwrap();
+        delete_password(host).unwrap();
+
+        let err = get_password(host).unwrap_err();
+        assert!(err.contains("[SMB_NO_CREDENTIALS]"), "{err}");
+        assert!(!STORE.lock().unwrap().contains_key(host));
+    }
 }

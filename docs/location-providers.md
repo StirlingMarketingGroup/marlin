@@ -3,7 +3,7 @@
 Every path in Marlin is a URI, and its scheme picks a storage backend called a location provider. The provider trait covers listing and whole-item operations only. It has no way to read or write file contents, so every feature that moves bytes between two backends is written by hand for each pair. Epic #368 replaces this with native mounts.
 
 **Covers:** `src-tauri/src/locations/`, `src-tauri/crates/marlin-smb/`, and the paste, drop, and download commands in `src-tauri/src/commands.rs`
-**Checked against the code:** 2026-11-11
+**Checked against the code:** 2026-11-12
 
 ## The model
 
@@ -46,7 +46,7 @@ Notes per provider:
 - **`file`** renames in two steps when only letter case changes, so the rename works on case-insensitive disks.
 - **`gdrive`** sets `requires_explicit_refresh`, because nothing tells Marlin when a remote folder changes. It stores accounts and their OAuth tokens as plain text in `gdrive-accounts.json` (issue #463).
 - **`sftp`** allows one transfer at a time per server (`MAX_CONCURRENT_OPS` in `sftp/pool.rs`), because some servers fail on parallel reads. It accepts every host key without checking (issue #238). Passwords are in the OS keychain.
-- **`smb`** is not compiled on Windows. On macOS and Linux the main app starts `marlin-smb` and sends it JSON-RPC 2.0 requests, one JSON object per line on stdin, with replies on stdout. A call times out after 30 seconds, a download after 5 minutes, and the app restarts a dead helper up to 3 times (`smb/client.rs`). Passwords are in the OS keychain under the service name `marlin-smb`.
+- **`smb`** is not compiled on Windows. On macOS and Linux the main app starts `marlin-smb` and sends it JSON-RPC 2.0 requests, one JSON object per line on stdin, with replies on stdout. A call times out after 30 seconds, a download after 5 minutes, and the app restarts a dead helper up to 3 times (`smb/client.rs`). Passwords are in the OS keychain under the service name `marlin-smb`. The app reads a server's password from the keychain on first use and keeps it in memory until the app quits (`smb/auth.rs`), because macOS can ask the user to allow each read. macOS ties "Always Allow" to the app's code signature. A dev build's signature is ad hoc and changes with each rebuild, so macOS asks once per server after each rebuild (issue #491). A release build keeps one signature identity across updates (see [`release-signing.md`](release-signing.md)), so macOS sees the same app after an update.
 
 ## Where the model breaks
 
