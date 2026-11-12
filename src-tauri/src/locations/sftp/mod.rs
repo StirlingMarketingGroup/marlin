@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod host_key;
 pub mod pool;
 
 use crate::fs_utils::FileItem;

@@ -7840,6 +7840,27 @@ pub async fn test_sftp_connection(
     .await
 }
 
+/// The unknown key this SFTP server last sent, until the user trusts it.
+#[command]
+pub fn get_sftp_unknown_host_key(
+    hostname: String,
+    port: u16,
+) -> Option<crate::locations::sftp::host_key::UnknownHostKey> {
+    crate::locations::sftp::host_key::unknown_host_key(&hostname, port)
+}
+
+/// Save that key in `~/.ssh/known_hosts`, when `fingerprint` is the one the user was shown.
+#[command]
+pub fn trust_sftp_host_key(hostname: String, port: u16, fingerprint: String) -> Result<(), String> {
+    let known_hosts = crate::locations::sftp::host_key::known_hosts_path()?;
+    crate::locations::sftp::host_key::trust_unknown_host_key(
+        &hostname,
+        port,
+        &fingerprint,
+        &known_hosts,
+    )
+}
+
 /// Download an SFTP file to a temporary location (for drag-out/open-in-external-app).
 /// Returns the temporary file path.
 #[command]

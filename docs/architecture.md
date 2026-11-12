@@ -66,14 +66,14 @@ The workspace has two library-only crates under `src-tauri/crates/`. `marlin-vfs
 
 ## Where settings live
 
-| Data                                  | Place                                                                                      |
-| ------------------------------------- | ------------------------------------------------------------------------------------------ |
-| Preferences, per-folder view settings | `<config dir>/Marlin/preferences.json`, through `read_preferences` and `write_preferences` |
-| SMB servers                           | `<config dir>/marlin/smb-servers.json`, passwords in the OS keychain                       |
-| SFTP servers                          | `<config dir>/marlin/sftp-servers.json`, passwords in the OS keychain                      |
-| Google accounts and their tokens      | `<config dir>/marlin/gdrive-accounts.json`, as plain text (issue #463)                     |
-| Thumbnails                            | `<cache dir>/marlin_thumbnails`                                                            |
-| User themes                           | The themes folder listed in `README.md`                                                    |
+| Data                                  | Place                                                                                                            |
+| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Preferences, per-folder view settings | `<config dir>/Marlin/preferences.json`, through `read_preferences` and `write_preferences`                       |
+| SMB servers                           | `<config dir>/marlin/smb-servers.json`, passwords in the OS keychain                                             |
+| SFTP servers                          | `<config dir>/marlin/sftp-servers.json`, passwords in the OS keychain, trusted host keys in `~/.ssh/known_hosts` |
+| Google accounts and their tokens      | `<config dir>/marlin/gdrive-accounts.json`, as plain text (issue #463)                                           |
+| Thumbnails                            | `<cache dir>/marlin_thumbnails`                                                                                  |
+| User themes                           | The themes folder listed in `README.md`                                                                          |
 
 ## Known rough spots
 
