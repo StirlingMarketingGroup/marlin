@@ -1,0 +1,18 @@
+[package]
+name = "marlin-fuse"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+rust-version = "1.89"
+description = "Marlin's Linux mount adapter: serves a marlin-vfs mount through FUSE."
+
+[target.'cfg(target_os = "linux")'.dependencies]
+marlin-vfs = { path = "../marlin-vfs" }
+fuser = "=0.18.0"
+libc = "0.2"
+tokio = { version = "1.50", features = ["rt", "process"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+tokio = { version = "1.50", features = ["macros", "rt-multi-thread", "time"] }
+tempfile = "3"

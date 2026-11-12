@@ -1,9 +1,9 @@
 # Testing
 
-Marlin has static checks and six test suites. CI runs the static checks, the unit tests, and the end-to-end tests. CI does not run the Rust tests yet (issue #462), so run them yourself when you change Rust.
+Marlin has static checks and seven test suites. CI runs the static checks, the unit tests, and the end-to-end tests. CI does not run the Rust tests yet (issue #462), so run them yourself when you change Rust.
 
-**Covers:** `vitest.config.ts`, `src/test-setup.ts`, `playwright.config.ts`, `e2e/`, `.github/workflows/check.yml`, `.husky/pre-push`, `src-tauri/tests/`, `src-tauri/crates/marlin-smb/tests/`, `src-tauri/crates/marlin-vfs/tests/`, `src-tauri/crates/marlin-mount/tests/`
-**Checked against the code:** 2026-11-11
+**Covers:** `vitest.config.ts`, `src/test-setup.ts`, `playwright.config.ts`, `e2e/`, `.github/workflows/check.yml`, `.husky/pre-push`, `src-tauri/tests/`, `src-tauri/crates/marlin-smb/tests/`, `src-tauri/crates/marlin-vfs/tests/`, `src-tauri/crates/marlin-mount/tests/`, `src-tauri/crates/marlin-fuse/tests/`
+**Checked against the code:** 2026-11-12
 
 ## The suites
 
@@ -15,6 +15,7 @@ Marlin has static checks and six test suites. CI runs the static checks, the uni
 | Rust            | `cd src-tauri && cargo test`             | `cargo test`                           | **no**     | a Rust toolchain               |
 | Mount core      | see below                                | `cargo test`                           | no         | a Rust toolchain               |
 | Mount helper    | see below                                | `cargo test`                           | no         | a Rust toolchain               |
+| Linux mounts    | see below                                | `cargo test` in Docker                 | no         | Docker                         |
 | SMB integration | see below                                | `cargo test --ignored`                 | no         | a real SMB server              |
 
 `npm run check` treats Rust warnings as errors. The pre-push hook runs it, so a push fails on a lint, format, type, or Rust warning.
@@ -41,6 +42,7 @@ CI skips a job when the files it covers did not change (`check.yml` uses path fi
 - Unit tests sit in `#[cfg(test)]` modules inside the source files. There are about 60, mostly in `locations/` and `thumbnails/`.
 - `cargo test -p marlin-vfs` runs the mount core's tests. A plain `cargo test` does not include them. They run on an in-memory provider and need nothing installed. See [Mount core](mount-core.md).
 - `cargo test -p marlin-mount` runs the mount helper's tests. A plain `cargo test` does not include them. They talk to the helper over a real socket in a temporary folder, with a fake adapter, and need nothing installed. See [Mount helper](mount-helper.md).
+- `src-tauri/crates/marlin-fuse/test-in-docker.sh` runs the Linux mount adapter's tests in a container: unit tests, and tests that mount an in-memory provider through FUSE. On a Mac the crate compiles to nothing, so `cargo test -p marlin-fuse` runs no test there. See [Linux mount adapter](mount-linux.md).
 - `cargo test -p marlin-smb` runs the SMB helper's test. It starts the built helper, sends a `ping`, and checks the reply and a clean exit. It needs samba installed, and CI does not run it.
 - `src-tauri/tests/smb_integration.rs` holds manual tests that need a real SMB server. They are marked `#[ignore]`. The file's header lists the environment variables and the command to run them.
 

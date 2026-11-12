@@ -3,7 +3,7 @@
 Marlin is one Tauri 2 desktop app: a Rust backend that owns all file access, and a React frontend that draws the UI in a webview. The frontend never touches the disk. It calls a Rust command and gets data back.
 
 **Covers:** `src-tauri/src/lib.rs`, `src-tauri/src/commands.rs`, `src-tauri/Cargo.toml`, `src-tauri/crates/`, `src/main.tsx`, `src/store/`, `src/windows/`
-**Checked against the code:** 2026-11-11
+**Checked against the code:** 2026-11-12
 
 ## Processes
 
@@ -17,7 +17,7 @@ The main app starts `marlin-smb` on demand and talks to it over stdin and stdout
 
 `src-tauri/Cargo.toml` is both the app package and the root of a Cargo workspace. Each helper is a member, so it shares the lockfile and the `target/` folder but none of the app's code. A plain `cargo build`, `check`, or `test` in `src-tauri/` acts on the app only. Name a helper to build or test it: `cargo test -p marlin-smb` (it needs samba installed) or `cargo test -p marlin-mount`. New binaries and shared crates go under `src-tauri/crates/`.
 
-The workspace has one library-only crate, `marlin-vfs` in `src-tauri/crates/marlin-vfs/`. It is the core for native mounts, and `marlin-mount` links it. See [Mount core](mount-core.md). `npm run check` checks `marlin-vfs` and `marlin-mount` along with the app.
+The workspace has two library-only crates under `src-tauri/crates/`. `marlin-vfs` is the core for native mounts. `marlin-fuse` is the Linux mount adapter. `marlin-mount` links `marlin-vfs` everywhere and `marlin-fuse` on Linux. See [Mount core](mount-core.md) and [Linux mount adapter](mount-linux.md). `npm run check` checks all three along with the app.
 
 ## How the frontend and backend talk
 

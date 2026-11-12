@@ -1,9 +1,9 @@
 # Mount core (`marlin-vfs`)
 
-`marlin-vfs` is the layer between a storage provider and an OS mount adapter. An adapter asks it for nodes and bytes. It asks a provider for items. The [mount helper](mount-helper.md) builds one `Vfs` per mount. Nothing serves one to the OS yet: the adapters (#373, #374, #375) and the first real provider (#372) come next. It is read-only until #376.
+`marlin-vfs` is the layer between a storage provider and an OS mount adapter. An adapter asks it for nodes and bytes. It asks a provider for items. The [mount helper](mount-helper.md) builds one `Vfs` per mount. On Linux the [Linux mount adapter](mount-linux.md) serves it to the OS. The macOS and Windows adapters (#373, #375) and the first real provider (#372) come next. It is read-only until #376.
 
 **Covers:** `src-tauri/crates/marlin-vfs/`
-**Checked against the code:** 2026-11-11
+**Checked against the code:** 2026-11-12
 
 The design is in [decision 0001](decisions/0001-mount-architecture.md). [Decision 0002](decisions/0002-node-ids-follow-lookup-counts.md) sets how long a node ID lasts.
 
