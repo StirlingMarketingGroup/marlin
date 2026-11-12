@@ -1,0 +1,20 @@
+[package]
+name = "marlin-mount"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+rust-version = "1.89"
+description = "Marlin's mount helper: one process per user that owns every mount."
+
+[dependencies]
+marlin-vfs = { path = "../marlin-vfs" }
+tokio = { version = "1.50", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "signal", "time"] }
+async-trait = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+dirs = "7.0"
+regex = "1"
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,6 +1,6 @@
 # 0002: A node ID lasts while the OS holds the node
 
-**Status:** proposed
+**Status:** accepted
 **Date:** 2026-11-11
 **Issue:** #370 (epic #368)
 
