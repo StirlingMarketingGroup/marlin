@@ -2,7 +2,7 @@
 
 `marlin-mount` is the process that will own every native mount. It runs once per user, apart from the app, so a mount outlives a hot reload, an app crash, and every window. The app tells it what to mount over a local socket.
 
-It cannot mount anything yet. No OS adapter (#374, #373, #375) and no real provider (#372) exists, so no mount request can succeed: one that passes the name checks fails with -1004, unknown provider. Nothing starts the helper yet either: the app side is #483.
+It cannot mount anything yet. Linux has an adapter, the [Linux mount adapter](mount-linux.md). macOS (#373) and Windows (#375) have none. No real provider (#372) exists, so no mount request can succeed: one that passes the name checks fails with -1004, unknown provider. Nothing starts the helper yet either: the app side is #483.
 
 **Covers:** `src-tauri/crates/marlin-mount/`
 **Checked against the code:** 2026-11-12
@@ -114,7 +114,7 @@ Rules the table keeps:
 - **An operation finishes even when its client has gone.**
 - **The helper never mounts over anything.** A mount point must be absent or an empty real folder. A file, a folder with something in it, or a symbolic link fails with -1003 and is left as it was. This guards the user's files against a mistake. It is not a defense against another process of the same user.
 - **Folders.** The helper opens the account before it makes any folder, so a mount the provider refuses leaves nothing behind. It makes the mount point with mode 0700. It removes it after an unmount and after a failed mount. It only ever removes an empty folder, and an empty folder at a mount point counts as the helper's own.
-- **Shutdown.** From the moment a shutdown starts, a new `mount` gets -1009. If any unmount fails, `shutdown` returns -1007, the helper keeps running, and it takes mounts again: a mount that is still served must not lose its helper. The mounts that did unmount stay unmounted, so call `list`. A signal is different. It is an order to exit, so the helper unmounts what it can and exits anyway. A mount it could not unmount is then dead, and the start-up sweep (#482) will clear it.
+- **Shutdown.** From the moment a shutdown starts, a new `mount` gets -1009. If any unmount fails, `shutdown` returns -1007, the helper keeps running, and it takes mounts again: a mount that is still served must not lose its helper. The mounts that did unmount stay unmounted, so call `list`. A signal is different. It is an order to exit, so the helper unmounts what it can and exits anyway. A mount it could not unmount is then dead, and the start-up sweep (#482) will clear it. On Linux the adapter may detach it as the helper exits instead: see [Linux mount adapter](mount-linux.md).
 
 ## Adding an adapter or a provider
 
@@ -124,7 +124,7 @@ Rules the table keeps:
 - `Session::unmount()` unmounts. After an error the mount must still be served.
 - `Providers::open(provider, account)` returns the `marlin_vfs::Provider` for an account. `account` names the account and is never a secret. The provider reads its own credentials from the OS keychain.
 
-`main.rs` passes one adapter and one `Providers` value to `Server::bind`. Today both refuse everything. An adapter lives in its own crate, so `marlin-mount` implements `Adapter` for it in a few lines and the adapter crate does not depend on the helper.
+`main.rs` passes one adapter and one `Providers` value to `Server::bind`. The adapter is `adapter::OsAdapter`, chosen per OS at the top of `main.rs`: on Linux it is `marlin-fuse`, and on macOS it refuses every mount. The `Providers` value refuses everything. An adapter lives in its own crate, so `marlin-mount` implements `Adapter` for it in a few lines and the adapter crate does not depend on the helper.
 
 ## Logs and secrets
 
@@ -136,7 +136,7 @@ No secret crosses the socket or the command line. The text inside a `MountError`
 
 ## Testing
 
-`cd src-tauri && cargo test -p marlin-mount` needs no kernel driver, no network, and no account.
+`cd src-tauri && cargo test -p marlin-mount` needs no kernel driver, no network, and no account. On a Mac it does not compile the Linux adapter wiring in `main.rs`. `src-tauri/crates/marlin-fuse/test-in-docker.sh` does.
 
 - `tests/control.rs` runs the server on a real socket in a temporary folder, with a fake adapter and the core's `MemoryProvider`. The fake adapter can hold a mount or an unmount open, so the tests for two requests at once do not depend on timing.
 - One test starts the built binary and checks its flags, a refused mount, and a clean exit.

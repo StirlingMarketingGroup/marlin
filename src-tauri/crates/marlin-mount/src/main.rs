@@ -1,5 +1,68 @@
 //! Mount helper binary. One process per user, spoken to over a Unix socket.
 
+/// The mount adapter this OS has: FUSE through `marlin-fuse`.
+#[cfg(target_os = "linux")]
+mod adapter {
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use marlin_mount::{Adapter, MountError, Session};
+    use marlin_vfs::Vfs;
+
+    pub struct OsAdapter;
+
+    #[async_trait::async_trait]
+    impl Adapter for OsAdapter {
+        async fn mount(
+            &self,
+            vfs: Arc<Vfs>,
+            mount_point: &Path,
+        ) -> Result<Box<dyn Session>, MountError> {
+            match marlin_fuse::mount(vfs, mount_point).await {
+                Ok(mount) => Ok(Box::new(FuseSession(mount))),
+                Err(error) => Err(MountError::Adapter(error.to_string())),
+            }
+        }
+    }
+
+    struct FuseSession(marlin_fuse::Mount);
+
+    #[async_trait::async_trait]
+    impl Session for FuseSession {
+        async fn unmount(&mut self) -> Result<(), MountError> {
+            self.0
+                .unmount()
+                .await
+                .map_err(|error| MountError::Unmount(error.to_string()))
+        }
+    }
+}
+
+/// This OS has no mount adapter yet (macOS is #373), so every mount is refused.
+#[cfg(all(unix, not(target_os = "linux")))]
+mod adapter {
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use marlin_mount::{Adapter, MountError, Session};
+    use marlin_vfs::Vfs;
+
+    pub struct OsAdapter;
+
+    #[async_trait::async_trait]
+    impl Adapter for OsAdapter {
+        async fn mount(
+            &self,
+            _vfs: Arc<Vfs>,
+            _mount_point: &Path,
+        ) -> Result<Box<dyn Session>, MountError> {
+            Err(MountError::Adapter(
+                "Marlin cannot mount on this OS yet.".into(),
+            ))
+        }
+    }
+}
+
 #[cfg(not(unix))]
 fn main() {
     eprintln!("marlin-mount does not run on this OS yet (issue #375)");
@@ -12,24 +75,9 @@ async fn main() {
     use std::path::PathBuf;
     use std::sync::Arc;
 
-    use marlin_mount::{log, Adapter, BindError, Config, MountError, Providers, Server, Session};
-    use marlin_vfs::{Provider, Vfs};
+    use marlin_mount::{log, BindError, Config, MountError, Providers, Server};
+    use marlin_vfs::Provider;
     use tokio::signal::unix::{signal, SignalKind};
-
-    struct NoAdapter;
-
-    #[async_trait::async_trait]
-    impl Adapter for NoAdapter {
-        async fn mount(
-            &self,
-            _vfs: Arc<Vfs>,
-            _mount_point: &std::path::Path,
-        ) -> Result<Box<dyn Session>, MountError> {
-            Err(MountError::Adapter(
-                "Marlin cannot mount on this OS yet.".into(),
-            ))
-        }
-    }
 
     struct NoProviders;
 
@@ -77,7 +125,7 @@ async fn main() {
 
     let server = match Server::bind(
         Config { socket, root },
-        Arc::new(NoAdapter),
+        Arc::new(adapter::OsAdapter),
         Arc::new(NoProviders),
     ) {
         Ok(server) => server,
