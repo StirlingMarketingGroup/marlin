@@ -42,4 +42,4 @@ What this makes easy, what it makes hard, and what work it unblocks.
 | Record                                                                                        | Decides                                                                                                     |
 | --------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
 | [0001: Mount architecture](0001-mount-architecture.md) (accepted, #369)                       | How remotes become native mounts: the portable core, the adapter per OS, the helper process, and the risks. |
-| [0002: Node IDs follow lookup counts](0002-node-ids-follow-lookup-counts.md) (proposed, #370) | How long a mount's node ID lasts. Replaces the Identity row of 0001.                                        |
+| [0002: Node IDs follow lookup counts](0002-node-ids-follow-lookup-counts.md) (accepted, #370) | How long a mount's node ID lasts. Replaces the Identity row of 0001.                                        |

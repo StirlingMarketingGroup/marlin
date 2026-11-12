@@ -3875,6 +3875,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "marlin-mount"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "dirs",
+ "marlin-vfs",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "marlin-smb"
 version = "0.1.0"
 dependencies = [

@@ -7,16 +7,17 @@ Marlin is one Tauri 2 desktop app: a Rust backend that owns all file access, and
 
 ## Processes
 
-| Process      | Built from                                             | Job                                                                                                      |
-| ------------ | ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------- |
-| `marlin`     | `src-tauri/src/main.rs` → `app_lib::run()` in `lib.rs` | The app. Hosts the webview, runs every command.                                                          |
-| `marlin-smb` | `src-tauri/crates/marlin-smb/`, its own crate          | SMB helper. Keeps `libsmbclient` out of the main app so the app starts even when samba is not installed. |
+| Process        | Built from                                             | Job                                                                                                      |
+| -------------- | ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------- |
+| `marlin`       | `src-tauri/src/main.rs` → `app_lib::run()` in `lib.rs` | The app. Hosts the webview, runs every command.                                                          |
+| `marlin-smb`   | `src-tauri/crates/marlin-smb/`, its own crate          | SMB helper. Keeps `libsmbclient` out of the main app so the app starts even when samba is not installed. |
+| `marlin-mount` | `src-tauri/crates/marlin-mount/`, its own crate        | Mount helper. Will own every native mount. Nothing starts it yet (#483), and it cannot mount yet.        |
 
-The main app starts `marlin-smb` on demand and talks to it over stdin and stdout. See [Location providers](location-providers.md).
+The main app starts `marlin-smb` on demand and talks to it over stdin and stdout. See [Location providers](location-providers.md). `marlin-mount` is controlled over a local socket instead, so that it can outlive the app. See [Mount helper](mount-helper.md).
 
-`src-tauri/Cargo.toml` is both the app package and the root of a Cargo workspace. The helper is a member, so it shares the lockfile and the `target/` folder but none of the app's code. A plain `cargo build`, `check`, or `test` in `src-tauri/` acts on the app only. Name the helper to build or test it: `cargo test -p marlin-smb`. It needs samba installed. New binaries and shared crates go under `src-tauri/crates/`.
+`src-tauri/Cargo.toml` is both the app package and the root of a Cargo workspace. Each helper is a member, so it shares the lockfile and the `target/` folder but none of the app's code. A plain `cargo build`, `check`, or `test` in `src-tauri/` acts on the app only. Name a helper to build or test it: `cargo test -p marlin-smb` (it needs samba installed) or `cargo test -p marlin-mount`. New binaries and shared crates go under `src-tauri/crates/`.
 
-The workspace has one library crate, `marlin-vfs` in `src-tauri/crates/marlin-vfs/`. It is the core for native mounts, and no process links it yet. See [Mount core](mount-core.md). `npm run check` checks it along with the app.
+The workspace has one library-only crate, `marlin-vfs` in `src-tauri/crates/marlin-vfs/`. It is the core for native mounts, and `marlin-mount` links it. See [Mount core](mount-core.md). `npm run check` checks `marlin-vfs` and `marlin-mount` along with the app.
 
 ## How the frontend and backend talk
 
