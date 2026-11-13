@@ -421,22 +421,12 @@ jobs:
           TARGET_DIR="${CARGO_TARGET_DIR:-src-tauri/target}"
           rm -rf "$TARGET_DIR/${{ matrix.target }}/release/bundle/appimage" || true
 
-      - name: Create SMB sidecar placeholders
-        run: |
-          # Create placeholder files for all platforms to satisfy tauri-build
-          mkdir -p src-tauri/binaries
-          touch src-tauri/binaries/marlin-smb-x86_64-unknown-linux-gnu
-          touch src-tauri/binaries/marlin-smb-aarch64-unknown-linux-gnu
-          touch src-tauri/binaries/marlin-smb-x86_64-apple-darwin
-          touch src-tauri/binaries/marlin-smb-aarch64-apple-darwin
-
       - name: Build SMB sidecar
         if: matrix.smb
         run: |
           cd src-tauri
           cargo build --release -p marlin-smb --target ${{ matrix.target }}
           # Copy sidecar to binaries directory with target triple suffix (Tauri convention)
-          # This overwrites the placeholder created above
           # Use CARGO_TARGET_DIR if set (self-hosted), otherwise default 'target' dir
           TARGET_DIR="${CARGO_TARGET_DIR:-target}"
           cp "$TARGET_DIR/${{ matrix.target }}/release/marlin-smb" binaries/marlin-smb-${{ matrix.target }}
@@ -575,6 +565,10 @@ jobs:
           DMG_NAME="marlin_${VERSION}_${FRIENDLY_OS}_${FRIENDLY_ARCH}.dmg"
           DMG_PATH="$TARGET_DIR/${{ matrix.target }}/release/bundle/dmg/$DMG_NAME"
           gh release upload "${{ env.RELEASE_TAG }}" "$DMG_PATH" --clobber
+
+      # Last on purpose: every installer is already uploaded. The dry run is the gate before a release; this step makes a bad release show as a failed job.
+      - name: Check the bundled mount helper
+        run: node scripts/check-bundled-mount-helper.mjs "${CARGO_TARGET_DIR:-src-tauri/target}/${{ matrix.target }}/release/bundle"
 
   dry-run-changes:
     name: Detect changes the dry run builds
@@ -828,22 +822,12 @@ jobs:
           TARGET_DIR="${CARGO_TARGET_DIR:-src-tauri/target}"
           rm -rf "$TARGET_DIR/${{ matrix.target }}/release/bundle/appimage" || true
 
-      - name: Create SMB sidecar placeholders
-        run: |
-          # Create placeholder files for all platforms to satisfy tauri-build
-          mkdir -p src-tauri/binaries
-          touch src-tauri/binaries/marlin-smb-x86_64-unknown-linux-gnu
-          touch src-tauri/binaries/marlin-smb-aarch64-unknown-linux-gnu
-          touch src-tauri/binaries/marlin-smb-x86_64-apple-darwin
-          touch src-tauri/binaries/marlin-smb-aarch64-apple-darwin
-
       - name: Build SMB sidecar
         if: matrix.smb
         run: |
           cd src-tauri
           cargo build --release -p marlin-smb --target ${{ matrix.target }}
           # Copy sidecar to binaries directory with target triple suffix (Tauri convention)
-          # This overwrites the placeholder created above
           # Use CARGO_TARGET_DIR if set (self-hosted), otherwise default 'target' dir
           TARGET_DIR="${CARGO_TARGET_DIR:-target}"
           cp "$TARGET_DIR/${{ matrix.target }}/release/marlin-smb" binaries/marlin-smb-${{ matrix.target }}
@@ -861,6 +845,11 @@ jobs:
           TAURI_BUNDLE_LINUX_APPIMAGE_ARGS: ${{ runner.os == 'Linux' && '--verbosity=2' || '' }}
           # linuxdeploy needs to find libzpl.so when bundling the AppImage
           LD_LIBRARY_PATH: ${{ runner.os == 'Linux' && format('{0}/{1}/release', env.CARGO_TARGET_DIR || 'src-tauri/target', matrix.target) || '' }}
+          # Sign ad hoc, as a release without secrets does, so the check below can verify the signatures.
+          APPLE_SIGNING_IDENTITY: ${{ runner.os == 'macOS' && '-' || '' }}
+
+      - name: Check the bundled mount helper
+        run: node scripts/check-bundled-mount-helper.mjs "${CARGO_TARGET_DIR:-src-tauri/target}/${{ matrix.target }}/release/bundle"
 
       - name: Dump linuxdeploy diagnostics
         if: failure() && runner.os == 'Linux'

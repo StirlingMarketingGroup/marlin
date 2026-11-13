@@ -24,7 +24,47 @@ fn main() {
     // propagate to dependent crates.
     setup_libzpl();
 
+    create_missing_helper_placeholders();
+
     tauri_build::build()
+}
+
+/// tauri-build fails when a helper listed in `bundle.externalBin` is missing. A helper
+/// that nothing built becomes an empty file, so the app still compiles. The feature that
+/// needs the helper then fails when it starts it. `scripts/run-tauri.mjs` builds the real
+/// `marlin-mount`, and `npm run build:smb-sidecar` builds the real `marlin-smb`.
+fn create_missing_helper_placeholders() {
+    let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    // tauri-build reports a config it cannot read, so this reads one as having no helpers.
+    let conf: serde_json::Value = std::fs::read_to_string(manifest_dir.join("tauri.conf.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+
+    let target = std::env::var("TARGET").unwrap();
+    let extension = if std::env::var("CARGO_CFG_TARGET_OS").unwrap() == "windows" {
+        ".exe"
+    } else {
+        ""
+    };
+    for helper in conf["bundle"]["externalBin"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        let Some(helper) = helper.as_str() else {
+            continue;
+        };
+        let path = manifest_dir.join(format!("{helper}-{target}{extension}"));
+        if !path.exists() {
+            std::fs::write(&path, "").unwrap_or_else(|error| {
+                panic!(
+                    "could not write the helper placeholder {}: {error}",
+                    path.display()
+                )
+            });
+        }
+    }
 }
 
 /// Read the Linux deb install directory for libzpl from tauri.conf.json.

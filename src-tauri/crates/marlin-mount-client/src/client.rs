@@ -56,7 +56,7 @@ pub enum Event {
 
 #[derive(Debug)]
 pub enum ClientError {
-    /// No helper binary at `Start::binary`.
+    /// No helper binary at `Start::binary`, or only the empty placeholder that `src-tauri/build.rs` makes for a helper nothing built.
     MissingBinary(PathBuf),
     /// The helper could not be started, or did not answer in time.
     Start(String),
@@ -321,7 +321,7 @@ async fn open_or_start(start: &Start) -> Result<Connection, ClientError> {
 
 /// Starts the helper and reaps it. A helper that finds another one running exits with status 0 at once; that exit is reaped here, and the connect retry reaches the one that is running.
 fn start_helper(start: &Start) -> Result<(), ClientError> {
-    if !start.binary.is_file() {
+    if !std::fs::metadata(&start.binary).is_ok_and(|file| file.is_file() && file.len() > 0) {
         return Err(ClientError::MissingBinary(start.binary.clone()));
     }
     if let Some(folder) = start.log.parent() {

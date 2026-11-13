@@ -166,6 +166,8 @@ npm run tauri dev
 npm run tauri build
 ```
 
+`npm run tauri dev` and `npm run tauri build` build the mount helper (`marlin-mount`) themselves. Nothing else needs a build step. SMB support is the one optional extra.
+
 ### SMB Support (Optional)
 
 SMB/network share support requires libsmbclient and is built as a separate sidecar binary to ensure the main app always starts even if samba isn't installed.

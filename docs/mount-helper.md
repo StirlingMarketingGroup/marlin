@@ -2,9 +2,9 @@
 
 `marlin-mount` is the process that will own every native mount. It runs once per user, apart from the app, so a mount outlives a hot reload, an app crash, and every window. The app tells it what to mount over a local socket.
 
-It cannot mount anything yet. Linux has an adapter, the [Linux mount adapter](mount-linux.md). macOS (#373) and Windows (#375) have none. No real provider (#372) exists, so no mount request can succeed: one that passes the name checks fails with -1004, unknown provider. The app starts the helper on the first mount command: see [The app side](#the-app-side). No part of the UI sends one yet (#377), and a shipped app has no helper binary until #506.
+It cannot mount anything yet. Linux has an adapter, the [Linux mount adapter](mount-linux.md). macOS (#373) and Windows (#375) have none. No real provider (#372) exists, so no mount request can succeed: one that passes the name checks fails with -1004, unknown provider. The app starts the helper on the first mount command: see [The app side](#the-app-side). No part of the UI sends one yet (#377). The app bundle holds the helper: see [Building and bundling](#building-and-bundling).
 
-**Covers:** `src-tauri/crates/marlin-mount/`, `src-tauri/crates/marlin-mount-client/`, `src-tauri/src/mount_helper.rs`
+**Covers:** `src-tauri/crates/marlin-mount/`, `src-tauri/crates/marlin-mount-client/`, `src-tauri/src/mount_helper.rs`, `src-tauri/build.rs`, `scripts/run-tauri.mjs`, `scripts/check-bundled-mount-helper.mjs`
 **Checked against the code:** 2026-11-13
 
 The design is in [decision 0001](decisions/0001-mount-architecture.md), choices 3 to 6. The helper builds each mount on the [mount core](mount-core.md).
@@ -27,6 +27,25 @@ The wire types and the client are in a second crate, `marlin-mount-client`. The 
 | `lib.rs`      | `default_socket`, the one definition of the socket path that the helper and the app share. |
 
 `marlin-mount` and `Client` are Unix only. A Windows named pipe comes with the Windows adapter (#375). On Windows the five commands fail with the message "Marlin cannot mount on this OS yet."
+
+## Building and bundling
+
+The helper ships inside the app as a Tauri `externalBin` (`bundle.externalBin` in `src-tauri/tauri.conf.json`). Tauri takes the file `src-tauri/binaries/marlin-mount-<target triple>` and puts it beside the app binary under the name `marlin-mount`.
+
+| Build         | Where the helper lands                            |
+| ------------- | ------------------------------------------------- |
+| A dev build   | `src-tauri/target/debug/marlin-mount`             |
+| A macOS app   | `Marlin.app/Contents/MacOS/marlin-mount`          |
+| A Linux `deb` | `/usr/bin/marlin-mount`, beside `/usr/bin/marlin` |
+
+- **`npm run tauri dev` and `npm run tauri build` build the helper.** `scripts/run-tauri.mjs` runs `cargo build -p marlin-mount` with the app's profile and target, then copies the result into `src-tauri/binaries/`. A release and the release dry run go through the same script, so the workflows have no build step for the helper.
+- **The helper is built when the command starts, not while it runs.** After you change the helper's code, restart `npm run tauri dev`. A helper that is still running keeps its old code: see [The app side](#the-app-side).
+- **Any other build gets an empty placeholder.** `tauri-build` fails when a listed helper file is missing. So `src-tauri/build.rs` writes an empty file for each helper that nothing built, `marlin-smb` included. `cargo check`, `cargo test`, and an editor then compile on a fresh clone. An app built that way has no helper: the app treats an empty file as a missing one, and a mount command fails with "Marlin's mount helper is missing".
+- **`target/<profile>/marlin-mount` has two writers.** Cargo puts its own build of the helper there, and the app's build script copies the file from `src-tauri/binaries/` there. Cargo puts its copy back on every `cargo build -p marlin-mount` and `cargo test -p marlin-mount`, so the helper's tests run the current code.
+- **macOS signing.** Tauri signs the helper inside the bundle with the app's identity, the hardened runtime, and the app's `src-tauri/Entitlements.plist`. So the helper already has `com.apple.security.cs.disable-library-validation`, which it needs to load macFUSE's library. An entitlements file of its own waits for the macOS adapter (#373). Nothing loads a library until then, so nothing could test the file.
+- **CI checks the bundle.** `scripts/check-bundled-mount-helper.mjs` starts the helper from the built macOS app or from the built `deb`, and fails unless it answers `hello` and exits with status 0 after `shutdown`. On macOS it first runs `codesign --verify --deep --strict` on the app and checks that the helper has the hardened runtime. The release dry run runs it on every target, and so does a release: see [Release signing](release-signing.md).
+
+Not checked: the `rpm` and the AppImage (#486), and a helper started by an installed release.
 
 ## Running it
 
@@ -121,15 +140,15 @@ The types are in `src/types/index.ts`. A failed command rejects with a `MountCom
 
 **Starting the helper.** The first command connects to the socket. The app starts a helper only when the socket file is missing or refuses the connection. Any other error, such as no permission on the socket's folder, is reported and starts nothing.
 
-- The binary is the file `marlin-mount` in the folder of the app binary, and nowhere else. A dev build finds `src-tauri/target/debug/marlin-mount` after `cd src-tauri && cargo build -p marlin-mount`. A bundle will hold it as a Tauri `externalBin` (#506). When the file is missing, the command fails with "Marlin's mount helper is missing", and the rest of the app works.
+- The binary is the file `marlin-mount` in the folder of the app binary, and nowhere else. [Building and bundling](#building-and-bundling) says how it gets there. When the file is missing or empty, the command fails with "Marlin's mount helper is missing", and the rest of the app works.
 - The helper is detached: it runs in its own process group, with no pipe to the app. A Ctrl+C in the terminal that runs `npm run tauri dev` does not reach it, and it keeps running when the app is killed or rebuilt.
 - The command line holds `--socket` and the socket path, and nothing else.
 - The app waits up to 10 seconds for the new helper to take a connection, and up to 30 seconds for the answer to `hello`, which comes after the helper's sweep.
 - Two commands at once start one helper: the app holds a lock while it connects. A window or a webview reload reuses the connection. An app that was restarted finds the running helper through the socket.
 
-**A helper with another protocol version.** The app sends it `shutdown`, waits for it to close the connection, starts the helper beside the app, and connects again. It does this once. If the old helper cannot unmount, it keeps running and the command fails with the helper's reason. If the helper beside the app also speaks another version, the command fails and says both numbers. In a dev build that means `target/debug/marlin-mount` is stale: build it again.
+**A helper with another protocol version.** The app sends it `shutdown`, waits for it to close the connection, starts the helper beside the app, and connects again. It does this once. If the old helper cannot unmount, it keeps running and the command fails with the helper's reason. If the helper beside the app also speaks another version, the command fails and says both numbers. In a dev build that means `target/debug/marlin-mount` is stale: restart `npm run tauri dev`, which builds it again.
 
-**A helper with the same protocol version is reused, whatever its build.** A helper left by a killed dev app keeps running its old code after `cargo build -p marlin-mount`. Quit Marlin from its menu, or stop the `marlin-mount` process, to load the new build.
+**A helper with the same protocol version is reused, whatever its build.** A helper left by a killed dev app keeps running its old code after the helper is built again. Quit Marlin from its menu, or stop the `marlin-mount` process, to load the new build.
 
 **When the user quits.** The app handles Tauri's `RunEvent::Exit`: it connects to the socket and sends `shutdown`. It never starts a helper to do this.
 

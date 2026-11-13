@@ -62,8 +62,8 @@ tauri-private-key*
 # Tauri specific
 src-tauri/target/
 
-# SMB sidecar binaries (built per-platform during CI/release)
-src-tauri/binaries/marlin-smb-*
+# Helper binaries that Tauri bundles (built per platform, or empty placeholders made by build.rs)
+src-tauri/binaries/*
 !src-tauri/binaries/.gitkeep
 
 # libzpl shared library (downloaded during cargo build by zpl-rs, copied for Tauri bundling)
