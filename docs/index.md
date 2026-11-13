@@ -4,14 +4,14 @@ Start here. Each line says what a page answers. The rules for keeping these page
 
 ## How the app works
 
-| Page                                        | Read it to learn                                                                                                                           |
-| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| [Architecture](architecture.md)             | What runs where: the three processes, the Rust modules, the React windows and stores, and how they talk.                                   |
-| [Location providers](location-providers.md) | How local folders, archives, Google Drive, SMB, and SFTP work today, and where that model breaks.                                          |
-| [Thumbnails](thumbnails.md)                 | How a thumbnail gets requested, generated, and cached, for local and remote files.                                                         |
-| [Mount core](mount-core.md)                 | What the `marlin-vfs` crate gives a mount adapter and asks of a provider: nodes, names, limits.                                            |
-| [Mount helper](mount-helper.md)             | How the `marlin-mount` process is controlled: its socket, its protocol, the rules of its mounts, and the app's commands and events for it. |
-| [Linux mount adapter](mount-linux.md)       | How `marlin-fuse` serves a mount through FUSE: what the machine needs, the error table, and the tests.                                     |
+| Page                                        | Read it to learn                                                                                                                                               |
+| ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [Architecture](architecture.md)             | What runs where: the three processes, the Rust modules, the React windows and stores, and how they talk.                                                       |
+| [Location providers](location-providers.md) | How local folders, archives, Google Drive, SMB, and SFTP work today, and where that model breaks.                                                              |
+| [Thumbnails](thumbnails.md)                 | How a thumbnail gets requested, generated, and cached, for local and remote files.                                                                             |
+| [Mount core](mount-core.md)                 | What the `marlin-vfs` crate gives a mount adapter and asks of a provider: nodes, names, limits.                                                                |
+| [Mount helper](mount-helper.md)             | How the `marlin-mount` process is built, bundled, and controlled: its socket, its protocol, the rules of its mounts, and the app's commands and events for it. |
+| [Linux mount adapter](mount-linux.md)       | How `marlin-fuse` serves a mount through FUSE: what the machine needs, the error table, and the tests.                                                         |
 
 ## How to work on it
 

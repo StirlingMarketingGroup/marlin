@@ -3,31 +3,40 @@
 A release is built, signed, and notarized by `.github/workflows/release.yml`. Pushing a `v*` tag, or running the workflow by hand with a tag, starts it. Signing needs six Apple secrets and two Tauri updater secrets in the repository settings.
 
 **Covers:** `.github/workflows/release.yml`, `src-tauri/Entitlements.plist`, `src-tauri/tauri.conf.json`
-**Checked against the code:** 2026-11-11
+**Checked against the code:** 2026-11-13
 
 ## What the workflow does
 
-| Job               | Runs when                                                       | Does                                                                                                       |
-| ----------------- | --------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `sync-version`    | a `v*` tag, or a manual run with a tag                          | Writes the version into `package.json` and `tauri.conf.json`, commits it, and makes sure the tag exists.   |
-| `release`         | after `sync-version`, never on a PR                             | Builds the SMB helper, builds and publishes installers, and on macOS signs, makes a DMG, and notarizes it. |
-| `dry-run-changes` | every PR and every push to `master`                             | Checks which files changed and decides whether the dry run needs to build.                                 |
-| `release-dry-run` | a PR or a push to `master` that changes something in the bundle | Builds the bundle without publishing. It also keeps the Rust cache warm for PRs.                           |
+| Job               | Runs when                                                       | Does                                                                                                     |
+| ----------------- | --------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `sync-version`    | a `v*` tag, or a manual run with a tag                          | Writes the version into `package.json` and `tauri.conf.json`, commits it, and makes sure the tag exists. |
+| `release`         | after `sync-version`, never on a PR                             | Builds the helpers, builds and publishes installers, and on macOS signs, makes a DMG, and notarizes it.  |
+| `dry-run-changes` | every PR and every push to `master`                             | Checks which files changed and decides whether the dry run needs to build.                               |
+| `release-dry-run` | a PR or a push to `master` that changes something in the bundle | Builds the bundle without publishing, and checks its mount helper. It also keeps the Rust cache warm.    |
 
 Build targets:
 
-| Target                      | Runner                    | SMB helper |
-| --------------------------- | ------------------------- | ---------- |
-| `aarch64-apple-darwin`      | GitHub `macos-15`         | yes        |
-| `x86_64-apple-darwin`       | GitHub `macos-15-intel`   | no         |
-| `x86_64-unknown-linux-gnu`  | self-hosted               | yes        |
-| `aarch64-unknown-linux-gnu` | GitHub `ubuntu-24.04-arm` | yes        |
+| Target                      | Runner                    | SMB helper | Mount helper |
+| --------------------------- | ------------------------- | ---------- | ------------ |
+| `aarch64-apple-darwin`      | GitHub `macos-15`         | yes        | yes          |
+| `x86_64-apple-darwin`       | GitHub `macos-15-intel`   | no         | yes          |
+| `x86_64-unknown-linux-gnu`  | self-hosted               | yes        | yes          |
+| `aarch64-unknown-linux-gnu` | GitHub `ubuntu-24.04-arm` | yes        | yes          |
 
 There is no Windows build (issue #135).
 
+## The two helpers
+
+Both helpers are Tauri `externalBin` files in `src-tauri/binaries/`. The bundler puts each one beside the app binary.
+
+- **`marlin-smb`** is built by the "Build SMB sidecar" step, on the targets where samba is installed. On the other target the build script leaves an empty placeholder, and that app has no SMB support.
+- **`marlin-mount`** has no step. "Build and publish installers" and "Build Tauri bundle" both run `npm run tauri build`, and that script builds the helper first. See [Mount helper](mount-helper.md#building-and-bundling).
+- **Signing.** On macOS the bundler signs both helpers inside the app, with the hardened runtime and the app's entitlements. In `release`, when a signing identity is set, `marlin-smb` is also signed by its own step before the bundler runs.
+- **The check.** "Check the bundled mount helper" starts `marlin-mount` from the built bundle and verifies the macOS signatures. The dry run signs ad hoc so that the same check runs on a PR. In `release` the step runs last, after every installer is uploaded: the dry run is the gate, and the `release` step makes a bad release show as a failed job.
+
 `release` and `release-dry-run` repeat about 200 lines of the same setup steps. Change both when you change one.
 
-Both jobs set `MACOSX_DEPLOYMENT_TARGET` to `10.13`. `tauri build` sets that variable from `bundle.macOS.minimumSystemVersion` (default `10.13`), and the plain `cargo build` for the SMB helper does not. When the two disagree, every crate that compiles C is rebuilt by each step. If you set `minimumSystemVersion` in `tauri.conf.json`, change the workflow value to match.
+Both jobs set `MACOSX_DEPLOYMENT_TARGET` to `10.13`. `tauri build` sets that variable from `bundle.macOS.minimumSystemVersion` (default `10.13`), and the plain `cargo build` for a helper does not. When the two disagree, every crate that compiles C is rebuilt by each step. If you set `minimumSystemVersion` in `tauri.conf.json`, change the workflow value to match.
 
 A newer push cancels a running PR build, but never a `master` build. Only `master` builds save the Rust cache, and a cancelled one would save a partial cache under a key that is never written again. If a cache does get poisoned, delete it with `gh cache delete <id>` and the next `master` build saves a full one.
 

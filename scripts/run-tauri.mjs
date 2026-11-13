@@ -1,8 +1,9 @@
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { createHash, randomBytes } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 
 const args = process.argv.slice(2);
 const env = { ...process.env };
@@ -205,6 +206,60 @@ if (process.platform === 'linux') {
   }
   if (removedKeys.length) {
     console.info(`[marlin] Removed snap-related environment keys: ${removedKeys.join(', ')}.`);
+  }
+}
+
+// The app bundles `marlin-mount` (`bundle.externalBin`), so `tauri dev` and `tauri build`
+// need the real helper first, built with the app's own profile and target.
+if (args[0] === 'dev' || args[0] === 'build') {
+  const srcTauri = fileURLToPath(new URL('../src-tauri', import.meta.url));
+  const targetFlag = args.findIndex((arg) => arg === '--target' || arg === '-t');
+  const target =
+    targetFlag === -1
+      ? args.find((arg) => arg.startsWith('--target='))?.slice('--target='.length)
+      : args[targetFlag + 1];
+  const release =
+    args[0] === 'dev'
+      ? args.includes('--release')
+      : !args.includes('--debug') && !args.includes('-d');
+
+  // Cargo gets `--target` only when Tauri does, so the helper and the app share one build folder.
+  execFileSync(
+    'cargo',
+    [
+      'build',
+      '-p',
+      'marlin-mount',
+      ...(release ? ['--release'] : []),
+      ...(target ? ['--target', target] : []),
+    ],
+    { cwd: srcTauri, env, stdio: 'inherit' }
+  );
+
+  const { target_directory: targetDir } = JSON.parse(
+    execFileSync('cargo', ['metadata', '--format-version', '1', '--no-deps'], {
+      cwd: srcTauri,
+      env,
+      encoding: 'utf8',
+    })
+  );
+  const triple =
+    target ?? execFileSync('rustc', ['-vV'], { env, encoding: 'utf8' }).match(/^host: (.+)$/m)[1];
+  const exe = triple.includes('windows') ? '.exe' : '';
+  const built = path.join(
+    targetDir,
+    target ?? '',
+    release ? 'release' : 'debug',
+    `marlin-mount${exe}`
+  );
+  const bundled = path.join(srcTauri, 'binaries', `marlin-mount-${triple}${exe}`);
+
+  // A copy that changes nothing would still give the file a new time, and the
+  // app's build script would run again and relink the app on every start.
+  const builtBytes = await fs.readFile(built);
+  const bundledBytes = await fs.readFile(bundled).catch(() => null);
+  if (!bundledBytes?.equals(builtBytes)) {
+    await fs.copyFile(built, bundled);
   }
 }
 

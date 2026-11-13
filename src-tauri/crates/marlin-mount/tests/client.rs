@@ -233,6 +233,20 @@ async fn a_missing_binary_is_reported_and_nothing_is_started() {
 }
 
 #[tokio::test]
+async fn an_empty_placeholder_is_reported_as_a_missing_binary() {
+    let dir = tempfile::tempdir().unwrap();
+    let start = start_for(dir.path(), dir.path().join("marlin-mount"));
+    std::fs::write(&start.binary, "").unwrap();
+    let Err(error) = Client::connect(&start, |_| {}).await else {
+        panic!("connect was expected to fail");
+    };
+    assert!(
+        matches!(error, ClientError::MissingBinary(ref path) if path == &start.binary),
+        "{error}"
+    );
+}
+
+#[tokio::test]
 async fn a_socket_that_cannot_be_opened_for_another_reason_starts_no_helper() {
     use std::os::unix::fs::PermissionsExt;
 
