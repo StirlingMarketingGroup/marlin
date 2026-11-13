@@ -449,8 +449,10 @@ async fn get_service_account_token() -> Result<String, String> {
         .ok_or_else(|| "No access token in service account response".to_string())
 }
 
-/// Custom flow delegate that opens the browser
-struct BrowserFlowDelegate;
+/// Opens the Google sign-in page. `login_hint` is the email the user is expected to pick.
+struct BrowserFlowDelegate {
+    login_hint: Option<String>,
+}
 
 impl InstalledFlowDelegate for BrowserFlowDelegate {
     fn present_user_url<'a>(
@@ -460,8 +462,14 @@ impl InstalledFlowDelegate for BrowserFlowDelegate {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send + 'a>>
     {
         Box::pin(async move {
-            // Open the URL in the default browser
-            if let Err(e) = open::that(url) {
+            // Google only returns a refresh token on the first consent unless this is set.
+            let mut open_url = format!("{url}&prompt=consent");
+            if let Some(hint) = &self.login_hint {
+                open_url.push_str("&login_hint=");
+                open_url.push_str(&urlencoding::encode(hint));
+            }
+
+            if let Err(e) = open::that(&open_url) {
                 log::error!("Failed to open browser: {}", e);
                 return Err(format!("Failed to open browser: {}", e));
             }
@@ -495,12 +503,16 @@ impl TokenStorage for SignInTokens {
     }
 }
 
-/// Add a new Google account via OAuth flow
-pub async fn add_google_account() -> Result<GoogleAccountInfo, String> {
+/// Signs in to a Google account in the browser. Adds the account, or updates it when it is already listed.
+/// `login_hint` is the email the user is expected to pick.
+pub async fn add_google_account(login_hint: Option<String>) -> Result<GoogleAccountInfo, String> {
     let oauth_credentials = load_oauth_credentials()?;
 
-    // Prevent concurrent auth flows
-    let _guard = AUTH_MUTEX.lock().await;
+    // One sign-in at a time. A second one fails at once, so it never waits on a browser tab the user closed.
+    let _guard = AUTH_MUTEX.try_lock().map_err(|_| {
+        "A Google sign-in is already open in your browser. Finish it there, or try again in a few minutes."
+            .to_string()
+    })?;
 
     log::info!("Starting Google OAuth flow...");
 
@@ -523,7 +535,7 @@ pub async fn add_google_account() -> Result<GoogleAccountInfo, String> {
     // Use HTTPRedirect which automatically finds an available port
     let auth = InstalledFlowAuthenticator::builder(secret, InstalledFlowReturnMethod::HTTPRedirect)
         .with_storage(Box::new(SignInTokens(stored.clone())))
-        .flow_delegate(Box::new(BrowserFlowDelegate))
+        .flow_delegate(Box::new(BrowserFlowDelegate { login_hint }))
         .build()
         .await
         .map_err(|e| {
@@ -533,11 +545,15 @@ pub async fn add_google_account() -> Result<GoogleAccountInfo, String> {
 
     log::info!("Authenticator built, requesting token...");
 
-    // Get a token to trigger the auth flow
-    auth.token(SCOPES).await.map_err(|e| {
-        log::error!("Failed to get token: {}", e);
-        format!("Failed to get token: {}", e)
-    })?;
+    // Get a token to trigger the auth flow. A user who closes the browser tab never answers,
+    // and everything that waits on this sign-in would wait with them.
+    tokio::time::timeout(std::time::Duration::from_secs(300), auth.token(SCOPES))
+        .await
+        .map_err(|_| "Google sign-in was not finished within 5 minutes. Try again.".to_string())?
+        .map_err(|e| {
+            log::error!("Failed to get token: {}", e);
+            format!("Failed to get token: {}", e)
+        })?;
 
     log::info!("Token received!");
 
@@ -664,6 +680,9 @@ pub async fn remove_google_account(email: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Starts the error for an account whose saved sign-in no longer works. The frontend offers to sign in again.
+const SIGN_IN_NEEDED: &str = "[GDRIVE_SIGN_IN_NEEDED]";
+
 /// Refresh an access token if needed
 pub async fn ensure_valid_token(email: &str) -> Result<String, String> {
     // Check if this is a service account - use JWT-based auth
@@ -687,11 +706,12 @@ pub async fn ensure_valid_token(email: &str) -> Result<String, String> {
             if !accounts.iter().any(|account| account.email == email) {
                 return Err(format!("Account not found: {}", email));
             }
-            let refresh_token = keyring_entry(email)?.get_password().map_err(|e| {
-                format!(
-                    "No Google sign-in stored for {}. Re-authentication may be required. ({})",
-                    email, e
-                )
+            let refresh_token = keyring_entry(email)?.get_password().map_err(|e| match e {
+                keyring::Error::NoEntry => format!(
+                    "{} No Google sign-in is stored for {}. Open a folder in this account to sign in again.",
+                    SIGN_IN_NEEDED, email
+                ),
+                e => format!("Failed to read Google sign-in from keychain: {}", e),
             })?;
             tokens.insert(
                 email.to_string(),
@@ -734,10 +754,13 @@ pub async fn ensure_valid_token(email: &str) -> Result<String, String> {
             .map(|body| body.error)
             .unwrap_or_default();
         log::error!("Token refresh failed with status {}: {}", status, reason);
-        return Err(format!(
-            "Token refresh failed (status {}). Re-authentication may be required.",
-            status
-        ));
+        if reason == "invalid_grant" {
+            return Err(format!(
+                "{} Google no longer accepts the saved sign-in for {}. Open a folder in this account to sign in again.",
+                SIGN_IN_NEEDED, email
+            ));
+        }
+        return Err(format!("Token refresh failed (status {}).", status));
     }
 
     #[derive(Deserialize)]

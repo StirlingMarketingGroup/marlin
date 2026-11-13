@@ -17,6 +17,7 @@ import {
   GoogleLogo,
   Plus,
   SignOut,
+  Warning,
   ShareNetwork,
   Terminal,
 } from 'phosphor-react';
@@ -70,6 +71,7 @@ export default function Sidebar() {
     removePinnedDirectory,
     addPinnedDirectory,
     googleAccounts,
+    googleAccountsError,
     loadGoogleAccounts,
     addGoogleAccount,
     removeGoogleAccount,
@@ -325,7 +327,7 @@ export default function Sidebar() {
       console.error('Failed to add Google account:', error);
       addToast({
         type: 'error',
-        message: 'Failed to connect Google account',
+        message: error instanceof Error ? error.message : 'Failed to connect Google account',
         duration: 5000,
       });
     } finally {
@@ -700,6 +702,18 @@ export default function Sidebar() {
             </QuickTooltip>
           );
         })}
+
+        {googleAccountsError && (
+          <button
+            onClick={() => loadGoogleAccounts()}
+            className="w-full flex items-center gap-2 px-1.5 py-1 rounded-md text-left leading-5 text-[13px] text-app-muted hover:bg-app-light/70 hover:text-app-text transition-colors"
+            title={googleAccountsError}
+            data-tauri-drag-region={false}
+          >
+            <Warning className="w-5 h-5" weight="regular" />
+            <span className="truncate">Couldn&apos;t load Google accounts</span>
+          </button>
+        )}
 
         {/* Add Google Account button */}
         <button

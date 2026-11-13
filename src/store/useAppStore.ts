@@ -31,6 +31,7 @@ import { useToastStore } from './useToastStore';
 import { useUndoStore, pushUndoAndShowToast } from './useUndoStore';
 import { parseGoogleDriveUrl } from '@/utils/googleDriveUrl';
 import { getArchiveParentUri, isArchiveUri } from '@/utils/archiveUri';
+import { withGoogleSignInCheck } from '@/utils/googleSignIn';
 import { withSftpHostKeyCheck } from '@/utils/sftpHostKey';
 import { DEFAULT_THEME_IDS } from '@/themes';
 
@@ -268,6 +269,7 @@ interface AppState {
 
   // Google Drive accounts
   googleAccounts: GoogleAccountInfo[];
+  googleAccountsError?: string;
 
   // SMB network shares
   smbServers: SmbServerInfo[];
@@ -368,7 +370,7 @@ interface AppState {
   reorderPinnedDirectories: (paths: string[]) => Promise<void>;
   // Google Drive accounts
   loadGoogleAccounts: () => Promise<void>;
-  addGoogleAccount: () => Promise<GoogleAccountInfo>;
+  addGoogleAccount: (loginHint?: string) => Promise<GoogleAccountInfo>;
   removeGoogleAccount: (email: string) => Promise<void>;
   // SMB network shares
   loadSmbServers: () => Promise<void>;
@@ -469,6 +471,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   appIconCache: {},
   pinnedDirectories: [],
   googleAccounts: [],
+  googleAccountsError: undefined,
   smbServers: [],
   pendingSmbCredentialRequest: null,
   sftpServers: [],
@@ -868,6 +871,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     // A username can contain `@`. The host starts after the last one, as in `parse_sftp_authority`.
     const sftpMatch = currentPath.match(/^sftp:\/\/(?:([^/]+)@)?([^/:@]+)(?::(\d+))?/);
     const sftpPort = sftpMatch?.[3] ? parseInt(sftpMatch[3], 10) : 22;
+    const gdriveEmail = currentPath.match(/^gdrive:\/\/([^/]+)/)?.[1];
     try {
       setLoading(true);
       setError(undefined);
@@ -875,7 +879,12 @@ export const useAppStore = create<AppState>((set, get) => ({
         invoke<DirectoryListingResponse>('read_directory', { path: currentPath });
       const listing = sftpMatch
         ? await withSftpHostKeyCheck(sftpMatch[2], sftpPort, readDirectory)
-        : await readDirectory();
+        : gdriveEmail
+          ? await withGoogleSignInCheck(gdriveEmail, get().addGoogleAccount, readDirectory)
+          : await readDirectory();
+
+      // The user opened another folder while this one was being read.
+      if (get().currentPath !== currentPath) return;
 
       // For non-file schemes (gdrive://, smb://, archive://), keep the raw URI directly.
       const useRawPath = listing.location.scheme !== 'file';
@@ -908,6 +917,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error('❌ refreshCurrentDirectory failed:', msg);
+
+      // The user opened another folder while this one was being read.
+      if (get().currentPath !== currentPath) return;
 
       // Check if this is an SMB "no credentials" error
       if (msg.includes('[SMB_NO_CREDENTIALS]')) {
@@ -2085,18 +2097,22 @@ export const useAppStore = create<AppState>((set, get) => ({
   loadGoogleAccounts: async () => {
     try {
       const accounts = await invoke<GoogleAccountInfo[]>('get_google_accounts');
-      set({ googleAccounts: accounts });
+      set({ googleAccounts: accounts, googleAccountsError: undefined });
     } catch (error) {
       console.error('Failed to load Google accounts:', error);
-      set({ googleAccounts: [] });
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      set({ googleAccountsError: errorMessage });
     }
   },
 
-  addGoogleAccount: async () => {
+  addGoogleAccount: async (loginHint?: string) => {
     try {
-      const newAccount = await invoke<GoogleAccountInfo>('add_google_account');
+      const newAccount = await invoke<GoogleAccountInfo>('add_google_account', { loginHint });
+      // Signing in again to a listed account updates its row.
       set((state) => ({
-        googleAccounts: [...state.googleAccounts, newAccount],
+        googleAccounts: state.googleAccounts.some((a) => a.email === newAccount.email)
+          ? state.googleAccounts.map((a) => (a.email === newAccount.email ? newAccount : a))
+          : [...state.googleAccounts, newAccount],
       }));
       return newAccount;
     } catch (error) {

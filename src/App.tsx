@@ -20,6 +20,7 @@ import { basename, dirname } from './utils/pathUtils';
 import { applyAccentVariables, DEFAULT_ACCENT, normalizeHexColor } from '@/utils/accent';
 import { getSuggestedZipName } from './utils/zipNaming';
 import { revealInFileBrowser } from '@/utils/fileBrowser';
+import { GOOGLE_SIGN_IN_CANCELLED } from '@/utils/googleSignIn';
 
 import Toast from './components/Toast';
 import FilterInput from './components/FilterInput';
@@ -793,12 +794,14 @@ function App() {
         setLoading(false);
         setError(undefined);
 
-        // Show native alert dialog
-        await message(`Cannot access: ${currentPath}\n\n${errorMessage}`, {
-          title: 'Directory Error',
-          okLabel: 'OK',
-          kind: 'error',
-        });
+        // Show native alert dialog. A cancelled sign-in already asked the user.
+        if (errorMessage !== GOOGLE_SIGN_IN_CANCELLED) {
+          await message(`Cannot access: ${currentPath}\n\n${errorMessage}`, {
+            title: 'Directory Error',
+            okLabel: 'OK',
+            kind: 'error',
+          });
+        }
 
         // Navigate back to previous valid location
         // Don't change files - keep showing the previous directory's content
