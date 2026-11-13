@@ -5,6 +5,10 @@
 // Export constants for use in test files
 export const MOCK_HOME_DIR = '/Users/testuser';
 export const MOCK_DOWNLOADS_DIR = `${MOCK_HOME_DIR}/Downloads`;
+// Not listed in the home folder: a spec opens it by typing the path.
+export const MOCK_LONG_NAME_DIR = `${MOCK_HOME_DIR}/LongName`;
+export const MOCK_LONG_NAME =
+  '0-coin-stands-7-resize.f55c86b289eb233728c5c475eac70d1e3a9b64f07c2d85e1b3a6f9d4c7e2b1a0-preview.png';
 
 // For thumbnail cache test - track thumbnail request calls
 export interface ThumbnailRequestLog {
@@ -67,6 +71,7 @@ export function getTauriMockScript(): string {
     (function() {
       const mockHomeDir = '${MOCK_HOME_DIR}';
       const mockDownloadsDir = '${MOCK_DOWNLOADS_DIR}';
+      const mockLongNameDir = '${MOCK_LONG_NAME_DIR}';
 
       const mockFiles = [
         {
@@ -158,11 +163,30 @@ export function getTauriMockScript(): string {
         },
       ];
 
+      // One name long enough to hang over the row below, then enough files to fill rows under it.
+      const mockLongNameFiles = ['${MOCK_LONG_NAME}']
+        .concat(Array.from({ length: 40 }, (_, i) => 'file-' + String(i).padStart(2, '0') + '.png'))
+        .map((name) => ({
+          name,
+          path: mockLongNameDir + '/' + name,
+          is_directory: false,
+          is_hidden: false,
+          is_symlink: false,
+          is_git_repo: false,
+          size: 1024,
+          modified: new Date().toISOString(),
+          created: new Date().toISOString(),
+          extension: 'png',
+          permissions: { read: true, write: true, execute: false },
+        }));
+
       function getFilesForPath(path) {
         const normalizedPath = (path || '').replace(/\\\\/g, '/').replace(/\\/+$/, '') || '/';
         let files;
         if (normalizedPath === mockDownloadsDir || normalizedPath.endsWith('/Downloads')) {
           files = mockDownloadsFiles;
+        } else if (normalizedPath === mockLongNameDir) {
+          files = mockLongNameFiles;
         } else if (normalizedPath === mockHomeDir || normalizedPath === '~' || normalizedPath === '/') {
           files = mockFiles;
         } else {

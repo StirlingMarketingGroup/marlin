@@ -732,8 +732,6 @@ export default function MainPanel() {
           </div>
         </ScrollContext.Provider>
 
-        {/* In-app drag ghost removed; rely on setDragImage */}
-
         {marqueeRect && (
           <div
             className="pointer-events-none absolute z-50 rounded-sm"

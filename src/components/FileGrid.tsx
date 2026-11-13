@@ -1057,8 +1057,9 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
   return (
     <div ref={parentRef} className="p-2" data-testid="file-grid" data-grid-scroll-container="true">
       <div ref={gridRef}>
-        {/* Virtual scroll container */}
+        {/* Virtual scroll container. `isolate` keeps the rows' z-index inside the grid. */}
         <div
+          className="isolate"
           style={{
             height: `${virtualizer.getTotalSize()}px`,
             width: '100%',
@@ -1076,6 +1077,9 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
                   left: 0,
                   width: '100%',
                   transform: `translateY(${virtualRow.start}px)`,
+                  // The transform makes each row its own stacking context, and a
+                  // selected file's full name hangs down over the rows below it.
+                  zIndex: rows.length - virtualRow.index,
                 }}
               >
                 <div
