@@ -3,7 +3,7 @@
 `marlin-vfs` is the layer between a storage provider and an OS mount adapter. An adapter asks it for nodes and bytes. It asks a provider for items. The [mount helper](mount-helper.md) builds one `Vfs` per mount. On Linux the [Linux mount adapter](mount-linux.md) serves it to the OS. The macOS and Windows adapters (#373, #375) and the first real provider (#372) come next. It is read-only until #376.
 
 **Covers:** `src-tauri/crates/marlin-vfs/`
-**Checked against the code:** 2026-11-12
+**Checked against the code:** 2026-11-13
 
 The design is in [decision 0001](decisions/0001-mount-architecture.md). [Decision 0002](decisions/0002-node-ids-follow-lookup-counts.md) sets how long a node ID lasts.
 
@@ -46,6 +46,7 @@ An `ItemId` should stay with an item when the remote renames or moves it. Google
 - **Limits.** Each mount runs at most `max_calls` provider calls at once (default 16). A call that does not finish within `call_timeout` (default 30 seconds), waiting included, fails with `TimedOut`. Dropping the future of a core call cancels its provider call.
 - **Listing cache.** A folder's listing is reused for `listing_ttl` (default 5 seconds). The cache holds at most `max_listings` folders (default 64), and 0 turns it off. A listing that started before a `refresh()` is never put in the cache.
 - **Locking.** All state is behind one mutex that is never held across a provider call.
+- **Call results.** `Vfs::watch_calls` gives a mount's owner the result of every provider call, including the core's own `TimedOut`. A cancelled call and a cached listing report nothing. The mount helper builds a mount's health on it ([Health](mount-helper.md#health)).
 
 The four defaults are first guesses. Issue #372 tunes them against the real Google Drive API.
 

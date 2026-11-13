@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 pub const JSONRPC_VERSION: &str = "2.0";
 
 /// Protocol number this helper speaks. Raised when the control API changes.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// JSON-RPC and helper error codes.
 pub mod error_codes {
@@ -122,12 +122,15 @@ pub struct AccountParams {
     pub account: String,
 }
 
-/// Where a mount is in its life. `Unmounted` appears only in the last `mountChanged` for a mount.
+/// Where a mount is in its life. A mount that is up is `Mounted` when its remote answers, or `Degraded`, `AuthRequired`, or `Offline` when it does not. `Unmounted` appears only in the last `mountChanged` for a mount.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum MountState {
     Starting,
     Mounted,
+    Degraded,
+    AuthRequired,
+    Offline,
     Unmounting,
     Failed,
     Unmounted,

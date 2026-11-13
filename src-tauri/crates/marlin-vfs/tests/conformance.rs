@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use marlin_vfs::{Access, Kind, MemoryProvider, Options, Provider, Vfs, VfsError, POSIX};
@@ -365,6 +365,56 @@ async fn a_full_cache_drops_its_oldest_listing() {
         Err(VfsError::NotFound)
     );
     assert!(vfs.lookup(Vfs::ROOT, "late.txt").await.is_ok());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_watcher_hears_how_every_provider_call_ended() {
+    let provider = Arc::new(MemoryProvider::new());
+    let heard = Arc::new(Mutex::new(Vec::new()));
+    let heard_for_watch = Arc::clone(&heard);
+    let options = Options::default();
+    let vfs = Vfs::new(provider.clone(), POSIX, options).watch_calls(move |error| {
+        heard_for_watch.lock().unwrap().push(error.cloned());
+    });
+
+    vfs.space().await.unwrap();
+    assert_eq!(*heard.lock().unwrap(), vec![None]);
+
+    provider.fail_with(Some(VfsError::Offline));
+    assert_eq!(vfs.space().await, Err(VfsError::Offline));
+    provider.fail_with(None);
+    assert_eq!(*heard.lock().unwrap(), vec![None, Some(VfsError::Offline)]);
+
+    provider.set_delay(options.call_timeout + Duration::from_secs(1));
+    assert_eq!(vfs.space().await, Err(VfsError::TimedOut));
+    provider.set_delay(Duration::ZERO);
+    assert_eq!(
+        *heard.lock().unwrap(),
+        vec![None, Some(VfsError::Offline), Some(VfsError::TimedOut)]
+    );
+
+    assert_eq!(
+        vfs.lookup(Vfs::ROOT, "missing").await,
+        Err(VfsError::NotFound)
+    );
+    assert_eq!(
+        vfs.lookup(Vfs::ROOT, "missing").await,
+        Err(VfsError::NotFound)
+    );
+    assert_eq!(
+        *heard.lock().unwrap(),
+        vec![
+            None,
+            Some(VfsError::Offline),
+            Some(VfsError::TimedOut),
+            None
+        ]
+    );
+
+    provider.set_delay(Duration::from_secs(5));
+    let cancelled = tokio::time::timeout(Duration::from_secs(1), vfs.space()).await;
+    assert!(cancelled.is_err());
+    assert_eq!(heard.lock().unwrap().len(), 4);
 }
 
 #[tokio::test]

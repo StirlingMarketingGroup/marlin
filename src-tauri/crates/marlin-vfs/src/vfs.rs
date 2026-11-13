@@ -92,7 +92,11 @@ pub struct Vfs {
     options: Options,
     permits: Semaphore,
     state: Mutex<State>,
+    watcher: Option<Box<CallWatcher>>,
 }
+
+/// Hears how one provider call ended: `None` for a value, or the error.
+type CallWatcher = dyn Fn(Option<&VfsError>) + Send + Sync;
 
 impl Vfs {
     /// The node id of the folder at the top of the mount.
@@ -126,7 +130,17 @@ impl Vfs {
                 listings: HashMap::new(),
                 generation: 0,
             }),
+            watcher: None,
         }
+    }
+
+    /// Tells `watcher` how every provider call ended: `None` for a value, or the error. The core's own time limit reports [`VfsError::TimedOut`]. A call the adapter cancels reports nothing, and neither does a listing served from the cache.
+    pub fn watch_calls(
+        mut self,
+        watcher: impl Fn(Option<&VfsError>) + Send + Sync + 'static,
+    ) -> Self {
+        self.watcher = Some(Box::new(watcher));
+        self
     }
 
     /// Finds `name` in `parent` and adds one lookup to the item's node.
@@ -291,9 +305,13 @@ impl Vfs {
             let _permit = self.permits.acquire().await.expect("never closed");
             work.await
         };
-        tokio::time::timeout(self.options.call_timeout, limited)
+        let result = tokio::time::timeout(self.options.call_timeout, limited)
             .await
-            .unwrap_or(Err(VfsError::TimedOut))
+            .unwrap_or(Err(VfsError::TimedOut));
+        if let Some(watcher) = &self.watcher {
+            watcher(result.as_ref().err());
+        }
+        result
     }
 
     async fn listing(&self, folder: &ItemId) -> Result<Arc<Vec<Item>>, VfsError> {
