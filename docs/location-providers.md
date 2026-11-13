@@ -48,6 +48,25 @@ Notes per provider:
 - **`sftp`** allows one transfer at a time per server (`MAX_CONCURRENT_OPS` in `sftp/pool.rs`), because some servers fail on parallel reads. It accepts a server key only when `~/.ssh/known_hosts` holds it for that host (`sftp/host_key.rs`). A host with no saved key fails the connection. The frontend asks whether to save the key when the failure comes from opening a folder (`refreshCurrentDirectory`) or from the connect window. Every other SFTP call shows the error text and does not ask (the refresh shortcut is issue #500). A host with a saved key that does not match is refused, and the app has no override. Marlin appends to the file and never rewrites a line. The backend keeps each unknown key in memory and saves only that key, so the frontend cannot choose what gets saved. Limits: Marlin reads only that one file, not `ssh_config`, `UserKnownHostsFile`, or `/etc/ssh/ssh_known_hosts`. `russh` matches plain and hashed host names, so a host saved under a wildcard pattern, an `@cert-authority` line, or a line that separates its fields with tabs is asked about as new. An `@revoked` line is ignored. Marlin looks the host up in lower case and saves a new host under its plain name, even when `HashKnownHosts` is on. A remote folder is read twice per navigation (issue #499), so the frontend shares one answer between the two failed reads (`src/utils/sftpHostKey.ts`). Passwords are in the OS keychain.
 - **`smb`** is not compiled on Windows. On macOS and Linux the main app starts `marlin-smb` and sends it JSON-RPC 2.0 requests, one JSON object per line on stdin, with replies on stdout. A call times out after 30 seconds, a download after 5 minutes, and the app restarts a dead helper up to 3 times (`smb/client.rs`). Passwords are in the OS keychain under the service name `marlin-smb`. The app reads a server's password from the keychain on first use and keeps it in memory until the app quits (`smb/auth.rs`), because macOS can ask the user to allow each read. macOS ties "Always Allow" to the app's code signature. A dev build's signature is ad hoc and changes with each rebuild, so macOS asks once per server after each rebuild (issue #491). A release build keeps one signature identity across updates (see [`release-signing.md`](release-signing.md)), so macOS sees the same app after an update.
 
+## Google's settings for Marlin's sign-in
+
+Marlin signs in to Google as an OAuth app in a Google Cloud project. Its settings are in Google Cloud Console, under Google Auth Platform, and no file in this repo holds them. Only the project's owner can change them.
+
+| Setting                     | Value                    | Why                                                                                                      |
+| --------------------------- | ------------------------ | -------------------------------------------------------------------------------------------------------- |
+| Audience, publishing status | In production            | In "Testing", Google ends a refresh token after 7 days, so users had to sign in again every week (#167). |
+| Audience, user type         | External                 | Any Google account may sign in.                                                                          |
+| Branding, home page         | The repo's GitHub page   | Google will not publish an app without it.                                                               |
+| Branding, privacy policy    | `PRIVACY.md` on `master` | The same. If the file moves, change the link in the Console.                                             |
+| Branding, terms of service  | `TERMS.md` on `master`   | Optional for Google.                                                                                     |
+| Branding, authorized domain | `github.com`             | Each link's domain must be listed.                                                                       |
+| Branding, logo              | None                     | With a logo, Google asks for verification before the app may be in production.                           |
+
+Google has not verified the app. Two things follow:
+
+- Sign-in shows a "Google hasn't verified this app" screen. The user clicks Advanced, then continues.
+- **At most 100 Google accounts can ever connect** (#533). The count covers the life of the project and cannot be reset.
+
 ## Where the model breaks
 
 These are the reasons for epic #368. Each one is a place where code outside `locations/` has to know which backend it is talking to.
