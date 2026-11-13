@@ -17,7 +17,7 @@ Start here. Each line says what a page answers. The rules for keeping these page
 
 | Page                                  | Read it to learn                                                             |
 | ------------------------------------- | ---------------------------------------------------------------------------- |
-| [Testing](testing.md)                 | The seven test suites, what each one covers, and which ones CI runs.         |
+| [Testing](testing.md)                 | The eight test suites, what each one covers, and which ones CI runs.         |
 | [Release signing](release-signing.md) | How a release gets built, signed, and notarized, and which secrets it needs. |
 
 ## Decisions
