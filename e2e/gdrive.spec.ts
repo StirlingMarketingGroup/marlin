@@ -296,3 +296,106 @@ test.describe('Google Drive Integration', () => {
     await expect(page.locator('[data-testid="file-grid"]')).toBeVisible({ timeout: 5000 });
   });
 });
+
+// Layered over the Google Drive mocks: the account's saved sign-in is rejected until the user
+// signs in again. `answer` is the button the user picks in the sign-in dialog.
+function getSignInNeededMockScript(answer: 'Sign In' | 'Cancel'): string {
+  return `
+    (function() {
+      const gdriveInvoke = window.__TAURI_INTERNALS__.invoke;
+      const state = { needed: true, dialogs: [], signIns: [] };
+      window.__SIGN_IN_TEST__ = state;
+
+      window.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
+        if (cmd === 'read_directory' && args?.path?.startsWith('gdrive://') && state.needed) {
+          throw '[GDRIVE_SIGN_IN_NEEDED] Google no longer accepts the saved sign-in for ${MOCK_EMAIL}.';
+        }
+        if (cmd === 'plugin:dialog|message') {
+          state.dialogs.push(args.title);
+          return args.title === 'Sign In to Google Again' ? '${answer}' : 'OK';
+        }
+        if (cmd === 'add_google_account') {
+          state.signIns.push(args);
+          state.needed = false;
+          return { email: '${MOCK_EMAIL}', displayName: null };
+        }
+        return gdriveInvoke(cmd, args);
+      };
+    })();
+  `;
+}
+
+type SignInTestState = { dialogs: string[]; signIns: unknown[] };
+
+function signInTestState(page: Page): Promise<SignInTestState> {
+  return page.evaluate(
+    () => (window as unknown as { __SIGN_IN_TEST__: SignInTestState }).__SIGN_IN_TEST__
+  );
+}
+
+test.describe('Google Drive sign-in that Google no longer accepts', () => {
+  async function openApp(page: Page, answer: 'Sign In' | 'Cancel') {
+    await page.addInitScript(getTauriMockScript());
+    await page.addInitScript(getGdriveMockScript());
+    await page.addInitScript(getSignInNeededMockScript(answer));
+    await page.goto('/');
+    await expect(page.locator('[data-testid="path-input"]')).toBeVisible({ timeout: 15000 });
+  }
+
+  test('asks once, signs in to that account, and opens the folder', async ({ page }) => {
+    await openApp(page, 'Sign In');
+
+    await page.getByText(MOCK_EMAIL).click();
+
+    await expect(page.getByText('My Drive')).toBeVisible({ timeout: 5000 });
+    const state = await signInTestState(page);
+    expect(state.signIns).toEqual([{ loginHint: MOCK_EMAIL }]);
+    expect(state.dialogs).toEqual(['Sign In to Google Again']);
+  });
+
+  test('goes back without a second dialog when the user cancels', async ({ page }) => {
+    await openApp(page, 'Cancel');
+    const pathInput = page.locator('[data-testid="path-input"]');
+    const startPath = await pathInput.inputValue();
+
+    await page.getByText(MOCK_EMAIL).click();
+
+    await expect.poll(async () => (await signInTestState(page)).dialogs.length).toBeGreaterThan(0);
+    await expect(pathInput).toHaveValue(startPath);
+    const state = await signInTestState(page);
+    expect(state.dialogs).toEqual(['Sign In to Google Again']);
+    expect(state.signIns).toEqual([]);
+  });
+});
+
+test.describe('Google accounts that fail to load', () => {
+  test('shows a row in the sidebar that loads them again', async ({ page }) => {
+    await page.addInitScript(getTauriMockScript());
+    await page.addInitScript(getGdriveMockScript());
+    await page.addInitScript(`
+      (function() {
+        const gdriveInvoke = window.__TAURI_INTERNALS__.invoke;
+        window.__ACCOUNTS_FAIL__ = true;
+        window.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
+          if (cmd === 'get_google_accounts' && window.__ACCOUNTS_FAIL__) {
+            throw 'Failed to store Google sign-in in keychain: locked';
+          }
+          return gdriveInvoke(cmd, args);
+        };
+      })();
+    `);
+    await page.goto('/');
+
+    const row = page.getByText("Couldn't load Google accounts");
+    await expect(row).toBeVisible({ timeout: 15000 });
+    await expect(page.getByText(MOCK_EMAIL)).toHaveCount(0);
+
+    await page.evaluate(() => {
+      (window as unknown as { __ACCOUNTS_FAIL__: boolean }).__ACCOUNTS_FAIL__ = false;
+    });
+    await row.click();
+
+    await expect(page.getByText(MOCK_EMAIL)).toBeVisible({ timeout: 5000 });
+    await expect(row).toHaveCount(0);
+  });
+});

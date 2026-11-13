@@ -7531,10 +7531,11 @@ pub fn get_google_accounts() -> Result<Vec<GoogleAccountInfo>, String> {
     get_gdrive_accounts()
 }
 
-/// Add a new Google account via OAuth flow
+/// Signs in to a Google account in the browser. Adds the account, or updates it when it is already listed.
+/// `login_hint` is the email the user is expected to pick.
 #[command]
-pub async fn add_google_account() -> Result<GoogleAccountInfo, String> {
-    add_gdrive_account().await
+pub async fn add_google_account(login_hint: Option<String>) -> Result<GoogleAccountInfo, String> {
+    add_gdrive_account(login_hint).await
 }
 
 /// Remove a Google account

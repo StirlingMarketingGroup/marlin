@@ -473,6 +473,154 @@ describe('useAppStore', () => {
         'example.com:22 is not in /Users/me/.ssh/known_hosts. Its ssh-ed25519 key fingerprint is SHA256:abc.'
       );
     });
+
+    it('drops a listing when the user opened another folder while it was being read', async () => {
+      const gdrivePath = 'gdrive://a@example.com/';
+      const kept = {
+        name: 'kept.txt',
+        path: 'gdrive://a@example.com/kept.txt',
+        size: 1,
+        modified: '2024-01-01T00:00:00.000Z',
+        is_directory: false,
+        is_hidden: false,
+        is_symlink: false,
+        is_git_repo: false,
+      };
+      useAppStore.setState({
+        currentPath: gdrivePath,
+        currentLocationRaw: gdrivePath,
+        files: [kept],
+        pathHistory: [gdrivePath],
+        historyIndex: 0,
+      });
+
+      let resolveListing: (value: unknown) => void = () => {};
+      mockInvoke.mockImplementation((cmd) => {
+        if (cmd === 'read_directory') {
+          return new Promise((resolve) => {
+            resolveListing = resolve;
+          });
+        }
+        return Promise.resolve(undefined);
+      });
+
+      const refresh = useAppStore.getState().refreshCurrentDirectory();
+      useAppStore.setState({ currentPath: '/other' });
+      resolveListing({
+        entries: [
+          {
+            name: 'other.txt',
+            path: 'gdrive://a@example.com/other.txt',
+            size: 2,
+            modified: '2024-01-01T00:00:00.000Z',
+            is_directory: false,
+            is_hidden: false,
+            is_symlink: false,
+            is_git_repo: false,
+          },
+        ],
+        location: {
+          raw: gdrivePath,
+          scheme: 'gdrive',
+          authority: 'a@example.com',
+          path: '/',
+          displayPath: gdrivePath,
+        },
+        capabilities: {
+          scheme: 'gdrive',
+          displayName: 'Google Drive',
+          canRead: true,
+          canWrite: true,
+          canCreateDirectories: true,
+          canDelete: true,
+          canRename: true,
+          canCopy: true,
+          canMove: true,
+          supportsWatching: false,
+          requiresExplicitRefresh: true,
+        },
+      });
+      await refresh;
+
+      expect(useAppStore.getState().currentPath).toBe('/other');
+      expect(useAppStore.getState().files).toEqual([kept]);
+    });
+  });
+
+  describe('Google accounts', () => {
+    it('replaces an account that is already listed and appends a new email', async () => {
+      useAppStore.setState({
+        googleAccounts: [{ email: 'a@example.com', displayName: 'Old' }],
+      });
+
+      mockInvoke.mockImplementation((cmd) => {
+        if (cmd === 'add_google_account') {
+          return Promise.resolve({ email: 'a@example.com', displayName: 'New' });
+        }
+        return Promise.resolve(undefined);
+      });
+
+      await useAppStore.getState().addGoogleAccount();
+
+      expect(useAppStore.getState().googleAccounts).toEqual([
+        { email: 'a@example.com', displayName: 'New' },
+      ]);
+
+      mockInvoke.mockImplementation((cmd) => {
+        if (cmd === 'add_google_account') {
+          return Promise.resolve({ email: 'b@example.com', displayName: 'B' });
+        }
+        return Promise.resolve(undefined);
+      });
+
+      await useAppStore.getState().addGoogleAccount();
+
+      expect(useAppStore.getState().googleAccounts).toEqual([
+        { email: 'a@example.com', displayName: 'New' },
+        { email: 'b@example.com', displayName: 'B' },
+      ]);
+    });
+
+    it('sends the email as loginHint when signing in to a named account', async () => {
+      mockInvoke.mockResolvedValue({ email: 'a@example.com' });
+
+      await useAppStore.getState().addGoogleAccount('a@example.com');
+
+      expect(mockInvoke).toHaveBeenCalledWith('add_google_account', {
+        loginHint: 'a@example.com',
+      });
+    });
+
+    it('keeps listed accounts when loading fails and clears the error on the next success', async () => {
+      const listed = [{ email: 'a@example.com', displayName: 'A' }];
+      useAppStore.setState({ googleAccounts: listed, googleAccountsError: undefined });
+
+      mockInvoke.mockImplementation((cmd) => {
+        if (cmd === 'get_google_accounts') {
+          return Promise.reject(new Error('keychain locked'));
+        }
+        return Promise.resolve(undefined);
+      });
+
+      await useAppStore.getState().loadGoogleAccounts();
+
+      expect(useAppStore.getState().googleAccounts).toEqual(listed);
+      expect(useAppStore.getState().googleAccountsError).toBe('keychain locked');
+
+      mockInvoke.mockImplementation((cmd) => {
+        if (cmd === 'get_google_accounts') {
+          return Promise.resolve([{ email: 'b@example.com', displayName: 'B' }]);
+        }
+        return Promise.resolve(undefined);
+      });
+
+      await useAppStore.getState().loadGoogleAccounts();
+
+      expect(useAppStore.getState().googleAccountsError).toBeUndefined();
+      expect(useAppStore.getState().googleAccounts).toEqual([
+        { email: 'b@example.com', displayName: 'B' },
+      ]);
+    });
   });
 
   describe('navigation', () => {
