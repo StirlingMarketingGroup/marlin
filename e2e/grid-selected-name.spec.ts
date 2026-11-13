@@ -35,7 +35,7 @@ async function longNameOverTile(page: Page, belowName: string) {
         );
       const name = tileNamed(longName)?.querySelector<HTMLElement>('.text-sm');
       const below = tileNamed(belowName);
-      if (!name || !below) return { reachesTileBelow: false, paintedOnTop: false };
+      if (!name || !below) throw new Error('the long name or the tile below it is missing');
 
       const nameRect = name.getBoundingClientRect();
       const x = nameRect.left + nameRect.width / 2;
