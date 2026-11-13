@@ -7525,7 +7525,8 @@ fn save_pinned_directories(pinned_dirs: &[StoredPinnedDirectory]) -> Result<(), 
 // ============================================================================
 
 /// Get all connected Google accounts
-#[command]
+// Off the main thread: the first call after an update writes to the keychain, which can wait on the user.
+#[command(async)]
 pub fn get_google_accounts() -> Result<Vec<GoogleAccountInfo>, String> {
     get_gdrive_accounts()
 }
@@ -7538,8 +7539,8 @@ pub async fn add_google_account() -> Result<GoogleAccountInfo, String> {
 
 /// Remove a Google account
 #[command]
-pub fn remove_google_account(email: String) -> Result<(), String> {
-    remove_gdrive_account(&email)
+pub async fn remove_google_account(email: String) -> Result<(), String> {
+    remove_gdrive_account(&email).await
 }
 
 /// Result of resolving a Google Drive URL

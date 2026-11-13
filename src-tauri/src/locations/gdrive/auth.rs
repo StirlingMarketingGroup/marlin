@@ -1,11 +1,13 @@
 use chrono::{DateTime, Duration, Utc};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Mutex;
 use yup_oauth2::authenticator_delegate::InstalledFlowDelegate;
+use yup_oauth2::storage::{TokenInfo, TokenStorage, TokenStorageError};
 use yup_oauth2::{
     ApplicationSecret, InstalledFlowAuthenticator, InstalledFlowReturnMethod,
     ServiceAccountAuthenticator, ServiceAccountKey,
@@ -53,12 +55,6 @@ fn load_service_account_key() -> Result<ServiceAccountKey, String> {
     log::info!("Loaded service account: {:?}", key.client_email);
 
     Ok(key)
-}
-
-/// Check if a service account is configured
-#[allow(dead_code)] // Useful for checking service account availability
-pub fn is_service_account_configured() -> bool {
-    SERVICE_ACCOUNT_KEY.is_some()
 }
 
 /// Get the service account email if configured
@@ -257,32 +253,42 @@ pub struct GoogleAccountInfo {
     pub photo_url: Option<String>,
 }
 
-/// Stored account data with tokens
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GoogleAccount {
-    pub email: String,
-    pub display_name: Option<String>,
-    pub photo_url: Option<String>,
-    pub access_token: String,
-    pub refresh_token: String,
-    pub expires_at: DateTime<Utc>,
+/// Storage structure for accounts file
+#[derive(Serialize)]
+struct AccountStorage {
+    accounts: Vec<GoogleAccountInfo>,
 }
 
-/// Storage structure for accounts file
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-struct AccountStorage {
-    accounts: Vec<GoogleAccount>,
+/// What this process knows about an account's tokens. The access token lives only here.
+struct AccountTokens {
+    refresh_token: String,
+    /// The access token and when it expires. `None` until a refresh has worked in this run.
+    access: Option<(String, DateTime<Utc>)>,
 }
+
+// Two locks own all Google account state. `TOKENS` covers the keychain entries and the
+// tokens in memory. `ACCOUNTS_CACHE` covers the accounts file and its cached copy.
+// Take `TOKENS` first, then `ACCOUNTS_CACHE`, and never hold `ACCOUNTS_CACHE` across an `.await`.
+
+/// Held across the keychain read and the refresh request, so calls that arrive together
+/// cause one of each. macOS can ask the user on every keychain read.
+static TOKENS: Lazy<Mutex<HashMap<String, AccountTokens>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 
 /// In-memory cache of accounts
-static ACCOUNTS_CACHE: Lazy<RwLock<Option<Vec<GoogleAccount>>>> = Lazy::new(|| RwLock::new(None));
+static ACCOUNTS_CACHE: Lazy<StdMutex<Option<Vec<GoogleAccountInfo>>>> =
+    Lazy::new(|| StdMutex::new(None));
 
 /// Mutex to prevent concurrent auth flows
 static AUTH_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 /// Get the path to the accounts storage file
 fn get_accounts_path() -> Result<PathBuf, String> {
+    // Reading the accounts file can rewrite it, and unit tests swap the keychain for a fake one.
+    if cfg!(test) {
+        return Err("A unit test must not open the real Google accounts file".to_string());
+    }
+
     let config_dir =
         dirs::config_dir().ok_or_else(|| "Could not determine config directory".to_string())?;
     let marlin_dir = config_dir.join("marlin");
@@ -296,27 +302,87 @@ fn get_accounts_path() -> Result<PathBuf, String> {
     Ok(marlin_dir.join("gdrive-accounts.json"))
 }
 
-/// Load accounts from disk
-fn load_accounts_from_disk() -> Result<Vec<GoogleAccount>, String> {
-    let path = get_accounts_path()?;
+const GDRIVE_KEYRING_SERVICE: &str = "marlin-gdrive";
 
+fn keyring_entry(email: &str) -> Result<keyring::Entry, String> {
+    keyring::Entry::new(GDRIVE_KEYRING_SERVICE, email)
+        .map_err(|e| format!("Failed to create keyring entry: {}", e))
+}
+
+fn set_refresh_token(email: &str, refresh_token: &str) -> Result<(), String> {
+    let entry = keyring_entry(email)?;
+    entry
+        .set_password(refresh_token)
+        .map_err(|e| format!("Failed to store Google sign-in in keychain: {}", e))
+}
+
+fn delete_refresh_token(email: &str) -> Result<(), String> {
+    let entry = keyring_entry(email)?;
+    match entry.delete_credential() {
+        Ok(()) => Ok(()),
+        Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(format!(
+            "Failed to delete Google sign-in from keychain: {}",
+            e
+        )),
+    }
+}
+
+/// Reads the account list. A file written by an older version also holds tokens: this moves
+/// each refresh token into the keychain and rewrites the file without them.
+fn read_accounts_file_moving_tokens(path: &Path) -> Result<Vec<GoogleAccountInfo>, String> {
     if !path.exists() {
         return Ok(Vec::new());
     }
 
     let contents =
-        fs::read_to_string(&path).map_err(|e| format!("Failed to read accounts file: {}", e))?;
+        fs::read_to_string(path).map_err(|e| format!("Failed to read accounts file: {}", e))?;
 
-    let storage: AccountStorage = serde_json::from_str(&contents)
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct GoogleAccountDisk {
+        email: String,
+        display_name: Option<String>,
+        photo_url: Option<String>,
+        #[serde(default)]
+        access_token: Option<String>,
+        #[serde(default)]
+        refresh_token: Option<String>,
+    }
+
+    #[derive(Deserialize)]
+    struct AccountStorageDisk {
+        accounts: Vec<GoogleAccountDisk>,
+    }
+
+    let storage: AccountStorageDisk = serde_json::from_str(&contents)
         .map_err(|e| format!("Failed to parse accounts file: {}", e))?;
 
-    Ok(storage.accounts)
+    let mut had_tokens = false;
+    let mut accounts = Vec::with_capacity(storage.accounts.len());
+    for account in storage.accounts {
+        if account.access_token.is_some() || account.refresh_token.is_some() {
+            had_tokens = true;
+        }
+        if let Some(refresh_token) = account.refresh_token {
+            set_refresh_token(&account.email, &refresh_token)?;
+        }
+        accounts.push(GoogleAccountInfo {
+            email: account.email,
+            display_name: account.display_name,
+            photo_url: account.photo_url,
+        });
+    }
+
+    // Every keychain write has succeeded by now, so a failed one leaves the file as it was.
+    if had_tokens {
+        write_accounts_file(path, &accounts)?;
+    }
+
+    Ok(accounts)
 }
 
-/// Save accounts to disk
-fn save_accounts_to_disk(accounts: &[GoogleAccount]) -> Result<(), String> {
-    let path = get_accounts_path()?;
-
+fn write_accounts_file(path: &Path, accounts: &[GoogleAccountInfo]) -> Result<(), String> {
     let storage = AccountStorage {
         accounts: accounts.to_vec(),
     };
@@ -324,7 +390,10 @@ fn save_accounts_to_disk(accounts: &[GoogleAccount]) -> Result<(), String> {
     let contents = serde_json::to_string_pretty(&storage)
         .map_err(|e| format!("Failed to serialize accounts: {}", e))?;
 
-    fs::write(&path, contents).map_err(|e| format!("Failed to write accounts file: {}", e))?;
+    // A failed write leaves the old file whole: rename replaces it only once the new one is written.
+    let tmp_path = path.with_extension("json.tmp");
+    fs::write(&tmp_path, contents).map_err(|e| format!("Failed to write accounts file: {}", e))?;
+    fs::rename(&tmp_path, path).map_err(|e| format!("Failed to write accounts file: {}", e))?;
 
     Ok(())
 }
@@ -342,72 +411,19 @@ pub fn get_google_accounts() -> Result<Vec<GoogleAccountInfo>, String> {
         });
     }
 
-    // Check cache first for user accounts
-    {
-        let cache = ACCOUNTS_CACHE.read().map_err(|e| e.to_string())?;
-        if let Some(accounts) = &*cache {
-            result.extend(accounts.iter().map(|a| GoogleAccountInfo {
-                email: a.email.clone(),
-                display_name: a.display_name.clone(),
-                photo_url: a.photo_url.clone(),
-            }));
-            return Ok(result);
+    let mut cache = ACCOUNTS_CACHE.lock().map_err(|e| e.to_string())?;
+    if cache.is_none() {
+        *cache = Some(read_accounts_file_moving_tokens(&get_accounts_path()?)?);
+
+        // A sign-in by an older version can leave a token file in this folder.
+        if let Some(cache_dir) = dirs::cache_dir() {
+            let _ = fs::remove_dir_all(cache_dir.join("marlin").join("oauth_temp"));
         }
     }
-
-    // Load from disk
-    let accounts = load_accounts_from_disk()?;
-
-    // Update cache
-    {
-        let mut cache = ACCOUNTS_CACHE.write().map_err(|e| e.to_string())?;
-        *cache = Some(accounts.clone());
+    if let Some(accounts) = &*cache {
+        result.extend(accounts.iter().cloned());
     }
 
-    result.extend(accounts.iter().map(|a| GoogleAccountInfo {
-        email: a.email.clone(),
-        display_name: a.display_name.clone(),
-        photo_url: a.photo_url.clone(),
-    }));
-
-    Ok(result)
-}
-
-/// Get all accounts (internal use for iterating)
-pub fn get_all_accounts() -> Result<Vec<GoogleAccount>, String> {
-    let mut result = Vec::new();
-
-    // Include service account if configured (with placeholder tokens - real token fetched on demand)
-    if let Some(sa_email) = get_service_account_email() {
-        result.push(GoogleAccount {
-            email: sa_email,
-            display_name: Some("Service Account".to_string()),
-            photo_url: None,
-            access_token: String::new(),  // Will be fetched on demand
-            refresh_token: String::new(), // Service accounts use JWT, not refresh tokens
-            expires_at: Utc::now(),       // Force refresh on first use
-        });
-    }
-
-    // Check cache first for user accounts
-    {
-        let cache = ACCOUNTS_CACHE.read().map_err(|e| e.to_string())?;
-        if let Some(accounts) = &*cache {
-            result.extend(accounts.clone());
-            return Ok(result);
-        }
-    }
-
-    // Load from disk
-    let accounts = load_accounts_from_disk()?;
-
-    // Update cache
-    {
-        let mut cache = ACCOUNTS_CACHE.write().map_err(|e| e.to_string())?;
-        *cache = Some(accounts.clone());
-    }
-
-    result.extend(accounts);
     Ok(result)
 }
 
@@ -460,6 +476,25 @@ impl InstalledFlowDelegate for BrowserFlowDelegate {
     }
 }
 
+/// Keeps a sign-in's tokens in memory, so the OAuth library never writes them to a file.
+struct SignInTokens(Arc<StdMutex<Option<TokenInfo>>>);
+
+#[async_trait::async_trait]
+impl TokenStorage for SignInTokens {
+    async fn set(&self, _scopes: &[&str], token: TokenInfo) -> Result<(), TokenStorageError> {
+        let mut guard = self
+            .0
+            .lock()
+            .map_err(|e| TokenStorageError::Other(e.to_string().into()))?;
+        *guard = Some(token);
+        Ok(())
+    }
+
+    async fn get(&self, _scopes: &[&str]) -> Option<TokenInfo> {
+        self.0.lock().ok().and_then(|guard| guard.clone())
+    }
+}
+
 /// Add a new Google account via OAuth flow
 pub async fn add_google_account() -> Result<GoogleAccountInfo, String> {
     let oauth_credentials = load_oauth_credentials()?;
@@ -481,23 +516,13 @@ pub async fn add_google_account() -> Result<GoogleAccountInfo, String> {
         ..Default::default()
     };
 
-    // Create a temporary directory for the token cache
-    let token_cache_dir = dirs::cache_dir()
-        .ok_or_else(|| "Could not determine cache directory".to_string())?
-        .join("marlin")
-        .join("oauth_temp");
-
-    fs::create_dir_all(&token_cache_dir)
-        .map_err(|e| format!("Failed to create token cache directory: {}", e))?;
-
-    let token_cache_path = token_cache_dir.join(format!("token_{}.json", uuid::Uuid::new_v4()));
-    log::info!("Token cache path: {:?}", token_cache_path);
+    let stored = Arc::new(StdMutex::new(None));
 
     // Build the authenticator
     log::info!("Building authenticator...");
     // Use HTTPRedirect which automatically finds an available port
     let auth = InstalledFlowAuthenticator::builder(secret, InstalledFlowReturnMethod::HTTPRedirect)
-        .persist_tokens_to_disk(&token_cache_path)
+        .with_storage(Box::new(SignInTokens(stored.clone())))
         .flow_delegate(Box::new(BrowserFlowDelegate))
         .build()
         .await
@@ -509,46 +534,28 @@ pub async fn add_google_account() -> Result<GoogleAccountInfo, String> {
     log::info!("Authenticator built, requesting token...");
 
     // Get a token to trigger the auth flow
-    let token = auth.token(SCOPES).await.map_err(|e| {
+    auth.token(SCOPES).await.map_err(|e| {
         log::error!("Failed to get token: {}", e);
         format!("Failed to get token: {}", e)
     })?;
 
     log::info!("Token received!");
 
-    let access_token = token
-        .token()
-        .ok_or_else(|| "No access token received".to_string())?
-        .to_string();
-    log::info!("Access token extracted");
-
-    // Read the cached token to get the refresh token
-    let cached_token: serde_json::Value = if token_cache_path.exists() {
-        log::info!("Reading token cache file...");
-        let contents = fs::read_to_string(&token_cache_path)
-            .map_err(|e| format!("Failed to read token cache: {}", e))?;
-        serde_json::from_str(&contents)
-            .map_err(|e| format!("Failed to parse token cache: {}", e))?
-    } else {
-        log::error!("Token cache not found at {:?}", token_cache_path);
-        return Err("Token cache not found after auth".to_string());
-    };
-
-    // The token cache is an array with the token object nested inside
-    let refresh_token = cached_token
-        .get(0)
-        .and_then(|v| v.get("token"))
-        .and_then(|v| v.get("refresh_token"))
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            log::error!("No refresh token in cached token: {:?}", cached_token);
-            "No refresh token in response".to_string()
-        })?
-        .to_string();
-    log::info!("Refresh token extracted");
-
-    // Clean up temp token file
-    let _ = fs::remove_file(&token_cache_path);
+    let token_info = stored
+        .lock()
+        .map_err(|e| e.to_string())?
+        .take()
+        .ok_or_else(|| "No access token received".to_string())?;
+    let expires_at = token_info
+        .expires_at
+        .and_then(|t| DateTime::from_timestamp(t.unix_timestamp(), 0))
+        .unwrap_or_else(|| Utc::now() + Duration::hours(1));
+    let access_token = token_info
+        .access_token
+        .ok_or_else(|| "No access token received".to_string())?;
+    let refresh_token = token_info
+        .refresh_token
+        .ok_or_else(|| "No refresh token in response".to_string())?;
 
     // Get user info to get the email
     log::info!("Fetching user info...");
@@ -558,48 +565,44 @@ pub async fn add_google_account() -> Result<GoogleAccountInfo, String> {
     })?;
     log::info!("User info received: {}", user_info.email);
 
-    // Calculate expiry time (default 1 hour if not provided)
-    let expires_at = Utc::now() + Duration::hours(1);
+    let mut tokens = TOKENS.lock().await;
+    let mut cache = ACCOUNTS_CACHE.lock().map_err(|e| e.to_string())?;
 
     // Check if account already exists
-    let mut accounts = load_accounts_from_disk().map_err(|e| {
+    let path = get_accounts_path()?;
+    let mut accounts = read_accounts_file_moving_tokens(&path).map_err(|e| {
         log::error!("Failed to load accounts: {}", e);
         e
     })?;
     log::info!("Loaded {} existing accounts", accounts.len());
 
+    set_refresh_token(&user_info.email, &refresh_token)?;
+
     if let Some(existing) = accounts.iter_mut().find(|a| a.email == user_info.email) {
         // Update existing account
         log::info!("Updating existing account: {}", user_info.email);
-        existing.access_token = access_token;
-        existing.refresh_token = refresh_token;
-        existing.expires_at = expires_at;
         existing.display_name = user_info.display_name.clone();
         existing.photo_url = user_info.photo_url.clone();
     } else {
         // Add new account
         log::info!("Adding new account: {}", user_info.email);
-        accounts.push(GoogleAccount {
-            email: user_info.email.clone(),
-            display_name: user_info.display_name.clone(),
-            photo_url: user_info.photo_url.clone(),
-            access_token,
-            refresh_token,
-            expires_at,
-        });
+        accounts.push(user_info.clone());
     }
 
-    save_accounts_to_disk(&accounts).map_err(|e| {
+    write_accounts_file(&path, &accounts).map_err(|e| {
         log::error!("Failed to save accounts: {}", e);
         e
     })?;
     log::info!("Accounts saved to disk");
 
-    // Update cache
-    {
-        let mut cache = ACCOUNTS_CACHE.write().map_err(|e| e.to_string())?;
-        *cache = Some(accounts);
-    }
+    *cache = Some(accounts);
+    tokens.insert(
+        user_info.email.clone(),
+        AccountTokens {
+            refresh_token,
+            access: Some((access_token, expires_at)),
+        },
+    );
     log::info!("Account cache updated, returning user info");
 
     Ok(user_info)
@@ -640,8 +643,11 @@ async fn fetch_user_info(access_token: &str) -> Result<GoogleAccountInfo, String
 }
 
 /// Remove a Google account
-pub fn remove_google_account(email: &str) -> Result<(), String> {
-    let mut accounts = load_accounts_from_disk()?;
+pub async fn remove_google_account(email: &str) -> Result<(), String> {
+    let mut tokens = TOKENS.lock().await;
+    let mut cache = ACCOUNTS_CACHE.lock().map_err(|e| e.to_string())?;
+    let path = get_accounts_path()?;
+    let mut accounts = read_accounts_file_moving_tokens(&path)?;
 
     let original_len = accounts.len();
     accounts.retain(|a| a.email != email);
@@ -650,13 +656,10 @@ pub fn remove_google_account(email: &str) -> Result<(), String> {
         return Err(format!("Account not found: {}", email));
     }
 
-    save_accounts_to_disk(&accounts)?;
-
-    // Update cache
-    {
-        let mut cache = ACCOUNTS_CACHE.write().map_err(|e| e.to_string())?;
-        *cache = Some(accounts);
-    }
+    delete_refresh_token(email)?;
+    write_accounts_file(&path, &accounts)?;
+    *cache = Some(accounts);
+    tokens.remove(email);
 
     Ok(())
 }
@@ -669,22 +672,39 @@ pub async fn ensure_valid_token(email: &str) -> Result<String, String> {
         return get_service_account_token().await;
     }
 
-    // Load accounts once for the entire operation to avoid race conditions
-    let mut accounts = load_accounts_from_disk()?;
-    let account_index = accounts
-        .iter()
-        .position(|a| a.email == email)
-        .ok_or_else(|| format!("Account not found: {}", email))?;
-
-    // Check if token is still valid (with 5 minute buffer)
-    if accounts[account_index].expires_at > Utc::now() + Duration::minutes(5) {
-        return Ok(accounts[account_index].access_token.clone());
-    }
+    let mut tokens = TOKENS.lock().await;
+    let refresh_token = match tokens.get(email) {
+        Some(AccountTokens {
+            access: Some((access_token, expires_at)),
+            ..
+        }) if *expires_at > Utc::now() + Duration::minutes(5) => {
+            return Ok(access_token.clone());
+        }
+        Some(kept) => kept.refresh_token.clone(),
+        None => {
+            // Listing the accounts moves an older file's tokens into the keychain first.
+            let accounts = get_google_accounts()?;
+            if !accounts.iter().any(|account| account.email == email) {
+                return Err(format!("Account not found: {}", email));
+            }
+            let refresh_token = keyring_entry(email)?.get_password().map_err(|e| {
+                format!(
+                    "No Google sign-in stored for {}. Re-authentication may be required. ({})",
+                    email, e
+                )
+            })?;
+            tokens.insert(
+                email.to_string(),
+                AccountTokens {
+                    refresh_token: refresh_token.clone(),
+                    access: None,
+                },
+            );
+            refresh_token
+        }
+    };
 
     let oauth_credentials = load_oauth_credentials()?;
-
-    // Clone the refresh token before the async operation
-    let refresh_token = accounts[account_index].refresh_token.clone();
     let client = reqwest::Client::new();
 
     let response = client
@@ -692,21 +712,28 @@ pub async fn ensure_valid_token(email: &str) -> Result<String, String> {
         .form(&[
             ("client_id", oauth_credentials.client_id.as_str()),
             ("client_secret", oauth_credentials.client_secret.as_str()),
-            ("refresh_token", &refresh_token),
+            ("refresh_token", refresh_token.as_str()),
             ("grant_type", "refresh_token"),
         ])
+        // `TOKENS` stays locked while this runs.
+        .timeout(std::time::Duration::from_secs(30))
         .send()
         .await
         .map_err(|e| format!("Failed to refresh token: {}", e))?;
 
     if !response.status().is_success() {
         let status = response.status();
-        let error_text = response.text().await.unwrap_or_default();
-        log::error!(
-            "Token refresh failed with status {}: {}",
-            status,
-            error_text
-        );
+        // Google's `error` code (`invalid_grant`, `invalid_client`) holds no token.
+        #[derive(Deserialize)]
+        struct RefreshError {
+            error: String,
+        }
+        let reason = response
+            .json::<RefreshError>()
+            .await
+            .map(|body| body.error)
+            .unwrap_or_default();
+        log::error!("Token refresh failed with status {}: {}", status, reason);
         return Err(format!(
             "Token refresh failed (status {}). Re-authentication may be required.",
             status
@@ -726,22 +753,27 @@ pub async fn ensure_valid_token(email: &str) -> Result<String, String> {
         .await
         .map_err(|e| format!("Failed to parse token response: {}", e))?;
 
-    let expires_at = Utc::now() + Duration::seconds(token_response.expires_in);
-
-    // Update account in the vector atomically
-    let account = &mut accounts[account_index];
-    account.access_token = token_response.access_token.clone();
-    if let Some(rt) = token_response.refresh_token.as_deref() {
-        account.refresh_token = rt.to_string();
+    let mut refresh_token = refresh_token;
+    if let Some(new_refresh_token) = token_response.refresh_token {
+        if new_refresh_token != refresh_token {
+            // The refresh worked, so a failed keychain write must not fail the call.
+            if let Err(e) = set_refresh_token(email, &new_refresh_token) {
+                log::warn!("{}", e);
+            }
+            refresh_token = new_refresh_token;
+        }
     }
-    account.expires_at = expires_at;
 
-    // Save all accounts and update cache in one operation
-    save_accounts_to_disk(&accounts)?;
-    {
-        let mut cache = ACCOUNTS_CACHE.write().map_err(|e| e.to_string())?;
-        *cache = Some(accounts);
-    }
+    tokens.insert(
+        email.to_string(),
+        AccountTokens {
+            refresh_token,
+            access: Some((
+                token_response.access_token.clone(),
+                Utc::now() + Duration::seconds(token_response.expires_in),
+            )),
+        },
+    );
 
     Ok(token_response.access_token)
 }
@@ -749,9 +781,11 @@ pub async fn ensure_valid_token(email: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        load_oauth_credentials_from_file, oauth_from_pair, OAuthCredentials, GOOGLE_CLIENT_ID_ENV,
-        GOOGLE_CLIENT_SECRET_ENV,
+        delete_refresh_token, load_oauth_credentials_from_file, oauth_from_pair,
+        read_accounts_file_moving_tokens, write_accounts_file, GoogleAccountInfo, OAuthCredentials,
+        GDRIVE_KEYRING_SERVICE, GOOGLE_CLIENT_ID_ENV, GOOGLE_CLIENT_SECRET_ENV,
     };
+    use crate::locations::test_keychain;
     use std::fs;
 
     #[test]
@@ -810,5 +844,187 @@ mod tests {
     fn runtime_env_var_names_remain_stable() {
         assert_eq!(GOOGLE_CLIENT_ID_ENV, "GOOGLE_CLIENT_ID");
         assert_eq!(GOOGLE_CLIENT_SECRET_ENV, "GOOGLE_CLIENT_SECRET");
+    }
+
+    #[test]
+    fn read_accounts_file_moves_tokens_to_the_keychain() {
+        test_keychain::install();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("gdrive-accounts.json");
+        let ada = "move-ada@example.com";
+        let bea = "move-bea@example.com";
+        let access_ada = "access-token-move-ada";
+        let refresh_ada = "refresh-token-move-ada";
+        let access_bea = "access-token-move-bea";
+        let refresh_bea = "refresh-token-move-bea";
+        fs::write(
+            &path,
+            format!(
+                r#"{{
+                  "accounts": [
+                    {{
+                      "email": "{ada}",
+                      "displayName": "Ada",
+                      "photoUrl": "https://example.com/ada.png",
+                      "accessToken": "{access_ada}",
+                      "refreshToken": "{refresh_ada}",
+                      "expiresAt": "2020-01-01T00:00:00Z"
+                    }},
+                    {{
+                      "email": "{bea}",
+                      "displayName": "Bea",
+                      "photoUrl": "https://example.com/bea.png",
+                      "accessToken": "{access_bea}",
+                      "refreshToken": "{refresh_bea}",
+                      "expiresAt": "2020-01-01T00:00:00Z"
+                    }}
+                  ]
+                }}"#
+            ),
+        )
+        .unwrap();
+
+        let accounts = read_accounts_file_moving_tokens(&path).unwrap();
+        assert_eq!(accounts.len(), 2);
+        assert_eq!(accounts[0].email, ada);
+        assert_eq!(accounts[0].display_name.as_deref(), Some("Ada"));
+        assert_eq!(
+            accounts[0].photo_url.as_deref(),
+            Some("https://example.com/ada.png")
+        );
+        assert_eq!(accounts[1].email, bea);
+        assert_eq!(accounts[1].display_name.as_deref(), Some("Bea"));
+        assert_eq!(
+            accounts[1].photo_url.as_deref(),
+            Some("https://example.com/bea.png")
+        );
+        assert_eq!(
+            test_keychain::get(GDRIVE_KEYRING_SERVICE, ada).as_deref(),
+            Some(refresh_ada)
+        );
+        assert_eq!(
+            test_keychain::get(GDRIVE_KEYRING_SERVICE, bea).as_deref(),
+            Some(refresh_bea)
+        );
+
+        let rewritten = fs::read_to_string(&path).unwrap();
+        for secret in [access_ada, refresh_ada, access_bea, refresh_bea] {
+            assert!(!rewritten.contains(secret), "{rewritten}");
+        }
+        assert!(!rewritten.contains("accessToken"));
+        assert!(!rewritten.contains("refreshToken"));
+
+        let again = read_accounts_file_moving_tokens(&path).unwrap();
+        assert_eq!(again.len(), accounts.len());
+        for (left, right) in again.iter().zip(&accounts) {
+            assert_eq!(left.email, right.email);
+            assert_eq!(left.display_name, right.display_name);
+            assert_eq!(left.photo_url, right.photo_url);
+        }
+    }
+
+    #[test]
+    fn read_accounts_file_keeps_the_file_when_the_keychain_fails() {
+        test_keychain::install();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("gdrive-accounts.json");
+        let email = "keychain-fails@example.com";
+        let original = format!(
+            r#"{{"accounts":[{{"email":"{email}","displayName":"Fail","photoUrl":null,"accessToken":"access-fail","refreshToken":"refresh-fail","expiresAt":"2020-01-01T00:00:00Z"}}]}}"#
+        );
+        fs::write(&path, &original).unwrap();
+        test_keychain::fail_writes_for(GDRIVE_KEYRING_SERVICE, email);
+
+        let err = read_accounts_file_moving_tokens(&path).unwrap_err();
+        assert!(
+            err.contains("Failed to store Google sign-in in keychain"),
+            "{err}"
+        );
+        assert_eq!(fs::read(&path).unwrap(), original.as_bytes());
+    }
+
+    #[test]
+    fn read_accounts_file_rewrites_a_file_with_only_an_access_token() {
+        test_keychain::install();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("gdrive-accounts.json");
+        let email = "access-only@example.com";
+        let access_token = "access-token-only";
+        fs::write(
+            &path,
+            format!(
+                r#"{{
+                  "accounts": [
+                    {{
+                      "email": "{email}",
+                      "displayName": "Access",
+                      "photoUrl": null,
+                      "accessToken": "{access_token}"
+                    }}
+                  ]
+                }}"#
+            ),
+        )
+        .unwrap();
+
+        let accounts = read_accounts_file_moving_tokens(&path).unwrap();
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].email, email);
+        assert_eq!(accounts[0].display_name.as_deref(), Some("Access"));
+        let rewritten = fs::read_to_string(&path).unwrap();
+        assert!(!rewritten.contains(access_token), "{rewritten}");
+        assert!(test_keychain::get(GDRIVE_KEYRING_SERVICE, email).is_none());
+    }
+
+    #[test]
+    fn read_accounts_file_leaves_a_file_without_tokens_alone() {
+        test_keychain::install();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("gdrive-accounts.json");
+        let original = "{\"accounts\":[ {\"email\":\"plain-spacing@example.com\", \"displayName\":\"Pat\", \"photoUrl\":null} ]}";
+        fs::write(&path, original).unwrap();
+
+        let accounts = read_accounts_file_moving_tokens(&path).unwrap();
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].email, "plain-spacing@example.com");
+        assert_eq!(accounts[0].display_name.as_deref(), Some("Pat"));
+        assert_eq!(fs::read(&path).unwrap(), original.as_bytes());
+    }
+
+    #[test]
+    fn delete_refresh_token_ignores_a_missing_entry() {
+        test_keychain::install();
+        let email = "delete-twice@example.com";
+        test_keychain::set(GDRIVE_KEYRING_SERVICE, email, "secret");
+
+        delete_refresh_token(email).unwrap();
+        assert!(test_keychain::get(GDRIVE_KEYRING_SERVICE, email).is_none());
+        delete_refresh_token(email).unwrap();
+    }
+
+    #[test]
+    fn write_accounts_file_replaces_the_file_and_leaves_no_temp_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("gdrive-accounts.json");
+        fs::write(&path, "old").unwrap();
+
+        write_accounts_file(
+            &path,
+            &[GoogleAccountInfo {
+                email: "write-replace@example.com".to_string(),
+                display_name: Some("Writer".to_string()),
+                photo_url: None,
+            }],
+        )
+        .unwrap();
+
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(written.contains("write-replace@example.com"), "{written}");
+        assert!(!written.contains("old"), "{written}");
+        let names: Vec<_> = fs::read_dir(temp_dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names.len(), 1);
     }
 }

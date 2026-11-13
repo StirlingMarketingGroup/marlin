@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 use std::time::{Duration as StdDuration, Instant};
 
-use super::auth::{ensure_valid_token, get_all_accounts};
+use super::auth::{ensure_valid_token, get_google_accounts};
 use crate::fs_utils::FileItem;
 use crate::locations::{
     Location, LocationCapabilities, LocationProvider, LocationSummary, ProviderDirectoryEntries,
@@ -1273,7 +1273,7 @@ impl LocationProvider for GoogleDriveProvider {
 /// Resolve a Google Drive file ID to a full path, trying all connected accounts
 pub async fn resolve_file_id_to_path(file_id: &str) -> Result<(String, String), String> {
     log::info!("resolve_file_id_to_path: file_id={}", file_id);
-    let accounts = get_all_accounts()?;
+    let accounts = get_google_accounts()?;
     log::info!("  Found {} connected accounts", accounts.len());
 
     if accounts.is_empty() {

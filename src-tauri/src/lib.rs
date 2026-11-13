@@ -2,7 +2,7 @@ mod clipboard;
 mod commands;
 mod fs_utils;
 mod fs_watcher;
-mod locations;
+pub mod locations;
 #[cfg(target_os = "macos")]
 mod macos_icons;
 mod macos_security;
@@ -18,7 +18,7 @@ use state::{DirectoryStreamState, FolderSizeState, MenuState, TrashUndoState};
 use std::sync::Mutex;
 use std::sync::OnceLock;
 
-fn ensure_rustls_crypto_provider() {
+pub fn ensure_rustls_crypto_provider() {
     static PROVIDER_ONCE: OnceLock<()> = OnceLock::new();
     PROVIDER_ONCE.get_or_init(|| {
         // rustls 0.23 requires explicitly selecting a CryptoProvider when multiple (or none)
