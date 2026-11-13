@@ -213,6 +213,8 @@ pub fn run() {
             commands::add_sftp_server,
             commands::remove_sftp_server,
             commands::test_sftp_connection,
+            commands::get_sftp_unknown_host_key,
+            commands::trust_sftp_host_key,
             commands::download_sftp_file,
             commands::open_sftp_connect_window,
             commands::hide_sftp_connect_window,

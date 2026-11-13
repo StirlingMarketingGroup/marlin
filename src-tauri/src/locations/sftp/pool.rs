@@ -3,11 +3,13 @@ use russh::keys::PublicKey;
 use russh::{client, ChannelId};
 use russh_sftp::client::SftpSession;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore};
 
 use super::auth;
+use super::host_key::{self, HostKeyRejection};
 
 type PoolKey = (String, u16); // (hostname, port)
 
@@ -29,18 +31,34 @@ const MAX_CONCURRENT_OPS: usize = 1;
 /// Avoids a network round trip per operation when many requests are queued.
 const LIVENESS_SKIP_SECS: u64 = 30;
 
-/// SSH client handler that accepts all host keys
-struct SshHandler;
+#[derive(Debug)]
+enum ConnectError {
+    Ssh(russh::Error),
+    HostKey(PublicKey, HostKeyRejection),
+}
+
+impl From<russh::Error> for ConnectError {
+    fn from(error: russh::Error) -> Self {
+        ConnectError::Ssh(error)
+    }
+}
+
+/// SSH client handler that accepts only a server key saved in `known_hosts`.
+struct SshHandler {
+    saved_host_keys: Vec<PublicKey>,
+}
 
 impl client::Handler for SshHandler {
-    type Error = russh::Error;
+    type Error = ConnectError;
 
     fn check_server_key(
         &mut self,
-        _server_public_key: &PublicKey,
+        server_public_key: &PublicKey,
     ) -> impl std::future::Future<Output = Result<bool, Self::Error>> + Send {
-        // TODO: known_hosts verification
-        async { Ok(true) }
+        let checked = host_key::check_host_key(server_public_key, &self.saved_host_keys)
+            .map(|()| true)
+            .map_err(|rejection| ConnectError::HostKey(server_public_key.clone(), rejection));
+        async move { checked }
     }
 
     fn channel_open_confirmation(
@@ -63,19 +81,29 @@ impl client::Handler for SshHandler {
     }
 }
 
-/// Create a new SFTP session from credentials
+/// Create a new SFTP session from credentials.
 async fn create_session(
     hostname: &str,
     port: u16,
     creds: &auth::SftpServerCredentials,
+    known_hosts: &Path,
 ) -> Result<SftpSession, String> {
+    let saved_host_keys = host_key::saved_host_keys(hostname, port, known_hosts)?;
     let config = client::Config {
+        preferred: russh::Preferred {
+            key: host_key::preferred_host_key_algorithms(&saved_host_keys).into(),
+            ..Default::default()
+        },
         ..Default::default()
     };
 
-    let mut session = tokio::time::timeout(
+    let connect_result = tokio::time::timeout(
         Duration::from_secs(CONNECT_TIMEOUT_SECS),
-        client::connect(Arc::new(config), (hostname, port), SshHandler),
+        client::connect(
+            Arc::new(config),
+            (hostname, port),
+            SshHandler { saved_host_keys },
+        ),
     )
     .await
     .map_err(|_| {
@@ -83,8 +111,30 @@ async fn create_session(
             "SSH connection to {}:{} timed out after {}s",
             hostname, port, CONNECT_TIMEOUT_SECS
         )
-    })?
-    .map_err(|e| format!("SSH connection failed: {}", e))?;
+    })?;
+
+    let mut session = match connect_result {
+        Ok(session) => session,
+        Err(ConnectError::HostKey(key, HostKeyRejection::Unknown)) => {
+            let unknown = host_key::remember_unknown_host_key(hostname, port, key, known_hosts);
+            return Err(format!(
+                "[SFTP_HOST_KEY_UNKNOWN] {}:{} is not in {}. Its {} key fingerprint is {}.",
+                hostname, port, unknown.known_hosts_path, unknown.key_type, unknown.fingerprint
+            ));
+        }
+        Err(ConnectError::HostKey(key, HostKeyRejection::Changed { saved_fingerprint })) => {
+            return Err(host_key::changed_host_key_warning(
+                hostname,
+                port,
+                &key,
+                &saved_fingerprint,
+                known_hosts,
+            ));
+        }
+        Err(ConnectError::Ssh(error)) => {
+            return Err(format!("SSH connection failed: {}", error));
+        }
+    };
 
     // Authenticate
     match creds.auth_method.as_str() {
@@ -254,7 +304,8 @@ pub async fn get_sftp_session(hostname: &str, port: u16) -> Result<Arc<SftpSessi
 
     // Create a new connection
     let creds = auth::get_server_credentials(hostname, port)?;
-    let sftp = Arc::new(create_session(hostname, port, &creds).await?);
+    let known_hosts = host_key::known_hosts_path()?;
+    let sftp = Arc::new(create_session(hostname, port, &creds, &known_hosts).await?);
     let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_OPS));
 
     // Store in pool
@@ -315,7 +366,8 @@ pub async fn test_connection(
         key_path: key_path.map(|s| s.to_string()),
     };
 
-    let sftp = create_session(hostname, port, &creds).await?;
+    let known_hosts = host_key::known_hosts_path()?;
+    let sftp = create_session(hostname, port, &creds, &known_hosts).await?;
 
     // Verify we can actually list the root directory
     sftp.metadata(".")
@@ -323,4 +375,145 @@ pub async fn test_connection(
         .map_err(|e| format!("SFTP session created but root stat failed: {}", e))?;
 
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use russh::keys::{Algorithm, EcdsaCurve, HashAlg, PrivateKey};
+    use russh::server::{Auth, Handler, Server};
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    /// Rejects every login and counts the passwords it was sent.
+    struct RejectLogins {
+        passwords_seen: Arc<AtomicUsize>,
+    }
+
+    impl Handler for RejectLogins {
+        type Error = russh::Error;
+
+        async fn auth_password(
+            &mut self,
+            _user: &str,
+            _password: &str,
+        ) -> Result<Auth, Self::Error> {
+            self.passwords_seen.fetch_add(1, Ordering::SeqCst);
+            Ok(Auth::reject())
+        }
+    }
+
+    struct RejectServer {
+        passwords_seen: Arc<AtomicUsize>,
+    }
+
+    impl Server for RejectServer {
+        type Handler = RejectLogins;
+
+        fn new_client(&mut self, _: Option<std::net::SocketAddr>) -> Self::Handler {
+            RejectLogins {
+                passwords_seen: self.passwords_seen.clone(),
+            }
+        }
+    }
+
+    fn password_creds() -> auth::SftpServerCredentials {
+        auth::SftpServerCredentials {
+            username: "user".to_string(),
+            auth_method: "password".to_string(),
+            password: Some("secret".to_string()),
+            key_path: None,
+        }
+    }
+
+    fn write_host_line(path: &Path, entry: &str, key: &PublicKey) {
+        fs::write(
+            path,
+            format!("{entry} {}\n", key.to_openssh().expect("encode public key")),
+        )
+        .unwrap();
+    }
+
+    async fn session_error(port: u16, known_hosts: &Path) -> String {
+        match create_session("127.0.0.1", port, &password_creds(), known_hosts).await {
+            Ok(_) => panic!("expected the connection to fail"),
+            Err(error) => error,
+        }
+    }
+
+    #[tokio::test]
+    async fn create_session_checks_the_server_key_against_known_hosts() {
+        let host_key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
+        let server_public = host_key.public_key().clone();
+        let server_fingerprint = server_public.fingerprint(HashAlg::Sha256).to_string();
+
+        let mut server_config = russh::server::Config::default();
+        server_config.auth_rejection_time = Duration::from_millis(0);
+        server_config.auth_rejection_time_initial = Some(Duration::from_millis(0));
+        server_config.inactivity_timeout = None;
+        server_config.keys.push(host_key);
+        let server_config = Arc::new(server_config);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let passwords_seen = Arc::new(AtomicUsize::new(0));
+        let server_passwords_seen = passwords_seen.clone();
+        tokio::spawn(async move {
+            let mut server = RejectServer {
+                passwords_seen: server_passwords_seen,
+            };
+            let _ = server.run_on_socket(server_config, &listener).await;
+        });
+
+        let unknown_dir = tempfile::tempdir().unwrap();
+        let unknown_path = unknown_dir.path().join("known_hosts");
+        fs::write(&unknown_path, b"").unwrap();
+
+        let unknown = session_error(port, &unknown_path).await;
+        assert!(unknown.starts_with("[SFTP_HOST_KEY_UNKNOWN]"), "{unknown}");
+        let waiting = host_key::unknown_host_key("127.0.0.1", port).expect("unknown key");
+        assert_eq!(waiting.fingerprint, server_fingerprint);
+        assert_eq!(passwords_seen.load(Ordering::SeqCst), 0);
+
+        host_key::trust_unknown_host_key("127.0.0.1", port, &server_fingerprint, &unknown_path)
+            .unwrap();
+        let trusted = session_error(port, &unknown_path).await;
+        assert_eq!(trusted, "Password authentication rejected by server");
+        assert_eq!(passwords_seen.load(Ordering::SeqCst), 1);
+
+        let changed_dir = tempfile::tempdir().unwrap();
+        let changed_path = changed_dir.path().join("known_hosts");
+        let other_ed25519 = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
+        let entry = format!("[127.0.0.1]:{port}");
+        write_host_line(&changed_path, &entry, other_ed25519.public_key());
+        let changed_before = fs::read(&changed_path).unwrap();
+
+        let changed = session_error(port, &changed_path).await;
+        assert!(
+            changed.starts_with(&format!("The key for 127.0.0.1:{port} does not match")),
+            "{changed}"
+        );
+        assert!(changed.contains(&server_fingerprint), "{changed}");
+        assert!(host_key::unknown_host_key("127.0.0.1", port).is_none());
+        assert_eq!(fs::read(&changed_path).unwrap(), changed_before);
+
+        let ecdsa_dir = tempfile::tempdir().unwrap();
+        let ecdsa_path = ecdsa_dir.path().join("known_hosts");
+        let ecdsa = PrivateKey::random(
+            &mut rand::rng(),
+            Algorithm::Ecdsa {
+                curve: EcdsaCurve::NistP256,
+            },
+        )
+        .unwrap();
+        write_host_line(&ecdsa_path, &entry, ecdsa.public_key());
+
+        let ecdsa_only = session_error(port, &ecdsa_path).await;
+        assert!(
+            ecdsa_only.starts_with(&format!("The key for 127.0.0.1:{port} does not match")),
+            "{ecdsa_only}"
+        );
+        assert_eq!(passwords_seen.load(Ordering::SeqCst), 1);
+    }
 }

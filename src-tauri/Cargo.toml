@@ -83,7 +83,7 @@ trash = "5.2.6"
 zpl-rs = "0.1"
 keyring = { version = "3.6.3", default-features = false, features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust", "vendored"] }
 
-# SFTP integration (russh 0.57 includes keys module, no separate russh-keys needed)
+# SFTP integration (SSH keys and known_hosts are in russh::keys)
 russh = "0.61"
 russh-sftp = "2.1"
 
@@ -115,4 +115,5 @@ clipboard-win = "5"
 gtk = { version = "0.18", package = "gtk" }
 
 [dev-dependencies]
+rand = "0.10"
 tempfile = "3.27"

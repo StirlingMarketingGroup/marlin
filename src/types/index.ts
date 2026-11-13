@@ -313,6 +313,12 @@ export interface SftpServerInfo {
   keyPath?: string | null;
 }
 
+export interface SftpUnknownHostKey {
+  keyType: string;
+  fingerprint: string;
+  knownHostsPath: string;
+}
+
 export interface SftpConnectInitPayload {
   initialHostname?: string | null;
   initialPort?: number | null;

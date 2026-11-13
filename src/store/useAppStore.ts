@@ -31,6 +31,7 @@ import { useToastStore } from './useToastStore';
 import { useUndoStore, pushUndoAndShowToast } from './useUndoStore';
 import { parseGoogleDriveUrl } from '@/utils/googleDriveUrl';
 import { getArchiveParentUri, isArchiveUri } from '@/utils/archiveUri';
+import { withSftpHostKeyCheck } from '@/utils/sftpHostKey';
 import { DEFAULT_THEME_IDS } from '@/themes';
 
 // Concurrency limiter for app icon generation requests (macOS)
@@ -864,12 +865,17 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   refreshCurrentDirectory: async () => {
     const { currentPath, setLoading, setError } = get();
+    // A username can contain `@`. The host starts after the last one, as in `parse_sftp_authority`.
+    const sftpMatch = currentPath.match(/^sftp:\/\/(?:([^/]+)@)?([^/:@]+)(?::(\d+))?/);
+    const sftpPort = sftpMatch?.[3] ? parseInt(sftpMatch[3], 10) : 22;
     try {
       setLoading(true);
       setError(undefined);
-      const listing = await invoke<DirectoryListingResponse>('read_directory', {
-        path: currentPath,
-      });
+      const readDirectory = () =>
+        invoke<DirectoryListingResponse>('read_directory', { path: currentPath });
+      const listing = sftpMatch
+        ? await withSftpHostKeyCheck(sftpMatch[2], sftpPort, readDirectory)
+        : await readDirectory();
 
       // For non-file schemes (gdrive://, smb://, archive://), keep the raw URI directly.
       const useRawPath = listing.location.scheme !== 'file';
@@ -920,13 +926,16 @@ export const useAppStore = create<AppState>((set, get) => ({
 
       // Check if this is an SFTP "no credentials" error
       if (msg.includes('[SFTP_NO_CREDENTIALS]')) {
-        const sftpMatch = currentPath.match(/^sftp:\/\/(?:([^@]+)@)?([^/:]+)(?::(\d+))?/);
         if (sftpMatch) {
           const username = sftpMatch[1] || undefined;
           const hostname = sftpMatch[2];
-          const port = sftpMatch[3] ? parseInt(sftpMatch[3], 10) : 22;
           set({
-            pendingSftpCredentialRequest: { hostname, port, username, targetPath: currentPath },
+            pendingSftpCredentialRequest: {
+              hostname,
+              port: sftpPort,
+              username,
+              targetPath: currentPath,
+            },
             error: undefined,
           });
           return;

@@ -3855,6 +3855,7 @@ dependencies = [
  "once_cell",
  "open",
  "psd",
+ "rand 0.10.1",
  "rayon",
  "reqwest 0.13.5",
  "resvg",

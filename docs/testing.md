@@ -38,8 +38,8 @@ CI skips a job when the files it covers did not change (`check.yml` uses path fi
 
 ## Rust tests
 
-- **A plain `cargo test` does not pass today.** The five ZPL thumbnail tests abort the test process when they run in parallel (issue #469). Five Google Drive tests fail on a machine with a Google account connected, because no TLS crypto provider is installed in tests (issue #470). `cargo test --lib -- --skip zpl` avoids the crash: expect 50 passed and those 5 failed.
-- Unit tests sit in `#[cfg(test)]` modules inside the source files. There are about 60, mostly in `locations/` and `thumbnails/`.
+- **A plain `cargo test` does not pass today.** The five ZPL thumbnail tests abort the test process when they run in parallel (issue #469). Five Google Drive tests fail on a machine with a Google account connected, because no TLS crypto provider is installed in tests (issue #470). `cargo test --lib -- --skip zpl` avoids the crash: expect those 5 to fail and every other test to pass.
+- Unit tests sit in `#[cfg(test)]` modules inside the source files, mostly in `locations/` and `thumbnails/`. The SFTP host key test in `locations/sftp/pool.rs` starts an SSH server inside the test process on a free local port.
 - `cargo test -p marlin-vfs` runs the mount core's tests. A plain `cargo test` does not include them. They run on an in-memory provider and need nothing installed. See [Mount core](mount-core.md).
 - `cargo test -p marlin-mount` runs the mount helper's tests. A plain `cargo test` does not include them. They talk to the helper over a real socket in a temporary folder, with a fake adapter, and need nothing installed. See [Mount helper](mount-helper.md).
 - `src-tauri/crates/marlin-fuse/test-in-docker.sh` runs the Linux mount adapter's tests in a container: unit tests, and tests that mount an in-memory provider through FUSE. On a Mac the crate compiles to nothing, so `cargo test -p marlin-fuse` runs no test there. See [Linux mount adapter](mount-linux.md).

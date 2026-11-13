@@ -5,6 +5,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { CircleNotch, Terminal, CheckCircle, X } from 'phosphor-react';
 import type { SftpConnectInitPayload, SftpConnectSuccessPayload, SftpServerInfo } from '@/types';
 import { SFTP_CONNECT_INIT_EVENT, SFTP_CONNECT_SUCCESS_EVENT } from '@/utils/events';
+import { withSftpHostKeyCheck } from '@/utils/sftpHostKey';
 import { WINDOW_CONTENT_TOP_PADDING } from '@/windows/windowLayout';
 
 export default function SftpConnectWindow() {
@@ -120,14 +121,16 @@ export default function SftpConnectWindow() {
       const effectiveKeyPath = authMethod === 'key' ? keyPath.trim() : null;
 
       // Test the connection BEFORE saving credentials
-      await invoke<boolean>('test_sftp_connection', {
-        hostname: trimmedHostname,
-        port,
-        username: trimmedUsername,
-        password: effectivePassword,
-        authMethod,
-        keyPath: effectiveKeyPath,
-      });
+      await withSftpHostKeyCheck(trimmedHostname, port, () =>
+        invoke<boolean>('test_sftp_connection', {
+          hostname: trimmedHostname,
+          port,
+          username: trimmedUsername,
+          password: effectivePassword,
+          authMethod,
+          keyPath: effectiveKeyPath,
+        })
+      );
 
       // Connection succeeded — now persist credentials
       const server = await invoke<SftpServerInfo>('add_sftp_server', {
@@ -340,7 +343,7 @@ export default function SftpConnectWindow() {
           )}
 
           {error && (
-            <div className="px-3 py-2 text-sm text-red-400 bg-red-500/10 border border-red-500/20 rounded-md">
+            <div className="px-3 py-2 text-sm text-red-400 bg-red-500/10 border border-red-500/20 rounded-md whitespace-pre-line break-words">
               {error}
             </div>
           )}

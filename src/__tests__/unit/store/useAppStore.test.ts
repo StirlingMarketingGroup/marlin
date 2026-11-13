@@ -368,6 +368,106 @@ describe('useAppStore', () => {
       expect(file?.image_width).toBe(1920);
       expect(file?.image_height).toBe(1080);
     });
+
+    it('trusts an unknown SFTP host key and reads the directory again, for a username with an @', async () => {
+      const sftpPath = 'sftp://alice@example.com@files.example.net:2222/';
+      const tagged =
+        '[SFTP_HOST_KEY_UNKNOWN] files.example.net:2222 is not in /Users/me/.ssh/known_hosts. Its ssh-ed25519 key fingerprint is SHA256:abc.';
+      useAppStore.setState({
+        currentPath: sftpPath,
+        currentLocationRaw: sftpPath,
+        pathHistory: [sftpPath],
+        historyIndex: 0,
+        error: undefined,
+      });
+
+      let reads = 0;
+      mockInvoke.mockImplementation((cmd) => {
+        if (cmd === 'read_directory') {
+          reads += 1;
+          if (reads === 1) {
+            return Promise.reject(new Error(tagged));
+          }
+          return Promise.resolve({
+            entries: [],
+            location: {
+              raw: sftpPath,
+              scheme: 'sftp',
+              authority: 'alice@example.com@files.example.net:2222',
+              path: '/',
+              displayPath: sftpPath,
+            },
+            capabilities: {
+              scheme: 'sftp',
+              displayName: 'SFTP Server',
+              canRead: true,
+              canWrite: true,
+              canCreateDirectories: true,
+              canDelete: true,
+              canRename: true,
+              canCopy: true,
+              canMove: true,
+              supportsWatching: false,
+              requiresExplicitRefresh: true,
+            },
+          });
+        }
+        if (cmd === 'get_sftp_unknown_host_key') {
+          return Promise.resolve({
+            keyType: 'ssh-ed25519',
+            fingerprint: 'SHA256:abc',
+            knownHostsPath: '/Users/me/.ssh/known_hosts',
+          });
+        }
+        return Promise.resolve(undefined);
+      });
+      mockAsk.mockResolvedValue(true);
+
+      await useAppStore.getState().refreshCurrentDirectory();
+
+      expect(mockInvoke).toHaveBeenCalledWith('trust_sftp_host_key', {
+        hostname: 'files.example.net',
+        port: 2222,
+        fingerprint: 'SHA256:abc',
+      });
+      expect(reads).toBe(2);
+      expect(useAppStore.getState().error).toBeUndefined();
+    });
+
+    it('shows the host key message without the bracket tag when the user declines', async () => {
+      const sftpPath = 'sftp://user@example.com/';
+      const tagged =
+        '[SFTP_HOST_KEY_UNKNOWN] example.com:22 is not in /Users/me/.ssh/known_hosts. Its ssh-ed25519 key fingerprint is SHA256:abc.';
+      useAppStore.setState({
+        currentPath: sftpPath,
+        currentLocationRaw: sftpPath,
+        pathHistory: [sftpPath],
+        historyIndex: 0,
+        error: undefined,
+      });
+
+      mockInvoke.mockImplementation((cmd) => {
+        if (cmd === 'read_directory') {
+          return Promise.reject(new Error(tagged));
+        }
+        if (cmd === 'get_sftp_unknown_host_key') {
+          return Promise.resolve({
+            keyType: 'ssh-ed25519',
+            fingerprint: 'SHA256:abc',
+            knownHostsPath: '/Users/me/.ssh/known_hosts',
+          });
+        }
+        return Promise.resolve(undefined);
+      });
+      mockAsk.mockResolvedValue(false);
+
+      await useAppStore.getState().refreshCurrentDirectory();
+
+      expect(mockInvoke).not.toHaveBeenCalledWith('trust_sftp_host_key', expect.anything());
+      expect(useAppStore.getState().error).toBe(
+        'example.com:22 is not in /Users/me/.ssh/known_hosts. Its ssh-ed25519 key fingerprint is SHA256:abc.'
+      );
+    });
   });
 
   describe('navigation', () => {
