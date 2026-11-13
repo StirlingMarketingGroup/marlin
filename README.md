@@ -221,3 +221,8 @@ The working rules are in [`AGENTS.md`](AGENTS.md).
 ## License
 
 MIT
+
+## Privacy and terms
+
+- [Privacy policy](PRIVACY.md)
+- [Terms of service](TERMS.md)
