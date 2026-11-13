@@ -8,6 +8,7 @@ rust-version = "1.89"
 description = "Marlin's mount helper: one process per user that owns every mount."
 
 [dependencies]
+marlin-mount-client = { path = "../marlin-mount-client" }
 marlin-vfs = { path = "../marlin-vfs" }
 tokio = { version = "1.50", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "signal", "time", "process"] }
 async-trait = "0.1"

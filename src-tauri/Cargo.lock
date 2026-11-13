@@ -3845,6 +3845,7 @@ dependencies = [
  "libc",
  "log",
  "lru",
+ "marlin-mount-client",
  "mime_guess",
  "mupdf",
  "notify",
@@ -3914,11 +3915,22 @@ dependencies = [
  "dirs",
  "libc",
  "marlin-fuse",
+ "marlin-mount-client",
  "marlin-vfs",
  "regex",
  "serde",
  "serde_json",
  "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "marlin-mount-client"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 

@@ -167,10 +167,7 @@ async fn main() {
         }
     }
 
-    let socket = socket.or_else(|| {
-        let folder = dirs::runtime_dir().or_else(dirs::data_local_dir)?;
-        Some(folder.join("marlin").join("mount.sock"))
-    });
+    let socket = socket.or_else(marlin_mount_client::default_socket);
     let root = root.or_else(|| Some(dirs::home_dir()?.join("Marlin")));
     let (Some(socket), Some(root)) = (socket, root) else {
         log::write("error", "helper.no_home_folder", serde_json::Value::Null);

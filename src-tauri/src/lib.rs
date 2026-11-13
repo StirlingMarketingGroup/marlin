@@ -7,6 +7,7 @@ mod locations;
 mod macos_icons;
 mod macos_security;
 mod menu;
+mod mount_helper;
 #[cfg(target_os = "macos")]
 mod native_drag;
 mod plugins;
@@ -220,6 +221,12 @@ pub fn run() {
             commands::hide_sftp_connect_window,
             commands::sftp_connect_window_ready,
             commands::sftp_connect_window_unready,
+            // Mount helper
+            mount_helper::list_mounts,
+            mount_helper::get_mount_status,
+            mount_helper::mount_account,
+            mount_helper::unmount_account,
+            mount_helper::list_dead_mounts,
             commands::show_file_properties,
             plugins::drag_detector::enable_drag_detection,
             plugins::drag_detector::set_drop_zone,
@@ -342,6 +349,12 @@ pub fn run() {
                 let _ = event;
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, event| {
+            // Fires when the user quits. A rebuild under `npm run tauri dev` kills the process, so the helper outlives that.
+            if let tauri::RunEvent::Exit = event {
+                mount_helper::stop_at_quit();
+            }
+        });
 }

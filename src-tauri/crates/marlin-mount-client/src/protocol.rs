@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 /// JSON-RPC 2.0 version string.
 pub const JSONRPC_VERSION: &str = "2.0";
 
-/// Protocol number this helper speaks. Raised when the control API changes.
+/// Protocol number the helper and the app speak. Raised when the control API changes.
 pub const PROTOCOL_VERSION: u32 = 3;
 
 /// JSON-RPC and helper error codes.
