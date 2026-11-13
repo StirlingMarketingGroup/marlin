@@ -36,7 +36,7 @@ pub trait Session: Send + 'static {
     async fn unmount(&mut self) -> Result<(), MountError>;
 }
 
-/// Opens the storage behind an account. Issue #372 adds the first real one.
+/// Opens the storage behind an account. Issue #529 adds the first real one.
 #[async_trait::async_trait]
 pub trait Providers: Send + Sync + 'static {
     /// `provider` is a kind such as `gdrive`. `account` names the account and is never a secret: the provider reads its own credentials from the OS keychain.

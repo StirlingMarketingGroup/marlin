@@ -1,23 +1,24 @@
 # Testing
 
-Marlin has static checks and eight test suites. CI runs the static checks, the unit tests, and the end-to-end tests. CI does not run the Rust tests yet (issue #462), so run them yourself when you change Rust.
+Marlin has static checks and nine test suites. CI runs the static checks, the unit tests, and the end-to-end tests. CI does not run the Rust tests yet (issue #462), so run them yourself when you change Rust.
 
-**Covers:** `vitest.config.ts`, `src/test-setup.ts`, `playwright.config.ts`, `e2e/`, `.github/workflows/check.yml`, `.husky/pre-push`, `src-tauri/tests/`, `src-tauri/crates/marlin-smb/tests/`, `src-tauri/crates/marlin-vfs/tests/`, `src-tauri/crates/marlin-mount/tests/`, `src-tauri/crates/marlin-mount/test-sweep.sh`, `src-tauri/crates/marlin-fuse/tests/`
+**Covers:** `vitest.config.ts`, `src/test-setup.ts`, `playwright.config.ts`, `e2e/`, `.github/workflows/check.yml`, `.husky/pre-push`, `src-tauri/tests/`, `src-tauri/crates/marlin-smb/tests/`, `src-tauri/crates/marlin-vfs/tests/`, `src-tauri/crates/marlin-gdrive/tests/`, `src-tauri/crates/marlin-mount/tests/`, `src-tauri/crates/marlin-mount/test-sweep.sh`, `src-tauri/crates/marlin-fuse/tests/`
 **Checked against the code:** 2026-11-13
 
 ## The suites
 
-| Suite           | Command                                  | Tool                                                            | Runs in CI | Needs                          |
-| --------------- | ---------------------------------------- | --------------------------------------------------------------- | ---------- | ------------------------------ |
-| Static checks   | `npm run check`                          | ESLint, Prettier, `tsc`, `cargo check`                          | yes        | nothing                        |
-| Unit            | `npm run test:run` (`npm test` to watch) | Vitest, Testing Library, jsdom                                  | yes        | nothing                        |
-| End-to-end      | `npm run test:e2e`                       | Playwright, Chromium                                            | yes        | nothing; it starts Vite itself |
-| Rust            | `cd src-tauri && cargo test`             | `cargo test`                                                    | **no**     | a Rust toolchain               |
-| Mount core      | see below                                | `cargo test`                                                    | no         | a Rust toolchain               |
-| Mount helper    | see below                                | `cargo test`                                                    | no         | a Rust toolchain               |
-| Linux mounts    | see below                                | `cargo test` in Docker                                          | no         | Docker                         |
-| SMB integration | see below                                | `cargo test --features smb --test smb_integration -- --ignored` | no         | a real SMB server              |
-| Google Drive    | see below                                | `cargo test --test gdrive_integration -- --ignored`             | no         | a connected Google account     |
+| Suite                | Command                                  | Tool                                                            | Runs in CI | Needs                          |
+| -------------------- | ---------------------------------------- | --------------------------------------------------------------- | ---------- | ------------------------------ |
+| Static checks        | `npm run check`                          | ESLint, Prettier, `tsc`, `cargo check`                          | yes        | nothing                        |
+| Unit                 | `npm run test:run` (`npm test` to watch) | Vitest, Testing Library, jsdom                                  | yes        | nothing                        |
+| End-to-end           | `npm run test:e2e`                       | Playwright, Chromium                                            | yes        | nothing; it starts Vite itself |
+| Rust                 | `cd src-tauri && cargo test`             | `cargo test`                                                    | **no**     | a Rust toolchain               |
+| Mount core           | see below                                | `cargo test`                                                    | no         | a Rust toolchain               |
+| Drive mount provider | see below                                | `cargo test`                                                    | no         | a Rust toolchain               |
+| Mount helper         | see below                                | `cargo test`                                                    | no         | a Rust toolchain               |
+| Linux mounts         | see below                                | `cargo test` in Docker                                          | no         | Docker                         |
+| SMB integration      | see below                                | `cargo test --features smb --test smb_integration -- --ignored` | no         | a real SMB server              |
+| Google Drive         | see below                                | `cargo test --test gdrive_integration -- --ignored`             | no         | a connected Google account     |
 
 `npm run check` treats Rust warnings as errors. The pre-push hook runs it, so a push fails on a lint, format, type, or Rust warning.
 
@@ -42,6 +43,7 @@ CI skips a job when the files it covers did not change (`check.yml` uses path fi
 - **A plain `cargo test` does not pass today.** The five ZPL thumbnail tests abort the test process when they run in parallel (issue #469). `cargo test --lib -- --skip zpl` avoids the crash, and every other test passes.
 - Unit tests sit in `#[cfg(test)]` modules inside the source files, mostly in `locations/` and `thumbnails/`. The SFTP host key test in `locations/sftp/pool.rs` starts an SSH server inside the test process on a free local port.
 - `cargo test -p marlin-vfs` runs the mount core's tests. A plain `cargo test` does not include them. They run on an in-memory provider and need nothing installed. See [Mount core](mount-core.md).
+- `cargo test -p marlin-gdrive` runs the tests of the Google Drive provider for mounts. A plain `cargo test` does not include them. They run against a fake Drive server inside the test process and need no network and no account. See [Google Drive mount provider](mount-gdrive.md).
 - `cargo test -p marlin-mount` runs the mount helper's tests. A plain `cargo test` does not include them. They talk to the helper over a real socket in a temporary folder, with a fake adapter, and need nothing installed. `tests/client.rs` tests the app's client the same way: it starts the built helper, and it stands in a fake helper where it needs another protocol version. See [Mount helper](mount-helper.md).
 - `src-tauri/crates/marlin-mount/test-sweep.sh` checks the helper against a real dead mount. It needs a Mac with macFUSE, or Linux with `fuse3`. No `cargo test` covers the real unmount of a dead mount, so run it when you change that code. See [Mount helper](mount-helper.md).
 - `src-tauri/crates/marlin-fuse/test-in-docker.sh` runs the Linux mount adapter's tests in a container: unit tests, tests that mount an in-memory provider through FUSE, and `test-sweep.sh`. On a Mac the crate compiles to nothing, so `cargo test -p marlin-fuse` runs no test there. See [Linux mount adapter](mount-linux.md).

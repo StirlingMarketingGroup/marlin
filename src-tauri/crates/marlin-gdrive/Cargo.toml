@@ -1,0 +1,22 @@
+[package]
+name = "marlin-gdrive"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+rust-version = "1.89"
+description = "Marlin's Google Drive provider for native mounts: one account as a marlin-vfs provider."
+
+[dependencies]
+marlin-vfs = { path = "../marlin-vfs" }
+async-trait = "0.1"
+reqwest = { version = "0.13", features = ["query"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+tokio = { version = "1.50", features = ["time"] }
+fastrand = "2"
+
+[dev-dependencies]
+tokio = { version = "1.50", features = ["macros", "rt-multi-thread", "sync", "time"] }
+wiremock = "0.6"
