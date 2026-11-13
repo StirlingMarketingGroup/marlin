@@ -3,7 +3,7 @@
 Marlin is one Tauri 2 desktop app: a Rust backend that owns all file access, and a React frontend that draws the UI in a webview. The frontend never touches the disk. It calls a Rust command and gets data back.
 
 **Covers:** `src-tauri/src/lib.rs`, `src-tauri/src/commands.rs`, `src-tauri/Cargo.toml`, `src-tauri/crates/`, `src-tauri/src/fs_watcher.rs`, `src/main.tsx`, `src/store/`, `src/windows/`, `src/hooks/useDirectoryWatcher.ts`
-**Checked against the code:** 2026-11-12
+**Checked against the code:** 2026-11-13
 
 ## Processes
 
@@ -11,13 +11,13 @@ Marlin is one Tauri 2 desktop app: a Rust backend that owns all file access, and
 | -------------- | ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------- |
 | `marlin`       | `src-tauri/src/main.rs` → `app_lib::run()` in `lib.rs` | The app. Hosts the webview, runs every command.                                                          |
 | `marlin-smb`   | `src-tauri/crates/marlin-smb/`, its own crate          | SMB helper. Keeps `libsmbclient` out of the main app so the app starts even when samba is not installed. |
-| `marlin-mount` | `src-tauri/crates/marlin-mount/`, its own crate        | Mount helper. Will own every native mount. Nothing starts it yet (#483), and it cannot mount yet.        |
+| `marlin-mount` | `src-tauri/crates/marlin-mount/`, its own crate        | Mount helper. Will own every native mount. The app starts it on demand, and it cannot mount yet.         |
 
-The main app starts `marlin-smb` on demand and talks to it over stdin and stdout. See [Location providers](location-providers.md). `marlin-mount` is controlled over a local socket instead, so that it can outlive the app. See [Mount helper](mount-helper.md).
+The main app starts `marlin-smb` on demand and talks to it over stdin and stdout. See [Location providers](location-providers.md). `marlin-mount` is controlled over a local socket instead, so that it can outlive the app. The app starts it detached on the first mount command and asks it to stop when the user quits. See [Mount helper](mount-helper.md).
 
 `src-tauri/Cargo.toml` is both the app package and the root of a Cargo workspace. Each helper is a member, so it shares the lockfile and the `target/` folder but none of the app's code. A plain `cargo build`, `check`, or `test` in `src-tauri/` acts on the app only. Name a helper to build or test it: `cargo test -p marlin-smb` (it needs samba installed) or `cargo test -p marlin-mount`. New binaries and shared crates go under `src-tauri/crates/`.
 
-The workspace has two library-only crates under `src-tauri/crates/`. `marlin-vfs` is the core for native mounts. `marlin-fuse` is the Linux mount adapter. `marlin-mount` links `marlin-vfs` everywhere and `marlin-fuse` on Linux. See [Mount core](mount-core.md) and [Linux mount adapter](mount-linux.md). `npm run check` checks all three along with the app.
+The workspace has three library-only crates under `src-tauri/crates/`. `marlin-vfs` is the core for native mounts. `marlin-fuse` is the Linux mount adapter. `marlin-mount-client` holds the helper's wire types and the client that speaks them. `marlin-mount` links `marlin-vfs` and `marlin-mount-client` everywhere and `marlin-fuse` on Linux. The app links `marlin-mount-client` and none of the others. See [Mount core](mount-core.md), [Linux mount adapter](mount-linux.md), and [Mount helper](mount-helper.md). `npm run check` checks all four along with the app.
 
 ## How the frontend and backend talk
 
@@ -27,21 +27,22 @@ The workspace has two library-only crates under `src-tauri/crates/`. `marlin-vfs
 
 ## Backend modules (`src-tauri/src/`)
 
-| Module                   | Job                                                                                                  |
-| ------------------------ | ---------------------------------------------------------------------------------------------------- |
-| `lib.rs`                 | Entry point. Registers plugins, commands, and shared state.                                          |
-| `commands.rs`            | Nearly every command: listing, file operations, paste, archives, windows, preferences, remote setup. |
-| `locations/`             | Storage backends behind one trait. See [Location providers](location-providers.md).                  |
-| `thumbnails/`            | Thumbnail service, cache, and per-format generators. See [Thumbnails](thumbnails.md).                |
-| `clipboard.rs`           | File copy, cut, and paste through the OS clipboard, with one implementation per OS.                  |
-| `fs_utils.rs`            | Local path expansion, `FileItem` building, local copy helpers.                                       |
-| `fs_watcher.rs`          | Watches local folders and emits `directory-changed`.                                                 |
-| `state.rs`               | Shared state types: directory streams, folder-size jobs, menu state, trash undo.                     |
-| `menu.rs`                | The native menu bar.                                                                                 |
-| `native_drag.rs`         | macOS only. Starts a native drag of files out of the app.                                            |
-| `plugins/drag_detector/` | Detects files dragged into the window, with one file per OS.                                         |
-| `macos_security.rs`      | macOS security-scoped bookmarks, so folder access survives a restart.                                |
-| `macos_icons.rs`         | macOS only. Extracts app icons.                                                                      |
+| Module                   | Job                                                                                                       |
+| ------------------------ | --------------------------------------------------------------------------------------------------------- |
+| `lib.rs`                 | Entry point. Registers plugins, commands, and shared state.                                               |
+| `commands.rs`            | Nearly every command: listing, file operations, paste, archives, windows, preferences, remote setup.      |
+| `locations/`             | Storage backends behind one trait. See [Location providers](location-providers.md).                       |
+| `thumbnails/`            | Thumbnail service, cache, and per-format generators. See [Thumbnails](thumbnails.md).                     |
+| `clipboard.rs`           | File copy, cut, and paste through the OS clipboard, with one implementation per OS.                       |
+| `fs_utils.rs`            | Local path expansion, `FileItem` building, local copy helpers.                                            |
+| `fs_watcher.rs`          | Watches local folders and emits `directory-changed`.                                                      |
+| `mount_helper.rs`        | The five mount commands, and the request to stop the helper at quit. See [Mount helper](mount-helper.md). |
+| `state.rs`               | Shared state types: directory streams, folder-size jobs, menu state, trash undo.                          |
+| `menu.rs`                | The native menu bar.                                                                                      |
+| `native_drag.rs`         | macOS only. Starts a native drag of files out of the app.                                                 |
+| `plugins/drag_detector/` | Detects files dragged into the window, with one file per OS.                                              |
+| `macos_security.rs`      | macOS security-scoped bookmarks, so folder access survives a restart.                                     |
+| `macos_icons.rs`         | macOS only. Extracts app icons.                                                                           |
 
 ## Frontend (`src/`)
 

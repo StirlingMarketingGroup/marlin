@@ -379,3 +379,39 @@ export interface ConflictResolution {
   customName?: string | null;
   applyToAll: boolean;
 }
+
+// Native mounts, as the marlin-mount helper reports them
+export type MountState =
+  | 'starting'
+  | 'mounted'
+  | 'degraded'
+  | 'auth-required'
+  | 'offline'
+  | 'unmounting'
+  | 'failed'
+  | 'unmounted';
+
+export interface MountError {
+  code: number;
+  message: string;
+}
+
+export interface MountStatus {
+  provider: string;
+  account: string;
+  name: string;
+  mountPoint: string;
+  state: MountState;
+  error?: MountError;
+}
+
+// What a failed mount command rejects with. `code` is the helper's error code, when the helper answered.
+export interface MountCommandError {
+  code?: number;
+  message: string;
+}
+
+export interface DeadMount {
+  name: string;
+  mountPoint: string;
+}

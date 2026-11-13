@@ -10,7 +10,7 @@ rust-version = "1.77.2"
 default-run = "marlin"
 
 [workspace]
-members = ["crates/marlin-smb", "crates/marlin-vfs", "crates/marlin-mount", "crates/marlin-fuse"]
+members = ["crates/marlin-smb", "crates/marlin-vfs", "crates/marlin-mount", "crates/marlin-mount-client", "crates/marlin-fuse"]
 
 [features]
 default = []
@@ -32,6 +32,7 @@ serde_json = "1.0"
 [dependencies]
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
+marlin-mount-client = { path = "crates/marlin-mount-client" }
 log = "0.4"
 tauri = { version = "2.11.2", features = [] }
 tauri-plugin-log = "2.3.1"

@@ -2,24 +2,31 @@
 
 `marlin-mount` is the process that will own every native mount. It runs once per user, apart from the app, so a mount outlives a hot reload, an app crash, and every window. The app tells it what to mount over a local socket.
 
-It cannot mount anything yet. Linux has an adapter, the [Linux mount adapter](mount-linux.md). macOS (#373) and Windows (#375) have none. No real provider (#372) exists, so no mount request can succeed: one that passes the name checks fails with -1004, unknown provider. Nothing starts the helper yet either: the app side is #483.
+It cannot mount anything yet. Linux has an adapter, the [Linux mount adapter](mount-linux.md). macOS (#373) and Windows (#375) have none. No real provider (#372) exists, so no mount request can succeed: one that passes the name checks fails with -1004, unknown provider. The app starts the helper on the first mount command: see [The app side](#the-app-side). No part of the UI sends one yet (#377), and a shipped app has no helper binary until #506.
 
-**Covers:** `src-tauri/crates/marlin-mount/`
+**Covers:** `src-tauri/crates/marlin-mount/`, `src-tauri/crates/marlin-mount-client/`, `src-tauri/src/mount_helper.rs`
 **Checked against the code:** 2026-11-13
 
 The design is in [decision 0001](decisions/0001-mount-architecture.md), choices 3 to 6. The helper builds each mount on the [mount core](mount-core.md).
 
 ## The parts
 
-| File          | Holds                                                                                                |
-| ------------- | ---------------------------------------------------------------------------------------------------- |
-| `main.rs`     | The binary: two flags, the default paths, and the signals.                                           |
-| `server.rs`   | The socket, the lock that allows one helper per user, the connections, and the request dispatch.     |
-| `mounts.rs`   | The mount table and its rules, the three traits that adapters and providers plug into, `MountError`. |
-| `protocol.rs` | The wire types. The app will share them (#483).                                                      |
-| `log.rs`      | The log writer, and `redact`.                                                                        |
+| File        | Holds                                                                                                |
+| ----------- | ---------------------------------------------------------------------------------------------------- |
+| `main.rs`   | The binary: two flags, the default paths, and the signals.                                           |
+| `server.rs` | The socket, the lock that allows one helper per user, the connections, and the request dispatch.     |
+| `mounts.rs` | The mount table and its rules, the three traits that adapters and providers plug into, `MountError`. |
+| `log.rs`    | The log writer, and `redact`.                                                                        |
 
-The crate is Unix only. A Windows named pipe comes with the Windows adapter (#375).
+The wire types and the client are in a second crate, `marlin-mount-client`. The helper and the app both link it, so the app never links the helper's provider and adapter code.
+
+| File          | Holds                                                                                      |
+| ------------- | ------------------------------------------------------------------------------------------ |
+| `protocol.rs` | The wire types. The helper exports them again as `marlin_mount::protocol`.                 |
+| `client.rs`   | `Client`, which connects to the helper or starts one, and `shutdown`. Unix only.           |
+| `lib.rs`      | `default_socket`, the one definition of the socket path that the helper and the app share. |
+
+`marlin-mount` and `Client` are Unix only. A Windows named pipe comes with the Windows adapter (#375). On Windows the five commands fail with the message "Marlin cannot mount on this OS yet."
 
 ## Running it
 
@@ -63,7 +70,7 @@ What a client must know:
 - **Notifications start after the `hello` response and are not replayed.** Call `list` after `hello`. A client that falls 64 notifications behind loses the oldest ones, and `list` is how it catches up. The notifications a client does get arrive in the order the changes happened.
 - **A failed `mount` answers with an error, not a status.** The codes -1001, -1002, and -1009 are refusals: they make no entry, keep an entry that is already there, and send no notification. Any other failure leaves a `failed` entry, which keeps its name until the next attempt or an `unmount`.
 
-**Version rules.** The protocol number is `PROTOCOL_VERSION` in `protocol.rs`.
+**Version rules.** The protocol number is `PROTOCOL_VERSION` in `marlin-mount-client/src/protocol.rs`.
 
 - The first request on a connection must be `hello`. The helper answers it before it reads anything else.
 - A `hello` with a valid `protocol` succeeds whatever the number is, and returns the helper's own number.
@@ -90,6 +97,46 @@ What a client must know:
 | -1012  | A dead mount is at the mount point, and the helper could not clear it. |
 
 The protocol has no `health` request. A helper that answers `hello` is alive, and a machine that cannot mount says why in the error of a `mount`.
+
+## The app side
+
+The app talks to the helper through `Client` in `marlin-mount-client`. `src-tauri/src/mount_helper.rs` keeps one `Client` for the app process and puts five commands over it.
+
+| Command            | Helper request | Returns                  |
+| ------------------ | -------------- | ------------------------ |
+| `list_mounts`      | `list`         | `MountStatus[]`          |
+| `get_mount_status` | `status`       | `MountStatus`, or `null` |
+| `mount_account`    | `mount`        | `MountStatus`            |
+| `unmount_account`  | `unmount`      | nothing                  |
+| `list_dead_mounts` | `deadMounts`   | `DeadMount[]`            |
+
+The types are in `src/types/index.ts`. A failed command rejects with a `MountCommandError`, `{code?, message}`. `code` is one of the helper's [error codes](#the-protocol), and it is missing when the failure was not an answer from the helper: a missing binary, a helper that would not start, a lost connection.
+
+| Event                 | Payload       | Sent when                           |
+| --------------------- | ------------- | ----------------------------------- |
+| `mount-changed`       | `MountStatus` | The helper sends `mountChanged`.    |
+| `mount-helper-closed` | none          | The connection to the helper ended. |
+
+**What the frontend must do.** Call `list_mounts` once before it trusts any event, and again after `mount-helper-closed`: notifications are not replayed, and after a lost connection every mount's state is unknown. The app connects only when a command runs, so no event arrives before the first command.
+
+**Starting the helper.** The first command connects to the socket. The app starts a helper only when the socket file is missing or refuses the connection. Any other error, such as no permission on the socket's folder, is reported and starts nothing.
+
+- The binary is the file `marlin-mount` in the folder of the app binary, and nowhere else. A dev build finds `src-tauri/target/debug/marlin-mount` after `cd src-tauri && cargo build -p marlin-mount`. A bundle will hold it as a Tauri `externalBin` (#506). When the file is missing, the command fails with "Marlin's mount helper is missing", and the rest of the app works.
+- The helper is detached: it runs in its own process group, with no pipe to the app. A Ctrl+C in the terminal that runs `npm run tauri dev` does not reach it, and it keeps running when the app is killed or rebuilt.
+- The command line holds `--socket` and the socket path, and nothing else.
+- The app waits up to 10 seconds for the new helper to take a connection, and up to 30 seconds for the answer to `hello`, which comes after the helper's sweep.
+- Two commands at once start one helper: the app holds a lock while it connects. A window or a webview reload reuses the connection. An app that was restarted finds the running helper through the socket.
+
+**A helper with another protocol version.** The app sends it `shutdown`, waits for it to close the connection, starts the helper beside the app, and connects again. It does this once. If the old helper cannot unmount, it keeps running and the command fails with the helper's reason. If the helper beside the app also speaks another version, the command fails and says both numbers. In a dev build that means `target/debug/marlin-mount` is stale: build it again.
+
+**A helper with the same protocol version is reused, whatever its build.** A helper left by a killed dev app keeps running its old code after `cargo build -p marlin-mount`. Quit Marlin from its menu, or stop the `marlin-mount` process, to load the new build.
+
+**When the user quits.** The app handles Tauri's `RunEvent::Exit`: it connects to the socket and sends `shutdown`. It never starts a helper to do this.
+
+- A window that closes while others stay open is not a quit. A killed app gets no `Exit` event, and neither does a rebuild under `npm run tauri dev`, so the helper outlives both.
+- The app waits up to 5 seconds. The request needs that time to reach the helper, which answers `hello` first. Once the helper has the request, it finishes the shutdown even when the app has gone. A dev build logs a failure. A release build has no logger.
+- **If an unmount fails at quit, the app quits anyway and shows nothing.** The helper keeps running and keeps serving that mount, because a program still has a file open in it. The next start of Marlin finds that helper and uses it.
+- **Limit: two Marlin processes share one helper.** When one of them quits, it stops the helper under the other (#508).
 
 ## Mounts
 
@@ -204,6 +251,8 @@ The helper writes one JSON object per line to stderr: `timeMs`, `level`, `event`
 
 Whoever starts the helper must point stderr at a file or `/dev/null`, never at a pipe. The helper drops a log line it cannot write, but a pipe that is full and never read blocks it.
 
+The app points it at `marlin-mount.log` in the app's log folder: `~/Library/Logs/com.marlin.filebrowser/` on macOS, and `~/.local/share/com.marlin.filebrowser/logs/` on Linux. The file has mode 0600. Lines are added to it across helper starts. When the app starts a helper and the file is over 1 MiB, it first renames the file to `marlin-mount.log.old`, which replaces the one before.
+
 No secret crosses the socket or the command line. The text inside a `MountError` must hold no credential. As a backstop, `MountError` prints through `redact`, which masks bearer tokens, the values of fields such as `access_token` and `password`, and the user and password in a URL. That is the only way the text reaches a log line, a status, or a response. `redact` masks the word that follows `token:`, `password=`, `Bearer`, `Basic`, and the like, so word an error so that its cause does not sit there.
 
 ## Testing
@@ -214,5 +263,7 @@ No secret crosses the socket or the command line. The text inside a `MountError`
 - One test starts the built binary and checks its flags, a refused mount, and a clean exit.
 - The fake adapter can call a folder a dead mount, and can refuse to clear it. Two tests cover the sweep, `deadMounts`, and error -1012 that way. A unit test in `main.rs` checks the real macOS rule on a folder, a missing path, and a symbolic link.
 - `src-tauri/crates/marlin-mount/test-sweep.sh` makes a real dead mount and a live one with the spike programs in `spikes/mount-hello/`, starts the built helper, and checks that only the dead mount and the empty folder are gone. Run it on a Mac with macFUSE, both of its switches on. `test-in-docker.sh` runs it on Linux.
+- `tests/client.rs` tests `Client` against the built helper: the first connect starts it, a second one reuses it, it outlives its client, it runs in its own process group, and `shutdown` stops it. A fake helper, a plain socket listener in the test, covers another protocol version, a refused shutdown, and a notification in front of an answer.
+- The Tauri layer in `src-tauri/src/mount_helper.rs` has one test: the request at quit runs outside the async runtime, with no helper. Nothing drives the real app yet (#497), so the `Exit` event, the five commands, and the two events are untested.
 - A signal is tested through the future that `Server::run` takes, not with a real `SIGTERM`.
 - The check of the connecting user's ID has no test. It needs a second user account.

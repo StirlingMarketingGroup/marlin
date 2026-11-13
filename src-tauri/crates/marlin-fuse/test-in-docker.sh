@@ -18,7 +18,8 @@ docker run --rm \
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq fuse3
+# procps: a marlin-mount test finds the helper with pgrep and ps.
+apt-get install -y -qq fuse3 procps
 useradd -m tester
 chown tester /usr/local/cargo/registry /target
 cat > /tmp/as-tester.sh << 'TEST'

@@ -6,7 +6,7 @@
 
 pub mod log;
 mod mounts;
-pub mod protocol;
+pub use marlin_mount_client::protocol;
 mod server;
 
 pub use mounts::{Adapter, MountError, Providers, Session};
