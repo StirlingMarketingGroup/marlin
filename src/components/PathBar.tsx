@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -21,7 +22,7 @@ import {
   X,
 } from 'phosphor-react';
 import { invoke } from '@tauri-apps/api/core';
-import type { DirectoryPreferencesMap, DirectoryListingResponse, FileItem } from '@/types';
+import type { DirectoryListingResponse, FileItem } from '@/types';
 import { useAppStore } from '@/store/useAppStore';
 import { useToastStore } from '@/store/useToastStore';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -31,7 +32,7 @@ import GitRepoBadge from '@/components/GitRepoBadge';
 import SymlinkBadge from '@/components/SymlinkBadge';
 import { useDragStore } from '@/store/useDragStore';
 import { formatArchivePathForDisplay, isArchiveUri } from '@/utils/archiveUri';
-import { dirname } from '@/utils/pathUtils';
+import { dirname, resolveTypedPath } from '@/utils/pathUtils';
 
 /** Get parent directory path — returns null for root */
 const getParentPath = (path: string): string | null => {
@@ -42,20 +43,11 @@ const getParentPath = (path: string): string | null => {
   return parent === path ? null : parent;
 };
 
-const MAX_SUGGESTIONS = 8;
+const MAX_SUGGESTIONS = 50;
 
 interface PathSuggestion {
   value: string;
-  name: string;
   display: string;
-}
-
-interface AutocompleteInfo {
-  basePrefix: string;
-  partial: string;
-  separator: string;
-  showHidden: boolean;
-  triggerIndex: number;
 }
 
 const normalizeForCompare = (value: string): string => {
@@ -63,100 +55,6 @@ const normalizeForCompare = (value: string): string => {
   const replaced = value.replace(/\\/g, '/');
   const trimmed = replaced.length > 1 && replaced.endsWith('/') ? replaced.slice(0, -1) : replaced;
   return trimmed || '/';
-};
-
-interface DeriveAutocompleteParams {
-  value: string;
-  cursor: number;
-  previousInfo: AutocompleteInfo | null;
-  directoryPreferences: DirectoryPreferencesMap;
-  globalShowHidden: boolean;
-}
-
-const deriveAutocompleteInfo = ({
-  value,
-  cursor,
-  previousInfo,
-  directoryPreferences,
-  globalShowHidden,
-}: DeriveAutocompleteParams): AutocompleteInfo | null => {
-  const uptoCursor = value.slice(0, cursor);
-  const lastSlash = Math.max(uptoCursor.lastIndexOf('/'), uptoCursor.lastIndexOf('\\'));
-
-  if (lastSlash < 0) return null;
-
-  const separator = uptoCursor[lastSlash];
-  const basePrefix = value.slice(0, lastSlash + 1);
-  const partial = uptoCursor.slice(lastSlash + 1);
-  const hasTrailingSeparator = uptoCursor.endsWith('/') || uptoCursor.endsWith('\\');
-  const requestingHidden = partial.startsWith('.');
-  const triggeredIndex = hasTrailingSeparator
-    ? lastSlash
-    : previousInfo && previousInfo.triggerIndex === lastSlash
-      ? previousInfo.triggerIndex
-      : undefined;
-
-  const shouldSuggest =
-    hasTrailingSeparator || typeof triggeredIndex === 'number' || requestingHidden;
-  if (!shouldSuggest) return null;
-
-  const normalizedDir = normalizeForCompare(basePrefix);
-  const showHiddenPref = directoryPreferences[normalizedDir]?.showHidden ?? globalShowHidden;
-
-  return {
-    basePrefix,
-    partial,
-    separator,
-    showHidden: showHiddenPref,
-    triggerIndex: hasTrailingSeparator
-      ? lastSlash
-      : typeof triggeredIndex === 'number'
-        ? triggeredIndex
-        : lastSlash,
-  };
-};
-
-interface FetchSuggestionsParams {
-  info: AutocompleteInfo;
-  currentPath: string;
-  files: FileItem[];
-}
-
-const fetchSuggestionsForInfo = async ({
-  info,
-  currentPath,
-  files,
-}: FetchSuggestionsParams): Promise<PathSuggestion[]> => {
-  const { basePrefix: prefix, partial: partialSegment, separator: sep, showHidden } = info;
-
-  let entries: FileItem[] = [];
-  if (normalizeForCompare(prefix) === normalizeForCompare(currentPath)) {
-    entries = files;
-  } else {
-    const fetchPath = prefix.length === 0 ? sep : prefix;
-    const response = await invoke<DirectoryListingResponse>('read_directory', {
-      path: fetchPath || '/',
-    });
-    entries = response.entries;
-  }
-
-  const partialLower = partialSegment.toLocaleLowerCase();
-  const allowHidden = showHidden || partialSegment.startsWith('.');
-  const filtered = entries.filter((entry) => {
-    if (!entry.is_directory) return false;
-    if (!allowHidden && entry.is_hidden) return false;
-    if (!partialSegment) return true;
-    return entry.name.toLocaleLowerCase().startsWith(partialLower);
-  });
-
-  return filtered
-    .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
-    .slice(0, MAX_SUGGESTIONS)
-    .map<PathSuggestion>((entry) => ({
-      value: `${prefix}${entry.name}${sep}`,
-      name: entry.name,
-      display: `${entry.name}${sep}`,
-    }));
 };
 
 export default function PathBar() {
@@ -167,15 +65,27 @@ export default function PathBar() {
     scheduleHideZoomSlider,
     showZoomSlider,
     files,
+    loading,
+    homeDir,
     globalPreferences,
     directoryPreferences,
   } = useAppStore();
 
   const [editPath, setEditPath] = useState(currentPath);
-  const [suggestions, setSuggestions] = useState<PathSuggestion[]>([]);
-  const [showSuggestions, setShowSuggestions] = useState(false);
   const [activeSuggestion, setActiveSuggestion] = useState(-1);
   const [isFocused, setIsFocused] = useState(false);
+  // The typed text split at its last separator: the folder to list and the start of a name in it.
+  // `folder` is that folder as a location, in the form `normalizeForCompare` gives.
+  const [query, setQuery] = useState<{
+    folderText: string;
+    typedName: string;
+    folder: string;
+  } | null>(null);
+  // The folder listed for suggestions when it is not the current folder.
+  // `entries` is null while the request is out. A failed request leaves it empty.
+  const [listing, setListing] = useState<{ folder: string; entries: FileItem[] | null } | null>(
+    null
+  );
   const [isMaximized, setIsMaximized] = useState(false);
   const [remoteDragGhost, setRemoteDragGhost] = useState<{
     x: number;
@@ -188,12 +98,9 @@ export default function PathBar() {
   const isMacPlatform = platform.includes('MAC');
 
   const inputRef = useRef<HTMLInputElement>(null);
+  const suggestionListRef = useRef<HTMLDivElement>(null);
   const [currentDirMeta, setCurrentDirMeta] = useState<FileItem | null>(null);
   const windowRef = useRef(getCurrentWindow());
-  const autocompleteInfoRef = useRef<AutocompleteInfo | null>(null);
-  const originalValueRef = useRef<string>('');
-  const skipNextFetchRef = useRef(false);
-  const suggestionRequestIdRef = useRef(0);
   const startNativeDrag = useDragStore((state) => state.startNativeDrag);
   const endNativeDrag = useDragStore((state) => state.endNativeDrag);
   const setNativeDragPaths = useDragStore((state) => state.setNativeDragPaths);
@@ -203,12 +110,6 @@ export default function PathBar() {
 
   const parentPath = getParentPath(currentPath);
   const isUpButtonDropTarget = parentPath && dropTargetPath === parentPath;
-
-  const clearSuggestions = useCallback(() => {
-    setSuggestions([]);
-    setShowSuggestions(false);
-    setActiveSuggestion(-1);
-  }, []);
 
   const displayPath = isArchiveUri(currentPath)
     ? formatArchivePathForDisplay(currentPath)
@@ -235,75 +136,119 @@ export default function PathBar() {
     };
   }, [currentPath]);
 
-  const scheduleSelection = (start: number, end: number) => {
-    requestAnimationFrame(() => {
-      const input = inputRef.current;
-      if (!input) return;
-      input.setSelectionRange(start, end);
-    });
-  };
+  const suggestions = useMemo<PathSuggestion[]>(() => {
+    if (!query) return [];
+    const { folderText, typedName, folder } = query;
+    // While the current folder loads, `files` can still hold the folder before it.
+    const entries =
+      folder === normalizeForCompare(currentPath)
+        ? loading
+          ? []
+          : files
+        : listing?.folder === folder
+          ? (listing.entries ?? [])
+          : [];
+    const separator = folderText.slice(-1);
+    const typedLower = typedName.toLocaleLowerCase();
+    const showHidden =
+      typedName.startsWith('.') ||
+      (directoryPreferences[folder]?.showHidden ?? globalPreferences.showHidden);
+    return entries
+      .filter(
+        (entry) =>
+          entry.is_directory &&
+          (showHidden || !entry.is_hidden) &&
+          entry.name.toLocaleLowerCase().startsWith(typedLower)
+      )
+      .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
+      .slice(0, MAX_SUGGESTIONS)
+      .map((entry) => ({
+        value: `${folderText}${entry.name}${separator}`,
+        display: `${entry.name}${separator}`,
+      }));
+  }, [
+    query,
+    currentPath,
+    loading,
+    files,
+    listing,
+    directoryPreferences,
+    globalPreferences.showHidden,
+  ]);
 
-  const previewSuggestion = (index: number) => {
-    const info = autocompleteInfoRef.current;
-    const suggestion = suggestions[index];
-    if (!info || !suggestion) return;
-    skipNextFetchRef.current = true;
-    setActiveSuggestion(index);
-    setEditPath(suggestion.value);
-    const start = Math.min(info.basePrefix.length + info.partial.length, suggestion.value.length);
-    scheduleSelection(start, suggestion.value.length);
-  };
-
-  const restoreOriginal = () => {
-    const info = autocompleteInfoRef.current;
-    if (!info) return;
-    skipNextFetchRef.current = true;
-    const original = originalValueRef.current || info.basePrefix + info.partial;
-    setEditPath(original);
+  const closeSuggestions = useCallback(() => {
+    setQuery(null);
     setActiveSuggestion(-1);
-    const caret = info.basePrefix.length + info.partial.length;
-    scheduleSelection(caret, caret);
+  }, []);
+
+  // The one place that turns text into a query. The caret is at the end of `text`.
+  const suggestFor = (text: string) => {
+    setActiveSuggestion(-1);
+    const lastSlash = Math.max(text.lastIndexOf('/'), text.lastIndexOf('\\'));
+    // An archive address keeps its inner path in a query parameter, so its text has no folder to list.
+    if (lastSlash < 0 || isArchiveUri(text)) {
+      setQuery(null);
+      return;
+    }
+    const folderText = text.slice(0, lastSlash + 1);
+    // The folder is listed as the location Enter would open, so `~/` and a Windows share path list too.
+    const folderLocation = resolveTypedPath(folderText, homeDir);
+    const folder = normalizeForCompare(folderLocation);
+    setQuery({ folderText, typedName: text.slice(lastSlash + 1), folder });
+
+    if (folder === normalizeForCompare(currentPath) || folder === listing?.folder) return;
+    // One listing per folder: later edits in the same folder wait on the same request.
+    setListing({ folder, entries: null });
+    void invoke<DirectoryListingResponse>('read_directory', { path: folderLocation })
+      .catch((error) => {
+        console.warn('Failed to fetch path suggestions:', error);
+        return { entries: [] };
+      })
+      .then(({ entries }) =>
+        setListing((current) => (current?.folder === folder ? { folder, entries } : current))
+      );
+  };
+
+  const completeWith = (suggestion: PathSuggestion) => {
+    setEditPath(suggestion.value);
+    suggestFor(suggestion.value);
   };
 
   const handleFocus = () => {
     setIsFocused(true);
-    skipNextFetchRef.current = false;
-    if (isArchiveUri(currentPath) && editPath !== currentPath) {
-      setEditPath(currentPath);
-      originalValueRef.current = currentPath;
-      return;
-    }
-    originalValueRef.current = editPath;
+    // A folder listed during an earlier edit may have changed since.
+    setListing(null);
   };
 
   const handleBlur = () => {
+    closeSuggestions();
+    // Switching to another app blurs the input but leaves it the active element.
+    // Keep the draft for when the user comes back.
+    if (document.activeElement === inputRef.current) return;
     setIsFocused(false);
-    clearSuggestions();
-  };
-
-  const commitSuggestion = (index?: number) => {
-    const targetIndex = typeof index === 'number' ? index : activeSuggestion;
-    const suggestion = suggestions[targetIndex];
-    if (!suggestion) return false;
-    clearSuggestions();
-    skipNextFetchRef.current = true;
-    autocompleteInfoRef.current = null;
-    setEditPath(suggestion.value);
-    scheduleSelection(suggestion.value.length, suggestion.value.length);
-    originalValueRef.current = suggestion.value;
-    return true;
+    setEditPath(currentPath);
   };
 
   const handleInputChange = (e: ChangeEvent<HTMLInputElement>) => {
-    skipNextFetchRef.current = false;
-    setActiveSuggestion(-1);
-    setEditPath(e.target.value);
+    const text = e.target.value;
+    setEditPath(text);
+    // A suggestion completes the end of the text, so it can never replace what follows the caret.
+    if (e.target.selectionStart === text.length) {
+      suggestFor(text);
+    } else {
+      closeSuggestions();
+    }
   };
 
   const handleKeyDown = (e: ReactKeyboardEvent<HTMLInputElement>) => {
-    const hasSuggestions = showSuggestions && suggestions.length > 0;
+    const listOpen = suggestions.length > 0;
 
-    if (!hasSuggestions && e.key === 'ArrowDown') {
+    if (!listOpen && e.key === 'ArrowDown') {
+      // With a draft in the bar, Down waits for suggestions: moving to the files would drop the draft.
+      if (editPath !== currentPath) {
+        e.preventDefault();
+        return;
+      }
       const input = inputRef.current;
       if (input) {
         input.blur();
@@ -321,131 +266,73 @@ export default function PathBar() {
       return;
     }
 
-    if (hasSuggestions) {
+    if (listOpen) {
       if (e.key === 'ArrowDown') {
         e.preventDefault();
-        const next = activeSuggestion + 1;
-        const index = next >= suggestions.length ? 0 : next;
-        previewSuggestion(index);
+        setActiveSuggestion(activeSuggestion + 1 >= suggestions.length ? 0 : activeSuggestion + 1);
         return;
       }
       if (e.key === 'ArrowUp') {
         e.preventDefault();
-        if (activeSuggestion <= 0) {
-          restoreOriginal();
-        } else {
-          previewSuggestion(activeSuggestion - 1);
-        }
+        setActiveSuggestion(Math.max(activeSuggestion - 1, -1));
         return;
       }
-      if (e.key === 'Tab' && !e.shiftKey) {
-        const index = activeSuggestion === -1 ? 0 : activeSuggestion;
-        if (suggestions[index]) {
-          e.preventDefault();
-          commitSuggestion(index);
-        }
+      if (e.key === 'Escape') {
+        closeSuggestions();
         return;
       }
     }
 
+    // Tab completes a name, as in a shell. With nothing to complete it does nothing:
+    // moving focus would drop the draft.
+    if (e.key === 'Tab' && !e.shiftKey) {
+      e.preventDefault();
+      if (listOpen) completeWith(suggestions[Math.max(activeSuggestion, 0)]);
+      return;
+    }
+
     if (e.key === 'Enter') {
-      if (hasSuggestions && activeSuggestion >= 0) {
-        e.preventDefault();
-        const suggestion = suggestions[activeSuggestion];
-        if (commitSuggestion(activeSuggestion)) {
-          navigateTo(suggestion.value);
-        }
-        return;
-      }
-      clearSuggestions();
-      navigateTo(editPath);
+      navigateTo(suggestions[activeSuggestion]?.value ?? editPath);
+      // The files the person asked for take the focus. The blur closes the list and shows the real path.
+      inputRef.current?.blur();
     } else if (e.key === 'Escape') {
       setEditPath(currentPath);
-      clearSuggestions();
-      originalValueRef.current = currentPath;
-      skipNextFetchRef.current = false;
-      scheduleSelection(currentPath.length, currentPath.length);
+      // A listing still on its way must not open a list under the restored path.
+      closeSuggestions();
     }
   };
 
   // Keep the input in sync if navigation occurs elsewhere
   useEffect(() => {
     setEditPath(currentPath);
-    clearSuggestions();
-    originalValueRef.current = currentPath;
-  }, [currentPath, clearSuggestions]);
+    closeSuggestions();
+  }, [currentPath, closeSuggestions]);
 
   useEffect(() => {
-    if (!isFocused) {
-      clearSuggestions();
-      return;
-    }
-
-    if (skipNextFetchRef.current) {
-      skipNextFetchRef.current = false;
-      return;
-    }
-
-    const input = inputRef.current;
-    const cursor = input ? (input.selectionStart ?? editPath.length) : editPath.length;
-
-    const nextInfo = deriveAutocompleteInfo({
-      value: editPath,
-      cursor,
-      previousInfo: autocompleteInfoRef.current,
-      directoryPreferences,
-      globalShowHidden: globalPreferences.showHidden,
-    });
-
-    if (!nextInfo) {
-      autocompleteInfoRef.current = null;
-      clearSuggestions();
-      return;
-    }
-
-    autocompleteInfoRef.current = nextInfo;
-    originalValueRef.current = editPath;
-
-    let cancelled = false;
-    const requestId = ++suggestionRequestIdRef.current;
-
-    const run = async () => {
-      const activeInfo = autocompleteInfoRef.current;
-      if (!activeInfo) return;
-      try {
-        const limited = await fetchSuggestionsForInfo({
-          info: activeInfo,
-          currentPath,
-          files,
-        });
-        if (cancelled || suggestionRequestIdRef.current !== requestId) return;
-        setSuggestions(limited);
-        setShowSuggestions(limited.length > 0);
-        setActiveSuggestion(-1);
-      } catch (error) {
-        if (cancelled || suggestionRequestIdRef.current !== requestId) return;
-        console.warn('Failed to fetch path suggestions:', error);
-        clearSuggestions();
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (
+        (isMacPlatform ? e.metaKey : e.ctrlKey) &&
+        !e.altKey &&
+        !e.shiftKey &&
+        e.key.toLowerCase() === 'l'
+      ) {
+        e.preventDefault();
+        inputRef.current?.focus();
+        inputRef.current?.select();
       }
     };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [isMacPlatform]);
 
-    const timeoutId = window.setTimeout(() => {
-      void run();
-    }, 120);
+  // Typing or pasting right after a click or the shortcut replaces the whole path.
+  useEffect(() => {
+    if (isFocused) inputRef.current?.select();
+  }, [isFocused]);
 
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timeoutId);
-    };
-  }, [
-    editPath,
-    files,
-    currentPath,
-    directoryPreferences,
-    globalPreferences.showHidden,
-    isFocused,
-    clearSuggestions,
-  ]);
+  useEffect(() => {
+    suggestionListRef.current?.children[activeSuggestion]?.scrollIntoView({ block: 'nearest' });
+  }, [activeSuggestion]);
 
   useEffect(() => {
     if (!isLinux) {
@@ -707,6 +594,13 @@ export default function PathBar() {
           onKeyDown={handleKeyDown}
           onFocus={handleFocus}
           onBlur={handleBlur}
+          onMouseDown={(e) => {
+            // The first click selects the whole path (see the focus effect). A later click places the caret.
+            if (document.activeElement !== e.currentTarget) {
+              e.preventDefault();
+              e.currentTarget.focus();
+            }
+          }}
           className="w-full input-field pl-10"
           placeholder="Enter path..."
           data-testid="path-input"
@@ -716,35 +610,31 @@ export default function PathBar() {
           autoCapitalize="off"
           spellCheck={false}
         />
-        {showSuggestions && suggestions.length > 0 && (
-          <div className="absolute left-0 right-0 top-full mt-1 rounded-md border border-app-border bg-app-gray shadow-lg z-30 overflow-hidden">
-            {suggestions.map((suggestion, index) => {
-              const partial = autocompleteInfoRef.current?.partial ?? '';
-              const highlightLength = Math.min(partial.length, suggestion.display.length);
-              const typedPortion = suggestion.display.slice(0, highlightLength);
-              const remainder = suggestion.display.slice(highlightLength);
-              const isActive = index === activeSuggestion;
-
-              return (
-                <button
-                  key={suggestion.value}
-                  type="button"
-                  className={`w-full text-left px-3 py-1.5 text-sm flex items-center gap-2 transition-colors ${
-                    isActive ? 'bg-app-light text-accent' : 'hover:bg-app-light'
-                  }`}
-                  onMouseEnter={() => previewSuggestion(index)}
-                  onMouseDown={(event) => {
-                    event.preventDefault();
-                    commitSuggestion(index);
-                  }}
-                >
-                  <span className="font-mono tracking-tight">
-                    <span>{typedPortion}</span>
-                    <span className="text-app-muted">{remainder}</span>
-                  </span>
-                </button>
-              );
-            })}
+        {suggestions.length > 0 && (
+          <div
+            ref={suggestionListRef}
+            role="listbox"
+            // A mouse press in the list, its scrollbar included, must not take focus from the input.
+            onMouseDown={(event) => event.preventDefault()}
+            // Enter opens the highlighted row, so a row the pointer only passed over must not stay highlighted.
+            onMouseLeave={() => setActiveSuggestion(-1)}
+            className="absolute left-0 right-0 top-full mt-1 max-h-64 overflow-y-auto rounded-md border border-app-border bg-app-gray shadow-lg z-30"
+          >
+            {suggestions.map((suggestion, index) => (
+              <button
+                key={suggestion.value}
+                type="button"
+                role="option"
+                aria-selected={index === activeSuggestion}
+                className={`w-full text-left pl-10 pr-3 py-1 text-sm ${
+                  index === activeSuggestion ? 'bg-app-light' : ''
+                }`}
+                onMouseMove={() => setActiveSuggestion(index)}
+                onMouseDown={() => completeWith(suggestion)}
+              >
+                {suggestion.display}
+              </button>
+            ))}
           </div>
         )}
       </div>

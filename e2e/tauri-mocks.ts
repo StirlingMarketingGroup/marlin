@@ -115,6 +115,63 @@ export function getTauriMockScript(): string {
         },
       ];
 
+      const mockDocumentsDir = mockHomeDir + '/Documents';
+
+      const mockDocumentsFiles = [
+        {
+          name: 'Invoices',
+          path: mockDocumentsDir + '/Invoices',
+          is_directory: true,
+          is_hidden: false,
+          is_symlink: false,
+          is_git_repo: false,
+          size: 0,
+          modified: new Date().toISOString(),
+          created: new Date().toISOString(),
+          extension: null,
+          permissions: { read: true, write: true, execute: true },
+        },
+        {
+          name: 'Projects',
+          path: mockDocumentsDir + '/Projects',
+          is_directory: true,
+          is_hidden: false,
+          is_symlink: false,
+          is_git_repo: false,
+          size: 0,
+          modified: new Date().toISOString(),
+          created: new Date().toISOString(),
+          extension: null,
+          permissions: { read: true, write: true, execute: true },
+        },
+        {
+          name: '.archive',
+          path: mockDocumentsDir + '/.archive',
+          is_directory: true,
+          is_hidden: true,
+          is_symlink: false,
+          is_git_repo: false,
+          size: 0,
+          modified: new Date().toISOString(),
+          created: new Date().toISOString(),
+          extension: null,
+          permissions: { read: true, write: true, execute: true },
+        },
+        {
+          name: 'notes.txt',
+          path: mockDocumentsDir + '/notes.txt',
+          is_directory: false,
+          is_hidden: false,
+          is_symlink: false,
+          is_git_repo: false,
+          size: 128,
+          modified: new Date().toISOString(),
+          created: new Date().toISOString(),
+          extension: 'txt',
+          permissions: { read: true, write: true, execute: false },
+        },
+      ];
+
       const mockDownloadsFiles = [
         {
           name: 'sample.pdf',
@@ -185,9 +242,11 @@ export function getTauriMockScript(): string {
         let files;
         if (normalizedPath === mockDownloadsDir || normalizedPath.endsWith('/Downloads')) {
           files = mockDownloadsFiles;
+        } else if (normalizedPath === mockDocumentsDir) {
+          files = mockDocumentsFiles;
         } else if (normalizedPath === mockLongNameDir) {
           files = mockLongNameFiles;
-        } else if (normalizedPath === mockHomeDir || normalizedPath === '~' || normalizedPath === '/') {
+        } else if (normalizedPath === mockHomeDir || normalizedPath === '/') {
           files = mockFiles;
         } else {
           console.warn('[Tauri Mock] Unhandled path in getFilesForPath, returning empty array:', path);

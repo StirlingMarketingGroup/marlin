@@ -2,9 +2,14 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { useAppStore } from '../../../store/useAppStore';
 import { invoke } from '@tauri-apps/api/core';
 import { ask } from '@tauri-apps/plugin-dialog';
+import { getPlatform } from '@/hooks/usePlatform';
 
 vi.mock('@tauri-apps/api/core');
 vi.mock('@tauri-apps/plugin-dialog');
+// jsdom's user agent on a Mac holds "darwin", which `getPlatform` reads as Windows.
+vi.mock('@/hooks/usePlatform', () => ({
+  getPlatform: vi.fn(() => ({ isMac: false, isWindows: false, isLinux: true })),
+}));
 
 const mockInvoke = vi.mocked(invoke);
 const mockAsk = vi.mocked(ask);
@@ -505,6 +510,56 @@ describe('useAppStore', () => {
       const updated = useAppStore.getState();
       expect(updated.pathHistory).toEqual(['/a', '/b', '/d']);
       expect(updated.historyIndex).toBe(2);
+    });
+
+    it('opens a Windows share path as an smb address', () => {
+      useAppStore.getState().navigateTo('\\\\server\\share\\folder one');
+
+      expect(useAppStore.getState().currentPath).toBe('smb://server/share/folder one');
+    });
+
+    it('turns backslashes in an smb address into slashes', () => {
+      useAppStore.getState().navigateTo('smb://server\\share\\folder\\');
+
+      expect(useAppStore.getState().currentPath).toBe('smb://server/share/folder');
+    });
+
+    it('accepts an smb address written with a backslash authority', () => {
+      useAppStore.getState().navigateTo('smb:\\\\server\\share');
+
+      expect(useAppStore.getState().currentPath).toBe('smb://server/share');
+    });
+
+    it('expands ~ to the home folder', () => {
+      useAppStore.setState({ homeDir: '/Users/me' });
+
+      useAppStore.getState().navigateTo('~');
+      expect(useAppStore.getState().currentPath).toBe('/Users/me');
+
+      useAppStore.getState().navigateTo('~/Documents');
+      expect(useAppStore.getState().currentPath).toBe('/Users/me/Documents');
+    });
+
+    it('leaves ~other alone', () => {
+      useAppStore.setState({ homeDir: '/Users/me' });
+
+      useAppStore.getState().navigateTo('~other/x');
+
+      expect(useAppStore.getState().currentPath).toBe('~other/x');
+    });
+
+    it('keeps a share path native on Windows', () => {
+      vi.mocked(getPlatform).mockReturnValueOnce({ isMac: false, isWindows: true, isLinux: false });
+
+      useAppStore.getState().navigateTo('\\\\server\\share');
+
+      expect(useAppStore.getState().currentPath).toBe('//server/share');
+    });
+
+    it('drops a user name and password from a typed smb address', () => {
+      useAppStore.getState().navigateTo('smb://user:secret@server/share');
+
+      expect(useAppStore.getState().currentPath).toBe('smb://server/share');
     });
   });
 

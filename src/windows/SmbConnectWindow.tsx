@@ -5,6 +5,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { CircleNotch, ShareNetwork, CheckCircle, X } from 'phosphor-react';
 import type { SmbConnectInitPayload, SmbConnectSuccessPayload, SmbServerInfo } from '@/types';
 import { SMB_CONNECT_INIT_EVENT, SMB_CONNECT_SUCCESS_EVENT } from '@/utils/events';
+import { smbServerAndFolders } from '@/utils/pathUtils';
 import { WINDOW_CONTENT_TOP_PADDING } from '@/windows/windowLayout';
 
 export default function SmbConnectWindow() {
@@ -93,7 +94,9 @@ export default function SmbConnectWindow() {
   const handleSubmit = useCallback(async () => {
     setError(undefined);
 
-    if (!hostname.trim()) {
+    // A pasted address (\\server\share\folder or smb://server/share/folder) names the server first.
+    const [host, ...folders] = smbServerAndFolders(hostname.trim()).split('/');
+    if (!host) {
       setError('Server hostname is required.');
       return;
     }
@@ -109,7 +112,7 @@ export default function SmbConnectWindow() {
     setIsConnecting(true);
     try {
       const server = await invoke<SmbServerInfo>('add_smb_server', {
-        hostname: hostname.trim(),
+        hostname: host,
         username: username.trim(),
         password,
         domain: domain.trim() || undefined,
@@ -117,7 +120,7 @@ export default function SmbConnectWindow() {
 
       const payload: SmbConnectSuccessPayload = {
         hostname: server.hostname,
-        targetPath: targetPath || `smb://${server.hostname}/`,
+        targetPath: targetPath || `smb://${server.hostname}/${folders.join('/')}`,
       };
 
       setConnected(true);
@@ -185,7 +188,7 @@ export default function SmbConnectWindow() {
               type="text"
               value={hostname}
               onChange={(e) => setHostname(e.target.value)}
-              placeholder="server.local or 192.168.1.100"
+              placeholder="server.local or \\server\share"
               className="w-full px-3 py-2 text-sm bg-app-gray border border-app-border rounded-md focus:outline-none focus:ring-2 focus:ring-accent/50 focus:border-accent disabled:opacity-70"
               disabled={isConnecting || hostnameLocked}
               autoComplete="off"

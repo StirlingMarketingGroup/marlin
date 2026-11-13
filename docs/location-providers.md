@@ -75,7 +75,7 @@ Same-scheme pairs go through the provider's own `copy`. Anything from an `archiv
 
 **7. Only local folders refresh on their own.** `supports_watching` is true for `file` alone.
 
-**8. Scheme checks are spread across the frontend.** `useAppStore.ts`, `Sidebar.tsx`, `App.tsx`, `FileGrid.tsx`, `FileList.tsx`, `ContextMenu.tsx`, `StatusBar.tsx`, `MainPanel.tsx`, and `useThumbnail.ts` all test for scheme prefixes.
+**8. Scheme checks are spread across the frontend.** `useAppStore.ts`, `Sidebar.tsx`, `App.tsx`, `FileGrid.tsx`, `FileList.tsx`, `ContextMenu.tsx`, `StatusBar.tsx`, `MainPanel.tsx`, `useThumbnail.ts`, and `utils/pathUtils.ts` all test for scheme prefixes.
 
 ## Where this is going
 
