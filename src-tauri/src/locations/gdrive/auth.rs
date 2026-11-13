@@ -1,4 +1,5 @@
 use chrono::{DateTime, Duration, Utc};
+use marlin_gdrive::{keyring_entry, OAuthClient, SavedSignIn, SignInError};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -13,18 +14,6 @@ use yup_oauth2::{
     ServiceAccountAuthenticator, ServiceAccountKey,
 };
 
-/// Google API OAuth credentials embedded at build time when available.
-/// These remain as a fallback, but runtime sources are preferred so refresh
-/// can keep working even if the current binary was built without them.
-const CLIENT_ID: &str = match option_env!("GOOGLE_CLIENT_ID") {
-    Some(id) => id,
-    None => "",
-};
-const CLIENT_SECRET: &str = match option_env!("GOOGLE_CLIENT_SECRET") {
-    Some(secret) => secret,
-    None => "",
-};
-
 /// Scopes needed for Google Drive access
 const SCOPES: &[&str] = &[
     "https://www.googleapis.com/auth/drive",
@@ -33,9 +22,6 @@ const SCOPES: &[&str] = &[
 
 /// Environment variable for service account key file path
 const SERVICE_ACCOUNT_KEY_FILE_ENV: &str = "GOOGLE_SERVICE_ACCOUNT_KEY_FILE";
-const GOOGLE_CLIENT_ID_ENV: &str = "GOOGLE_CLIENT_ID";
-const GOOGLE_CLIENT_SECRET_ENV: &str = "GOOGLE_CLIENT_SECRET";
-const GOOGLE_CREDENTIALS_FILE_NAME: &str = "google-credentials.json";
 
 /// Cached service account key (loaded once from environment)
 static SERVICE_ACCOUNT_KEY: Lazy<Option<ServiceAccountKey>> =
@@ -67,183 +53,6 @@ pub fn is_service_account_email(email: &str) -> bool {
     get_service_account_email().map_or(false, |sa_email| sa_email == email)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct OAuthCredentials {
-    client_id: String,
-    client_secret: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct OAuthCredentialsFile {
-    installed: Option<OAuthClientSecret>,
-    web: Option<OAuthClientSecret>,
-    client_id: Option<String>,
-    client_secret: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OAuthClientSecret {
-    client_id: String,
-    client_secret: String,
-}
-
-fn normalize_secret(value: Option<String>) -> Option<String> {
-    value.and_then(|value| {
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        }
-    })
-}
-
-fn oauth_credentials_error() -> String {
-    format!(
-        "Google OAuth credentials not configured. Set {} and {} or provide {}.",
-        GOOGLE_CLIENT_ID_ENV, GOOGLE_CLIENT_SECRET_ENV, GOOGLE_CREDENTIALS_FILE_NAME
-    )
-}
-
-fn oauth_from_pair(
-    client_id: Option<String>,
-    client_secret: Option<String>,
-    source: &str,
-) -> Result<OAuthCredentials, String> {
-    let client_id = normalize_secret(client_id);
-    let client_secret = normalize_secret(client_secret);
-
-    match (client_id, client_secret) {
-        (Some(client_id), Some(client_secret)) => Ok(OAuthCredentials {
-            client_id,
-            client_secret,
-        }),
-        (Some(_), None) | (None, Some(_)) => Err(format!(
-            "{} is missing part of the OAuth client secret",
-            source
-        )),
-        (None, None) => Err(format!("{} not configured", source)),
-    }
-}
-
-fn load_oauth_credentials_from_file(path: &Path) -> Result<OAuthCredentials, String> {
-    let contents = fs::read_to_string(path)
-        .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
-    let parsed: OAuthCredentialsFile = serde_json::from_str(&contents)
-        .map_err(|e| format!("Failed to parse {}: {}", path.display(), e))?;
-
-    if let Some(installed) = parsed.installed {
-        return oauth_from_pair(
-            Some(installed.client_id),
-            Some(installed.client_secret),
-            &format!("OAuth credentials file {}", path.display()),
-        );
-    }
-
-    if let Some(web) = parsed.web {
-        return oauth_from_pair(
-            Some(web.client_id),
-            Some(web.client_secret),
-            &format!("OAuth credentials file {}", path.display()),
-        );
-    }
-
-    oauth_from_pair(
-        parsed.client_id,
-        parsed.client_secret,
-        &format!("OAuth credentials file {}", path.display()),
-    )
-}
-
-fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
-    if !paths.iter().any(|existing| existing == &path) {
-        paths.push(path);
-    }
-}
-
-fn oauth_credentials_candidate_paths() -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-
-    if let Some(config_dir) = dirs::config_dir() {
-        push_unique_path(
-            &mut paths,
-            config_dir.join("marlin").join(GOOGLE_CREDENTIALS_FILE_NAME),
-        );
-    }
-
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            push_unique_path(&mut paths, exe_dir.join(GOOGLE_CREDENTIALS_FILE_NAME));
-            push_unique_path(
-                &mut paths,
-                exe_dir
-                    .join("../Resources")
-                    .join(GOOGLE_CREDENTIALS_FILE_NAME),
-            );
-        }
-    }
-
-    #[cfg(debug_assertions)]
-    {
-        if let Ok(current_dir) = std::env::current_dir() {
-            push_unique_path(&mut paths, current_dir.join(GOOGLE_CREDENTIALS_FILE_NAME));
-            push_unique_path(
-                &mut paths,
-                current_dir
-                    .join("src-tauri")
-                    .join(GOOGLE_CREDENTIALS_FILE_NAME),
-            );
-        }
-
-        push_unique_path(
-            &mut paths,
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(GOOGLE_CREDENTIALS_FILE_NAME),
-        );
-    }
-
-    paths
-}
-
-fn load_oauth_credentials() -> Result<OAuthCredentials, String> {
-    if let Ok(credentials) = oauth_from_pair(
-        std::env::var(GOOGLE_CLIENT_ID_ENV).ok(),
-        std::env::var(GOOGLE_CLIENT_SECRET_ENV).ok(),
-        "runtime environment variables",
-    ) {
-        return Ok(credentials);
-    }
-
-    if let Ok(credentials) = oauth_from_pair(
-        Some(CLIENT_ID.to_string()),
-        Some(CLIENT_SECRET.to_string()),
-        "build-time environment variables",
-    ) {
-        return Ok(credentials);
-    }
-
-    let mut file_errors = Vec::new();
-    for path in oauth_credentials_candidate_paths() {
-        if !path.exists() {
-            continue;
-        }
-
-        match load_oauth_credentials_from_file(&path) {
-            Ok(credentials) => return Ok(credentials),
-            Err(error) => file_errors.push(error),
-        }
-    }
-
-    if file_errors.is_empty() {
-        Err(oauth_credentials_error())
-    } else {
-        Err(format!(
-            "{} Tried credential files: {}",
-            oauth_credentials_error(),
-            file_errors.join(" | ")
-        ))
-    }
-}
-
 /// Information about a connected Google account
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -259,21 +68,13 @@ struct AccountStorage {
     accounts: Vec<GoogleAccountInfo>,
 }
 
-/// What this process knows about an account's tokens. The access token lives only here.
-struct AccountTokens {
-    refresh_token: String,
-    /// The access token and when it expires. `None` until a refresh has worked in this run.
-    access: Option<(String, DateTime<Utc>)>,
-}
-
 // Two locks own all Google account state. `TOKENS` covers the keychain entries and the
 // tokens in memory. `ACCOUNTS_CACHE` covers the accounts file and its cached copy.
 // Take `TOKENS` first, then `ACCOUNTS_CACHE`, and never hold `ACCOUNTS_CACHE` across an `.await`.
 
-/// Held across the keychain read and the refresh request, so calls that arrive together
-/// cause one of each. macOS can ask the user on every keychain read.
-static TOKENS: Lazy<Mutex<HashMap<String, AccountTokens>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+/// Held across `valid_token`, so a sign-in or a removal never runs during a refresh.
+/// `SavedSignIn` itself makes calls that arrive together cause one keychain read and one request.
+static TOKENS: Lazy<Mutex<HashMap<String, SavedSignIn>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
 /// In-memory cache of accounts
 static ACCOUNTS_CACHE: Lazy<StdMutex<Option<Vec<GoogleAccountInfo>>>> =
@@ -300,13 +101,6 @@ fn get_accounts_path() -> Result<PathBuf, String> {
     }
 
     Ok(marlin_dir.join("gdrive-accounts.json"))
-}
-
-const GDRIVE_KEYRING_SERVICE: &str = "marlin-gdrive";
-
-fn keyring_entry(email: &str) -> Result<keyring::Entry, String> {
-    keyring::Entry::new(GDRIVE_KEYRING_SERVICE, email)
-        .map_err(|e| format!("Failed to create keyring entry: {}", e))
 }
 
 fn set_refresh_token(email: &str, refresh_token: &str) -> Result<(), String> {
@@ -506,7 +300,7 @@ impl TokenStorage for SignInTokens {
 /// Signs in to a Google account in the browser. Adds the account, or updates it when it is already listed.
 /// `login_hint` is the email the user is expected to pick.
 pub async fn add_google_account(login_hint: Option<String>) -> Result<GoogleAccountInfo, String> {
-    let oauth_credentials = load_oauth_credentials()?;
+    let client = OAuthClient::load()?;
 
     // One sign-in at a time. A second one fails at once, so it never waits on a browser tab the user closed.
     let _guard = AUTH_MUTEX.try_lock().map_err(|_| {
@@ -517,10 +311,10 @@ pub async fn add_google_account(login_hint: Option<String>) -> Result<GoogleAcco
     log::info!("Starting Google OAuth flow...");
 
     let secret = ApplicationSecret {
-        client_id: oauth_credentials.client_id,
-        client_secret: oauth_credentials.client_secret,
+        client_id: client.client_id.clone(),
+        client_secret: client.client_secret.clone(),
         auth_uri: "https://accounts.google.com/o/oauth2/auth".to_string(),
-        token_uri: "https://oauth2.googleapis.com/token".to_string(),
+        token_uri: client.token_uri.clone(),
         redirect_uris: vec![
             "http://127.0.0.1".to_string(),
             "http://localhost".to_string(),
@@ -614,10 +408,13 @@ pub async fn add_google_account(login_hint: Option<String>) -> Result<GoogleAcco
     *cache = Some(accounts);
     tokens.insert(
         user_info.email.clone(),
-        AccountTokens {
+        SavedSignIn::signed_in(
+            &user_info.email,
+            client,
             refresh_token,
-            access: Some((access_token, expires_at)),
-        },
+            access_token,
+            expires_at.into(),
+        ),
     );
     log::info!("Account cache updated, returning user info");
 
@@ -692,182 +489,44 @@ pub async fn ensure_valid_token(email: &str) -> Result<String, String> {
     }
 
     let mut tokens = TOKENS.lock().await;
-    let refresh_token = match tokens.get(email) {
-        Some(AccountTokens {
-            access: Some((access_token, expires_at)),
-            ..
-        }) if *expires_at > Utc::now() + Duration::minutes(5) => {
-            return Ok(access_token.clone());
+    if !tokens.contains_key(email) {
+        // Listing the accounts moves an older file's tokens into the keychain first.
+        let accounts = get_google_accounts()?;
+        if !accounts.iter().any(|account| account.email == email) {
+            return Err(format!("Account not found: {}", email));
         }
-        Some(kept) => kept.refresh_token.clone(),
-        None => {
-            // Listing the accounts moves an older file's tokens into the keychain first.
-            let accounts = get_google_accounts()?;
-            if !accounts.iter().any(|account| account.email == email) {
-                return Err(format!("Account not found: {}", email));
-            }
-            let refresh_token = keyring_entry(email)?.get_password().map_err(|e| match e {
-                keyring::Error::NoEntry => format!(
-                    "{} No Google sign-in is stored for {}. Open a folder in this account to sign in again.",
-                    SIGN_IN_NEEDED, email
-                ),
-                e => format!("Failed to read Google sign-in from keychain: {}", e),
-            })?;
-            tokens.insert(
-                email.to_string(),
-                AccountTokens {
-                    refresh_token: refresh_token.clone(),
-                    access: None,
-                },
-            );
-            refresh_token
-        }
-    };
-
-    let oauth_credentials = load_oauth_credentials()?;
-    let client = reqwest::Client::new();
-
-    let response = client
-        .post("https://oauth2.googleapis.com/token")
-        .form(&[
-            ("client_id", oauth_credentials.client_id.as_str()),
-            ("client_secret", oauth_credentials.client_secret.as_str()),
-            ("refresh_token", refresh_token.as_str()),
-            ("grant_type", "refresh_token"),
-        ])
-        // `TOKENS` stays locked while this runs.
-        .timeout(std::time::Duration::from_secs(30))
-        .send()
-        .await
-        .map_err(|e| format!("Failed to refresh token: {}", e))?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        // Google's `error` code (`invalid_grant`, `invalid_client`) holds no token.
-        #[derive(Deserialize)]
-        struct RefreshError {
-            error: String,
-        }
-        let reason = response
-            .json::<RefreshError>()
-            .await
-            .map(|body| body.error)
-            .unwrap_or_default();
-        log::error!("Token refresh failed with status {}: {}", status, reason);
-        if reason == "invalid_grant" {
-            return Err(format!(
-                "{} Google no longer accepts the saved sign-in for {}. Open a folder in this account to sign in again.",
-                SIGN_IN_NEEDED, email
-            ));
-        }
-        return Err(format!("Token refresh failed (status {}).", status));
+        tokens.insert(
+            email.to_string(),
+            SavedSignIn::new(email, OAuthClient::load()?),
+        );
     }
 
-    #[derive(Deserialize)]
-    struct TokenResponse {
-        access_token: String,
-        expires_in: i64,
-        #[serde(default)]
-        refresh_token: Option<String>,
-    }
-
-    let token_response: TokenResponse = response
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse token response: {}", e))?;
-
-    let mut refresh_token = refresh_token;
-    if let Some(new_refresh_token) = token_response.refresh_token {
-        if new_refresh_token != refresh_token {
-            // The refresh worked, so a failed keychain write must not fail the call.
-            if let Err(e) = set_refresh_token(email, &new_refresh_token) {
-                log::warn!("{}", e);
-            }
-            refresh_token = new_refresh_token;
+    tokens[email].valid_token().await.map_err(|error| match error {
+        SignInError::NoSavedSignIn => format!(
+            "{} No Google sign-in is stored for {}. Open a folder in this account to sign in again.",
+            SIGN_IN_NEEDED, email
+        ),
+        SignInError::Rejected => format!(
+            "{} Google no longer accepts the saved sign-in for {}. Open a folder in this account to sign in again.",
+            SIGN_IN_NEEDED, email
+        ),
+        SignInError::Offline(error) => format!("Failed to refresh token: {}", error),
+        SignInError::Other(error) => {
+            log::error!("{}", error);
+            error
         }
-    }
-
-    tokens.insert(
-        email.to_string(),
-        AccountTokens {
-            refresh_token,
-            access: Some((
-                token_response.access_token.clone(),
-                Utc::now() + Duration::seconds(token_response.expires_in),
-            )),
-        },
-    );
-
-    Ok(token_response.access_token)
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        delete_refresh_token, load_oauth_credentials_from_file, oauth_from_pair,
-        read_accounts_file_moving_tokens, write_accounts_file, GoogleAccountInfo, OAuthCredentials,
-        GDRIVE_KEYRING_SERVICE, GOOGLE_CLIENT_ID_ENV, GOOGLE_CLIENT_SECRET_ENV,
+        delete_refresh_token, read_accounts_file_moving_tokens, write_accounts_file,
+        GoogleAccountInfo,
     };
-    use crate::locations::test_keychain;
+    use marlin_gdrive::KEYRING_SERVICE;
+    use marlin_test_keychain as test_keychain;
     use std::fs;
-
-    #[test]
-    fn oauth_from_pair_rejects_partial_credentials() {
-        let result = oauth_from_pair(Some("client".into()), None, "test");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn loads_google_credentials_json_installed_shape() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let path = temp_dir.path().join("google-credentials.json");
-        fs::write(
-            &path,
-            r#"{
-              "installed": {
-                "client_id": "client-id.apps.googleusercontent.com",
-                "client_secret": "client-secret"
-              }
-            }"#,
-        )
-        .unwrap();
-
-        let credentials = load_oauth_credentials_from_file(&path).unwrap();
-        assert_eq!(
-            credentials.client_id,
-            "client-id.apps.googleusercontent.com"
-        );
-        assert_eq!(credentials.client_secret, "client-secret");
-    }
-
-    #[test]
-    fn loads_google_credentials_json_flat_shape() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let path = temp_dir.path().join("google-credentials.json");
-        fs::write(
-            &path,
-            r#"{
-              "client_id": "flat-client-id",
-              "client_secret": "flat-client-secret"
-            }"#,
-        )
-        .unwrap();
-
-        let credentials = load_oauth_credentials_from_file(&path).unwrap();
-        assert_eq!(
-            credentials,
-            OAuthCredentials {
-                client_id: "flat-client-id".into(),
-                client_secret: "flat-client-secret".into(),
-            }
-        );
-    }
-
-    #[test]
-    fn runtime_env_var_names_remain_stable() {
-        assert_eq!(GOOGLE_CLIENT_ID_ENV, "GOOGLE_CLIENT_ID");
-        assert_eq!(GOOGLE_CLIENT_SECRET_ENV, "GOOGLE_CLIENT_SECRET");
-    }
 
     #[test]
     fn read_accounts_file_moves_tokens_to_the_keychain() {
@@ -922,11 +581,11 @@ mod tests {
             Some("https://example.com/bea.png")
         );
         assert_eq!(
-            test_keychain::get(GDRIVE_KEYRING_SERVICE, ada).as_deref(),
+            test_keychain::get(KEYRING_SERVICE, ada).as_deref(),
             Some(refresh_ada)
         );
         assert_eq!(
-            test_keychain::get(GDRIVE_KEYRING_SERVICE, bea).as_deref(),
+            test_keychain::get(KEYRING_SERVICE, bea).as_deref(),
             Some(refresh_bea)
         );
 
@@ -956,7 +615,7 @@ mod tests {
             r#"{{"accounts":[{{"email":"{email}","displayName":"Fail","photoUrl":null,"accessToken":"access-fail","refreshToken":"refresh-fail","expiresAt":"2020-01-01T00:00:00Z"}}]}}"#
         );
         fs::write(&path, &original).unwrap();
-        test_keychain::fail_writes_for(GDRIVE_KEYRING_SERVICE, email);
+        test_keychain::fail_writes_for(KEYRING_SERVICE, email);
 
         let err = read_accounts_file_moving_tokens(&path).unwrap_err();
         assert!(
@@ -996,7 +655,7 @@ mod tests {
         assert_eq!(accounts[0].display_name.as_deref(), Some("Access"));
         let rewritten = fs::read_to_string(&path).unwrap();
         assert!(!rewritten.contains(access_token), "{rewritten}");
-        assert!(test_keychain::get(GDRIVE_KEYRING_SERVICE, email).is_none());
+        assert!(test_keychain::get(KEYRING_SERVICE, email).is_none());
     }
 
     #[test]
@@ -1018,10 +677,10 @@ mod tests {
     fn delete_refresh_token_ignores_a_missing_entry() {
         test_keychain::install();
         let email = "delete-twice@example.com";
-        test_keychain::set(GDRIVE_KEYRING_SERVICE, email, "secret");
+        test_keychain::set(KEYRING_SERVICE, email, "secret");
 
         delete_refresh_token(email).unwrap();
-        assert!(test_keychain::get(GDRIVE_KEYRING_SERVICE, email).is_none());
+        assert!(test_keychain::get(KEYRING_SERVICE, email).is_none());
         delete_refresh_token(email).unwrap();
     }
 

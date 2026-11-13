@@ -14,9 +14,6 @@ pub mod sftp;
 #[cfg(not(target_os = "windows"))]
 pub mod smb;
 
-#[cfg(test)]
-pub(crate) mod test_keychain;
-
 pub use archive::ArchiveProvider;
 pub use file::FileSystemProvider;
 pub use gdrive::GoogleDriveProvider;
