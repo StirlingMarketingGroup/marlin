@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use marlin_vfs::{Options, Provider, Vfs, VfsError};
 
 use crate::log::{self, redact};
-use crate::protocol::{error_codes, MountState, MountStatus, RpcError};
+use crate::protocol::{error_codes, DeadMount, MountState, MountStatus, RpcError};
 
 /// What an OS adapter gives the helper. `marlin-fuse` is the Linux one. Issues #373 and #375 add the others.
 #[async_trait::async_trait]
@@ -21,6 +21,12 @@ pub trait Adapter: Send + Sync + 'static {
         vfs: Arc<Vfs>,
         mount_point: &Path,
     ) -> Result<Box<dyn Session>, MountError>;
+
+    /// Whether a dead mount is at `mount_point`: one whose server was killed, so the OS still lists it and a listing of it fails. A live mount, a plain folder, a symbolic link, and a path that is not there are not dead mounts.
+    async fn is_dead_mount(&self, mount_point: &Path) -> bool;
+
+    /// Unmounts the dead mount at `mount_point`. The folder itself stays. Fails with [`MountError::DeadMount`] when the dead mount is still there.
+    async fn unmount_dead(&self, mount_point: &Path) -> Result<(), MountError>;
 }
 
 /// One live mount.
@@ -49,6 +55,7 @@ pub enum MountError {
     Provider(String),
     Adapter(String),
     Unmount(String),
+    DeadMount(String),
     Io(String),
     ShuttingDown,
 }
@@ -62,9 +69,11 @@ impl fmt::Display for MountError {
                 f.write_str("the mount point exists and is not an empty folder")
             }
             Self::UnknownProvider => f.write_str("unknown provider"),
-            Self::Provider(text) | Self::Adapter(text) | Self::Unmount(text) | Self::Io(text) => {
-                f.write_str(&redact(text))
-            }
+            Self::Provider(text)
+            | Self::Adapter(text)
+            | Self::Unmount(text)
+            | Self::DeadMount(text)
+            | Self::Io(text) => f.write_str(&redact(text)),
             Self::ShuttingDown => f.write_str("the helper is shutting down"),
         }
     }
@@ -90,6 +99,7 @@ impl From<MountError> for RpcError {
                 MountError::Provider(_) => error_codes::PROVIDER,
                 MountError::Adapter(_) => error_codes::ADAPTER,
                 MountError::Unmount(_) => error_codes::UNMOUNT,
+                MountError::DeadMount(_) => error_codes::DEAD_MOUNT,
                 MountError::Io(_) => error_codes::IO,
                 MountError::ShuttingDown => error_codes::SHUTTING_DOWN,
             },
@@ -180,6 +190,56 @@ impl Mounts {
         self.events.subscribe()
     }
 
+    /// The real folders in the mount folder. The type comes from the mount folder's own listing, so a symbolic link is never handed to the adapter or removed.
+    fn folders(&self) -> Vec<PathBuf> {
+        // No mount folder yet means nothing was ever mounted.
+        let Ok(found) = std::fs::read_dir(&self.root) else {
+            return Vec::new();
+        };
+        found
+            .flatten()
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            .map(|entry| entry.path())
+            .collect()
+    }
+
+    /// Every dead mount under the mount folder right now, sorted by name. After the sweep, these are the ones it could not clear.
+    pub async fn dead_mounts(&self) -> Vec<DeadMount> {
+        let mut dead = Vec::new();
+        for mount_point in self.folders() {
+            if self.adapter.is_dead_mount(&mount_point).await {
+                dead.push(DeadMount {
+                    name: mount_point
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned(),
+                    mount_point: mount_point.display().to_string(),
+                });
+            }
+        }
+        dead.sort_by(|a, b| a.name.cmp(&b.name));
+        dead
+    }
+
+    /// Clears what a killed helper left under the mount folder: dead mounts and empty folders. The server runs this once, before it takes a request, so no mount of this helper exists yet.
+    pub async fn sweep(&self) {
+        for mount_point in self.folders() {
+            if self.adapter.is_dead_mount(&mount_point).await {
+                if let Err(error) = self.adapter.unmount_dead(&mount_point).await {
+                    log::write(
+                        "error",
+                        "helper.dead_mount",
+                        serde_json::json!({"mountPoint": mount_point.display().to_string(), "message": error.to_string()}),
+                    );
+                    continue;
+                }
+            }
+            // An empty folder here is the helper's to remove. This fails, and changes nothing, on a folder with something in it and on a live mount.
+            let _ = std::fs::remove_dir(&mount_point);
+        }
+    }
+
     /// Mounts an account at `root/name` and returns once the OS shows it. The caller built `name` once and stores it with the account, so the helper checks it and never invents one.
     pub async fn mount(
         self: &Arc<Self>,
@@ -239,6 +299,10 @@ impl Mounts {
             // The provider comes first, so a mount it refuses leaves no folder behind.
             let provider = self.providers.open(provider, account).await?;
             std::fs::create_dir_all(&self.root)?;
+            // A dead mount can still be here: one the sweep could not clear, or one left after the helper started. This comes before the checks below because they fail on a dead mount, the first of them included, with an error that says nothing.
+            if self.adapter.is_dead_mount(&mount_point).await {
+                self.adapter.unmount_dead(&mount_point).await?;
+            }
             // This protects the user's own files from a mistake. It is no defense against another process of the same user, which can already do all the helper can.
             match std::fs::symlink_metadata(&mount_point) {
                 Err(error) if error.kind() == ErrorKind::NotFound => {

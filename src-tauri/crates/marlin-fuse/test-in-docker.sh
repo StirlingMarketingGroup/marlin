@@ -3,7 +3,8 @@
 # A non-root user mounts through the setuid fusermount3.
 set -euo pipefail
 
-src=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+# The repo root: the sweep script builds spikes/mount-hello.
+src=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 
 docker run --rm \
   --device /dev/fuse \
@@ -22,7 +23,7 @@ useradd -m tester
 chown tester /usr/local/cargo/registry /target
 cat > /tmp/as-tester.sh << 'TEST'
 set -euo pipefail
-cd /src
+cd /src/src-tauri
 export CARGO_TARGET_DIR=/target
 echo "=== environment ==="
 id
@@ -31,6 +32,7 @@ fusermount3 --version
 # marlin-mount is here because its Linux half, the wiring to this adapter, is compiled out on a Mac.
 # One test at a time: see the note at the top of tests/mount.rs.
 cargo test --locked -p marlin-fuse -p marlin-mount -- --include-ignored --test-threads=1
+bash crates/marlin-mount/test-sweep.sh
 TEST
 chmod 755 /tmp/as-tester.sh
 su -s /bin/bash tester -c 'bash /tmp/as-tester.sh'

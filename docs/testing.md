@@ -2,8 +2,8 @@
 
 Marlin has static checks and seven test suites. CI runs the static checks, the unit tests, and the end-to-end tests. CI does not run the Rust tests yet (issue #462), so run them yourself when you change Rust.
 
-**Covers:** `vitest.config.ts`, `src/test-setup.ts`, `playwright.config.ts`, `e2e/`, `.github/workflows/check.yml`, `.husky/pre-push`, `src-tauri/tests/`, `src-tauri/crates/marlin-smb/tests/`, `src-tauri/crates/marlin-vfs/tests/`, `src-tauri/crates/marlin-mount/tests/`, `src-tauri/crates/marlin-fuse/tests/`
-**Checked against the code:** 2026-11-12
+**Covers:** `vitest.config.ts`, `src/test-setup.ts`, `playwright.config.ts`, `e2e/`, `.github/workflows/check.yml`, `.husky/pre-push`, `src-tauri/tests/`, `src-tauri/crates/marlin-smb/tests/`, `src-tauri/crates/marlin-vfs/tests/`, `src-tauri/crates/marlin-mount/tests/`, `src-tauri/crates/marlin-mount/test-sweep.sh`, `src-tauri/crates/marlin-fuse/tests/`
+**Checked against the code:** 2026-11-13
 
 ## The suites
 
@@ -42,7 +42,8 @@ CI skips a job when the files it covers did not change (`check.yml` uses path fi
 - Unit tests sit in `#[cfg(test)]` modules inside the source files, mostly in `locations/` and `thumbnails/`. The SFTP host key test in `locations/sftp/pool.rs` starts an SSH server inside the test process on a free local port.
 - `cargo test -p marlin-vfs` runs the mount core's tests. A plain `cargo test` does not include them. They run on an in-memory provider and need nothing installed. See [Mount core](mount-core.md).
 - `cargo test -p marlin-mount` runs the mount helper's tests. A plain `cargo test` does not include them. They talk to the helper over a real socket in a temporary folder, with a fake adapter, and need nothing installed. See [Mount helper](mount-helper.md).
-- `src-tauri/crates/marlin-fuse/test-in-docker.sh` runs the Linux mount adapter's tests in a container: unit tests, and tests that mount an in-memory provider through FUSE. On a Mac the crate compiles to nothing, so `cargo test -p marlin-fuse` runs no test there. See [Linux mount adapter](mount-linux.md).
+- `src-tauri/crates/marlin-mount/test-sweep.sh` checks the helper against a real dead mount. It needs a Mac with macFUSE, or Linux with `fuse3`. No `cargo test` covers the real unmount of a dead mount, so run it when you change that code. See [Mount helper](mount-helper.md).
+- `src-tauri/crates/marlin-fuse/test-in-docker.sh` runs the Linux mount adapter's tests in a container: unit tests, tests that mount an in-memory provider through FUSE, and `test-sweep.sh`. On a Mac the crate compiles to nothing, so `cargo test -p marlin-fuse` runs no test there. See [Linux mount adapter](mount-linux.md).
 - `cargo test -p marlin-smb` runs the SMB helper's test. It starts the built helper, sends a `ping`, and checks the reply and a clean exit. It needs samba installed, and CI does not run it.
 - `src-tauri/tests/smb_integration.rs` holds manual tests that need a real SMB server. They are marked `#[ignore]`. The file's header lists the environment variables and the command to run them.
 

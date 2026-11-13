@@ -1,6 +1,6 @@
 #![cfg(unix)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -38,6 +38,12 @@ struct Fake {
     /// While true, every unmount call fails.
     fail_unmount: AtomicBool,
 
+    /// Mount points the fake treats as dead mounts.
+    dead: Mutex<HashSet<PathBuf>>,
+
+    /// While true, a dead mount cannot be cleared.
+    stuck: AtomicBool,
+
     /// Each mount's core, keyed by the mount folder's name. A test makes a provider call through it.
     vfs: Mutex<HashMap<String, Arc<Vfs>>>,
 
@@ -71,6 +77,18 @@ impl Adapter for FakeAdapter {
             Some(error) => Err(error),
             None => Ok(Box::new(FakeSession(Arc::clone(&self.0)))),
         }
+    }
+
+    async fn is_dead_mount(&self, mount_point: &Path) -> bool {
+        self.0.dead.lock().unwrap().contains(mount_point)
+    }
+
+    async fn unmount_dead(&self, mount_point: &Path) -> Result<(), MountError> {
+        if self.0.stuck.load(Ordering::SeqCst) {
+            return Err(MountError::DeadMount("busy".into()));
+        }
+        self.0.dead.lock().unwrap().remove(mount_point);
+        Ok(())
     }
 }
 
@@ -191,10 +209,16 @@ struct Harness {
 }
 
 fn start() -> Harness {
+    start_after(|_, _| {})
+}
+
+fn start_after(prepare: impl FnOnce(&Path, &Fake)) -> Harness {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("mount.sock");
     let root = dir.path().join("Marlin");
-    let fake = Arc::new(Fake::default());
+    let fake = Fake::default();
+    prepare(&root, &fake);
+    let fake = Arc::new(fake);
     let server = Server::bind(
         Config {
             socket: socket.clone(),
@@ -932,5 +956,87 @@ async fn a_call_from_an_earlier_mount_of_the_account_changes_nothing() {
     assert_eq!(
         client.call("status", account("ana")).await["result"]["state"],
         "mounted"
+    );
+}
+
+#[tokio::test]
+async fn the_sweep_clears_dead_mounts_and_empty_folders_and_leaves_the_rest() {
+    let harness = start_after(|root, fake| {
+        std::fs::create_dir_all(root).unwrap();
+        let dead = root.join("dead");
+        std::fs::create_dir(&dead).unwrap();
+        std::fs::create_dir(root.join("empty")).unwrap();
+        std::fs::create_dir(root.join("files")).unwrap();
+        std::fs::write(root.join("files").join("keep.txt"), b"keep").unwrap();
+        std::fs::write(root.join("note.txt"), b"note").unwrap();
+        let outside = root.parent().unwrap().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        let mut dead_set = fake.dead.lock().unwrap();
+        dead_set.insert(dead);
+        dead_set.insert(link);
+    });
+
+    let mut client = Client::connect(&harness.socket).await;
+    assert!(!harness.root.join("dead").exists());
+    assert!(!harness.root.join("empty").exists());
+    assert_eq!(
+        std::fs::read(harness.root.join("files").join("keep.txt")).unwrap(),
+        b"keep"
+    );
+    assert_eq!(
+        std::fs::read(harness.root.join("note.txt")).unwrap(),
+        b"note"
+    );
+    let link = harness.root.join("link");
+    assert!(std::fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert!(std::fs::read_link(&link).unwrap().is_dir());
+    let dead = harness.fake.dead.lock().unwrap();
+    assert_eq!(dead.len(), 1);
+    assert!(dead.contains(&link));
+    drop(dead);
+    assert_eq!(client.call("list", Value::Null).await["result"], json!([]));
+    assert_eq!(
+        client.call("deadMounts", Value::Null).await["result"],
+        json!([])
+    );
+}
+
+#[tokio::test]
+async fn a_dead_mount_that_cannot_be_cleared_is_reported_and_fails_its_mount_until_it_clears() {
+    let harness = start_after(|root, fake| {
+        let drive = root.join("drive");
+        std::fs::create_dir_all(&drive).unwrap();
+        fake.dead.lock().unwrap().insert(drive);
+        fake.stuck.store(true, Ordering::SeqCst);
+    });
+
+    let mut client = Client::connect(&harness.socket).await;
+    let drive = harness.root.join("drive");
+    assert!(drive.is_dir());
+    assert_eq!(
+        client.call("deadMounts", Value::Null).await["result"],
+        json!([{
+            "name": "drive",
+            "mountPoint": drive.display().to_string(),
+        }])
+    );
+    let failed = client.call("mount", mount("ana", "drive")).await;
+    assert_eq!(code(&failed), -1012);
+    let status = client.call("status", account("ana")).await;
+    assert_eq!(status["result"]["state"], "failed");
+    assert_eq!(status["result"]["error"]["code"], -1012);
+    assert_eq!(*harness.fake.mounts.borrow(), 0);
+
+    harness.fake.stuck.store(false, Ordering::SeqCst);
+    let mounted = client.call("mount", mount("ana", "drive")).await;
+    assert_eq!(mounted["result"]["state"], "mounted");
+    assert_eq!(
+        client.call("deadMounts", Value::Null).await["result"],
+        json!([])
     );
 }

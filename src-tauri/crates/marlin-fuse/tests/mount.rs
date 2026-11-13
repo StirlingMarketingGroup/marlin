@@ -395,3 +395,21 @@ async fn dropping_a_mount_detaches_it() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
+
+#[ignore = "needs /dev/fuse and fusermount3: run crates/marlin-fuse/test-in-docker.sh"]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_live_mount_is_not_a_dead_mount() {
+    let provider = Arc::new(MemoryProvider::new());
+    provider.add_file(&provider.root(), "note.txt", b"note");
+    let (dir, point) = empty_dir();
+    let mut mount = marlin_fuse::mount(vfs(provider), &point).await.unwrap();
+
+    assert!(!marlin_fuse::is_dead_mount(&point).await);
+    let link = dir.path().join("link");
+    std::os::unix::fs::symlink(&point, &link).unwrap();
+    assert!(!marlin_fuse::is_dead_mount(&link).await);
+    assert!(mount_line(&point).is_some());
+    assert_eq!(read_file(&point.join("note.txt")).await.unwrap(), b"note");
+
+    mount.unmount().await.unwrap();
+}

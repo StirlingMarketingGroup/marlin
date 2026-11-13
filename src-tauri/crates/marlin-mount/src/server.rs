@@ -124,8 +124,11 @@ impl Server {
 
     /// Serves connections until a `shutdown` request succeeds or `stop` resolves, then removes the socket file.
     ///
+    /// The sweep of the mount folder runs first, before any request is accepted.
+    ///
     /// `stop` is a signal. It is an order to exit, so the helper unmounts what it can and returns even if an unmount failed.
     pub async fn run(self, stop: impl Future<Output = ()>) {
+        self.shared.mounts.sweep().await;
         tokio::select! {
             _ = stop => {
                 if let Err(error) = self.shared.mounts.close().await {
@@ -300,6 +303,7 @@ async fn answer(
             Value::Null
         }
         methods::LIST => json!(mounts.list()),
+        methods::DEAD_MOUNTS => json!(mounts.dead_mounts().await),
         methods::STATUS => {
             let AccountParams { provider, account } =
                 serde_json::from_value(params).map_err(invalid_params)?;

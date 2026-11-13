@@ -31,6 +31,7 @@ The crate is Unix only. A Windows named pipe comes with the Windows adapter (#37
 | The mount folder | `~/Marlin`                                                                                                                                  |
 
 - **One helper per socket.** The default socket path gives each user one helper. The helper takes a lock on `<socket>.lock` and holds it while it lives. A second helper that finds the lock taken logs that and exits with status 0. The OS drops the lock when a process dies, so a crashed helper never blocks the next one. The next one removes the socket file that was left. It removes nothing else: if the socket path holds any other kind of file, the helper fails to start and leaves the file alone.
+- **Starting.** Before it takes a request, the helper clears what a killed helper left in the mount folder: see [Dead mounts](#dead-mounts). A client can connect during that sweep, and its `hello` is answered when the sweep is done.
 - **Open to that user only.** The socket file and the lock file have mode 0600, and the helper drops a connection from any other user ID.
 - **Stopping.** A `shutdown` request unmounts everything, removes the socket file, and exits with status 0. If an unmount fails, it returns -1007 and the helper keeps running. `SIGTERM` and `SIGINT` try every unmount, remove the socket file, and exit with status 0 even if an unmount failed.
 - **Replacing a helper.** After a `shutdown` response, wait for the helper to close the connection before you start another one. The lock is free by then. A helper started earlier finds the lock taken and exits with status 0.
@@ -42,14 +43,15 @@ JSON-RPC 2.0, one JSON object per line, the same framing as `marlin-smb`. Field 
 
 A request is `{jsonrpc, id, method, params?}`. The `id` must be an unsigned integer. A line that does not parse is answered with id 0, so start at 1.
 
-| Method     | Params                      | Result                                                                |
-| ---------- | --------------------------- | --------------------------------------------------------------------- |
-| `hello`    | `{protocol}`                | `{protocol, version}`: the helper's protocol number and version.      |
-| `mount`    | `{provider, account, name}` | The mount's status, once the mount is up. A failed mount is an error. |
-| `unmount`  | `{provider, account}`       | `null`. An account with no mount is a success.                        |
-| `list`     | none                        | Every mount's status, sorted by name.                                 |
-| `status`   | `{provider, account}`       | One mount's status, or `null`.                                        |
-| `shutdown` | none                        | `null`, then the helper exits.                                        |
+| Method       | Params                      | Result                                                                                                   |
+| ------------ | --------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `hello`      | `{protocol}`                | `{protocol, version}`: the helper's protocol number and version.                                         |
+| `mount`      | `{provider, account, name}` | The mount's status, once the mount is up. A failed mount is an error.                                    |
+| `unmount`    | `{provider, account}`       | `null`. An account with no mount is a success.                                                           |
+| `list`       | none                        | Every mount's status, sorted by name.                                                                    |
+| `status`     | `{provider, account}`       | One mount's status, or `null`.                                                                           |
+| `shutdown`   | none                        | `null`, then the helper exits.                                                                           |
+| `deadMounts` | none                        | Every [dead mount](#dead-mounts) in the mount folder right now, as `{name, mountPoint}`, sorted by name. |
 
 A status is `{provider, account, name, mountPoint, state, error?}`. `error` is `{code, message}` and is there only when the state is `failed`.
 
@@ -69,22 +71,23 @@ What a client must know:
 
 **Error codes.**
 
-| Code   | Meaning                                                             |
-| ------ | ------------------------------------------------------------------- |
-| -32700 | The line is not a request.                                          |
-| -32601 | Unknown method.                                                     |
-| -32602 | Wrong params.                                                       |
-| -1001  | The mount name is not one plain folder name.                        |
-| -1002  | Another account's mount has this name, ignoring letter case.        |
-| -1003  | The mount point exists and is not an empty folder.                  |
-| -1004  | Unknown provider.                                                   |
-| -1005  | The provider could not open the account.                            |
-| -1006  | The adapter could not mount.                                        |
-| -1007  | The adapter could not unmount.                                      |
-| -1008  | A folder could not be made or read.                                 |
-| -1009  | The helper is shutting down and takes no new mount.                 |
-| -1010  | `hello` must come first.                                            |
-| -1011  | The protocol versions differ, and the request was not a `shutdown`. |
+| Code   | Meaning                                                                |
+| ------ | ---------------------------------------------------------------------- |
+| -32700 | The line is not a request.                                             |
+| -32601 | Unknown method.                                                        |
+| -32602 | Wrong params.                                                          |
+| -1001  | The mount name is not one plain folder name.                           |
+| -1002  | Another account's mount has this name, ignoring letter case.           |
+| -1003  | The mount point exists and is not an empty folder.                     |
+| -1004  | Unknown provider.                                                      |
+| -1005  | The provider could not open the account.                               |
+| -1006  | The adapter could not mount.                                           |
+| -1007  | The adapter could not unmount.                                         |
+| -1008  | A folder could not be made or read.                                    |
+| -1009  | The helper is shutting down and takes no new mount.                    |
+| -1010  | `hello` must come first.                                               |
+| -1011  | The protocol versions differ, and the request was not a `shutdown`.    |
+| -1012  | A dead mount is at the mount point, and the helper could not clear it. |
 
 The protocol has no `health` request. A helper that answers `hello` is alive, and a machine that cannot mount says why in the error of a `mount`.
 
@@ -113,9 +116,41 @@ Rules the table keeps:
 - **Unmounting twice is safe.**
 - **A failed unmount keeps the mount.** The mount comes back with its current health, and the request gets the error.
 - **An operation finishes even when its client has gone.**
-- **The helper never mounts over anything.** A mount point must be absent or an empty real folder. A file, a folder with something in it, or a symbolic link fails with -1003 and is left as it was. This guards the user's files against a mistake. It is not a defense against another process of the same user.
+- **The helper never mounts over anything.** A mount point must be absent or an empty real folder. A file, a folder with something in it, or a symbolic link fails with -1003 and is left as it was. The one thing the helper clears first is a [dead mount](#dead-mounts). This guards the user's files against a mistake. It is not a defense against another process of the same user.
 - **Folders.** The helper opens the account before it makes any folder, so a mount the provider refuses leaves nothing behind. It makes the mount point with mode 0700. It removes it after an unmount and after a failed mount. It only ever removes an empty folder, and an empty folder at a mount point counts as the helper's own.
-- **Shutdown.** From the moment a shutdown starts, a new `mount` gets -1009. If any unmount fails, `shutdown` returns -1007, the helper keeps running, and it takes mounts again: a mount that is still served must not lose its helper. The mounts that did unmount stay unmounted, so call `list`. A signal is different. It is an order to exit, so the helper unmounts what it can and exits anyway. A mount it could not unmount is then dead, and the start-up sweep (#482) will clear it. On Linux the adapter may detach it as the helper exits instead: see [Linux mount adapter](mount-linux.md).
+- **Shutdown.** From the moment a shutdown starts, a new `mount` gets -1009. If any unmount fails, `shutdown` returns -1007, the helper keeps running, and it takes mounts again: a mount that is still served must not lose its helper. The mounts that did unmount stay unmounted, so call `list`. A signal is different. It is an order to exit, so the helper unmounts what it can and exits anyway. A mount it could not unmount is then dead, and the next helper clears it when it starts: see [Dead mounts](#dead-mounts). On Linux the adapter may detach it as the helper exits instead: see [Linux mount adapter](mount-linux.md).
+
+## Dead mounts
+
+A dead mount is a mount whose server was killed. The OS still lists it, and nothing answers it. A helper that crashes or is killed with `kill -9` leaves one for each mount it served. A restart of the machine clears them all.
+
+| OS      | A listing of a dead mount fails with                 | What clears it                |
+| ------- | ---------------------------------------------------- | ----------------------------- |
+| Linux   | "Transport endpoint is not connected" (`ENOTCONN`)   | `fusermount3 -u -z <folder>`  |
+| macOS   | "Device not configured" (`ENXIO`)                    | `umount -f <folder>`          |
+| Windows | Nothing: the mount folder goes away with the helper. | Nothing. The adapter is #375. |
+
+`stat` proves nothing: on both systems it can still succeed on a dead mount. A plain unmount (`fusermount3 -u`, `umount`) fails with "busy" while any process has its working folder inside, for example a terminal the user left there. So the helper uses the lazy form on Linux and the forced form on macOS. Nothing serves a dead mount, so no open file is lost.
+
+The helper clears dead mounts at two moments:
+
+- **The sweep, when the helper starts.** It looks at each real folder in the mount folder. It unmounts a dead mount, then removes the folder if it is empty. A folder that holds anything, a file, a symbolic link, and a live mount are left as they were. It never deletes anything but an empty folder.
+- **A `mount` request.** If a dead mount is at the mount point, the helper unmounts it and then mounts. The provider is opened first, so a provider error (-1004, -1005) comes before this.
+
+**A dead mount the helper cannot clear** does not stop the helper. It shows in three places:
+
+- `deadMounts` lists it. The request looks at the mount folder each time, so a mount leaves the list once it is cleared.
+- A `mount` at that folder fails with -1012 and leaves a `failed` entry. The next `mount` tries to clear it again.
+- The sweep logs `helper.dead_mount` with the mount point and what the unmount command reported.
+
+The user can then run the command from the table by hand. If that fails too, a restart of the machine clears every mount.
+
+**Limits.**
+
+- The mount folder is the helper's. The helper treats any folder there whose listing fails with the error in the table as a dead mount, whoever mounted it. Neither OS offers a surer sign that a server is gone.
+- The checks have no time limit. A mount in the mount folder that another program serves, and that never answers a listing, holds up the start of the helper, a `deadMounts` request, and a `mount` at that folder. A mount of Marlin's own cannot do this: the core puts a time limit on every call.
+
+**Tested (risk 6 in [decision 0001](decisions/0001-mount-architecture.md)).** On 2026-11-13 the sweep cleared a real dead mount with a process sitting inside it, on Linux (a Debian 12 container, `fuse3` 3.14) and on macOS 27.2 (macFUSE 5.5.0, FSKit backend). No restart was needed on either. Windows waits for its adapter (#375).
 
 ## Health
 
@@ -155,16 +190,17 @@ Results count in the order the calls finish. A call that finishes later is later
 `mounts.rs` has the three traits:
 
 - `Adapter::mount(vfs, mount_point)` serves a `marlin_vfs::Vfs` at an empty folder and returns a `Session` once the OS shows the mount.
+- `Adapter::is_dead_mount(mount_point)` says whether a [dead mount](#dead-mounts) is there. A symbolic link is never one. `Adapter::unmount_dead(mount_point)` unmounts it and leaves the folder.
 - `Session::unmount()` unmounts. After an error the mount must still be served.
 - `Providers::open(provider, account)` returns the `marlin_vfs::Provider` for an account. `account` names the account and is never a secret. The provider reads its own credentials from the OS keychain.
 
 A provider's errors decide a mount's [health](#health). `VfsError` in `marlin-vfs/src/error.rs` says which error to return: `Other` is for a failure of the remote, never for one item. After `SignInNeeded`, a provider reads the keychain again on its next call, so the mount recovers without an unmount.
 
-`main.rs` passes one adapter and one `Providers` value to `Server::bind`. The adapter is `adapter::OsAdapter`, chosen per OS at the top of `main.rs`: on Linux it is `marlin-fuse`, and on macOS it refuses every mount. The `Providers` value refuses everything. An adapter lives in its own crate, so `marlin-mount` implements `Adapter` for it in a few lines and the adapter crate does not depend on the helper.
+`main.rs` passes one adapter and one `Providers` value to `Server::bind`. The adapter is `adapter::OsAdapter`, chosen per OS at the top of `main.rs`: on Linux it is `marlin-fuse`, and on macOS it refuses every mount but can clear a dead macFUSE mount. The `Providers` value refuses everything. An adapter lives in its own crate, so `marlin-mount` implements `Adapter` for it in a few lines and the adapter crate does not depend on the helper.
 
 ## Logs and secrets
 
-The helper writes one JSON object per line to stderr: `timeMs`, `level`, `event`, and the fields of the event. It logs its start and stop, a failed start, a failed unmount at a signal, a refused connection, a line that was too long, and each mount state change with the mount's status (provider, account, name, mount point, state, error). It logs nothing else from a request, and never file names inside a mount or file contents.
+The helper writes one JSON object per line to stderr: `timeMs`, `level`, `event`, and the fields of the event. It logs its start and stop, a failed start, a dead mount the sweep could not clear, a failed unmount at a signal, a refused connection, a line that was too long, and each mount state change with the mount's status (provider, account, name, mount point, state, error). It logs nothing else from a request, and never file names inside a mount or file contents.
 
 Whoever starts the helper must point stderr at a file or `/dev/null`, never at a pipe. The helper drops a log line it cannot write, but a pipe that is full and never read blocks it.
 
@@ -176,5 +212,7 @@ No secret crosses the socket or the command line. The text inside a `MountError`
 
 - `tests/control.rs` runs the server on a real socket in a temporary folder, with a fake adapter and the core's `MemoryProvider`. The fake adapter can hold a mount or an unmount open, so the tests for two requests at once do not depend on timing. The fake adapter keeps each mount's `Vfs`, so a test makes provider calls through it and sets failures with `MemoryProvider::fail_with`.
 - One test starts the built binary and checks its flags, a refused mount, and a clean exit.
+- The fake adapter can call a folder a dead mount, and can refuse to clear it. Two tests cover the sweep, `deadMounts`, and error -1012 that way. A unit test in `main.rs` checks the real macOS rule on a folder, a missing path, and a symbolic link.
+- `src-tauri/crates/marlin-mount/test-sweep.sh` makes a real dead mount and a live one with the spike programs in `spikes/mount-hello/`, starts the built helper, and checks that only the dead mount and the empty folder are gone. Run it on a Mac with macFUSE, both of its switches on. `test-in-docker.sh` runs it on Linux.
 - A signal is tested through the future that `Server::run` takes, not with a real `SIGTERM`.
 - The check of the connecting user's ID has no test. It needs a second user account.
