@@ -26,7 +26,7 @@ import { emit } from '@tauri-apps/api/event';
 import { open as openShell } from '@tauri-apps/plugin-shell';
 import { ask, message, open as openDialog } from '@tauri-apps/plugin-dialog';
 import { getExtractableArchiveFormat, isArchiveFile } from '@/utils/fileTypes';
-import { basename } from '@/utils/pathUtils';
+import { basename, resolveTypedPath } from '@/utils/pathUtils';
 import { useToastStore } from './useToastStore';
 import { useUndoStore, pushUndoAndShowToast } from './useUndoStore';
 import { parseGoogleDriveUrl } from '@/utils/googleDriveUrl';
@@ -614,7 +614,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     // Cancel any in-flight thumbnail generation from the previous directory
     void invoke('cancel_all_thumbnails');
 
-    const { pathHistory, historyIndex, googleAccounts } = get();
+    const { pathHistory, historyIndex, googleAccounts, homeDir } = get();
     const trimmed = path.trim();
 
     // Check if this is a Google Drive URL
@@ -670,7 +670,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
 
     // Normalize path (handles URIs like gdrive://, smb://, etc.)
-    const norm = normalizePath(path);
+    const norm = normalizePath(resolveTypedPath(trimmed, homeDir));
     // For URIs, use the normalized URI as locationRaw; for file paths, convert to file:// URI
     const isUri = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(norm);
     const locationRaw = isUri ? norm : toFileUri(norm);

@@ -20,7 +20,7 @@ A fast, no-nonsense file browser. Gets out of your way and just does files well.
 ### Core
 
 - Grid view with thumbnails and list view
-- Editable path bar with autocomplete
+- Editable path bar with autocomplete (Cmd/Ctrl+L jumps to it)
 - Type-to-filter: just start typing to filter files instantly
 - Marquee selection: click and drag to select multiple files
 - Select all with Cmd/Ctrl+A

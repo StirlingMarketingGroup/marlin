@@ -2,7 +2,7 @@
 
 Marlin is one Tauri 2 desktop app: a Rust backend that owns all file access, and a React frontend that draws the UI in a webview. The frontend never touches the disk. It calls a Rust command and gets data back.
 
-**Covers:** `src-tauri/src/lib.rs`, `src-tauri/src/commands.rs`, `src-tauri/Cargo.toml`, `src-tauri/crates/`, `src-tauri/src/fs_watcher.rs`, `src/main.tsx`, `src/store/`, `src/windows/`, `src/hooks/useDirectoryWatcher.ts`
+**Covers:** `src-tauri/src/lib.rs`, `src-tauri/src/commands.rs`, `src-tauri/Cargo.toml`, `src-tauri/crates/`, `src-tauri/src/fs_watcher.rs`, `src/main.tsx`, `src/store/`, `src/windows/`, `src/components/PathBar.tsx`, `src/hooks/useDirectoryWatcher.ts`
 **Checked against the code:** 2026-11-13
 
 ## Processes
@@ -49,6 +49,14 @@ The workspace has three library-only crates under `src-tauri/crates/`. `marlin-v
 **Windows.** `src/main.tsx` reads the `view` query parameter and renders one root component. No parameter means the main browser window (`App.tsx`). Each other value is a small separate OS window from `src/windows/`: `folder-size`, `archive-progress`, `compress-progress`, `delete-progress`, `clipboard-progress`, `smb-connect`, `sftp-connect`, `permissions`, `preferences`, `conflict`. The backend opens these windows from commands in `commands.rs`.
 
 **Main window.** `App.tsx` lays out `Sidebar`, `PathBar`, `MainPanel`, and `StatusBar`. `MainPanel` shows either `FileGrid` or `FileList`. Both virtualize rows with `@tanstack/react-virtual`.
+
+**Path bar.** `src/components/PathBar.tsx` is a text field that holds a draft of the path. Enter sends the draft to `navigateTo` and gives the focus to the files. Cmd/Ctrl+L or the first click focuses the field and selects the whole path; a later click places the caret. Clicking away drops the draft; switching to another app keeps it.
+
+- Suggestions complete only the end of the text. An edit with the caret anywhere else closes the list, so a suggestion can never replace text after the caret.
+- Only Tab, a click on a suggestion, or Enter changes the text. Hover and the arrow keys only move the highlight. Tab never leaves the field: with no suggestion it does nothing.
+- The list is derived in render from two things: the query (the text split at its last separator) and the entries of that folder. The current folder's entries are the store's `files`. Any other folder takes one `read_directory` call, which later edits in the same folder reuse.
+- Typed text becomes a location in `resolveTypedPath` (`src/utils/pathUtils.ts`): a leading `~` is the home folder, and a Windows share path (`\\server\share\folder`) becomes `smb://server/share/folder`, except on Windows. `navigateTo` calls it for Enter, and the path bar calls it to list a folder for suggestions, so both read the text the same way. `normalizePath` does not do this, because it also handles paths that providers return. `navigateTo` also resolves a pasted Google Drive URL.
+- The SMB connect window (`src/windows/SmbConnectWindow.tsx`) reads its Server field with `smbServerAndFolders`, not `resolveTypedPath`, because the field also takes a bare host name. A pasted `\\server\share\folder` is saved under `server` alone, and the share and folder become the folder that opens.
 
 **State.** Zustand stores in `src/store/`:
 
