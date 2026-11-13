@@ -2,7 +2,7 @@
 
 `marlin-fuse` serves one [mount core](mount-core.md) `Vfs` to Linux as a FUSE mount. The [mount helper](mount-helper.md) uses it on Linux. It is read-only, like the core, until #376.
 
-No real provider exists yet (#372), so today only the tests mount anything.
+The helper links no real provider yet (#529), so today only the tests mount anything.
 
 **Covers:** `src-tauri/crates/marlin-fuse/`, and the adapter wiring in `src-tauri/crates/marlin-mount/src/main.rs`
 **Checked against the code:** 2026-11-13

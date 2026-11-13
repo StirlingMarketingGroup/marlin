@@ -706,7 +706,7 @@ async fn the_built_helper_answers_refuses_every_mount_and_exits_on_shutdown() {
     }
     let mut client = Client::connect(&socket).await;
     assert_eq!(client.call("list", Value::Null).await["result"], json!([]));
-    // The shipped helper knows no provider yet (#372), and it opens the provider before it asks the adapter.
+    // The shipped helper knows no provider yet (#529), and it opens the provider before it asks the adapter.
     let refused = client.call("mount", mount("ana", "drive")).await;
     assert_eq!(code(&refused), -1004);
     assert!(!dir.path().join("Marlin").exists());

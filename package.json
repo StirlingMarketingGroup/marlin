@@ -42,7 +42,7 @@
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.node.json",
     "check": "npm run lint:changed && npm run format && npm run typecheck && npm run check:rust",
     "prepare": "husky",
-    "check:rust": "cd src-tauri && export RUSTFLAGS=\"-D warnings\" && cargo check && cargo check -p marlin-vfs -p marlin-mount -p marlin-mount-client -p marlin-fuse --all-targets",
+    "check:rust": "cd src-tauri && export RUSTFLAGS=\"-D warnings\" && cargo check && cargo check -p marlin-vfs -p marlin-gdrive -p marlin-mount -p marlin-mount-client -p marlin-fuse --all-targets",
     "install:local": "node scripts/install-local.mjs",
     "install:local:build": "node scripts/install-local.mjs --build",
     "format": "prettier --check .",

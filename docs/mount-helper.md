@@ -2,7 +2,7 @@
 
 `marlin-mount` is the process that will own every native mount. It runs once per user, apart from the app, so a mount outlives a hot reload, an app crash, and every window. The app tells it what to mount over a local socket.
 
-It cannot mount anything yet. Linux has an adapter, the [Linux mount adapter](mount-linux.md). macOS (#373) and Windows (#375) have none. No real provider (#372) exists, so no mount request can succeed: one that passes the name checks fails with -1004, unknown provider. The app starts the helper on the first mount command: see [The app side](#the-app-side). No part of the UI sends one yet (#377). The app bundle holds the helper: see [Building and bundling](#building-and-bundling).
+It cannot mount anything yet. Linux has an adapter, the [Linux mount adapter](mount-linux.md). macOS (#373) and Windows (#375) have none. The helper links no provider yet: the [Google Drive mount provider](mount-gdrive.md) is built, and #529 wires it in. So no mount request can succeed: one that passes the name checks fails with -1004, unknown provider. The app starts the helper on the first mount command: see [The app side](#the-app-side). No part of the UI sends one yet (#377). The app bundle holds the helper: see [Building and bundling](#building-and-bundling).
 
 **Covers:** `src-tauri/crates/marlin-mount/`, `src-tauri/crates/marlin-mount-client/`, `src-tauri/src/mount_helper.rs`, `src-tauri/build.rs`, `scripts/run-tauri.mjs`, `scripts/check-bundled-mount-helper.mjs`
 **Checked against the code:** 2026-11-13
@@ -161,7 +161,7 @@ The types are in `src/types/index.ts`. A failed command rejects with a `MountCom
 
 A mount is keyed by provider and account. Its mount point is the mount folder plus `name`.
 
-**The caller sends the name.** Decision 0001 says a mount's name is built once and stored with the account. So the helper checks the name and never invents one. Nothing builds names yet: that comes with the first real account store (#372).
+**The caller sends the name.** Decision 0001 says a mount's name is built once and stored with the account. So the helper checks the name and never invents one. Nothing builds names yet: that is #526.
 
 | State           | Meaning                                                                                              |
 | --------------- | ---------------------------------------------------------------------------------------------------- |

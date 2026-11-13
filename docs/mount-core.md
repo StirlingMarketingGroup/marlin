@@ -1,6 +1,6 @@
 # Mount core (`marlin-vfs`)
 
-`marlin-vfs` is the layer between a storage provider and an OS mount adapter. An adapter asks it for nodes and bytes. It asks a provider for items. The [mount helper](mount-helper.md) builds one `Vfs` per mount. On Linux the [Linux mount adapter](mount-linux.md) serves it to the OS. The macOS and Windows adapters (#373, #375) and the first real provider (#372) come next. It is read-only until #376.
+`marlin-vfs` is the layer between a storage provider and an OS mount adapter. An adapter asks it for nodes and bytes. It asks a provider for items. The [mount helper](mount-helper.md) builds one `Vfs` per mount. On Linux the [Linux mount adapter](mount-linux.md) serves it to the OS. The first real provider is the [Google Drive mount provider](mount-gdrive.md). The macOS and Windows adapters (#373, #375) come next. It is read-only until #376.
 
 **Covers:** `src-tauri/crates/marlin-vfs/`
 **Checked against the code:** 2026-11-13
@@ -31,7 +31,7 @@ An `ItemId` should stay with an item when the remote renames or moves it. Google
 | --------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
 | `lookup(parent, name)`                  | Finds a name in a folder and returns its node. Counts one lookup on that node.                             |
 | `forget(node, lookups)`                 | Gives lookups back. The adapter must call it for every lookup, or the node table grows.                    |
-| `attributes(node)`                      | Asks the provider for the kind, size, and modified time. Not cached.                                       |
+| `attributes(node)`                      | Asks the provider for the kind, size, and modified time. Not cached (#528).                                |
 | `open_folder`, `read_folder`, `release` | Takes a fixed copy of a folder's listing and reads it in pages. The copy does not change while it is open. |
 | `open`, `read`, `release`               | Opens a file and reads any byte range. Opening for write fails with `ReadOnly`.                            |
 | `space()`                               | Total and free bytes.                                                                                      |
@@ -48,7 +48,7 @@ An `ItemId` should stay with an item when the remote renames or moves it. Google
 - **Locking.** All state is behind one mutex that is never held across a provider call.
 - **Call results.** `Vfs::watch_calls` gives a mount's owner the result of every provider call, including the core's own `TimedOut`. A cancelled call and a cached listing report nothing. The mount helper builds a mount's health on it ([Health](mount-helper.md#health)).
 
-The four defaults are first guesses. Issue #372 tunes them against the real Google Drive API.
+The four defaults are first guesses. Issue #529 tunes them against the real Google Drive API.
 
 ## Testing
 
