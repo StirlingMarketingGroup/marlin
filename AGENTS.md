@@ -30,7 +30,7 @@ This file holds the rules that always apply. Everything longer lives in the wiki
 ## Before you call work done
 
 1. Run `npm run check` and `npm run test:run`. Both must pass with no warnings.
-2. If you changed Rust, run `cargo test` in `src-tauri/`. CI does not run it yet (issue #462). [`docs/testing.md`](docs/testing.md) lists the tests that fail today and the issue for each. A failure listed there does not block your branch. Any other failure does. A plain `cargo test` skips the workspace crates. If you changed one under `src-tauri/crates/` (`marlin-smb`, `marlin-vfs`, `marlin-mount`), also run `cargo test -p <crate>` there. If you changed `marlin-fuse`, or the `Adapter` or `Session` trait or `main.rs` in `marlin-mount`, run `src-tauri/crates/marlin-fuse/test-in-docker.sh`: the Linux code is compiled out on a Mac.
+2. If you changed Rust, run `cargo test` in `src-tauri/`. CI does not run it yet (issue #462). [`docs/testing.md`](docs/testing.md) lists the tests that fail today and the issue for each. A failure listed there does not block your branch. Any other failure does. A plain `cargo test` skips the workspace crates. If you changed one under `src-tauri/crates/` (`marlin-smb`, `marlin-vfs`, `marlin-mount`), also run `cargo test -p <crate>` there. If you changed `marlin-fuse`, or the `Adapter` or `Session` trait or `main.rs` in `marlin-mount`, run `src-tauri/crates/marlin-fuse/test-in-docker.sh`: the Linux code is compiled out on a Mac. If you changed how the helper finds or clears a dead mount, also run `src-tauri/crates/marlin-mount/test-sweep.sh` on a Mac.
 3. If you changed `src/` or `e2e/`, run `npm run test:e2e`.
 4. Update the wiki page that covers what you changed (see "Keeping the wiki true").
 

@@ -116,6 +116,42 @@ impl Mount {
     }
 }
 
+/// Whether a dead mount is at `mount_point`: one whose server was killed. A live mount, a plain folder, a symbolic link, and a path that is not there are not dead mounts.
+pub async fn is_dead_mount(mount_point: &Path) -> bool {
+    let path = mount_point.to_path_buf();
+    // The check blocks, and a test serves a live mount from this same process.
+    tokio::task::spawn_blocking(move || {
+        // `read_dir` follows a symbolic link, so a link is decided here, before that call.
+        if std::fs::symlink_metadata(&path).is_ok_and(|found| found.is_symlink()) {
+            return false;
+        }
+        // A dead mount fails the open, or the read of the first entry.
+        std::fs::read_dir(&path)
+            .and_then(|mut entries| entries.next().transpose())
+            .is_err_and(|error| error.raw_os_error() == Some(libc::ENOTCONN))
+    })
+    .await
+    .unwrap_or(false)
+}
+
+/// Unmounts the dead mount at `mount_point`. The folder itself stays.
+pub async fn unmount_dead(mount_point: &Path) -> Result<(), Error> {
+    // A lazy unmount, unlike `Mount::unmount`. Nothing serves a dead mount, so there is no open file to protect, and a plain unmount fails while any process has its working folder inside.
+    let output = tokio::process::Command::new("fusermount3")
+        .arg("-u")
+        .arg("-z")
+        .arg("--")
+        .arg(mount_point)
+        .output()
+        .await
+        .map_err(|error| Error::Unmount(error.to_string()))?;
+    if !output.status.success() {
+        let text = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(Error::Unmount(text));
+    }
+    Ok(())
+}
+
 /// Whether this process's mount table lists a mount at `mount_point`.
 fn is_mounted(mount_point: &Path) -> std::io::Result<bool> {
     let table = std::fs::read_to_string("/proc/self/mountinfo")?;
@@ -160,5 +196,17 @@ mod tests {
         );
         assert!(Error::NoFusermount.to_string().contains("fuse3"));
         assert!(Error::NoFuseDevice.to_string().contains("modprobe fuse"));
+    }
+
+    #[tokio::test]
+    async fn a_plain_folder_a_missing_path_and_a_symlink_are_not_dead_mounts() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("plain");
+        std::fs::create_dir(&folder).unwrap();
+        assert!(!is_dead_mount(&folder).await);
+        assert!(!is_dead_mount(&dir.path().join("missing")).await);
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&folder, &link).unwrap();
+        assert!(!is_dead_mount(&link).await);
     }
 }

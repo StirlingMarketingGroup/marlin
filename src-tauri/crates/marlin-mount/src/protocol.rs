@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 pub const JSONRPC_VERSION: &str = "2.0";
 
 /// Protocol number this helper speaks. Raised when the control API changes.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// JSON-RPC and helper error codes.
 pub mod error_codes {
@@ -26,6 +26,7 @@ pub mod error_codes {
     pub const SHUTTING_DOWN: i32 = -1009;
     pub const HELLO_REQUIRED: i32 = -1010;
     pub const PROTOCOL_MISMATCH: i32 = -1011;
+    pub const DEAD_MOUNT: i32 = -1012;
 }
 
 /// Control methods and the one notification the helper sends.
@@ -36,6 +37,7 @@ pub mod methods {
     pub const LIST: &str = "list";
     pub const STATUS: &str = "status";
     pub const SHUTDOWN: &str = "shutdown";
+    pub const DEAD_MOUNTS: &str = "deadMounts";
     pub const MOUNT_CHANGED: &str = "mountChanged";
 }
 
@@ -147,4 +149,12 @@ pub struct MountStatus {
     pub state: MountState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<RpcError>,
+}
+
+/// A dead mount under the mount folder: its server was killed, and the OS still lists it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeadMount {
+    pub name: String,
+    pub mount_point: String,
 }

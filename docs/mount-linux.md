@@ -5,18 +5,18 @@
 No real provider exists yet (#372), so today only the tests mount anything.
 
 **Covers:** `src-tauri/crates/marlin-fuse/`, and the adapter wiring in `src-tauri/crates/marlin-mount/src/main.rs`
-**Checked against the code:** 2026-11-12
+**Checked against the code:** 2026-11-13
 
 The design is in [decision 0001](decisions/0001-mount-architecture.md), choices 2 and 6.
 
 ## The parts
 
-| File                | Holds                                                                                      |
-| ------------------- | ------------------------------------------------------------------------------------------ |
-| `src/lib.rs`        | `mount`, `Mount::unmount`, `Error`, and the check of what the machine has.                 |
-| `src/fs.rs`         | The `fuser::Filesystem` callbacks, the attribute rules, and the errno table.               |
-| `tests/mount.rs`    | Tests that mount for real. They are marked `#[ignore]`, and `test-in-docker.sh` runs them. |
-| `test-in-docker.sh` | Runs every test in a container, as a user who is not root.                                 |
+| File                | Holds                                                                                                       |
+| ------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `src/lib.rs`        | `mount`, `Mount::unmount`, `is_dead_mount`, `unmount_dead`, `Error`, and the check of what the machine has. |
+| `src/fs.rs`         | The `fuser::Filesystem` callbacks, the attribute rules, and the errno table.                                |
+| `tests/mount.rs`    | Tests that mount for real. They are marked `#[ignore]`, and `test-in-docker.sh` runs them.                  |
+| `test-in-docker.sh` | Runs every test in a container, as a user who is not root.                                                  |
 
 - The crate is the only one that imports `fuser`. The version is pinned exactly (`=0.18.0`), because `fuser` changes its `Filesystem` trait between releases (risk 8 in decision 0001).
 - Every dependency is behind `cfg(target_os = "linux")`. On macOS the crate compiles to nothing, so a Mac never checks this code. The CI check runs on Linux and does. To check it from a Mac, run `rustup target add x86_64-unknown-linux-gnu` once, then `cargo check -p marlin-fuse -p marlin-mount --all-targets --target x86_64-unknown-linux-gnu` in `src-tauri/`.
@@ -73,7 +73,7 @@ The `.deb` and `.rpm` packages depend on `fuse3` (`src-tauri/tauri.conf.json`). 
 - `Mount::unmount` never calls `fuser`'s own unmount. In `fuser` 0.18.0 that one is lazy: it detaches a busy mount at once, so the mount point looks free while open files are still served.
 - **A mount removed from outside.** A user can run `fusermount3 -u` or eject the mount in a file manager. The next `unmount` sees that the mount table no longer lists the mount and succeeds without running anything. Until that `unmount`, the helper still lists the mount (#488).
 - Dropping a `Mount` makes `fuser` lazily detach whatever FUSE mount is at the path. `fuser` 0.18.0 cannot tell that the mount is already gone, so this also runs after a successful unmount, where it finds nothing. The helper drops a mount before it frees the mount's name. Untested: whether the helper drops its mounts when it exits after a signal. If it does, a busy mount is detached then. If it does not, the mount is left dead.
-- A helper that is killed leaves a dead mount. Every access fails with "Transport endpoint is not connected" until something runs `fusermount3 -u <mount point>`. The helper's start-up sweep will do that (#482).
+- A helper that is killed leaves a dead mount. A listing of it fails with "Transport endpoint is not connected". `is_dead_mount` reports that, and `unmount_dead` runs `fusermount3 -u -z`. The unmount is lazy on purpose: a plain one fails while a process has its working folder inside, and a dead mount has no open file to protect. The helper calls both when it starts and at each mount: see [Dead mounts](mount-helper.md#dead-mounts).
 
 ## Testing
 
@@ -81,9 +81,10 @@ Run `src-tauri/crates/marlin-fuse/test-in-docker.sh`. It needs Docker.
 
 - The container gets `/dev/fuse`, `CAP_SYS_ADMIN`, and no AppArmor profile. The tests run as a user who is not root, so every mount goes through the setuid `fusermount3`, as it does for any user who is not root.
 - It also runs the helper's tests (`marlin-mount`). The helper's Linux half, the wiring to this adapter, is compiled out on a Mac.
+- Last, it runs `crates/marlin-mount/test-sweep.sh`, which kills a mount's server and checks that the helper clears the dead mount. The script mounts with the spike program in `spikes/mount-hello/`, so the container gets the whole repo, read-only.
 - The first run downloads and builds everything. Two Docker volumes keep the registry and the build folder for later runs.
-- The unit tests cover the attribute rules and the two "missing" messages. They need no kernel support.
-- The mount tests mount a `MemoryProvider` and use ordinary file calls: list, read at an offset, free space, a 1,000-file folder, a name that is too long, every row of the error table, four slow reads at once, an unmount while a file is open, an unmount after one from outside, an unmount while the provider is slow, two mounts at once (one at a path with a space), and a dropped mount.
+- The unit tests cover the attribute rules, the two "missing" messages, and what is not a dead mount: a folder, a missing path, a symbolic link. They need no kernel support.
+- The mount tests mount a `MemoryProvider` and use ordinary file calls: list, read at an offset, free space, a 1,000-file folder, a name that is too long, every row of the error table, four slow reads at once, an unmount while a file is open, an unmount after one from outside, an unmount while the provider is slow, two mounts at once (one at a path with a space), a dropped mount, and a live mount that must not count as dead.
 - On a Linux machine, `cargo test -p marlin-fuse` runs the unit tests only. Add `-- --include-ignored --test-threads=1` to run the mount tests there.
 - The mount tests run one at a time. In parallel they fail now and then: a test that starts a program forks, and the child briefly holds a copy of a file that another test has open on its mount, so that test's unmount is refused as busy.
 
@@ -91,7 +92,7 @@ Run `src-tauri/crates/marlin-fuse/test-in-docker.sh`. It needs Docker.
 
 | What                                                                           | State                                                     |
 | ------------------------------------------------------------------------------ | --------------------------------------------------------- |
-| Debian 12 container (`fuse3` 3.14), a user who is not root                     | Tested by `test-in-docker.sh`, 2026-11-12                 |
+| Debian 12 container (`fuse3` 3.14), a user who is not root                     | Tested by `test-in-docker.sh`, 2026-11-13                 |
 | A CI runner                                                                    | Not tested. Risk 9 in decision 0001 is still open (#485). |
 | A bare Linux desktop: file managers, drag and drop, file dialogs, thumbnailers | Not tested. It needs a real provider (#486).              |
 | Flatpak, Snap, AppImage                                                        | Not tested (#486).                                        |
