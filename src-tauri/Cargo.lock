@@ -3856,7 +3856,6 @@ dependencies = [
  "clipboard-win",
  "dashmap",
  "dirs",
- "dotenvy",
  "ffmpeg-sidecar",
  "filetime",
  "flate2",
@@ -3873,7 +3872,9 @@ dependencies = [
  "libc",
  "log",
  "lru",
+ "marlin-gdrive",
  "marlin-mount-client",
+ "marlin-test-keychain",
  "mime_guess",
  "mupdf",
  "notify",
@@ -3941,11 +3942,16 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "dirs",
+ "dotenvy",
  "fastrand",
+ "keyring",
+ "marlin-test-keychain",
  "marlin-vfs",
  "reqwest 0.13.5",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "wiremock",
 ]
@@ -3987,6 +3993,14 @@ dependencies = [
  "serde",
  "serde_json",
  "uuid",
+]
+
+[[package]]
+name = "marlin-test-keychain"
+version = "0.1.0"
+dependencies = [
+ "keyring",
+ "once_cell",
 ]
 
 [[package]]

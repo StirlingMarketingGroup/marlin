@@ -6,11 +6,11 @@ authors = ["Marlin Team"]
 license = "MIT"
 repository = "https://github.com/StirlingMarketingGroup/marlin"
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.89"
 default-run = "marlin"
 
 [workspace]
-members = ["crates/marlin-smb", "crates/marlin-vfs", "crates/marlin-mount", "crates/marlin-mount-client", "crates/marlin-fuse", "crates/marlin-gdrive"]
+members = ["crates/marlin-smb", "crates/marlin-vfs", "crates/marlin-mount", "crates/marlin-mount-client", "crates/marlin-fuse", "crates/marlin-gdrive", "crates/marlin-test-keychain"]
 
 [features]
 default = []
@@ -26,13 +26,13 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2.5.5", features = [] }
-dotenvy = "0.15"
 serde_json = "1.0"
 
 [dependencies]
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 marlin-mount-client = { path = "crates/marlin-mount-client" }
+marlin-gdrive = { path = "crates/marlin-gdrive" }
 log = "0.4"
 tauri = { version = "2.11.2", features = [] }
 tauri-plugin-log = "2.3.1"
@@ -118,3 +118,4 @@ gtk = { version = "0.18", package = "gtk" }
 [dev-dependencies]
 rand = "0.10"
 tempfile = "3.27"
+marlin-test-keychain = { path = "crates/marlin-test-keychain" }
