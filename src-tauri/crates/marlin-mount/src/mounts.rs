@@ -7,7 +7,7 @@ use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use marlin_vfs::{Options, Provider, Vfs};
+use marlin_vfs::{Options, Provider, Vfs, VfsError};
 
 use crate::log::{self, redact};
 use crate::protocol::{error_codes, MountState, MountStatus, RpcError};
@@ -103,6 +103,18 @@ struct Key {
     account: String,
 }
 
+/// How many provider calls must fail in a row before a mount becomes `offline` or `degraded`. One slow call or one dropped connection is not news.
+const FAILURES_IN_A_ROW: u32 = 3;
+
+/// What the last provider calls say about a mount's remote, from best to worst. A run of failed calls only moves a mount toward the worse end. The first call the remote answers moves it back to `Healthy`.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Health {
+    Healthy,
+    Degraded,
+    Offline,
+    AuthRequired,
+}
+
 /// Where one mount is in its life, with what that state holds. Between operations a mount is `Mounted` or `Failed`.
 enum Lifecycle {
     Starting,
@@ -114,6 +126,13 @@ enum Lifecycle {
 struct MountEntry {
     name: String,
     lifecycle: Lifecycle,
+
+    /// Which mount attempt made this entry. A provider call from an earlier attempt of the same account must not change this one.
+    attempt: u64,
+    health: Health,
+
+    /// Provider calls that failed in a row.
+    failures: u32,
 }
 
 struct Table {
@@ -124,11 +143,14 @@ struct Table {
 
     /// True from the moment a shutdown starts until it fails or the helper exits.
     closing: bool,
+
+    /// How many mount attempts this helper has started. Each new entry takes the next number.
+    attempts: u64,
 }
 
 /// Every mount the helper serves, keyed by provider and account.
 ///
-/// A mount or unmount first takes its key's operation lock, so operations on one mount run one at a time and operations on different mounts run together. The table's own lock is never held across an `.await` or a log write.
+/// A mount or unmount first takes its key's operation lock, so operations on one mount run one at a time and operations on different mounts run together. The table's own lock is never held across an `.await` or a log write. Events are sent under that lock, because a provider call can change a mount's health at any moment, outside the operation lock.
 pub struct Mounts {
     table: Mutex<Table>,
     events: tokio::sync::broadcast::Sender<MountStatus>,
@@ -144,6 +166,7 @@ impl Mounts {
                 entries: HashMap::new(),
                 locks: HashMap::new(),
                 closing: false,
+                attempts: 0,
             }),
             events: tokio::sync::broadcast::channel(64).0,
             adapter,
@@ -159,7 +182,7 @@ impl Mounts {
 
     /// Mounts an account at `root/name` and returns once the OS shows it. The caller built `name` once and stores it with the account, so the helper checks it and never invents one.
     pub async fn mount(
-        &self,
+        self: &Arc<Self>,
         provider: &str,
         account: &str,
         name: &str,
@@ -179,7 +202,7 @@ impl Mounts {
         let operation = self.operation_lock(&key);
         let _operation = operation.lock().await;
 
-        let starting = {
+        let (starting, attempt) = {
             let mut table = self.table.lock().unwrap();
             if table.closing {
                 return Err(MountError::ShuttingDown);
@@ -196,15 +219,20 @@ impl Mounts {
             if name_in_use {
                 return Err(MountError::NameInUse);
             }
+            table.attempts += 1;
+            let attempt = table.attempts;
             let entry = MountEntry {
                 name: name.to_string(),
                 lifecycle: Lifecycle::Starting,
+                attempt,
+                health: Health::Healthy,
+                failures: 0,
             };
-            let starting = snapshot(&key, &entry, &self.root);
+            let starting = self.announce(&key, &entry);
             table.entries.insert(key.clone(), entry);
-            starting
+            (starting, attempt)
         };
-        self.emit(starting);
+        log_state(&starting);
 
         let mount_point = self.root.join(name);
         let mounted = async {
@@ -227,8 +255,17 @@ impl Mounts {
                     }
                 }
             }
-            let vfs = Arc::new(Vfs::new(provider, marlin_vfs::POSIX, Options::default()));
-            self.adapter.mount(vfs, &mount_point).await
+            let mounts = Arc::downgrade(self);
+            let watched = key.clone();
+            let vfs = Vfs::new(provider, marlin_vfs::POSIX, Options::default()).watch_calls(
+                // Weak, because a session can hold the `Vfs`, and the table holds the session.
+                move |error| {
+                    if let Some(mounts) = mounts.upgrade() {
+                        mounts.record(&watched, attempt, error);
+                    }
+                },
+            );
+            self.adapter.mount(Arc::new(vfs), &mount_point).await
         }
         .await;
 
@@ -258,12 +295,18 @@ impl Mounts {
                 return Ok(());
             };
             let previous = std::mem::replace(&mut entry.lifecycle, Lifecycle::Unmounting);
-            (snapshot(&key, entry, &self.root), previous)
+            // Only a mount that was up announces `unmounting`.
+            let unmounting = if matches!(previous, Lifecycle::Mounted(_)) {
+                self.announce(&key, entry)
+            } else {
+                snapshot(&key, entry, &self.root)
+            };
+            (unmounting, previous)
         };
 
         // A failed mount has no session and no folder of the helper's: only its entry goes.
         if let Lifecycle::Mounted(mut session) = previous {
-            self.emit(unmounting.clone());
+            log_state(&unmounting);
             if let Err(error) = session.unmount().await {
                 self.transition(&key, Lifecycle::Mounted(session));
                 return Err(MountError::Unmount(error.to_string()));
@@ -272,11 +315,16 @@ impl Mounts {
             let _ = std::fs::remove_dir(self.root.join(&unmounting.name));
         }
 
-        self.table.lock().unwrap().entries.remove(&key);
-        self.emit(MountStatus {
+        let unmounted = MountStatus {
             state: MountState::Unmounted,
             ..unmounting
-        });
+        };
+        {
+            let mut table = self.table.lock().unwrap();
+            table.entries.remove(&key);
+            let _ = self.events.send(unmounted.clone());
+        }
+        log_state(&unmounted);
         Ok(())
     }
 
@@ -332,33 +380,84 @@ impl Mounts {
         table.locks.entry(key.clone()).or_default().clone()
     }
 
+    /// Applies how one provider call ended to its mount's health. The rules are in `docs/mount-helper.md`, under "Health".
+    fn record(&self, key: &Key, attempt: u64, error: Option<&VfsError>) {
+        let changed = {
+            let mut table = self.table.lock().unwrap();
+            let Some(entry) = table.entries.get_mut(key) else {
+                return;
+            };
+            if entry.attempt != attempt {
+                return;
+            }
+            let before = entry.health;
+            let says = match error {
+                Some(VfsError::SignInNeeded) => Health::AuthRequired,
+                Some(VfsError::Offline) => Health::Offline,
+                Some(VfsError::TimedOut | VfsError::Other(_)) => Health::Degraded,
+                // Any other result is an answer from the remote, even when the answer is "not found".
+                _ => Health::Healthy,
+            };
+            if says == Health::Healthy {
+                entry.failures = 0;
+                entry.health = Health::Healthy;
+            } else {
+                entry.failures += 1;
+                // The remote itself said the sign-in is gone, so there is nothing to wait for.
+                if says == Health::AuthRequired || entry.failures >= FAILURES_IN_A_ROW {
+                    entry.health = entry.health.max(says);
+                }
+            }
+            // Health is kept in every lifecycle, but only a mount that is up shows it.
+            if entry.health == before || !matches!(entry.lifecycle, Lifecycle::Mounted(_)) {
+                return;
+            }
+            self.announce(key, entry)
+        };
+        log_state(&changed);
+    }
+
     /// Moves a mount to a new state and tells every listener.
     fn transition(&self, key: &Key, lifecycle: Lifecycle) -> MountStatus {
         let status = {
             let mut table = self.table.lock().unwrap();
             let entry = table.entries.get_mut(key).unwrap();
             entry.lifecycle = lifecycle;
-            snapshot(key, entry, &self.root)
+            self.announce(key, entry)
         };
-        self.emit(status.clone());
+        log_state(&status);
         status
     }
 
-    fn emit(&self, status: MountStatus) {
-        let level = if status.state == MountState::Failed {
-            "error"
-        } else {
-            "info"
-        };
-        log::write(level, "mount.state", serde_json::json!(status));
-        let _ = self.events.send(status);
+    /// Builds a mount's status and tells every listener. The caller holds the table's lock, so listeners hear changes in the order the table made them.
+    fn announce(&self, key: &Key, entry: &MountEntry) -> MountStatus {
+        let status = snapshot(key, entry, &self.root);
+        let _ = self.events.send(status.clone());
+        status
     }
+}
+
+fn log_state(status: &MountStatus) {
+    let level = if status.state == MountState::Failed {
+        "error"
+    } else {
+        "info"
+    };
+    log::write(level, "mount.state", serde_json::json!(status));
 }
 
 fn snapshot(key: &Key, entry: &MountEntry, root: &Path) -> MountStatus {
     let (state, error) = match &entry.lifecycle {
         Lifecycle::Starting => (MountState::Starting, None),
-        Lifecycle::Mounted(_) => (MountState::Mounted, None),
+        Lifecycle::Mounted(_) => (
+            match entry.health {
+                Health::Healthy => MountState::Mounted,
+                Health::Degraded => MountState::Degraded,
+                Health::Offline => MountState::Offline,
+                Health::AuthRequired => MountState::AuthRequired,
+            },
+            None,
+        ),
         Lifecycle::Unmounting => (MountState::Unmounting, None),
         Lifecycle::Failed(error) => (MountState::Failed, Some(error.clone().into())),
     };

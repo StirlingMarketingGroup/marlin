@@ -10,12 +10,15 @@ pub enum VfsError {
     NotAFolder,
     IsAFolder,
     NoSpace,
+    /// The sign-in is gone and the user must sign in again. One of these marks the whole mount.
     SignInNeeded,
     TimedOut,
+    /// The remote cannot be reached.
     Offline,
+    /// The remote cannot serve this item. Use this, not `Other`, for a failure of one item.
     NotSupported,
     StaleHandle,
-    /// Any other failure. The text must hold no credential, token, or file contents.
+    /// A failure of the remote that no other variant names, never a failure of one item: a mount's owner counts these against the whole mount. The text must hold no credential, token, or file contents.
     Other(String),
 }
 

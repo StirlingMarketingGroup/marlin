@@ -56,7 +56,7 @@ impl From<std::io::Error> for BindError {
 }
 
 struct Shared {
-    mounts: Mounts,
+    mounts: Arc<Mounts>,
 
     /// The user who owns the socket. Only this user may connect.
     uid: u32,
@@ -114,7 +114,7 @@ impl Server {
             listener,
             socket: config.socket,
             shared: Arc::new(Shared {
-                mounts: Mounts::new(config.root, adapter, providers),
+                mounts: Arc::new(Mounts::new(config.root, adapter, providers)),
                 uid,
                 stop: Notify::new(),
             }),
@@ -263,7 +263,7 @@ async fn serve(stream: UnixStream, shared: Arc<Shared>) {
 
 /// Runs one request and returns its result.
 async fn answer(
-    mounts: &Mounts,
+    mounts: &Arc<Mounts>,
     matched: bool,
     method: &str,
     params: Value,

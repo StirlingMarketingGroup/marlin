@@ -1,5 +1,6 @@
 #![cfg(unix)]
 
+use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -9,7 +10,7 @@ use std::time::Duration;
 
 use marlin_mount::protocol::PROTOCOL_VERSION;
 use marlin_mount::{Adapter, BindError, Config, MountError, Providers, Server, Session};
-use marlin_vfs::{MemoryProvider, Provider, Vfs};
+use marlin_vfs::{MemoryProvider, Provider, Vfs, VfsError};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -36,6 +37,12 @@ struct Fake {
 
     /// While true, every unmount call fails.
     fail_unmount: AtomicBool,
+
+    /// Each mount's core, keyed by the mount folder's name. A test makes a provider call through it.
+    vfs: Mutex<HashMap<String, Arc<Vfs>>>,
+
+    /// Each account's provider, keyed by account. A test sets its failures here.
+    providers: Mutex<HashMap<String, Arc<MemoryProvider>>>,
 }
 
 async fn wait<T>(value: &watch::Sender<T>, check: impl FnMut(&T) -> bool) {
@@ -48,9 +55,16 @@ struct FakeAdapter(Arc<Fake>);
 impl Adapter for FakeAdapter {
     async fn mount(
         &self,
-        _vfs: Arc<Vfs>,
-        _mount_point: &Path,
+        vfs: Arc<Vfs>,
+        mount_point: &Path,
     ) -> Result<Box<dyn Session>, MountError> {
+        let name = mount_point
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        self.0.vfs.lock().unwrap().insert(name, vfs);
         self.0.mounts.send_modify(|count| *count += 1);
         wait(&self.0.hold_mount, |hold| !hold).await;
         match self.0.fail_mount.lock().unwrap().take() {
@@ -74,15 +88,22 @@ impl Session for FakeSession {
     }
 }
 
-struct MemoryProviders;
+/// The core's in-memory provider, one per account. A test reaches an account's provider through [`Fake::providers`].
+struct MemoryProviders(Arc<Fake>);
 
 #[async_trait::async_trait]
 impl Providers for MemoryProviders {
-    async fn open(&self, provider: &str, _account: &str) -> Result<Arc<dyn Provider>, MountError> {
+    async fn open(&self, provider: &str, account: &str) -> Result<Arc<dyn Provider>, MountError> {
         if provider != "memory" {
             return Err(MountError::UnknownProvider);
         }
-        Ok(Arc::new(MemoryProvider::new()))
+        let memory = Arc::new(MemoryProvider::new());
+        self.0
+            .providers
+            .lock()
+            .unwrap()
+            .insert(account.to_string(), Arc::clone(&memory));
+        Ok(memory)
     }
 }
 
@@ -180,7 +201,7 @@ fn start() -> Harness {
             root: root.clone(),
         },
         Arc::new(FakeAdapter(Arc::clone(&fake))),
-        Arc::new(MemoryProviders),
+        Arc::new(MemoryProviders(Arc::clone(&fake))),
     )
     .unwrap();
     let (signal, signaled) = oneshot::channel();
@@ -206,6 +227,23 @@ fn account(account: &str) -> Value {
 
 fn code(response: &Value) -> i64 {
     response["error"]["code"].as_i64().expect("an error")
+}
+
+/// Makes one provider call through the mount named `name` and ignores the result.
+async fn call(harness: &Harness, name: &str) {
+    let vfs = harness.fake.vfs.lock().unwrap()[name].clone();
+    let _ = vfs.space().await;
+}
+
+fn fail(harness: &Harness, account: &str, error: Option<VfsError>) {
+    harness.fake.providers.lock().unwrap()[account].fail_with(error);
+}
+
+/// Mounts `account` at `name` and drops the `starting` and `mounted` notifications, so a later `mounted` can only be a recovery.
+async fn mount_and_settle(client: &mut Client, watcher: &mut Client, account: &str, name: &str) {
+    client.call("mount", mount(account, name)).await;
+    watcher.event("starting").await;
+    watcher.event("mounted").await;
 }
 
 #[tokio::test]
@@ -536,7 +574,7 @@ async fn a_second_helper_cannot_bind_while_the_first_one_lives() {
                 root: dir.path().join("Marlin"),
             },
             Arc::new(FakeAdapter(Arc::default())),
-            Arc::new(MemoryProviders),
+            Arc::new(MemoryProviders(Arc::default())),
         )
     };
     let first = bind().unwrap();
@@ -559,7 +597,7 @@ async fn a_file_at_the_socket_path_is_not_removed() {
             root: dir.path().join("Marlin"),
         },
         Arc::new(FakeAdapter(Arc::default())),
-        Arc::new(MemoryProviders),
+        Arc::new(MemoryProviders(Arc::default())),
     );
     assert!(matches!(bound, Err(BindError::Io(_))));
     assert_eq!(std::fs::read(&socket).unwrap(), b"keep me");
@@ -655,4 +693,244 @@ async fn the_built_helper_answers_refuses_every_mount_and_exits_on_shutdown() {
 
     let unknown_flag = Command::new(helper).arg("--nope").output().unwrap();
     assert_eq!(unknown_flag.status.code(), Some(2));
+}
+
+#[tokio::test]
+async fn sign_in_needed_moves_a_mount_to_auth_required_at_once() {
+    let harness = start();
+    let mut client = Client::connect(&harness.socket).await;
+    let mut watcher = Client::connect(&harness.socket).await;
+    mount_and_settle(&mut client, &mut watcher, "ana", "drive").await;
+
+    fail(&harness, "ana", Some(VfsError::SignInNeeded));
+    call(&harness, "drive").await;
+    watcher.event("auth-required").await;
+    assert!(watcher.inbox.is_empty());
+    assert_eq!(
+        client.call("status", account("ana")).await["result"]["state"],
+        "auth-required"
+    );
+    assert_eq!(
+        client.call("list", Value::Null).await["result"][0]["state"],
+        "auth-required"
+    );
+
+    for _ in 0..4 {
+        call(&harness, "drive").await;
+    }
+    fail(&harness, "ana", None);
+    call(&harness, "drive").await;
+    watcher.event("mounted").await;
+    assert!(watcher.inbox.is_empty());
+}
+
+#[tokio::test]
+async fn offline_takes_three_failed_calls_in_a_row_and_one_answer_ends_it() {
+    let harness = start();
+    let mut client = Client::connect(&harness.socket).await;
+    let mut watcher = Client::connect(&harness.socket).await;
+    mount_and_settle(&mut client, &mut watcher, "ana", "drive").await;
+
+    fail(&harness, "ana", Some(VfsError::Offline));
+    call(&harness, "drive").await;
+    call(&harness, "drive").await;
+    assert_eq!(
+        client.call("status", account("ana")).await["result"]["state"],
+        "mounted"
+    );
+    call(&harness, "drive").await;
+    watcher.event("offline").await;
+    assert!(watcher.inbox.is_empty());
+
+    call(&harness, "drive").await;
+    call(&harness, "drive").await;
+    fail(&harness, "ana", None);
+    call(&harness, "drive").await;
+    watcher.event("mounted").await;
+    assert!(watcher.inbox.is_empty());
+}
+
+#[tokio::test]
+async fn one_failed_call_between_answers_changes_nothing() {
+    let harness = start();
+    let mut client = Client::connect(&harness.socket).await;
+    let mut watcher = Client::connect(&harness.socket).await;
+    mount_and_settle(&mut client, &mut watcher, "ana", "drive").await;
+
+    call(&harness, "drive").await;
+    fail(&harness, "ana", Some(VfsError::Offline));
+    call(&harness, "drive").await;
+    fail(&harness, "ana", None);
+    call(&harness, "drive").await;
+    fail(&harness, "ana", Some(VfsError::Offline));
+    call(&harness, "drive").await;
+    call(&harness, "drive").await;
+    fail(&harness, "ana", None);
+    call(&harness, "drive").await;
+    assert_eq!(
+        client.call("status", account("ana")).await["result"]["state"],
+        "mounted"
+    );
+
+    client.call("unmount", account("ana")).await;
+    watcher.event("unmounted").await;
+    let states: Vec<_> = watcher
+        .inbox
+        .iter()
+        .map(|line| &line["params"]["state"])
+        .collect();
+    assert_eq!(states, ["unmounting"]);
+}
+
+#[tokio::test]
+async fn degraded_is_three_timeouts_or_unnamed_errors_in_a_row() {
+    let harness = start();
+    let mut client = Client::connect(&harness.socket).await;
+    let mut watcher = Client::connect(&harness.socket).await;
+    mount_and_settle(&mut client, &mut watcher, "ana", "drive").await;
+
+    fail(&harness, "ana", Some(VfsError::TimedOut));
+    call(&harness, "drive").await;
+    fail(&harness, "ana", Some(VfsError::Other("quota".into())));
+    call(&harness, "drive").await;
+    assert_eq!(
+        client.call("status", account("ana")).await["result"]["state"],
+        "mounted"
+    );
+    fail(&harness, "ana", Some(VfsError::TimedOut));
+    call(&harness, "drive").await;
+    watcher.event("degraded").await;
+    assert!(watcher.inbox.is_empty());
+
+    fail(&harness, "ana", None);
+    call(&harness, "drive").await;
+    watcher.event("mounted").await;
+    assert!(watcher.inbox.is_empty());
+
+    fail(&harness, "ana", Some(VfsError::NotFound));
+    call(&harness, "drive").await;
+    call(&harness, "drive").await;
+    call(&harness, "drive").await;
+    assert_eq!(
+        client.call("status", account("ana")).await["result"]["state"],
+        "mounted"
+    );
+}
+
+#[tokio::test]
+async fn a_run_of_failures_only_makes_the_state_worse() {
+    let harness = start();
+    let mut client = Client::connect(&harness.socket).await;
+    let mut watcher = Client::connect(&harness.socket).await;
+    mount_and_settle(&mut client, &mut watcher, "ana", "drive").await;
+
+    fail(&harness, "ana", Some(VfsError::TimedOut));
+    for _ in 0..3 {
+        call(&harness, "drive").await;
+    }
+    watcher.event("degraded").await;
+    assert!(watcher.inbox.is_empty());
+
+    fail(&harness, "ana", Some(VfsError::Offline));
+    call(&harness, "drive").await;
+    watcher.event("offline").await;
+    assert!(watcher.inbox.is_empty());
+
+    fail(&harness, "ana", Some(VfsError::TimedOut));
+    call(&harness, "drive").await;
+    assert_eq!(
+        client.call("status", account("ana")).await["result"]["state"],
+        "offline"
+    );
+
+    fail(&harness, "ana", Some(VfsError::SignInNeeded));
+    call(&harness, "drive").await;
+    watcher.event("auth-required").await;
+    assert!(watcher.inbox.is_empty());
+
+    fail(&harness, "ana", Some(VfsError::Offline));
+    call(&harness, "drive").await;
+    assert_eq!(
+        client.call("status", account("ana")).await["result"]["state"],
+        "auth-required"
+    );
+}
+
+#[tokio::test]
+async fn one_mounts_health_never_changes_another_mount() {
+    let harness = start();
+    let mut client = Client::connect(&harness.socket).await;
+    let mut watcher = Client::connect(&harness.socket).await;
+    mount_and_settle(&mut client, &mut watcher, "ana", "drive").await;
+    mount_and_settle(&mut client, &mut watcher, "ben", "share").await;
+
+    fail(&harness, "ana", Some(VfsError::Offline));
+    for _ in 0..3 {
+        call(&harness, "drive").await;
+    }
+    watcher.event("offline").await;
+    assert_eq!(
+        client.call("status", account("ben")).await["result"]["state"],
+        "mounted"
+    );
+
+    for _ in 0..3 {
+        call(&harness, "share").await;
+    }
+    assert_eq!(
+        client.call("status", account("ana")).await["result"]["state"],
+        "offline"
+    );
+    assert_eq!(
+        client.call("status", account("ben")).await["result"]["state"],
+        "mounted"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_unmount_keeps_the_health_and_an_unhealthy_mount_can_unmount() {
+    let harness = start();
+    let mut client = Client::connect(&harness.socket).await;
+    let mut watcher = Client::connect(&harness.socket).await;
+    mount_and_settle(&mut client, &mut watcher, "ana", "drive").await;
+
+    fail(&harness, "ana", Some(VfsError::Offline));
+    for _ in 0..3 {
+        call(&harness, "drive").await;
+    }
+    watcher.event("offline").await;
+
+    harness.fake.fail_unmount.store(true, Ordering::SeqCst);
+    let unmount = client.call("unmount", account("ana")).await;
+    assert_eq!(code(&unmount), -1007);
+    assert_eq!(
+        client.call("status", account("ana")).await["result"]["state"],
+        "offline"
+    );
+
+    harness.fake.fail_unmount.store(false, Ordering::SeqCst);
+    let unmount = client.call("unmount", account("ana")).await;
+    assert!(unmount["error"].is_null());
+    watcher.event("unmounted").await;
+}
+
+#[tokio::test]
+async fn a_call_from_an_earlier_mount_of_the_account_changes_nothing() {
+    let harness = start();
+    let mut client = Client::connect(&harness.socket).await;
+    let mut watcher = Client::connect(&harness.socket).await;
+    mount_and_settle(&mut client, &mut watcher, "ana", "drive").await;
+    let old_vfs = harness.fake.vfs.lock().unwrap()["drive"].clone();
+    let old_provider = harness.fake.providers.lock().unwrap()["ana"].clone();
+
+    client.call("unmount", account("ana")).await;
+    watcher.event("unmounted").await;
+    mount_and_settle(&mut client, &mut watcher, "ana", "drive").await;
+
+    old_provider.fail_with(Some(VfsError::SignInNeeded));
+    let _ = old_vfs.space().await;
+    assert_eq!(
+        client.call("status", account("ana")).await["result"]["state"],
+        "mounted"
+    );
 }

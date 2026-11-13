@@ -5,7 +5,7 @@
 It cannot mount anything yet. Linux has an adapter, the [Linux mount adapter](mount-linux.md). macOS (#373) and Windows (#375) have none. No real provider (#372) exists, so no mount request can succeed: one that passes the name checks fails with -1004, unknown provider. Nothing starts the helper yet either: the app side is #483.
 
 **Covers:** `src-tauri/crates/marlin-mount/`
-**Checked against the code:** 2026-11-12
+**Checked against the code:** 2026-11-13
 
 The design is in [decision 0001](decisions/0001-mount-architecture.md), choices 3 to 6. The helper builds each mount on the [mount core](mount-core.md).
 
@@ -58,7 +58,7 @@ The helper also sends notifications: `{jsonrpc, method: "mountChanged", params: 
 What a client must know:
 
 - **Requests on one connection run at the same time.** Responses come back in any order, mixed with notifications. Wait for a response before you send a request that depends on it: a `mount` and an `unmount` of one account sent back to back can run in either order.
-- **Notifications start after the `hello` response and are not replayed.** Call `list` after `hello`. A client that falls 64 notifications behind loses the oldest ones, and `list` is how it catches up.
+- **Notifications start after the `hello` response and are not replayed.** Call `list` after `hello`. A client that falls 64 notifications behind loses the oldest ones, and `list` is how it catches up. The notifications a client does get arrive in the order the changes happened.
 - **A failed `mount` answers with an error, not a status.** The codes -1001, -1002, and -1009 are refusals: they make no entry, keep an entry that is already there, and send no notification. Any other failure leaves a `failed` entry, which keeps its name until the next attempt or an `unmount`.
 
 **Version rules.** The protocol number is `PROTOCOL_VERSION` in `protocol.rs`.
@@ -94,15 +94,16 @@ A mount is keyed by provider and account. Its mount point is the mount folder pl
 
 **The caller sends the name.** Decision 0001 says a mount's name is built once and stored with the account. So the helper checks the name and never invents one. Nothing builds names yet: that comes with the first real account store (#372).
 
-| State        | Meaning                                                                        |
-| ------------ | ------------------------------------------------------------------------------ |
-| `starting`   | The helper is opening the account and mounting.                                |
-| `mounted`    | The OS shows the mount.                                                        |
-| `unmounting` | The adapter is unmounting.                                                     |
-| `failed`     | The mount attempt failed. The status keeps the error until the next attempt.   |
-| `unmounted`  | Only in the last `mountChanged` for a mount. The mount is no longer in `list`. |
-
-Health states for a mount that is up but unusable (`degraded`, `auth-required`, `offline`) are #481.
+| State           | Meaning                                                                                              |
+| --------------- | ---------------------------------------------------------------------------------------------------- |
+| `starting`      | The helper is opening the account and mounting.                                                      |
+| `mounted`       | The OS shows the mount, and the remote answers its calls.                                            |
+| `degraded`      | The mount is up, but calls to the remote time out or fail with an error the provider could not name. |
+| `auth-required` | The mount is up, but the remote needs the user to sign in again.                                     |
+| `offline`       | The mount is up, but the remote cannot be reached.                                                   |
+| `unmounting`    | The adapter is unmounting.                                                                           |
+| `failed`        | The mount attempt failed. The status keeps the error until the next attempt.                         |
+| `unmounted`     | Only in the last `mountChanged` for a mount. The mount is no longer in `list`.                       |
 
 Rules the table keeps:
 
@@ -110,11 +111,44 @@ Rules the table keeps:
 - **Mounting twice is safe.** A mount request for an account that is already mounted returns its status, and the adapter is not called again. A live mount keeps its name, whatever name the new request asks for.
 - **A failed mount can be retried.** The next `mount` tries again. An `unmount` removes the failed entry.
 - **Unmounting twice is safe.**
-- **A failed unmount keeps the mount.** The state goes back to `mounted` and the request gets the error.
+- **A failed unmount keeps the mount.** The mount comes back with its current health, and the request gets the error.
 - **An operation finishes even when its client has gone.**
 - **The helper never mounts over anything.** A mount point must be absent or an empty real folder. A file, a folder with something in it, or a symbolic link fails with -1003 and is left as it was. This guards the user's files against a mistake. It is not a defense against another process of the same user.
 - **Folders.** The helper opens the account before it makes any folder, so a mount the provider refuses leaves nothing behind. It makes the mount point with mode 0700. It removes it after an unmount and after a failed mount. It only ever removes an empty folder, and an empty folder at a mount point counts as the helper's own.
 - **Shutdown.** From the moment a shutdown starts, a new `mount` gets -1009. If any unmount fails, `shutdown` returns -1007, the helper keeps running, and it takes mounts again: a mount that is still served must not lose its helper. The mounts that did unmount stay unmounted, so call `list`. A signal is different. It is an order to exit, so the helper unmounts what it can and exits anyway. A mount it could not unmount is then dead, and the start-up sweep (#482) will clear it. On Linux the adapter may detach it as the helper exits instead: see [Linux mount adapter](mount-linux.md).
+
+## Health
+
+The helper judges a mount's remote from how each provider call ends. It makes no calls of its own. A mount that nothing reads keeps its last state.
+
+| The call ended with                                                             | Kind          |
+| ------------------------------------------------------------------------------- | ------------- |
+| A value, or any error not listed below (not found, access denied, and the rest) | answered      |
+| `SignInNeeded`                                                                  | auth-required |
+| `Offline`                                                                       | offline       |
+| `TimedOut`, or `Other`                                                          | degraded      |
+
+An answered call sets the failure count back to 0 and the mount back to `mounted`. Any other call adds 1 to that count.
+
+- `SignInNeeded` moves the mount to `auth-required` at once. The remote itself said the sign-in is gone, so there is nothing to wait for.
+- After 3 failures in a row of any kind (`FAILURES_IN_A_ROW` in `mounts.rs`), each `Offline` moves the mount to `offline`, and each `TimedOut` or `Other` moves it to `degraded`. One slow call or one dropped connection does not change the state.
+- A run of failures only makes the state worse, never better. The order is `degraded`, then `offline`, then `auth-required`. The first call the remote answers moves the mount back to `mounted`.
+
+The helper sends one `mountChanged` per change of state, not one per call. Failed calls that leave the state as it is send nothing.
+
+Each mount has its own count. One mount never changes another.
+
+Only a mount that is up shows its health. `starting`, `unmounting`, and `failed` win. A failed unmount puts the mount back with its current health: calls that end during the unmount still count.
+
+A health state carries no `error`. Provider error text can hold a file name, so it reaches no status and no log line.
+
+A mount recovers by itself. In `auth-required`, the next call the remote answers after the user signs in again moves the mount back to `mounted`. No unmount is needed. An `unmount` and a `mount` also work. A `mount` of an unhealthy mount returns its status and mounts nothing.
+
+The state changes only at a provider call. A read that a cache answers makes none. The core reuses a folder listing for 5 seconds, and the OS caches too. After a sign-in, the state can stay `auth-required` until something reads the mount past those caches.
+
+`degraded` covers the core's time limit. That limit includes the wait for a free call slot. A mount whose slots are all held by slow calls becomes `degraded` too.
+
+Results count in the order the calls finish. A call that finishes later is later evidence. Up to 16 calls run at once, so a call that started before a `SignInNeeded` and finishes after it can show `mounted` for a moment. The next call corrects it.
 
 ## Adding an adapter or a provider
 
@@ -123,6 +157,8 @@ Rules the table keeps:
 - `Adapter::mount(vfs, mount_point)` serves a `marlin_vfs::Vfs` at an empty folder and returns a `Session` once the OS shows the mount.
 - `Session::unmount()` unmounts. After an error the mount must still be served.
 - `Providers::open(provider, account)` returns the `marlin_vfs::Provider` for an account. `account` names the account and is never a secret. The provider reads its own credentials from the OS keychain.
+
+A provider's errors decide a mount's [health](#health). `VfsError` in `marlin-vfs/src/error.rs` says which error to return: `Other` is for a failure of the remote, never for one item. After `SignInNeeded`, a provider reads the keychain again on its next call, so the mount recovers without an unmount.
 
 `main.rs` passes one adapter and one `Providers` value to `Server::bind`. The adapter is `adapter::OsAdapter`, chosen per OS at the top of `main.rs`: on Linux it is `marlin-fuse`, and on macOS it refuses every mount. The `Providers` value refuses everything. An adapter lives in its own crate, so `marlin-mount` implements `Adapter` for it in a few lines and the adapter crate does not depend on the helper.
 
@@ -138,7 +174,7 @@ No secret crosses the socket or the command line. The text inside a `MountError`
 
 `cd src-tauri && cargo test -p marlin-mount` needs no kernel driver, no network, and no account. On a Mac it does not compile the Linux adapter wiring in `main.rs`. `src-tauri/crates/marlin-fuse/test-in-docker.sh` does.
 
-- `tests/control.rs` runs the server on a real socket in a temporary folder, with a fake adapter and the core's `MemoryProvider`. The fake adapter can hold a mount or an unmount open, so the tests for two requests at once do not depend on timing.
+- `tests/control.rs` runs the server on a real socket in a temporary folder, with a fake adapter and the core's `MemoryProvider`. The fake adapter can hold a mount or an unmount open, so the tests for two requests at once do not depend on timing. The fake adapter keeps each mount's `Vfs`, so a test makes provider calls through it and sets failures with `MemoryProvider::fail_with`.
 - One test starts the built binary and checks its flags, a refused mount, and a clean exit.
 - A signal is tested through the future that `Server::run` takes, not with a real `SIGTERM`.
 - The check of the connecting user's ID has no test. It needs a second user account.
