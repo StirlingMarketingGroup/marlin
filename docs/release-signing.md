@@ -31,7 +31,7 @@ Both helpers are Tauri `externalBin` files in `src-tauri/binaries/`. The bundler
 
 - **`marlin-smb`** is built by the "Build SMB sidecar" step, on the targets where samba is installed. On the other target the build script leaves an empty placeholder, and that app has no SMB support.
 - **`marlin-mount`** has no step. "Build and publish installers" and "Build Tauri bundle" both run `npm run tauri build`, and that script builds the helper first. See [Mount helper](mount-helper.md#building-and-bundling).
-- **Signing.** On macOS the bundler signs both helpers inside the app, with the hardened runtime and the app's entitlements. In `release`, when a signing identity is set, `marlin-smb` is also signed by its own step before the bundler runs.
+- **Signing.** On macOS the bundler signs both helpers inside the app, with the hardened runtime and the app's entitlements. In `release`, when a signing identity is set, `marlin-smb` is also signed by its own step before the bundler runs. `marlin-mount` needs `com.apple.security.cs.disable-library-validation` from those entitlements, or it cannot load macFUSE: see [Mount helper](mount-helper.md#building-and-bundling).
 - **The check.** "Check the bundled mount helper" starts `marlin-mount` from the built bundle and verifies the macOS signatures. The dry run signs ad hoc so that the same check runs on a PR. In `release` the step runs last, after every installer is uploaded: the dry run is the gate, and the `release` step makes a bad release show as a failed job.
 
 `release` and `release-dry-run` repeat about 200 lines of the same setup steps. Change both when you change one.

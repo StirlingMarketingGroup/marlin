@@ -1,25 +1,26 @@
 # Linux mount adapter (`marlin-fuse`)
 
-`marlin-fuse` serves one [mount core](mount-core.md) `Vfs` to Linux as a FUSE mount. The [mount helper](mount-helper.md) uses it on Linux. It is read-only, like the core, until #376.
+`marlin-fuse` serves one [mount core](mount-core.md) `Vfs` to Linux as a FUSE mount. The [mount helper](mount-helper.md) uses it on Linux. The same crate serves macOS through macFUSE: see [macOS mount adapter](mount-macos.md). It is read-only, like the core, until #376.
 
 The helper mounts a Google account through it: see [Providers](mount-helper.md#providers). No part of the UI asks for a mount yet (#377).
 
-**Covers:** `src-tauri/crates/marlin-fuse/`, and the adapter wiring in `src-tauri/crates/marlin-mount/src/adapter.rs`
+**Covers:** `src-tauri/crates/marlin-fuse/` except its macOS half (`src/macos.rs`, `src/macos/`, `test-on-mac.sh`), and the adapter wiring in `src-tauri/crates/marlin-mount/src/adapter.rs`
 **Checked against the code:** 2026-11-16
 
 The design is in [decision 0001](decisions/0001-mount-architecture.md), choices 2 and 6.
 
 ## The parts
 
-| File                | Holds                                                                                                       |
-| ------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `src/lib.rs`        | `mount`, `Mount::unmount`, `is_dead_mount`, `unmount_dead`, `Error`, and the check of what the machine has. |
-| `src/fs.rs`         | The `fuser::Filesystem` callbacks, the attribute rules, and the errno table.                                |
-| `tests/mount.rs`    | Tests that mount for real. They are marked `#[ignore]`, and `test-in-docker.sh` runs them.                  |
-| `test-in-docker.sh` | Runs every test in a container, as a user who is not root.                                                  |
+| File                | Holds                                                                                               |
+| ------------------- | --------------------------------------------------------------------------------------------------- |
+| `src/lib.rs`        | What both systems share: the errno table, the limits, the made-up permissions, and `is_dead_mount`. |
+| `src/linux.rs`      | `mount`, `Mount::unmount`, `unmount_dead`, `Error`, and the check of what the machine has.          |
+| `src/linux/fs.rs`   | The `fuser::Filesystem` callbacks and the attribute rules.                                          |
+| `tests/mount.rs`    | Tests that mount for real. They are marked `#[ignore]`, and `test-in-docker.sh` runs them.          |
+| `test-in-docker.sh` | Runs every test in a container, as a user who is not root.                                          |
 
 - The crate is the only one that imports `fuser`. The version is pinned exactly (`=0.18.0`), because `fuser` changes its `Filesystem` trait between releases (risk 8 in decision 0001).
-- Every dependency is behind `cfg(target_os = "linux")`. On macOS the crate compiles to nothing, so a Mac never checks this code. The CI check runs on Linux and does. To check it from a Mac, run `rustup target add x86_64-unknown-linux-gnu` once, then `cargo check -p marlin-fuse --all-targets --target x86_64-unknown-linux-gnu` in `src-tauri/`. That does not work for `marlin-mount`: it links the Google Drive provider, whose TLS code is C and needs a Linux C compiler. `test-in-docker.sh` compiles and tests the helper's Linux half.
+- The Linux code and `fuser` are behind `cfg(target_os = "linux")`. A Mac compiles the macOS half of the crate, so it never checks this code. The CI check runs on Linux and does. To check it from a Mac, run `rustup target add x86_64-unknown-linux-gnu` once, then `cargo check -p marlin-fuse --all-targets --target x86_64-unknown-linux-gnu` in `src-tauri/`. That does not work for `marlin-mount`: it links the Google Drive provider, whose TLS code is C and needs a Linux C compiler. `test-in-docker.sh` compiles and tests the helper's Linux half.
 - The build links no libfuse. `fuser` speaks the kernel protocol itself and runs `fusermount3` to mount.
 
 ## What the machine needs
@@ -85,7 +86,7 @@ Run `src-tauri/crates/marlin-fuse/test-in-docker.sh`. It needs Docker.
 - Last, it runs `crates/marlin-mount/test-sweep.sh`, which kills a mount's server and checks that the helper clears the dead mount. The script mounts with the spike program in `spikes/mount-hello/`, so the container gets the whole repo, read-only.
 - The first run downloads and builds everything. Two Docker volumes keep the registry and the build folder for later runs.
 - The unit tests cover the attribute rules, the two "missing" messages, and what is not a dead mount: a folder, a missing path, a symbolic link. They need no kernel support.
-- The mount tests mount a `MemoryProvider` and use ordinary file calls: list, read at an offset, free space, a 1,000-file folder, a name that is too long, every row of the error table, four slow reads at once, an unmount while a file is open, an unmount after one from outside, an unmount while the provider is slow, two mounts at once (one at a path with a space), a dropped mount, a live mount that must not count as dead, and the cached bytes: a second open makes no provider read, and a file with a new modified time is read again.
+- The mount tests mount a `MemoryProvider` and use ordinary file calls: list, read at an offset, free space, a 1,000-file folder, a name that is too long, every row of the error table, four slow reads at once, an unmount while a file is open, an unmount after one from outside, an unmount while the provider is slow, two mounts at once (one at a path with a space), a dropped mount, an unmount from outside and a drop while a read is waiting, a name with an accent, a live mount that must not count as dead, and the cached bytes: a second open makes no provider read, and a file with a new modified time is read again.
 - On a Linux machine, `cargo test -p marlin-fuse` runs the unit tests only. Add `-- --include-ignored --test-threads=1` to run the mount tests there.
 - The mount tests run one at a time. In parallel they fail now and then: a test that starts a program forks, and the child briefly holds a copy of a file that another test has open on its mount, so that test's unmount is refused as busy.
 

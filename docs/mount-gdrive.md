@@ -116,7 +116,7 @@ The app signs in to Google in a browser and saves the result. `src/sign_in.rs` r
 - One lock is held across the keychain read and the request to Google, so calls that arrive together cause one of each.
 - **After Google refuses the refresh token** (`invalid_grant`), the next call reads the keychain again. The app is the only process that signs in, and it overwrites the entry, so a mount recovers with no restart. While the entry still holds the refused token, a call fails at once and sends nothing to Google: a mount gets a call for every file the OS touches.
 - When the keychain has no entry, each call reads it again, for the same reason.
-- The keychain read is a blocking call inside an async one. On macOS a permission prompt holds the calling thread until the user answers (#373 checks this).
+- The keychain read is a blocking call inside an async one. On macOS a permission prompt holds the calling thread until the user answers (#543 checks this).
 
 | What happens                                       | `valid_token` returns | Through `AccessTokens`                                   |
 | -------------------------------------------------- | --------------------- | -------------------------------------------------------- |

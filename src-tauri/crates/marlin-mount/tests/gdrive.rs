@@ -1,4 +1,4 @@
-//! The helper with its real providers against a fake Google: the Drive API and the token endpoint on one `wiremock` server, and the in-memory keychain. The tests that mount need FUSE, so `crates/marlin-fuse/test-in-docker.sh` runs them.
+//! The helper with its real providers against a fake Google: the Drive API and the token endpoint on one `wiremock` server, and the in-memory keychain. The tests that mount need FUSE. `crates/marlin-fuse/test-in-docker.sh` runs them on Linux, and `crates/marlin-fuse/test-on-mac.sh` runs them on a Mac.
 
 #![cfg(unix)]
 
@@ -8,11 +8,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use marlin_gdrive::{OAuthClient, KEYRING_SERVICE};
-#[cfg(target_os = "linux")]
 use marlin_mount::protocol::MountState;
 use marlin_mount::protocol::{error_codes, MountStatus};
 use marlin_mount::{Config, LinkedProviders, OsAdapter, Server};
-#[cfg(target_os = "linux")]
 use marlin_mount_client::Event;
 use marlin_mount_client::{Client, ClientError, Start};
 use serde_json::{json, Value};
@@ -209,8 +207,7 @@ async fn fake_google() -> (MockServer, Arc<Mutex<GoogleState>>) {
 struct Running {
     root: PathBuf,
     client: Client,
-    /// Only the tests that mount read events, and they are Linux only.
-    #[cfg(target_os = "linux")]
+    /// Only the tests that mount read events.
     events: tokio::sync::mpsc::UnboundedReceiver<Event>,
     signal: tokio::sync::oneshot::Sender<()>,
     run: tokio::task::JoinHandle<()>,
@@ -257,12 +254,9 @@ async fn running_with(
     )
     .await
     .unwrap();
-    #[cfg(not(target_os = "linux"))]
-    drop(events);
     Running {
         root,
         client,
-        #[cfg(target_os = "linux")]
         events,
         signal,
         run,
@@ -415,7 +409,6 @@ async fn a_helper_with_no_oauth_client_refuses_the_mount_and_keeps_the_loaders_t
     stop(running).await;
 }
 
-#[cfg(target_os = "linux")]
 async fn names(path: &std::path::Path) -> Vec<String> {
     let path = path.to_path_buf();
     tokio::task::spawn_blocking(move || {
@@ -430,7 +423,6 @@ async fn names(path: &std::path::Path) -> Vec<String> {
     .unwrap()
 }
 
-#[cfg(target_os = "linux")]
 async fn read_file(path: &std::path::Path) -> Vec<u8> {
     let path = path.to_path_buf();
     tokio::task::spawn_blocking(move || std::fs::read(path).unwrap())
@@ -438,7 +430,6 @@ async fn read_file(path: &std::path::Path) -> Vec<u8> {
         .unwrap()
 }
 
-#[cfg(target_os = "linux")]
 async fn read_at(path: &std::path::Path, offset: u64, size: usize) -> Vec<u8> {
     let path = path.to_path_buf();
     tokio::task::spawn_blocking(move || {
@@ -453,21 +444,16 @@ async fn read_at(path: &std::path::Path, offset: u64, size: usize) -> Vec<u8> {
     .unwrap()
 }
 
-/// Makes one provider call that no cache answers, and ignores the result.
-#[cfg(target_os = "linux")]
-async fn ask_for_free_space(point: &std::path::Path) {
-    let point = point.to_path_buf();
+/// Makes one provider call that no cache answers, and ignores the result. It reads a file that nothing has read yet. A free-space call would not do: macOS asks for the space when it mounts and answers later calls from that.
+async fn read_big_file(point: &std::path::Path) {
+    let big = point.join("My Drive").join("big.bin");
     tokio::task::spawn_blocking(move || {
-        let _ = std::process::Command::new("stat")
-            .args(["--file-system", "--format=%S %b %a %l"])
-            .arg(point)
-            .output();
+        let _ = std::fs::read(big);
     })
     .await
     .unwrap();
 }
 
-#[cfg(target_os = "linux")]
 async fn changed(
     events: &mut tokio::sync::mpsc::UnboundedReceiver<Event>,
     state: MountState,
@@ -485,8 +471,7 @@ async fn changed(
     .expect("no mount event")
 }
 
-#[cfg(target_os = "linux")]
-#[ignore = "needs /dev/fuse and fusermount3: run crates/marlin-fuse/test-in-docker.sh"]
+#[ignore = "mounts for real: run crates/marlin-fuse/test-in-docker.sh on Linux, crates/marlin-fuse/test-on-mac.sh on a Mac"]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_google_account_mounts_and_reads_through_fuse() {
     marlin_test_keychain::install();
@@ -596,8 +581,7 @@ async fn a_google_account_mounts_and_reads_through_fuse() {
     stop(running).await;
 }
 
-#[cfg(target_os = "linux")]
-#[ignore = "needs /dev/fuse and fusermount3: run crates/marlin-fuse/test-in-docker.sh"]
+#[ignore = "mounts for real: run crates/marlin-fuse/test-in-docker.sh on Linux, crates/marlin-fuse/test-on-mac.sh on a Mac"]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_rejected_sign_in_shows_auth_required_and_a_new_sign_in_recovers() {
     marlin_test_keychain::install();
@@ -616,13 +600,13 @@ async fn a_rejected_sign_in_shows_auth_required_and_a_new_sign_in_recovers() {
         google.rejected = true;
         google.access_token = "access-2".to_string();
     }
-    ask_for_free_space(&point).await;
+    read_big_file(&point).await;
     let failed = changed(&mut running.events, MountState::AuthRequired).await;
     assert_eq!(failed.account, email);
 
     google.lock().unwrap().rejected = false;
     marlin_test_keychain::set(KEYRING_SERVICE, email, "refresh-2");
-    ask_for_free_space(&point).await;
+    read_big_file(&point).await;
     let recovered = changed(&mut running.events, MountState::Mounted).await;
     assert_eq!(recovered.account, email);
 

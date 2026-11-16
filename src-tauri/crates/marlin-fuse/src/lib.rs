@@ -1,123 +1,62 @@
-//! Marlin's Linux mount adapter: serves a marlin-vfs mount through FUSE.
+//! Marlin's FUSE mount adapter: serves a marlin-vfs mount on Linux and macOS.
 
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "macos"))]
 
-mod fs;
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "macos")]
+mod macos;
 
-use std::fmt;
-use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::Arc;
+use std::path::Path;
 
-use marlin_vfs::Vfs;
+use marlin_vfs::{Kind, VfsError};
 
-/// Why a mount or an unmount failed. `Display` is the text the user sees. `NoFuseDevice` and `NoFusermount` say how to fix the machine. The other two carry what `fuser` or `fusermount3` reported.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Error {
-    /// `/dev/fuse` does not exist.
-    NoFuseDevice,
+#[cfg(target_os = "linux")]
+pub use linux::{mount, unmount_dead, Error, Mount};
+#[cfg(target_os = "macos")]
+pub use macos::{mount, unmount_dead, Error, Mount};
 
-    /// `fusermount3` is not installed.
-    NoFusermount,
+/// How long the kernel may reuse a name and its attributes without asking again.
+pub(crate) const TTL: std::time::Duration = std::time::Duration::from_secs(1);
 
-    /// The mount failed. Holds what `fuser`, `fusermount3`, or the mount task reported.
-    Mount(String),
+pub(crate) const BLOCK_SIZE: u32 = 4096;
 
-    /// The unmount failed, for example because a file is open. Holds what `fusermount3` reported. The mount is still served.
-    Unmount(String),
-}
+/// The longest name apps expect, in bytes. A longer name is not listed and cannot be looked up.
+pub(crate) const NAME_MAX: usize = 255;
 
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NoFuseDevice => f.write_str(
-                "This machine has no /dev/fuse. Load the FUSE kernel module with `sudo modprobe fuse`. In a container, pass the host's /dev/fuse through.",
-            ),
-            Self::NoFusermount => f.write_str(
-                "Marlin needs fusermount3 to mount. Install the fuse3 package: `sudo apt install fuse3` on Debian and Ubuntu, `sudo dnf install fuse3` on Fedora, `sudo pacman -S fuse3` on Arch.",
-            ),
-            Self::Mount(text) => write!(f, "Linux could not mount: {text}"),
-            Self::Unmount(text) => write!(f, "Linux could not unmount: {text}"),
-        }
+/// One page of a folder listing. A bigger folder is read in pages, so one readdir never clones the whole listing.
+pub(crate) const PAGE: usize = 256;
+
+/// The mode and link count a mount shows. A folder is mode `0o500` with 2 links. A file is mode `0o400` with 1 link.
+pub(crate) fn mode_and_links(kind: Kind) -> (u16, u32) {
+    match kind {
+        Kind::Folder => (0o500, 2),
+        Kind::File => (0o400, 1),
     }
 }
 
-impl std::error::Error for Error {}
-
-/// One live mount.
-pub struct Mount {
-    /// The path as the kernel's mount table spells it.
-    mount_point: PathBuf,
-
-    /// Held so that a drop detaches the mount. `fuser` 0.18.0 cannot tell that a mount is already gone, so a drop always asks it to detach whatever FUSE mount is at the path. Drop a `Mount` before the path is used again.
-    _session: fuser::BackgroundSession,
-}
-
-/// Serves `vfs` at `mount_point`, an empty folder that exists. Returns once the mount is in the OS mount table.
-pub async fn mount(vfs: Arc<Vfs>, mount_point: &Path) -> Result<Mount, Error> {
-    let filesystem = fs::Fs {
-        vfs,
-        runtime: tokio::runtime::Handle::current(),
-        // SAFETY: getuid cannot fail and touches no memory.
-        uid: unsafe { libc::getuid() },
-        // SAFETY: getgid cannot fail and touches no memory.
-        gid: unsafe { libc::getgid() },
-        keep_cache: false,
-    };
-    let mut config = fuser::Config::default();
-    // No `allow_other`: only the mounting user may open the mount. `default_permissions` has the kernel enforce the modes, so the adapter needs no access callback.
-    config.mount_options = vec![
-        fuser::MountOption::RO,
-        fuser::MountOption::DefaultPermissions,
-        fuser::MountOption::FSName("marlin".into()),
-        fuser::MountOption::Subtype("marlin".into()),
-    ];
-    // Taken before the mount exists: afterwards it would be a call into the new filesystem.
-    let mount_point = mount_point
-        .canonicalize()
-        .map_err(|error| Error::Mount(error.to_string()))?;
-    let at = mount_point.clone();
-    // These calls block: they run `fusermount3` and wait for the kernel's first message. The mount is in the mount table when `Session::new` returns.
-    let session = tokio::task::spawn_blocking(move || {
-        preflight(Path::new("/dev/fuse"), "fusermount3")?;
-        fuser::Session::new(filesystem, &at, &config)
-            .and_then(|session| session.spawn())
-            .map_err(|error| Error::Mount(error.to_string().trim().to_string()))
-    })
-    .await
-    .map_err(|error| Error::Mount(error.to_string()))??;
-    Ok(Mount {
-        mount_point,
-        _session: session,
-    })
-}
-
-impl Mount {
-    /// Unmounts and returns once the OS no longer shows the mount. It does not wait for the session thread, which ends only when every copy of the mount is gone. After an error the mount is still served.
-    pub async fn unmount(&mut self) -> Result<(), Error> {
-        // Nothing to do when the mount is already gone: this is a second call, or something outside Marlin removed it (`fusermount3 -u`, or eject in a file manager).
-        if !is_mounted(&self.mount_point).map_err(|error| Error::Unmount(error.to_string()))? {
-            return Ok(());
-        }
-        // A plain unmount fails while a file is open, and the mount stays served.
-        // BackgroundSession::umount_and_join is a lazy unmount (MNT_DETACH, or `fusermount3 -u -q -z`), which would hide a busy mount.
-        let output = tokio::process::Command::new("fusermount3")
-            .arg("-u")
-            .arg("--")
-            .arg(&self.mount_point)
-            .output()
-            .await
-            .map_err(|error| Error::Unmount(error.to_string()))?;
-        if !output.status.success() {
-            let text = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            return Err(Error::Unmount(text));
-        }
-        Ok(())
+// Never map a provider error to ENOSYS. The kernel takes it to mean this filesystem has no such call and stops sending that call for the life of the mount. Only the callbacks this adapter leaves out answer it.
+pub(crate) fn errno(error: &VfsError) -> libc::c_int {
+    match error {
+        VfsError::NotFound => libc::ENOENT,
+        VfsError::AccessDenied => libc::EACCES,
+        VfsError::ReadOnly => libc::EROFS,
+        VfsError::Conflict => libc::EEXIST,
+        VfsError::NotAFolder => libc::ENOTDIR,
+        VfsError::IsAFolder => libc::EISDIR,
+        VfsError::NoSpace => libc::ENOSPC,
+        VfsError::SignInNeeded => libc::EACCES,
+        VfsError::TimedOut => libc::ETIMEDOUT,
+        VfsError::Offline => libc::ENETUNREACH,
+        VfsError::NotSupported => libc::EOPNOTSUPP,
+        VfsError::StaleHandle => libc::ESTALE,
+        VfsError::Other(_) => libc::EIO,
     }
 }
 
 /// Whether a dead mount is at `mount_point`: one whose server was killed. A live mount, a plain folder, a symbolic link, and a path that is not there are not dead mounts.
+///
+/// A dead mount fails the open, or the read of the first entry. Linux reports `ENOTCONN`. macOS reports `ENXIO`.
 pub async fn is_dead_mount(mount_point: &Path) -> bool {
     let path = mount_point.to_path_buf();
     // The check blocks, and a test serves a live mount from this same process.
@@ -126,78 +65,22 @@ pub async fn is_dead_mount(mount_point: &Path) -> bool {
         if std::fs::symlink_metadata(&path).is_ok_and(|found| found.is_symlink()) {
             return false;
         }
-        // A dead mount fails the open, or the read of the first entry.
+        let dead = if cfg!(target_os = "linux") {
+            libc::ENOTCONN
+        } else {
+            libc::ENXIO
+        };
         std::fs::read_dir(&path)
             .and_then(|mut entries| entries.next().transpose())
-            .is_err_and(|error| error.raw_os_error() == Some(libc::ENOTCONN))
+            .is_err_and(|error| error.raw_os_error() == Some(dead))
     })
     .await
     .unwrap_or(false)
 }
 
-/// Unmounts the dead mount at `mount_point`. The folder itself stays.
-pub async fn unmount_dead(mount_point: &Path) -> Result<(), Error> {
-    // A lazy unmount, unlike `Mount::unmount`. Nothing serves a dead mount, so there is no open file to protect, and a plain unmount fails while any process has its working folder inside.
-    let output = tokio::process::Command::new("fusermount3")
-        .arg("-u")
-        .arg("-z")
-        .arg("--")
-        .arg(mount_point)
-        .output()
-        .await
-        .map_err(|error| Error::Unmount(error.to_string()))?;
-    if !output.status.success() {
-        let text = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(Error::Unmount(text));
-    }
-    Ok(())
-}
-
-/// Whether this process's mount table lists a mount at `mount_point`.
-fn is_mounted(mount_point: &Path) -> std::io::Result<bool> {
-    let table = std::fs::read_to_string("/proc/self/mountinfo")?;
-    Ok(table.lines().any(|line| {
-        // The mount point is the fifth field of a line. The kernel writes a space, tab, newline, and backslash in it as `\040`, `\011`, `\012`, and `\134`.
-        let at = line
-            .split(' ')
-            .nth(4)
-            .unwrap_or_default()
-            .replace("\\040", " ")
-            .replace("\\011", "\t")
-            .replace("\\012", "\n")
-            .replace("\\134", "\\");
-        Path::new(&at) == mount_point
-    }))
-}
-
-/// Checks what a mount needs. The two inputs are parameters so the tests can name a device and a program that do not exist.
-fn preflight(device: &Path, fusermount: &str) -> Result<(), Error> {
-    if !device.exists() {
-        return Err(Error::NoFuseDevice);
-    }
-    match Command::new(fusermount).arg("--version").output() {
-        Err(error) if error.kind() == ErrorKind::NotFound => Err(Error::NoFusermount),
-        _ => Ok(()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn preflight_reports_a_missing_device_and_a_missing_fusermount() {
-        assert_eq!(
-            preflight(Path::new("/marlin-no-such-device"), "fusermount3"),
-            Err(Error::NoFuseDevice)
-        );
-        assert_eq!(
-            preflight(Path::new("/dev/null"), "marlin-no-such-program"),
-            Err(Error::NoFusermount)
-        );
-        assert!(Error::NoFusermount.to_string().contains("fuse3"));
-        assert!(Error::NoFuseDevice.to_string().contains("modprobe fuse"));
-    }
 
     #[tokio::test]
     async fn a_plain_folder_a_missing_path_and_a_symlink_are_not_dead_mounts() {

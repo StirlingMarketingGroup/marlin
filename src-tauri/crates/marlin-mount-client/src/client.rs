@@ -95,12 +95,14 @@ impl std::fmt::Display for ClientError {
 
 impl std::error::Error for ClientError {}
 
+/// Callers waiting on an answer, keyed by request id. `None` after the connection ends, so a call cannot register a waiter once the reader has given up.
+type Waiters = Arc<std::sync::Mutex<Option<HashMap<u64, oneshot::Sender<Response>>>>>;
+
 /// One connection to the helper. Requests on it run at the same time, so each answer finds its caller by id.
 pub struct Client {
     writer: tokio::sync::Mutex<OwnedWriteHalf>,
     next_id: AtomicU64,
-    /// `Some` while the connection is open. `None` after it ends, so a call cannot register a waiter once the reader has given up.
-    waiting: Arc<std::sync::Mutex<Option<HashMap<u64, oneshot::Sender<Response>>>>>,
+    waiting: Waiters,
 }
 
 impl Client {
@@ -371,7 +373,7 @@ fn start_helper(start: &Start) -> Result<(), ClientError> {
 
 async fn read_incoming(
     mut reader: BufReader<OwnedReadHalf>,
-    waiting: Arc<std::sync::Mutex<Option<HashMap<u64, oneshot::Sender<Response>>>>>,
+    waiting: Waiters,
     on_event: impl Fn(Event),
 ) {
     let mut line = String::new();
