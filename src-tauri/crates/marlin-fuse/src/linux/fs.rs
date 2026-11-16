@@ -1,24 +1,12 @@
 use std::ffi::OsStr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use fuser::{
     Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, Generation, INodeNo, InitFlags,
     KernelConfig, LockOwner, OpenAccMode, OpenFlags, ReplyAttr, ReplyData, ReplyDirectory,
     ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, Request,
 };
-use marlin_vfs::{Access, Attributes, HandleId, Kind, NodeId, Vfs, VfsError};
-
-/// How long the kernel may reuse a name and its attributes without asking again.
-const TTL: Duration = Duration::from_secs(1);
-
-const BLOCK_SIZE: u32 = 4096;
-
-/// The longest name Linux apps expect, in bytes. A longer name is not listed and cannot be looked up.
-const NAME_MAX: usize = 255;
-
-/// One page of a folder listing. A bigger folder is read in pages, so one readdir never clones the whole listing.
-const PAGE: usize = 256;
+use marlin_vfs::{Access, Attributes, HandleId, Kind, NodeId, Vfs};
 
 /// The core keeps no parent for a node. This is the value libfuse sends (`FUSE_UNKNOWN_INO`) when a filesystem does not know an entry's inode.
 const UNKNOWN_INODE: INodeNo = INodeNo(0xffff_ffff);
@@ -49,7 +37,7 @@ impl Filesystem for Fs {
         let Some(name) = name.to_str() else {
             return reply.error(Errno::ENOENT);
         };
-        if name.len() > NAME_MAX {
+        if name.len() > crate::NAME_MAX {
             return reply.error(Errno::ENAMETOOLONG);
         }
         let name = name.to_owned();
@@ -60,9 +48,9 @@ impl Filesystem for Fs {
             match vfs.lookup(NodeId(parent.0), &name).await {
                 Ok(entry) => {
                     let attr = file_attr(entry.node, &entry.attributes, uid, gid);
-                    reply.entry(&TTL, &attr, Generation(0));
+                    reply.entry(&crate::TTL, &attr, Generation(0));
                 }
-                Err(error) => reply.error(errno(&error)),
+                Err(error) => reply.error(Errno::from_i32(crate::errno(&error))),
             }
         });
     }
@@ -80,9 +68,9 @@ impl Filesystem for Fs {
             match vfs.attributes(node).await {
                 Ok(attributes) => {
                     let attr = file_attr(node, &attributes, uid, gid);
-                    reply.attr(&TTL, &attr);
+                    reply.attr(&crate::TTL, &attr);
                 }
-                Err(error) => reply.error(errno(&error)),
+                Err(error) => reply.error(Errno::from_i32(crate::errno(&error))),
             }
         });
     }
@@ -102,7 +90,7 @@ impl Filesystem for Fs {
         self.runtime.spawn(async move {
             match vfs.open(NodeId(ino.0), access).await {
                 Ok(handle) => reply.opened(FileHandle(handle.0), flags),
-                Err(error) => reply.error(errno(&error)),
+                Err(error) => reply.error(Errno::from_i32(crate::errno(&error))),
             }
         });
     }
@@ -122,7 +110,7 @@ impl Filesystem for Fs {
         self.runtime.spawn(async move {
             match vfs.read(HandleId(fh.0), offset, size).await {
                 Ok(bytes) => reply.data(&bytes),
-                Err(error) => reply.error(errno(&error)),
+                Err(error) => reply.error(Errno::from_i32(crate::errno(&error))),
             }
         });
     }
@@ -146,7 +134,7 @@ impl Filesystem for Fs {
         self.runtime.spawn(async move {
             match vfs.open_folder(NodeId(ino.0)).await {
                 Ok(handle) => reply.opened(FileHandle(handle.0), FopenFlags::empty()),
-                Err(error) => reply.error(errno(&error)),
+                Err(error) => reply.error(Errno::from_i32(crate::errno(&error))),
             }
         });
     }
@@ -173,19 +161,20 @@ impl Filesystem for Fs {
             offset = 2;
         }
         loop {
-            let page = match self
-                .vfs
-                .read_folder(HandleId(fh.0), (offset - 2) as usize, PAGE)
-            {
-                Ok(page) => page,
-                Err(error) => return reply.error(errno(&error)),
-            };
+            let page =
+                match self
+                    .vfs
+                    .read_folder(HandleId(fh.0), (offset - 2) as usize, crate::PAGE)
+                {
+                    Ok(page) => page,
+                    Err(error) => return reply.error(Errno::from_i32(crate::errno(&error))),
+                };
             if page.is_empty() {
                 return reply.ok();
             }
             for entry in page {
                 offset += 1;
-                if entry.name.len() > NAME_MAX {
+                if entry.name.len() > crate::NAME_MAX {
                     continue;
                 }
                 let kind = match entry.attributes.kind {
@@ -214,7 +203,7 @@ impl Filesystem for Fs {
     fn statfs(&self, _req: &Request, _ino: INodeNo, reply: ReplyStatfs) {
         let vfs = Arc::clone(&self.vfs);
         self.runtime.spawn(async move {
-            let block = u64::from(BLOCK_SIZE);
+            let block = u64::from(crate::BLOCK_SIZE);
             match vfs.space().await {
                 Ok(space) => reply.statfs(
                     space.total / block,
@@ -222,20 +211,21 @@ impl Filesystem for Fs {
                     space.free / block,
                     0,
                     0,
-                    BLOCK_SIZE,
-                    NAME_MAX as u32,
-                    BLOCK_SIZE,
+                    crate::BLOCK_SIZE,
+                    crate::NAME_MAX as u32,
+                    crate::BLOCK_SIZE,
                 ),
-                Err(error) => reply.error(errno(&error)),
+                Err(error) => reply.error(Errno::from_i32(crate::errno(&error))),
             }
         });
     }
 }
 
 fn file_attr(node: NodeId, attributes: &Attributes, uid: u32, gid: u32) -> FileAttr {
-    let (kind, perm, nlink) = match attributes.kind {
-        Kind::Folder => (FileType::Directory, 0o500, 2),
-        Kind::File => (FileType::RegularFile, 0o400, 1),
+    let (perm, nlink) = crate::mode_and_links(attributes.kind);
+    let kind = match attributes.kind {
+        Kind::Folder => FileType::Directory,
+        Kind::File => FileType::RegularFile,
     };
     FileAttr {
         ino: INodeNo(node.0),
@@ -251,33 +241,14 @@ fn file_attr(node: NodeId, attributes: &Attributes, uid: u32, gid: u32) -> FileA
         uid,
         gid,
         rdev: 0,
-        blksize: BLOCK_SIZE,
+        blksize: crate::BLOCK_SIZE,
         flags: 0,
-    }
-}
-
-// Never map a provider error to ENOSYS. The kernel takes it to mean this filesystem has no such call and stops sending that call for the life of the mount. Only the callbacks this adapter leaves out answer it, through `fuser`'s defaults.
-fn errno(error: &VfsError) -> Errno {
-    match error {
-        VfsError::NotFound => Errno::ENOENT,
-        VfsError::AccessDenied => Errno::EACCES,
-        VfsError::ReadOnly => Errno::EROFS,
-        VfsError::Conflict => Errno::EEXIST,
-        VfsError::NotAFolder => Errno::ENOTDIR,
-        VfsError::IsAFolder => Errno::EISDIR,
-        VfsError::NoSpace => Errno::ENOSPC,
-        VfsError::SignInNeeded => Errno::EACCES,
-        VfsError::TimedOut => Errno::ETIMEDOUT,
-        VfsError::Offline => Errno::ENETUNREACH,
-        VfsError::NotSupported => Errno::EOPNOTSUPP,
-        VfsError::StaleHandle => Errno::ESTALE,
-        VfsError::Other(_) => Errno::EIO,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::time::UNIX_EPOCH;
+    use std::time::{Duration, UNIX_EPOCH};
 
     use super::*;
 

@@ -12,7 +12,7 @@ use marlin_vfs::{Options, Provider, Vfs, VfsError};
 use crate::log::{self, redact};
 use crate::protocol::{error_codes, DeadMount, MountState, MountStatus, RpcError};
 
-/// What an OS adapter gives the helper. `marlin-fuse` is the Linux one. Issues #373 and #375 add the others.
+/// What an OS adapter gives the helper. `marlin-fuse` is the one for Linux and macOS. Issue #375 adds Windows.
 #[async_trait::async_trait]
 pub trait Adapter: Send + Sync + 'static {
     /// Serves `vfs` at `mount_point`, an empty folder that exists. Returns once the OS shows the mount.

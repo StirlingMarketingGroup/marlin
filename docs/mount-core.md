@@ -1,6 +1,6 @@
 # Mount core (`marlin-vfs`)
 
-`marlin-vfs` is the layer between a storage provider and an OS mount adapter. An adapter asks it for nodes and bytes. It asks a provider for items. The [mount helper](mount-helper.md) builds one `Vfs` per mount. On Linux the [Linux mount adapter](mount-linux.md) serves it to the OS. The first real provider is the [Google Drive mount provider](mount-gdrive.md). The macOS and Windows adapters (#373, #375) come next. It is read-only until #376.
+`marlin-vfs` is the layer between a storage provider and an OS mount adapter. An adapter asks it for nodes and bytes. It asks a provider for items. The [mount helper](mount-helper.md) builds one `Vfs` per mount. The [Linux mount adapter](mount-linux.md) and the [macOS mount adapter](mount-macos.md) serve it to the OS. The first real provider is the [Google Drive mount provider](mount-gdrive.md). The Windows adapter (#375) comes next. It is read-only until #376.
 
 **Covers:** `src-tauri/crates/marlin-vfs/`
 **Checked against the code:** 2026-11-16
@@ -46,7 +46,7 @@ An `ItemId` should stay with an item when the remote renames or moves it. Google
 - **Nodes.** The root is node 1. A node lives while the OS holds a lookup on it or a handle is open on it. An open folder holds its own node and the node of every item in its listing. Then the core drops it. An ID is never reused in a mount. A node that is gone gives `StaleHandle`.
 - **Stable identity.** A node is tied to the provider's `ItemId`, not to a path. An item the remote renamed or moved keeps its node and its open handles.
 - **Names.** `escape` turns each character the OS forbids into `%XX`, and `unescape` reverses it exactly. A name that occurs once in a folder is kept. Items that share a name are taken in `ItemId` order: each keeps the name if it is still free, or gets the first free ` (2)`, ` (3)` before the extension. The mapping is worked out again for each listing and is not stored, so a suffix can change when a duplicate is added or removed.
-- **Name rules per OS.** `NameRules` holds two functions: which characters are forbidden, and the key that decides whether two names are the same name. `POSIX` is the only rule set today. Windows reserved names and macOS Unicode forms belong to their adapters (#375, #373).
+- **Name rules per OS.** `NameRules` holds two functions: which characters are forbidden, and the key that decides whether two names are the same name. `POSIX` is the only rule set today. Windows reserved names come with the Windows adapter (#375). macOS mounts use `POSIX` until they get rules of their own (#542).
 - **Limits.** Each mount runs at most `max_calls` provider calls at once (default 16). A call that does not finish within `call_timeout` (default 30 seconds), waiting included, fails with `TimedOut`. Dropping the future of a core call cancels its provider call.
 - **Listing cache.** A folder's listing is reused for `listing_ttl` (default 5 seconds). The cache holds at most `max_listings` folders (default 64), and 0 turns it off. A listing that started before a `refresh()` is never put in the cache.
 - **Locking.** All state is behind one mutex that is never held across a provider call.

@@ -996,10 +996,11 @@ async fn the_sweep_clears_dead_mounts_and_empty_folders_and_leaves_the_rest() {
         .file_type()
         .is_symlink());
     assert!(std::fs::read_link(&link).unwrap().is_dir());
-    let dead = harness.fake.dead.lock().unwrap();
-    assert_eq!(dead.len(), 1);
-    assert!(dead.contains(&link));
-    drop(dead);
+    {
+        let dead = harness.fake.dead.lock().unwrap();
+        assert_eq!(dead.len(), 1);
+        assert!(dead.contains(&link));
+    }
     assert_eq!(client.call("list", Value::Null).await["result"], json!([]));
     assert_eq!(
         client.call("deadMounts", Value::Null).await["result"],
