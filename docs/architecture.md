@@ -2,7 +2,7 @@
 
 Marlin is one Tauri 2 desktop app: a Rust backend that owns all file access, and a React frontend that draws the UI in a webview. The frontend never touches the disk. It calls a Rust command and gets data back.
 
-**Covers:** `src-tauri/src/lib.rs`, `src-tauri/src/commands.rs`, `src-tauri/src/menu.rs`, `src-tauri/Cargo.toml`, `src-tauri/crates/`, `src-tauri/src/fs_watcher.rs`, `src/main.tsx`, `src/App.tsx`, `src/store/`, `src/windows/`, `src/components/PathBar.tsx`, `src/hooks/useDirectoryWatcher.ts`, `src/hooks/useRevealTarget.ts`
+**Covers:** `src-tauri/src/lib.rs`, `src-tauri/src/commands.rs`, `src-tauri/src/menu.rs`, `src-tauri/Cargo.toml`, `src-tauri/crates/`, `src-tauri/src/fs_watcher.rs`, `src/main.tsx`, `src/App.tsx`, `src/store/`, `src/windows/`, `src/components/PathBar.tsx`, `src/components/FilterInput.tsx`, `src/hooks/useDirectoryWatcher.ts`, `src/hooks/useRevealTarget.ts`
 **Checked against the code:** 2026-11-16
 
 ## Processes
@@ -70,6 +70,11 @@ The workspace has five library-only crates under `src-tauri/crates/`. `marlin-vf
 - The list is derived in render from two things: the query (the text split at its last separator) and the entries of that folder. The current folder's entries are the store's `files`. Any other folder takes one `read_directory` call, which later edits in the same folder reuse.
 - Typed text becomes a location in `resolveTypedPath` (`src/utils/pathUtils.ts`): a leading `~` is the home folder, and a Windows share path (`\\server\share\folder`) becomes `smb://server/share/folder`, except on Windows. `navigateTo` calls it for Enter, and the path bar calls it to list a folder for suggestions, so both read the text the same way. `normalizePath` does not do this, because it also handles paths that providers return. `navigateTo` also resolves a pasted Google Drive URL.
 - The SMB connect window (`src/windows/SmbConnectWindow.tsx`) reads its Server field with `smbServerAndFolders`, not `resolveTypedPath`, because the field also takes a bare host name. A pasted `\\server\share\folder` is saved under `server` alone, and the share and folder become the folder that opens.
+
+**Filter.** `src/components/FilterInput.tsx` is the box at the bottom right. Typing with the focus on the files shows the box and appends to `filterText`. Cmd/Ctrl+F shows it empty, so a name can be pasted. When the box is already open, the shortcut focuses it and selects its text. Escape or the X button clears the text and hides the box. An empty box stays open.
+
+- A file is shown when it passes two tests: it is not hidden (unless `showHidden` is on), and its name contains the text, ignoring case. The views, the box, select all, and the suggested zip name each apply this rule inline.
+- The box sorts with `useSortedFiles`, as the views do. So its match count is the number of rows on screen, and Down or Up from the box selects the first or last row.
 
 **State.** Zustand stores in `src/store/`:
 
