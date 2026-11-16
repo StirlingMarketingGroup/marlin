@@ -4,16 +4,16 @@ Start here. Each line says what a page answers. The rules for keeping these page
 
 ## How the app works
 
-| Page                                           | Read it to learn                                                                                                                                                                                                                 |
-| ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [Architecture](architecture.md)                | What runs where: the three processes, the Rust modules, the React windows and stores, and how they talk.                                                                                                                         |
-| [Location providers](location-providers.md)    | How local folders, archives, Google Drive, SMB, and SFTP work today, and where that model breaks.                                                                                                                                |
-| [Thumbnails](thumbnails.md)                    | How a thumbnail gets requested, generated, and cached, for local and remote files.                                                                                                                                               |
-| [Mount core](mount-core.md)                    | What the `marlin-vfs` crate gives a mount adapter and asks of a provider: nodes, names, limits.                                                                                                                                  |
-| [Google Drive mount provider](mount-gdrive.md) | What the `marlin-gdrive` crate shows of a Google account in a mount: the folders, the item IDs, the errors, the retries, and Google's limits. Also the saved Google sign-in, and where the OAuth client ID and secret come from. |
-| [Mount helper](mount-helper.md)                | How the `marlin-mount` process is built, bundled, and controlled: its socket, its protocol, the rules of its mounts, the providers it links, and the app's commands and events for it.                                           |
-| [macOS mount adapter](mount-macos.md)          | How `marlin-fuse` serves a mount through macFUSE: what the machine needs, the life of a session, and the tests.                                                                                                                  |
-| [Linux mount adapter](mount-linux.md)          | How `marlin-fuse` serves a mount through FUSE: what the machine needs, the error table, and the tests.                                                                                                                           |
+| Page                                           | Read it to learn                                                                                                                                                                                                                                 |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| [Architecture](architecture.md)                | What runs where: the three processes, the Rust modules, the React windows and stores, and how they talk.                                                                                                                                         |
+| [Location providers](location-providers.md)    | How local folders, archives, Google Drive, SMB, and SFTP work today, and where that model breaks.                                                                                                                                                |
+| [Thumbnails](thumbnails.md)                    | How a thumbnail gets requested, generated, and cached, for local and remote files.                                                                                                                                                               |
+| [Mount core](mount-core.md)                    | What the `marlin-vfs` crate gives a mount adapter and asks of a provider: nodes, names, limits.                                                                                                                                                  |
+| [Google Drive mount provider](mount-gdrive.md) | What the `marlin-gdrive` crate shows of a Google account in a mount: the folders, the link files, the item IDs, the errors, the retries, and Google's limits. Also the saved Google sign-in, and where the OAuth client ID and secret come from. |
+| [Mount helper](mount-helper.md)                | How the `marlin-mount` process is built, bundled, and controlled: its socket, its protocol, the rules of its mounts, the providers it links, and the app's commands and events for it.                                                           |
+| [macOS mount adapter](mount-macos.md)          | How `marlin-fuse` serves a mount through macFUSE: what the machine needs, the life of a session, and the tests.                                                                                                                                  |
+| [Linux mount adapter](mount-linux.md)          | How `marlin-fuse` serves a mount through FUSE: what the machine needs, the error table, and the tests.                                                                                                                                           |
 
 ## How to work on it
 
@@ -30,6 +30,7 @@ Start here. Each line says what a page answers. The rules for keeping these page
 | -------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
 | [0001: Mount architecture](decisions/0001-mount-architecture.md)                       | How remotes become native mounts (epic #368): the portable core, the adapter per OS, the helper process, and the risks. |
 | [0002: Node IDs follow lookup counts](decisions/0002-node-ids-follow-lookup-counts.md) | How long a mount's node ID lasts, and why it is not the life of the mount.                                              |
+| [0003: Google Drive link files](decisions/0003-gdrive-link-files.md)                   | How a Google Drive mount shows Google Docs, Sheets, Slides, and shortcuts, which have no bytes to read.                 |
 
 ## Frozen history
 

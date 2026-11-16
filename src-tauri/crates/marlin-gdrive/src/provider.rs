@@ -78,22 +78,34 @@ enum Place<'a> {
         drive: Option<&'a str>,
         file: &'a str,
     },
+    /// A link file: a small web page that opens a Drive item in the browser. A mount shows one for each Drive item that has no bytes to read.
+    ///
+    /// Its id is the id the item would have as a `File`, then `#`, then the id the page opens. `read` gets an id and nothing else, so the id has to carry it.
+    Link {
+        drive: Option<&'a str>,
+        file: &'a str,
+        opens: &'a str,
+    },
 }
 
 fn place(id: &ItemId) -> Place<'_> {
     match id.0.as_str() {
         MOUNT_ROOT => Place::Top,
         SHARED_DRIVES => Place::SharedDrives,
-        real => match real.split_once('/') {
-            Some((drive, file)) => Place::File {
-                drive: Some(drive),
-                file,
-            },
-            None => Place::File {
-                drive: None,
-                file: real,
-            },
-        },
+        real => {
+            let (real, opens) = match real.split_once('#') {
+                Some((real, opens)) => (real, Some(opens)),
+                None => (real, None),
+            };
+            let (drive, file) = match real.split_once('/') {
+                Some((drive, file)) => (Some(drive), file),
+                None => (None, real),
+            };
+            match opens {
+                Some(opens) => Place::Link { drive, file, opens },
+                None => Place::File { drive, file },
+            }
+        }
     }
 }
 
@@ -110,26 +122,59 @@ fn made_up_folder(id: &ItemId, name: &str) -> Item {
     }
 }
 
-/// The item a mount shows for a Drive file, or `None` for one it leaves out.
-fn item_from(id: ItemId, file: DriveFile) -> Option<Item> {
-    let (kind, size) = if file.mime_type == "application/vnd.google-apps.folder" {
-        (Kind::Folder, 0)
-    } else if file.mime_type.starts_with("application/vnd.google-apps.") {
-        // Docs, Sheets, Slides, shortcuts, and the rest have no bytes to read. Issue #527 decides how a mount shows them.
-        return None;
+/// The item a mount shows for a Drive file. `drive` is the shared drive it is in, if any.
+///
+/// A Google Doc, Sheet, shortcut, or other Google item that is not a folder has no bytes to read, so it is a link file.
+fn item_from(drive: Option<&str>, id: String, file: DriveFile) -> Item {
+    let modified = modified(file.modified_time.as_deref());
+    let plain = match drive {
+        Some(drive) => format!("{drive}/{id}"),
+        None => id.clone(),
+    };
+    let (id, name, kind, size) = if file.mime_type == "application/vnd.google-apps.folder" {
+        (plain, file.name, Kind::Folder, 0)
+    } else if let Some(google_type) = file.mime_type.strip_prefix("application/vnd.google-apps.") {
+        // Only a shortcut has a target. Every other item opens itself.
+        let target = file
+            .shortcut_details
+            .and_then(|shortcut| shortcut.target_id);
+        let opens = target.unwrap_or(id);
+        // A third-party shortcut's type is `drive-sdk.{app id}`.
+        let google_type = google_type
+            .split_once('.')
+            .map_or(google_type, |(word, _)| word);
+        (
+            format!("{plain}#{opens}"),
+            format!("{}.{google_type}.html", file.name),
+            Kind::File,
+            link_page(&opens).len() as u64,
+        )
     } else {
         let size = file.size.and_then(|size| size.parse().ok());
-        (Kind::File, size.unwrap_or(0))
+        (plain, file.name, Kind::File, size.unwrap_or(0))
     };
-    Some(Item {
-        id,
-        name: file.name,
+    Item {
+        id: ItemId(id),
+        name,
         attributes: Attributes {
             kind,
             size,
-            modified: modified(file.modified_time.as_deref()),
+            modified,
         },
-    })
+    }
+}
+
+/// The bytes of a link file. They depend on the id alone, so the size is known when a folder is listed and a read sends no request.
+fn link_page(opens: &str) -> String {
+    format!(
+        "\
+<!doctype html>
+<meta charset=\"utf-8\">
+<meta http-equiv=\"refresh\" content=\"0; url=https://drive.google.com/open?id={opens}\">
+<title>Open in Google Drive</title>
+<a href=\"https://drive.google.com/open?id={opens}\">Open in Google Drive</a>
+"
+    )
 }
 
 /// The item a mount shows for a shared drive: the drive's top folder under the drive's own name. Google gives a shared drive no modified time, so the time is when the drive was made.
@@ -159,7 +204,7 @@ impl Provider for DriveProvider {
     }
 
     async fn item(&self, id: &ItemId) -> Result<Item, VfsError> {
-        let file = match place(id) {
+        let (drive, file) = match place(id) {
             Place::Top => return Ok(made_up_folder(id, "")),
             Place::SharedDrives => return Ok(made_up_folder(id, "Shared drives")),
             // The top folder of a shared drive. `files.get` gives that folder another name than the drive's, so the answer comes from the drive itself, as it does in the listing of shared drives.
@@ -171,10 +216,13 @@ impl Provider for DriveProvider {
                 let response = self.get(&format!("/drives/{drive}"), &query, None).await?;
                 return Ok(shared_drive_item(api::json(response).await?));
             }
-            Place::File { file, .. } => file,
+            Place::File { drive, file } | Place::Link { drive, file, .. } => (drive, file),
         };
         let query = [
-            ("fields", "id,name,mimeType,size,modifiedTime,trashed"),
+            (
+                "fields",
+                "id,name,mimeType,size,modifiedTime,trashed,shortcutDetails(targetId)",
+            ),
             ("supportsAllDrives", "true"),
         ];
         let response = self.get(&format!("/files/{file}"), &query, None).await?;
@@ -186,8 +234,12 @@ impl Provider for DriveProvider {
         if file == MY_DRIVE {
             found.name = "My Drive".to_string();
         }
-        // The id stays the one the core asked for, so My Drive stays `root`.
-        item_from(id.clone(), found).ok_or(VfsError::NotSupported)
+        let item = item_from(drive, file.to_string(), found);
+        // The id says whether the core holds a plain item or a link, and which id the link opens. An answer that builds another id is not the item the core holds, and its size would not be the size of the bytes `read` returns.
+        if item.id != *id {
+            return Err(VfsError::NotFound);
+        }
+        Ok(item)
     }
 
     async fn list(&self, folder: &ItemId) -> Result<Vec<Item>, VfsError> {
@@ -217,6 +269,7 @@ impl Provider for DriveProvider {
                     page_token = Some(next);
                 }
             }
+            Place::Link { .. } => Err(VfsError::NotAFolder),
             Place::File {
                 drive,
                 file: parent,
@@ -230,7 +283,7 @@ impl Provider for DriveProvider {
                         ("q", children.as_str()),
                         (
                             "fields",
-                            "nextPageToken,files(id,name,mimeType,size,modifiedTime)",
+                            "nextPageToken,files(id,name,mimeType,size,modifiedTime,shortcutDetails(targetId))",
                         ),
                         ("pageSize", "1000"),
                         ("supportsAllDrives", "true"),
@@ -248,11 +301,7 @@ impl Provider for DriveProvider {
                     google_listed_any |= !page.files.is_empty();
                     for file in page.files {
                         // A folder's children are in the folder's own drive.
-                        let id = match drive {
-                            Some(drive) => format!("{drive}/{}", file.id),
-                            None => file.id.clone(),
-                        };
-                        items.extend(item_from(ItemId(id), file));
+                        items.push(item_from(drive, file.id.clone(), file));
                     }
                     let Some(next) = page.next_page_token else {
                         break;
@@ -269,8 +318,16 @@ impl Provider for DriveProvider {
     }
 
     async fn read(&self, id: &ItemId, offset: u64, length: u32) -> Result<Vec<u8>, VfsError> {
-        let Place::File { file, .. } = place(id) else {
-            return Err(VfsError::IsAFolder);
+        let file = match place(id) {
+            Place::File { file, .. } => file,
+            Place::Link { opens, .. } => {
+                // A link file's bytes come from its id alone, so Google is not asked.
+                let page = link_page(opens);
+                let start = offset.min(page.len() as u64) as usize;
+                let end = start.saturating_add(length as usize).min(page.len());
+                return Ok(page.as_bytes()[start..end].to_vec());
+            }
+            Place::Top | Place::SharedDrives => return Err(VfsError::IsAFolder),
         };
         if length == 0 {
             return Ok(Vec::new());
