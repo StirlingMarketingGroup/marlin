@@ -99,10 +99,9 @@ async fn a_real_account_lists_and_reads() {
         None => println!("no shared drive: shared drives not checked"),
         Some(drive) => {
             let found = provider.item(&drive.id).await.unwrap();
-            assert_eq!(found.attributes.kind, Kind::Folder);
             assert!(
-                found.name == drive.name,
-                "a shared drive's top folder has another name than its listing"
+                found == *drive,
+                "a shared drive's top folder differs from its line in the listing"
             );
             let started = Instant::now();
             let children = provider.list(&drive.id).await.unwrap();

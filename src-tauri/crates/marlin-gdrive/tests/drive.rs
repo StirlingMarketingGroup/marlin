@@ -755,6 +755,60 @@ async fn shared_drives_follow_two_pages_and_each_id_is_the_drive_twice() {
 }
 
 #[tokio::test]
+async fn a_shared_drives_top_folder_is_asked_from_the_drive_and_matches_its_listing() {
+    let server = MockServer::start().await;
+    // On a real account, `files.get` gives the top folder of a shared drive another name than the drive's. The provider must not ask it.
+    Mock::given(path("/files/team-1"))
+        .respond_with(ok_json(folder_json("team-1", "Drive")))
+        .mount(&server)
+        .await;
+    Mock::given(path("/drives/team-1"))
+        .respond_with(ok_json(
+            json!({ "id": "team-1", "name": "Team", "createdTime": MODIFIED }),
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(path("/drives"))
+        .respond_with(ok_json(json!({
+            "drives": [{ "id": "team-1", "name": "Team", "createdTime": MODIFIED }],
+        })))
+        .mount(&server)
+        .await;
+    let drive = drive(&server);
+    let listed = drive
+        .list(&ItemId("/shared-drives".to_string()))
+        .await
+        .unwrap();
+    let found = drive.item(&listed[0].id).await.unwrap();
+    assert_eq!(found, listed[0]);
+    assert_eq!(found.name, "Team");
+}
+
+#[tokio::test]
+async fn an_empty_shared_drive_lists_nothing_and_one_that_is_gone_is_not_found() {
+    let server = MockServer::start().await;
+    Mock::given(path("/files"))
+        .respond_with(ok_json(file_page(vec![], None)))
+        .mount(&server)
+        .await;
+    Mock::given(path("/drives/drive-1"))
+        .respond_with(ok_json(
+            json!({ "id": "drive-1", "name": "Team", "createdTime": MODIFIED }),
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(path("/drives/gone-1"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    let drive = drive(&server);
+    let empty = drive.list(&ItemId("drive-1/drive-1".to_string())).await;
+    assert_eq!(empty, Ok(vec![]));
+    let gone = drive.list(&ItemId("gone-1/gone-1".to_string())).await;
+    assert_eq!(gone, Err(VfsError::NotFound));
+}
+
+#[tokio::test]
 async fn a_shared_drive_listing_names_the_drive_and_a_my_drive_listing_does_not() {
     let server = MockServer::start().await;
     for (parent, child) in [

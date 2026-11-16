@@ -9,15 +9,15 @@ This is not the code behind `gdrive://` paths. That is the older provider in the
 
 ## The parts
 
-| File               | Holds                                                                                                            |
-| ------------------ | ---------------------------------------------------------------------------------------------------------------- |
-| `src/provider.rs`  | `DriveProvider`, its five `Provider` calls, the item IDs, and the two things a caller supplies.                  |
-| `src/api.rs`       | `get`, the one path every request takes: the token, the retries, and the error table. Google's JSON.             |
-| `src/sign_in.rs`   | `OAuthClient`, `SavedSignIn`, and the keychain entry: see [The saved sign-in](#the-saved-sign-in).               |
-| `build.rs`         | Passes the OAuth client ID and secret to the compiler.                                                           |
-| `tests/drive.rs`   | The provider's tests. They run against a fake Drive server in the test process.                                  |
-| `tests/sign_in.rs` | The sign-in's tests. They run against a fake token endpoint and an in-memory keychain.                           |
-| `tests/live.rs`    | One manual test against a real account: see [Not checked against real Google](#not-checked-against-real-google). |
+| File               | Holds                                                                                                    |
+| ------------------ | -------------------------------------------------------------------------------------------------------- |
+| `src/provider.rs`  | `DriveProvider`, its five `Provider` calls, the item IDs, and the two things a caller supplies.          |
+| `src/api.rs`       | `get`, the one path every request takes: the token, the retries, and the error table. Google's JSON.     |
+| `src/sign_in.rs`   | `OAuthClient`, `SavedSignIn`, and the keychain entry: see [The saved sign-in](#the-saved-sign-in).       |
+| `build.rs`         | Passes the OAuth client ID and secret to the compiler.                                                   |
+| `tests/drive.rs`   | The provider's tests. They run against a fake Drive server in the test process.                          |
+| `tests/sign_in.rs` | The sign-in's tests. They run against a fake token endpoint and an in-memory keychain.                   |
+| `tests/live.rs`    | One manual test against a real account: see [Checked against real Google](#checked-against-real-google). |
 
 The provider does not sign in, read a keychain, or know about the helper. A caller gives it two things:
 
@@ -60,19 +60,20 @@ What follows from that:
 
 ## The five calls
 
-| Call    | Requests                                                                                                            |
-| ------- | ------------------------------------------------------------------------------------------------------------------- |
-| `root`  | None.                                                                                                               |
-| `item`  | One `files.get`. None for `/` and `/shared-drives`.                                                                 |
-| `list`  | `files.list`, 1,000 items a page, until Google sends no next page. `drives.list` for the shared drives, 100 a page. |
-| `read`  | One `files.get` with `alt=media` and a `Range` header for exactly the bytes asked for.                              |
-| `space` | One `about.get`.                                                                                                    |
+| Call    | Requests                                                                                                              |
+| ------- | --------------------------------------------------------------------------------------------------------------------- |
+| `root`  | None.                                                                                                                 |
+| `item`  | One `files.get`, or one `drives.get` instead for the top folder of a shared drive. None for `/` and `/shared-drives`. |
+| `list`  | `files.list`, 1,000 items a page, until Google sends no next page. `drives.list` for the shared drives, 100 a page.   |
+| `read`  | One `files.get` with `alt=media` and a `Range` header for exactly the bytes asked for.                                |
+| `space` | One `about.get`.                                                                                                      |
 
 - **Listing the top asks Google for My Drive.** So a sign-in that is gone shows at the top of the mount, not as an empty folder.
 - **An empty listing costs one more request.** Google answers a listing of a file, and of a folder that is gone, with an empty list and no error. When a listing comes back empty, the provider asks for the folder itself and returns `NotFound` or `NotAFolder` when that is the truth.
 - **A read never downloads a whole file to serve a part.** If the server ignores the range and sends the whole file, the provider skips to the offset, keeps the bytes asked for, and drops the connection. A read at or past the end returns no bytes.
 - **Free space with no limit.** Google gives some Workspace accounts no storage limit. The provider then reports 1 PiB free, because a mount that reports 0 free makes file managers refuse to copy.
-- **A shared drive's modified time** in the `Shared drives` listing is the time the drive was made. Google's list of drives has no other time.
+- **A shared drive's top folder is asked from the drive, not from `files.get`.** On a real account `files.get` gives that folder another name than the drive's. So `item` asks `drives.get`, and its answer equals the drive's line in the `Shared drives` listing.
+- **A shared drive's modified time** is the time the drive was made. Google gives a shared drive no other time.
 - Every Drive API request is a GET. A token refresh sends a POST to Google's token endpoint. The crate sends nothing else.
 
 ## Errors and retries
@@ -133,13 +134,13 @@ The app's side is in `src-tauri/src/locations/gdrive/auth.rs`: the account list,
 
 Google counts Drive API use in quota units. The numbers are from [Usage limits](https://developers.google.com/workspace/drive/api/guides/limits), read on 2026-11-16.
 
-| Provider call | Request                           | Units                                                                         |
-| ------------- | --------------------------------- | ----------------------------------------------------------------------------- |
-| `item`        | `files.get`                       | 5                                                                             |
-| `list`        | `files.list` or `drives.list`     | 100 a page. A folder that lists no items costs one `files.get` more, 5 units. |
-| `read`        | `files.get` with `alt=media`      | 200, however many bytes it asks for                                           |
-| `space`       | `about.get`                       | 5                                                                             |
-| A new token   | A POST to Google's token endpoint | None. It is not a Drive API request.                                          |
+| Provider call | Request                                                      | Units                                                                            |
+| ------------- | ------------------------------------------------------------ | -------------------------------------------------------------------------------- |
+| `item`        | `files.get`, or `drives.get` for a shared drive's top folder | 5                                                                                |
+| `list`        | `files.list` or `drives.list`                                | 100 a page. A folder that lists no items costs one `item` request more, 5 units. |
+| `read`        | `files.get` with `alt=media`                                 | 200, however many bytes it asks for                                              |
+| `space`       | `about.get`                                                  | 5                                                                                |
+| A new token   | A POST to Google's token endpoint                            | None. It is not a Drive API request.                                             |
 
 | Limit                         | Units       |
 | ----------------------------- | ----------- |
@@ -159,15 +160,21 @@ Google counts Drive API use in quota units. The numbers are from [Usage limits](
 - **30 seconds covers the retries.** The three waits add up to 5.25 seconds at most. A listing is the long call: every page of a folder, one request after another, inside one call. How long a page of 1,000 items takes is not measured.
 - **A listing kept for 5 seconds** costs at most 12 listings a minute for a folder that stays open: 1,200 units a page.
 
-## Not checked against real Google
+## Checked against real Google
 
-Every automated test runs against the fake server. `tests/live.rs` is a manual test on a real account, with the five `Provider` calls only. It checks the second and fourth lines below. It lists a shared drive, but it cannot tell whether that listing is complete. It reads the real keychain, it never changes anything, and it prints counts, sizes, and times but no name. Its header has the command. Nobody has run it yet, so these still rest on Google's documentation:
+`tests/live.rs` is a manual test on a real account, with the five `Provider` calls only. It reads the real keychain, it never changes anything, and it prints counts, sizes, and times but no name. Its header has the command. It ran on 2026-11-16 against one Google Workspace account with two shared drives:
 
-- That `corpora=drive` with `driveId` lists every child of a folder in a shared drive.
-- What `files.get` returns for the top folder of a shared drive: its name and its modified time.
+- **A read at the end of a file, and past it, returns no bytes.**
+- **A read at an offset returns the same bytes as that part of a read from the start.**
+- **`files.get` gives the top folder of a shared drive another name than the drive's.** So `item` asks `drives.get` for that folder, and on this account its answer equals the drive's line in the `Shared drives` listing: see [The five calls](#the-five-calls).
+- **One request takes about half a second.** A listing of 62 items took 372 ms and 512 ms. A read of 14 KiB took 507 ms and 528 ms.
+
+Every automated test runs against the fake server, so these still rest on Google's documentation:
+
+- That `corpora=drive` with `driveId` lists every child of a folder in a shared drive. The live test lists a shared drive, but it cannot tell whether the listing is complete.
 - That every child of a folder is in the folder's own drive.
-- That Google answers a read at the end of a file with 416, and a read of an empty file too.
-- How long one page of a listing takes, and so how big a folder can be before its listing passes the core's 30 seconds.
+- That Google answers a read of an empty file with 416. The account had no empty file at the top of My Drive.
+- How long a page of 1,000 items takes, and so how big a folder can be before its listing passes the core's 30 seconds.
 - **A dead connection after sleep.** The HTTP client's only time limit is 10 seconds to connect. After a laptop sleeps or changes network, a kept connection can be dead, and each call on it may hang until the core's 30 seconds.
 - **A 403 that covers the whole account.** Any 403 that is not a rate limit is `AccessDenied`, which the helper counts as an answer. If Google answers the free-space request that way, a mount of such an account fails at its first call with -1005. A reason such as `domainPolicy` that starts while a mount is up leaves it `mounted` while every call fails.
 - **Two 30-second limits.** A token refresh times out after 30 seconds, and so does the core's call. A slow token endpoint may show as `TimedOut` and never as `Offline`.
