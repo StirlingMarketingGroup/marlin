@@ -1,0 +1,12 @@
+[package]
+name = "marlin-test-keychain"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+rust-version = "1.89"
+description = "An in-memory keychain for Marlin's tests only."
+
+[dependencies]
+keyring = { version = "3.6.3", default-features = false, features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust", "vendored"] }
+once_cell = "1.21"

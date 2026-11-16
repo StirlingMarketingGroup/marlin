@@ -140,7 +140,7 @@ curl -fsSL https://raw.githubusercontent.com/StirlingMarketingGroup/marlin/maste
 ### Requirements
 
 - Node.js 24.15+ (CI uses Node.js 24)
-- Rust 1.77+
+- Rust 1.89+
 - Linux only: GTK/WebKit toolchain
 
 ```bash

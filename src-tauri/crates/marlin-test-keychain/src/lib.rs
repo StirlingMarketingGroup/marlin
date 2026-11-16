@@ -80,18 +80,18 @@ impl CredentialBuilderApi for TestCredentialBuilder {
     }
 }
 
-pub(crate) fn install() {
+pub fn install() {
     keyring::set_default_credential_builder(Box::new(TestCredentialBuilder));
 }
 
-pub(crate) fn set(service: &str, user: &str, secret: &str) {
+pub fn set(service: &str, user: &str, secret: &str) {
     STORE
         .lock()
         .expect("test keychain lock")
         .insert((service.to_string(), user.to_string()), secret.to_string());
 }
 
-pub(crate) fn get(service: &str, user: &str) -> Option<String> {
+pub fn get(service: &str, user: &str) -> Option<String> {
     STORE
         .lock()
         .expect("test keychain lock")
@@ -99,14 +99,14 @@ pub(crate) fn get(service: &str, user: &str) -> Option<String> {
         .cloned()
 }
 
-pub(crate) fn remove(service: &str, user: &str) {
+pub fn remove(service: &str, user: &str) {
     STORE
         .lock()
         .expect("test keychain lock")
         .remove(&(service.to_string(), user.to_string()));
 }
 
-pub(crate) fn fail_writes_for(service: &str, user: &str) {
+pub fn fail_writes_for(service: &str, user: &str) {
     FAIL_WRITES
         .lock()
         .expect("test keychain lock")

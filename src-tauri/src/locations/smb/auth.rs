@@ -403,7 +403,7 @@ pub fn test_smb_connection(
 #[cfg(test)]
 mod tests {
     use super::{delete_password, get_password, set_password, SMB_KEYRING_SERVICE};
-    use crate::locations::test_keychain;
+    use marlin_test_keychain as test_keychain;
 
     #[test]
     fn get_password_keeps_a_keychain_read() {
