@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use marlin_vfs::{Attributes, Item, ItemId, Kind, Provider, Space, VfsError};
 use reqwest::StatusCode;
 
-use crate::api::{self, About, DriveFile, DrivePage, FilePage};
+use crate::api::{self, About, DriveFile, DrivePage, FilePage, SharedDrive};
 
 /// The id of the top of a mount. A Drive id never holds `/`, so neither made-up id can be a real one.
 const MOUNT_ROOT: &str = "/";
@@ -132,6 +132,20 @@ fn item_from(id: ItemId, file: DriveFile) -> Option<Item> {
     })
 }
 
+/// The item a mount shows for a shared drive: the drive's top folder under the drive's own name. Google gives a shared drive no modified time, so the time is when the drive was made.
+fn shared_drive_item(drive: SharedDrive) -> Item {
+    Item {
+        // A shared drive's id is also the id of its top folder.
+        id: ItemId(format!("{0}/{0}", drive.id)),
+        name: drive.name,
+        attributes: Attributes {
+            kind: Kind::Folder,
+            size: 0,
+            modified: modified(drive.created_time.as_deref()),
+        },
+    }
+}
+
 /// A time as Google writes it. One that is missing or unreadable is the start of 1970.
 fn modified(time: Option<&str>) -> SystemTime {
     time.and_then(|time| chrono::DateTime::parse_from_rfc3339(time).ok())
@@ -148,6 +162,15 @@ impl Provider for DriveProvider {
         let file = match place(id) {
             Place::Top => return Ok(made_up_folder(id, "")),
             Place::SharedDrives => return Ok(made_up_folder(id, "Shared drives")),
+            // The top folder of a shared drive. `files.get` gives that folder another name than the drive's, so the answer comes from the drive itself, as it does in the listing of shared drives.
+            Place::File {
+                drive: Some(drive),
+                file,
+            } if drive == file => {
+                let query = [("fields", "id,name,createdTime")];
+                let response = self.get(&format!("/drives/{drive}"), &query, None).await?;
+                return Ok(shared_drive_item(api::json(response).await?));
+            }
             Place::File { file, .. } => file,
         };
         let query = [
@@ -187,18 +210,7 @@ impl Provider for DriveProvider {
                     }
                     let response = self.get("/drives", &query, None).await?;
                     let page: DrivePage = api::json(response).await?;
-                    for drive in page.drives {
-                        items.push(Item {
-                            // A shared drive's id is also the id of its top folder.
-                            id: ItemId(format!("{0}/{0}", drive.id)),
-                            name: drive.name,
-                            attributes: Attributes {
-                                kind: Kind::Folder,
-                                size: 0,
-                                modified: modified(drive.created_time.as_deref()),
-                            },
-                        });
-                    }
+                    items.extend(page.drives.into_iter().map(shared_drive_item));
                     let Some(next) = page.next_page_token else {
                         return Ok(items);
                     };

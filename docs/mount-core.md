@@ -3,7 +3,7 @@
 `marlin-vfs` is the layer between a storage provider and an OS mount adapter. An adapter asks it for nodes and bytes. It asks a provider for items. The [mount helper](mount-helper.md) builds one `Vfs` per mount. On Linux the [Linux mount adapter](mount-linux.md) serves it to the OS. The first real provider is the [Google Drive mount provider](mount-gdrive.md). The macOS and Windows adapters (#373, #375) come next. It is read-only until #376.
 
 **Covers:** `src-tauri/crates/marlin-vfs/`
-**Checked against the code:** 2026-11-13
+**Checked against the code:** 2026-11-16
 
 The design is in [decision 0001](decisions/0001-mount-architecture.md). [Decision 0002](decisions/0002-node-ids-follow-lookup-counts.md) sets how long a node ID lasts.
 
@@ -22,6 +22,10 @@ The crate has no FUSE, WinFsp, Tauri, or serde types. It depends on `tokio` and 
 ## What a provider implements
 
 Five calls: `root`, `item`, `list`, `read` (a byte range), and `space`. A provider returns the names the remote uses and does not make them unique or safe. It has no write calls yet.
+
+When a file's bytes change, its modified time or its size must change too. An adapter may keep bytes it already read until one of the two changes, as the [Linux mount adapter](mount-linux.md) does.
+
+The text of a `VfsError::Other` holds no secret and no file name. The mount helper logs it.
 
 An `ItemId` should stay with an item when the remote renames or moves it. Google Drive's file ID does. A provider that only has paths, such as SFTP, uses the path, and a rename there looks like one item removed and another added.
 
@@ -48,7 +52,7 @@ An `ItemId` should stay with an item when the remote renames or moves it. Google
 - **Locking.** All state is behind one mutex that is never held across a provider call.
 - **Call results.** `Vfs::watch_calls` gives a mount's owner the result of every provider call, including the core's own `TimedOut`. A cancelled call and a cached listing report nothing. The mount helper builds a mount's health on it ([Health](mount-helper.md#health)).
 
-The four defaults are first guesses. Issue #529 tunes them against the real Google Drive API.
+Every mount uses the four defaults. [Google's limits](mount-gdrive.md#googles-limits) says how they fit the Drive API. Nobody has measured them against a real account.
 
 ## Testing
 

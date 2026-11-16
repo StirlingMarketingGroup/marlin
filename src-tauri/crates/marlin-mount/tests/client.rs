@@ -322,7 +322,7 @@ async fn a_status_of_an_account_with_no_mount_answers_none() {
         .call(
             methods::STATUS,
             AccountParams {
-                provider: "gdrive".to_string(),
+                provider: "memory".to_string(),
                 account: "a".to_string(),
             },
         )
@@ -342,7 +342,7 @@ async fn a_mount_state_change_reaches_on_event() {
         .call::<MountStatus>(
             methods::MOUNT,
             MountParams {
-                provider: "gdrive".to_string(),
+                provider: "memory".to_string(),
                 account: "a".to_string(),
                 name: "a".to_string(),
             },
@@ -369,7 +369,7 @@ async fn a_mount_state_change_reaches_on_event() {
     })
     .await
     .expect("no failed mount event");
-    assert_eq!(failed.provider, "gdrive");
+    assert_eq!(failed.provider, "memory");
     assert_eq!(failed.account, "a");
     assert_eq!(failed.name, "a");
     assert_eq!(

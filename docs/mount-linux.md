@@ -2,10 +2,10 @@
 
 `marlin-fuse` serves one [mount core](mount-core.md) `Vfs` to Linux as a FUSE mount. The [mount helper](mount-helper.md) uses it on Linux. It is read-only, like the core, until #376.
 
-The helper links no real provider yet (#529), so today only the tests mount anything.
+The helper mounts a Google account through it: see [Providers](mount-helper.md#providers). No part of the UI asks for a mount yet (#377).
 
-**Covers:** `src-tauri/crates/marlin-fuse/`, and the adapter wiring in `src-tauri/crates/marlin-mount/src/main.rs`
-**Checked against the code:** 2026-11-13
+**Covers:** `src-tauri/crates/marlin-fuse/`, and the adapter wiring in `src-tauri/crates/marlin-mount/src/adapter.rs`
+**Checked against the code:** 2026-11-16
 
 The design is in [decision 0001](decisions/0001-mount-architecture.md), choices 2 and 6.
 
@@ -19,7 +19,7 @@ The design is in [decision 0001](decisions/0001-mount-architecture.md), choices 
 | `test-in-docker.sh` | Runs every test in a container, as a user who is not root.                                                  |
 
 - The crate is the only one that imports `fuser`. The version is pinned exactly (`=0.18.0`), because `fuser` changes its `Filesystem` trait between releases (risk 8 in decision 0001).
-- Every dependency is behind `cfg(target_os = "linux")`. On macOS the crate compiles to nothing, so a Mac never checks this code. The CI check runs on Linux and does. To check it from a Mac, run `rustup target add x86_64-unknown-linux-gnu` once, then `cargo check -p marlin-fuse -p marlin-mount --all-targets --target x86_64-unknown-linux-gnu` in `src-tauri/`.
+- Every dependency is behind `cfg(target_os = "linux")`. On macOS the crate compiles to nothing, so a Mac never checks this code. The CI check runs on Linux and does. To check it from a Mac, run `rustup target add x86_64-unknown-linux-gnu` once, then `cargo check -p marlin-fuse --all-targets --target x86_64-unknown-linux-gnu` in `src-tauri/`. That does not work for `marlin-mount`: it links the Google Drive provider, whose TLS code is C and needs a Linux C compiler. `test-in-docker.sh` compiles and tests the helper's Linux half.
 - The build links no libfuse. `fuser` speaks the kernel protocol itself and runs `fusermount3` to mount.
 
 ## What the machine needs
@@ -40,6 +40,7 @@ The `.deb` and `.rpm` packages depend on `fuse3` (`src-tauri/tauri.conf.json`). 
 - **Made-up permissions.** The mounting user owns everything. A folder has mode 0500 and a file has mode 0400. `default_permissions` makes the kernel enforce them, so the adapter has no access callback.
 - **Times.** Access, change, and creation times repeat the modified time.
 - **Caching.** The kernel may reuse a name and its attributes for 1 second.
+- **File bytes stay cached across opens.** The adapter answers each open with `FOPEN_KEEP_CACHE`, so a preview and a thumbnailer that open the same file fetch it once. It also asks the kernel for `FUSE_AUTO_INVAL_DATA` when the mount starts. With that flag the kernel checks a file's size and modified time before it serves cached bytes, and drops them when either changed. `fuser` 0.18.0 does not ask for that flag by itself. On a kernel without it, the adapter does not keep the bytes. An open within about 6 seconds of a change on the remote can still get the old bytes: a lookup answers from the core's listing, which is up to 5 seconds old, and the kernel keeps its answer for 1 second. The cost is one attributes call a second for a file that is being read, until the core caches attributes (#528).
 - **Node IDs.** An inode number is the core's node ID, and a file handle is the core's handle ID. The kernel's forget calls go straight to the core ([decision 0002](decisions/0002-node-ids-follow-lookup-counts.md)).
 - **Listings.** A folder lists `.` and `..` first. `..` carries the inode number `0xffffffff`, which is libfuse's value for "not known": the core keeps no parent for a node.
 - **Free space.** `statfs` reports the provider's total and free bytes in 4,096-byte blocks.
@@ -80,11 +81,11 @@ The `.deb` and `.rpm` packages depend on `fuse3` (`src-tauri/tauri.conf.json`). 
 Run `src-tauri/crates/marlin-fuse/test-in-docker.sh`. It needs Docker.
 
 - The container gets `/dev/fuse`, `CAP_SYS_ADMIN`, and no AppArmor profile. The tests run as a user who is not root, so every mount goes through the setuid `fusermount3`, as it does for any user who is not root.
-- It also runs the helper's tests (`marlin-mount`). The helper's Linux half, the wiring to this adapter, is compiled out on a Mac.
+- It also runs the helper's tests (`marlin-mount`). The helper's Linux half, the wiring to this adapter, is compiled out on a Mac. Two of those tests mount a Google account against a fake Google: see [Mount helper](mount-helper.md#testing).
 - Last, it runs `crates/marlin-mount/test-sweep.sh`, which kills a mount's server and checks that the helper clears the dead mount. The script mounts with the spike program in `spikes/mount-hello/`, so the container gets the whole repo, read-only.
 - The first run downloads and builds everything. Two Docker volumes keep the registry and the build folder for later runs.
 - The unit tests cover the attribute rules, the two "missing" messages, and what is not a dead mount: a folder, a missing path, a symbolic link. They need no kernel support.
-- The mount tests mount a `MemoryProvider` and use ordinary file calls: list, read at an offset, free space, a 1,000-file folder, a name that is too long, every row of the error table, four slow reads at once, an unmount while a file is open, an unmount after one from outside, an unmount while the provider is slow, two mounts at once (one at a path with a space), a dropped mount, and a live mount that must not count as dead.
+- The mount tests mount a `MemoryProvider` and use ordinary file calls: list, read at an offset, free space, a 1,000-file folder, a name that is too long, every row of the error table, four slow reads at once, an unmount while a file is open, an unmount after one from outside, an unmount while the provider is slow, two mounts at once (one at a path with a space), a dropped mount, a live mount that must not count as dead, and the cached bytes: a second open makes no provider read, and a file with a new modified time is read again.
 - On a Linux machine, `cargo test -p marlin-fuse` runs the unit tests only. Add `-- --include-ignored --test-threads=1` to run the mount tests there.
 - The mount tests run one at a time. In parallel they fail now and then: a test that starts a program forks, and the child briefly holds a copy of a file that another test has open on its mount, so that test's unmount is refused as busy.
 
@@ -92,14 +93,15 @@ Run `src-tauri/crates/marlin-fuse/test-in-docker.sh`. It needs Docker.
 
 | What                                                                           | State                                                     |
 | ------------------------------------------------------------------------------ | --------------------------------------------------------- |
-| Debian 12 container (`fuse3` 3.14), a user who is not root                     | Tested by `test-in-docker.sh`, 2026-11-13                 |
+| Debian 12 container (`fuse3` 3.14), a user who is not root                     | Tested by `test-in-docker.sh`, 2026-11-16                 |
 | A CI runner                                                                    | Not tested. Risk 9 in decision 0001 is still open (#485). |
-| A bare Linux desktop: file managers, drag and drop, file dialogs, thumbnailers | Not tested. It needs a real provider (#486).              |
+| A bare Linux desktop: file managers, drag and drop, file dialogs, thumbnailers | Not tested (#486).                                        |
 | Flatpak, Snap, AppImage                                                        | Not tested (#486).                                        |
 
 Known limits:
 
 - A file or folder whose name is longer than 255 bytes is hidden.
+- A file whose bytes change while its size and its modified time stay the same keeps its old cached bytes until the kernel drops them. A provider must change one of the two: see [Mount core](mount-core.md).
 - The adapter does not handle the kernel's interrupt request. A call that an app gave up on still runs until the core's time limit ends it.
 - Read-only: every write fails with `EROFS` until #376.
 - Run as root, `fuser` mounts without `fusermount3`, and the mount's type is `fuse` with no subtype. The helper is a per-user process and is not meant to run as root.

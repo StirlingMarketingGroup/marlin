@@ -63,6 +63,7 @@ pub async fn mount(vfs: Arc<Vfs>, mount_point: &Path) -> Result<Mount, Error> {
         uid: unsafe { libc::getuid() },
         // SAFETY: getgid cannot fail and touches no memory.
         gid: unsafe { libc::getgid() },
+        keep_cache: false,
     };
     let mut config = fuser::Config::default();
     // No `allow_other`: only the mounting user may open the mount. `default_permissions` has the kernel enforce the modes, so the adapter needs no access callback.

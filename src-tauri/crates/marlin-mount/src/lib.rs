@@ -4,10 +4,14 @@
 
 #![cfg(unix)]
 
+mod adapter;
 pub mod log;
 mod mounts;
+mod providers;
 pub use marlin_mount_client::protocol;
 mod server;
 
+pub use adapter::OsAdapter;
 pub use mounts::{Adapter, MountError, Providers, Session};
+pub use providers::LinkedProviders;
 pub use server::{BindError, Config, Server};

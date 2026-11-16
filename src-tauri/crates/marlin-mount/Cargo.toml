@@ -10,6 +10,7 @@ description = "Marlin's mount helper: one process per user that owns every mount
 [dependencies]
 marlin-mount-client = { path = "../marlin-mount-client" }
 marlin-vfs = { path = "../marlin-vfs" }
+marlin-gdrive = { path = "../marlin-gdrive" }
 tokio = { version = "1.50", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "signal", "time", "process"] }
 async-trait = "0.1"
 serde = { version = "1.0", features = ["derive"] }
@@ -20,9 +21,14 @@ regex = "1"
 [target.'cfg(target_os = "linux")'.dependencies]
 marlin-fuse = { path = "../marlin-fuse" }
 
-# For the dead-mount check of the adapter in main.rs that every other Unix gets.
+# For the dead-mount check in adapter.rs that every other Unix gets.
 [target.'cfg(all(unix, not(target_os = "linux")))'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
+wiremock = "0.6"
+marlin-test-keychain = { path = "../marlin-test-keychain" }
+libc = "0.2"
+# For the paused clock in the log test.
+tokio = { version = "1.50", features = ["test-util"] }
