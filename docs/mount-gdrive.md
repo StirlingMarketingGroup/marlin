@@ -132,7 +132,27 @@ The app's side is in `src-tauri/src/locations/gdrive/auth.rs`: the account list,
 
 ## Google's limits
 
-Google counts Drive API use in quota units. The numbers are from [Usage limits](https://developers.google.com/workspace/drive/api/guides/limits), read on 2026-11-16.
+Google has two sets of limits for the Drive API. A Google Cloud project that used the API between November 2025 and April 2026 keeps the limits it had. A project made on or after 2026-05-01 gets limits in quota units. A project's Quotas page in the Google Cloud Console shows the ones it has. The numbers are from [Usage limits](https://developers.google.com/workspace/drive/api/guides/limits) and from the Quotas page of Marlin's own project, both read on 2026-11-16.
+
+- **The project is the OAuth client.** Every user of a build shares the limits of the project its client ID belongs to.
+- **Google plans to charge a project that passes a daily limit.** Its page sets 400,000,000 quota units a day and 1 TB a day of downloaded bytes before charges apply, and says that billing starts "later in 2026", with 90 days' notice. It does not say whether that covers a project on the older limits.
+
+### Marlin's own project counts requests
+
+It keeps the older limits. Its Quotas page shows:
+
+| Limit                         | Requests |
+| ----------------------------- | -------- |
+| One user, one minute          | 12,000   |
+| The whole project, one minute | 12,000   |
+
+- **Its two limits in quota units are "Unlimited".** So the unit costs below do not bind it.
+- **One mount does not reach the limit at the measured speed.** 12,000 a minute is 200 requests a second. One request to Google takes a quarter to half a second ([Checked against real Google](#checked-against-real-google)), so the core's 16 calls at once make 32 to 64 requests a second. A mount would need 80 ms a request to reach 200.
+- **The project's limit is the same number as one user's.** Four to seven mounts under full load at the same moment, on any machines, would pass it: four at a quarter second a request, seven at half a second.
+
+### A project made on or after 2026-05-01 counts quota units
+
+A build with its own OAuth client from a newer project gets these limits.
 
 | Provider call | Request                                                      | Units                                                                            |
 | ------------- | ------------------------------------------------------------ | -------------------------------------------------------------------------------- |
@@ -148,17 +168,19 @@ Google counts Drive API use in quota units. The numbers are from [Usage limits](
 | The whole project, one minute | 1,000,000   |
 | The whole project, one day    | 400,000,000 |
 
-- **The project is Marlin's OAuth client, so every user of one build shares the project's limits.**
-- **These are the limits of a Google Cloud project made on or after 2026-05-01.** An older project keeps the limits it had. The Quotas page of the project in the Google Cloud Console shows which ones apply.
-- **Past a minute's limit,** Google answers 403 or 429, and the provider waits and retries: see [Errors and retries](#errors-and-retries).
-- **Past the day's limit, Google plans to charge the project.** Its page says that billing starts "later in 2026", with 90 days' notice. The same page sets 1 TB a day of downloaded bytes before charges apply.
-- **Reads are what reach a limit.** One user's minute holds 1,625 reads, about 27 a second. The whole project's minute holds 5,000. Linux asks for a file about 128 KiB at a time, and each piece is one `read`. That is about 3.4 MiB a second for one user. #538 tracks reading in bigger pieces.
+- **Reads are what reach a unit limit.** One user's minute holds 1,625 reads, about 27 a second. The whole project's minute holds 5,000.
 
-**What this means for the core's limits.** The [mount core](mount-core.md) runs at most 16 provider calls at once and ends a call after 30 seconds. Both defaults fit Drive, with one limit.
+### What this means for a mount
 
-- **16 calls at once is not a rate.** Sixteen reads that each take half a second make 32 reads a second, which is over one user's limit. A lower number would slow every mount and still not hold a rate. The fix is fewer, bigger reads (#538).
+**The round trip is the first limit a user meets.** Linux asks for a file about 128 KiB at a time, and each piece is one `read`. At a quarter to half a second a request, a program that waits for each piece before it asks for the next reads 256 to 512 KiB a second. Nobody has measured a real stream: the kernel can ask for more than one piece at a time. #538 tracks reading in bigger pieces.
+
+**Past a minute's limit of either kind,** Google answers 403 or 429, and the provider waits and retries: see [Errors and retries](#errors-and-retries).
+
+The [mount core](mount-core.md) runs at most 16 provider calls at once and ends a call after 30 seconds. Both defaults fit Drive.
+
+- **16 calls at once is not a rate.** It stays under the request limit of Marlin's own project at the measured speed (above). It does not hold a limit in units: sixteen reads that each take half a second are 32 reads a second, over a newer project's 27. A lower number would slow every mount and still not hold a rate. The fix is fewer, bigger reads (#538).
 - **30 seconds covers the retries.** The three waits add up to 5.25 seconds at most. A listing is the long call: every page of a folder, one request after another, inside one call. How long a page of 1,000 items takes is not measured.
-- **A listing kept for 5 seconds** costs at most 12 listings a minute for a folder that stays open: 1,200 units a page.
+- **A listing kept for 5 seconds** costs at most 12 listings a minute for a folder that stays open.
 
 ## Checked against real Google
 
@@ -167,7 +189,7 @@ Google counts Drive API use in quota units. The numbers are from [Usage limits](
 - **A read at the end of a file, and past it, returns no bytes.**
 - **A read at an offset returns the same bytes as that part of a read from the start.**
 - **`files.get` gives the top folder of a shared drive another name than the drive's.** So `item` asks `drives.get` for that folder, and on this account its answer equals the drive's line in the `Shared drives` listing: see [The five calls](#the-five-calls).
-- **One request takes about half a second.** A listing of 62 items took 372 ms and 512 ms. A read of 14 KiB took 507 ms and 528 ms.
+- **One request takes a quarter to half a second.** In three runs, a listing of 62 items took 372, 431, and 512 ms, and a read of 14 KiB took 254, 507, and 528 ms.
 
 Every automated test runs against the fake server, so these still rest on Google's documentation:
 
