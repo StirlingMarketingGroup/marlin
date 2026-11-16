@@ -46,8 +46,12 @@ async fn a_real_account_lists_and_reads() {
 
     match items
         .iter()
-        .find(|item| item.attributes.kind == Kind::File && item.attributes.size > 0)
-    {
+        // A link file has `#` in its id, and a read of one sends Google nothing.
+        .find(|item| {
+            item.attributes.kind == Kind::File
+                && item.attributes.size > 0
+                && !item.id.0.contains('#')
+        }) {
         None => println!("no file with bytes at the top of My Drive: reads not checked"),
         Some(file) => {
             let length = file.attributes.size.min(65536) as u32;

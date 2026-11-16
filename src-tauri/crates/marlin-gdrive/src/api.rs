@@ -17,6 +17,13 @@ pub(crate) struct DriveFile {
     pub(crate) modified_time: Option<String>,
     #[serde(default)]
     pub(crate) trashed: bool,
+    pub(crate) shortcut_details: Option<ShortcutDetails>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ShortcutDetails {
+    pub(crate) target_id: Option<String>,
 }
 
 #[derive(Deserialize)]

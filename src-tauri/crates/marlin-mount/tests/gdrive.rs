@@ -22,6 +22,7 @@ const MODIFIED: &str = "2020-01-02T03:04:05.678Z";
 struct FakeFile {
     id: &'static str,
     name: &'static str,
+    mime: &'static str,
     bytes: Vec<u8>,
 }
 
@@ -46,22 +47,32 @@ impl GoogleState {
                 FakeFile {
                     id: "big",
                     name: "big.bin",
+                    mime: "application/octet-stream",
                     bytes: pattern(300_000),
                 },
                 FakeFile {
                     id: "same-1",
                     name: "same.txt",
+                    mime: "application/octet-stream",
                     bytes: b"one".to_vec(),
                 },
                 FakeFile {
                     id: "same-2",
                     name: "same.txt",
+                    mime: "application/octet-stream",
                     bytes: b"two".to_vec(),
                 },
                 FakeFile {
                     id: "slash",
                     name: "a/b.txt",
+                    mime: "application/octet-stream",
                     bytes: b"slash".to_vec(),
+                },
+                FakeFile {
+                    id: "doc",
+                    name: "Notes",
+                    mime: "application/vnd.google-apps.document",
+                    bytes: Vec::new(),
                 },
             ],
         }
@@ -80,7 +91,7 @@ fn file_json(file: &FakeFile) -> Value {
     json!({
         "id": file.id,
         "name": file.name,
-        "mimeType": "application/octet-stream",
+        "mimeType": file.mime,
         "size": file.bytes.len().to_string(),
         "modifiedTime": MODIFIED,
         "trashed": false,
@@ -167,6 +178,10 @@ impl Respond for FakeGoogle {
         };
         if query.get("alt").map(String::as_str) != Some("media") {
             return ResponseTemplate::new(200).set_body_json(file_json(file));
+        }
+        if file.mime.starts_with("application/vnd.google-apps.") {
+            return ResponseTemplate::new(403)
+                .set_body_json(json!({"error": {"errors": [{"reason": "fileNotDownloadable"}]}}));
         }
         let range = request
             .headers
@@ -492,12 +507,23 @@ async fn a_google_account_mounts_and_reads_through_fuse() {
     assert_eq!(
         names(&my_drive).await,
         [
+            "Notes.document.html".to_string(),
             "a%2Fb.txt".to_string(),
             "big.bin".to_string(),
             "same (2).txt".to_string(),
             "same.txt".to_string(),
         ]
     );
+    let notes_path = my_drive.join("Notes.document.html");
+    let notes = read_file(&notes_path).await;
+    assert!(String::from_utf8(notes.clone())
+        .unwrap()
+        .contains("https://drive.google.com/open?id=doc"));
+    let notes_len =
+        tokio::task::spawn_blocking(move || std::fs::metadata(notes_path).unwrap().len())
+            .await
+            .unwrap();
+    assert_eq!(notes_len, notes.len() as u64);
     let big = pattern(300_000);
     let big_path = my_drive.join("big.bin");
     assert_eq!(read_file(&big_path).await, big);

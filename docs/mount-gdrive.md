@@ -34,9 +34,44 @@ The provider does not sign in, read a keychain, or know about the helper. A call
 - "Shared with me", "Starred", and "Recent" are not shown. They are searches, not folders.
 - Both folders have these names for every account, whatever name Google gives My Drive.
 - `Shared drives` is there even when the account has none.
-- **Google Docs, Sheets, Slides, and the other Google editor files are left out, and so are shortcuts.** They have no bytes to read. A folder that holds only those looks empty. #527 decides how to show them.
-- A name is the name Google gives. Drive allows two files with one name in a folder, and any character in a name. The core makes the names unique and safe: see [Mount core](mount-core.md).
+- **A Google Doc, Sheet, Slides file, or other Google editor file is a link file, and so is a shortcut.** See [Link files](#link-files).
+- A name is the name Google gives. A link file's name has two more parts. Drive allows two files with one name in a folder, and any character in a name. The core makes the names unique and safe: see [Mount core](mount-core.md).
 - A file in the trash is not listed.
+
+## Link files
+
+Some Drive items have no bytes to read: Google Docs, Sheets, Slides, Forms, and the other Google editor files, and shortcuts. Google refuses a plain download of them. The size Google reports for an editor file is not the length of anything a mount can read, and a shortcut has no size. A mount shows each one as a **link file**: a small web page that sends the browser to the item. [Decision 0003](decisions/0003-gdrive-link-files.md) says why, and what was rejected.
+
+| Drive item                    | Name in the mount         | The page opens                                 |
+| ----------------------------- | ------------------------- | ---------------------------------------------- |
+| A Google Doc `Notes`          | `Notes.document.html`     | The Doc.                                       |
+| A Google Sheet `Budget`       | `Budget.spreadsheet.html` | The Sheet.                                     |
+| A Slides file `Deck`          | `Deck.presentation.html`  | The Slides file.                               |
+| A shortcut `Plan` to a file   | `Plan.shortcut.html`      | The shortcut's target.                         |
+| A shortcut `Team` to a folder | `Team.shortcut.html`      | The target folder, in Google Drive on the web. |
+
+- **The name** is the name Google gives, then the type, then `.html`. The type is what follows `application/vnd.google-apps.` in the item's MIME type, up to the next `.`. So a Form is `.form.html`, a Drawing is `.drawing.html`, and a new Google type needs no code.
+- **The page** is five lines. `{id}` is the item's own ID, or the target's ID for a shortcut:
+
+  ```text
+  <!doctype html>
+  <meta charset="utf-8">
+  <meta http-equiv="refresh" content="0; url=https://drive.google.com/open?id={id}">
+  <title>Open in Google Drive</title>
+  <a href="https://drive.google.com/open?id={id}">Open in Google Drive</a>
+  ```
+
+- **The size is the length of the page.** The page depends on the ID alone, so the size is known when the folder is listed, and it never changes.
+- **A read of a link file sends Google no request.** The ID to open is in the item's ID: see [Item IDs](#item-ids). Opening one, and asking for its attributes, each cost one `files.get`, as for any file.
+- **The modified time** is the item's own, as for any file.
+- **A shortcut is never followed.** The provider does not ask Google about the target. A shortcut whose target is gone, or is not shared with the account, lists like any other, and its page leads to Google's error page. A shortcut to a folder is a file, so no folder is reachable through two parents.
+- **A link file is a file.** Listing one returns `NotAFolder` and sends no request.
+
+Not handled:
+
+- **The page opens in the browser's default Google account.** That may not be the mount's account, and Google then shows its "You need access" page (#546).
+- **A target that needs a resource key.** Google gives some older link-shared files a key that the address must carry. The page does not carry it.
+- **A name near the OS limit.** The added parts can push a long name past 255 bytes, and the adapters hide such a name ([Linux mount adapter](mount-linux.md), [macOS mount adapter](mount-macos.md)).
 
 ## Item IDs
 
@@ -47,8 +82,13 @@ The provider does not sign in, read a keychain, or know about the helper. A call
 | `/shared-drives`       | The `Shared drives` folder.                                             |
 | `{file id}`            | An item in My Drive.                                                    |
 | `{drive id}/{file id}` | An item in a shared drive. The drive itself is `{drive id}/{drive id}`. |
+| `{either form}#{id}`   | A link file. `{id}` is the Drive ID its page opens.                     |
 
-A Drive ID never holds `/`, so the two made-up IDs cannot be real ones.
+A Drive ID never holds `/` or `#`, so the two made-up IDs cannot be real ones, and a link file's ID cannot be a plain item's.
+
+**Why a link file's ID holds the ID it opens.** `read` gets an item ID and nothing else, and the provider keeps nothing between calls. With the ID to open in the item ID, a read builds the page and asks Google nothing. A Google Doc `abc` in My Drive is `abc#abc`. A shortcut `abc` to `xyz` is `abc#xyz`. A shortcut's target is set when the shortcut is made, and a Google editor file stays one, so the ID stays with the item.
+
+**For a file or a link file, `item` returns the ID it was asked for, or `NotFound`.** The provider builds an item's ID from Google's answer. If that is not the ID asked for, the answer is not the item the core holds: a plain ID whose item is a Google Doc, or a link whose shortcut has another target. The size in such an answer would not be the size of the bytes a read returns.
 
 **Why a shared drive's ID is in the item's ID.** Google lists a folder of a shared drive in full only when the request names that drive (`corpora=drive` and `driveId`). Without them, Google promises only the files the user has opened, and a listing can come back short with no error. The provider keeps nothing between calls, so the ID has to carry the drive.
 
@@ -65,7 +105,7 @@ What follows from that:
 | `root`  | None.                                                                                                                 |
 | `item`  | One `files.get`, or one `drives.get` instead for the top folder of a shared drive. None for `/` and `/shared-drives`. |
 | `list`  | `files.list`, 1,000 items a page, until Google sends no next page. `drives.list` for the shared drives, 100 a page.   |
-| `read`  | One `files.get` with `alt=media` and a `Range` header for exactly the bytes asked for.                                |
+| `read`  | One `files.get` with `alt=media` and a `Range` header for exactly the bytes asked for. None for a link file.          |
 | `space` | One `about.get`.                                                                                                      |
 
 - **Listing the top asks Google for My Drive.** So a sign-in that is gone shows at the top of the mount, not as an empty folder.
@@ -198,6 +238,7 @@ Every automated test runs against the fake server, so these still rest on Google
 - That Google answers a read of an empty file with 416. The account had no empty file at the top of My Drive.
 - How long a page of 1,000 items takes, and so how big a folder can be before its listing passes the core's 30 seconds.
 - **A dead connection after sleep.** The HTTP client's only time limit is 10 seconds to connect. After a laptop sleeps or changes network, a kept connection can be dead, and each call on it may hang until the core's 30 seconds.
+- **Link files.** Nobody has opened one from a real mount in a browser, or looked at what Quick Look or a thumbnailer does with one. One request with no sign-in to `https://drive.google.com/open?id=` and the ID of a public Google Sheet was redirected to the sheet's editor address. A Doc, a Slides file, a folder, and a real shortcut are not checked, and no request with the field list `shortcutDetails(targetId)` has gone to real Google. The field name is in Google's API description, and the form matches the examples in Google's guide to the `fields` parameter.
 - **A 403 that covers the whole account.** Any 403 that is not a rate limit is `AccessDenied`, which the helper counts as an answer. If Google answers the free-space request that way, a mount of such an account fails at its first call with -1005. A reason such as `domainPolicy` that starts while a mount is up leaves it `mounted` while every call fails.
 - **Two 30-second limits.** A token refresh times out after 30 seconds, and so does the core's call. A slow token endpoint may show as `TimedOut` and never as `Offline`.
 - **A new token after a 401.** If Google hands back the same access token after a 401, the second 401 is `SignInNeeded`.
@@ -209,7 +250,8 @@ Every automated test runs against the fake server, so these still rest on Google
 - Each test starts a `wiremock` server on a free local port. A provider test points `Config::api` at it, and a sign-in test points `OAuthClient::token_uri` at it.
 - The sign-in tests use the in-memory keychain from the `marlin-test-keychain` crate (see [Testing](testing.md)), and one email per test. They cover a refused refresh token, a missing entry, recovery after each with the same `SavedSignIn`, a failed connection, an answer that repeats the secrets, and eight calls at once.
 - The test token source hands out `token-1`, then `token-2` after `token-1` is rejected. One test holds eight calls until all have `token-1`, and checks that they cause one new token, not eight.
-- Two tests put the provider under a real `Vfs`: one for duplicate names and a `/` in a name, one for a rename seen on the remote.
+- Three tests put the provider under a real `Vfs`: one for duplicate names and a `/` in a name, one for a rename seen on the remote, and one for link files that share a name.
+- The link file tests cover the name and the ID of each kind, the size in a listing against the bytes a read returns, `item` of a shortcut, a read in parts, a shared drive, a shortcut whose target is gone or missing from the answer, and a read that sends the server nothing.
 - One test checks that every request the server got was a GET.
 - The helper's tests mount this provider through FUSE against a fake Google: see [Mount helper](mount-helper.md#testing).
 - `tests/live.rs` is marked `#[ignore]`. Never run this crate's tests with `--ignored` or `--include-ignored` unless you mean to read a real account.

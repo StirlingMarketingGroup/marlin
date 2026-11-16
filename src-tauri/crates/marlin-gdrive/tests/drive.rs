@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use marlin_gdrive::{AccessTokens, Config, DriveProvider};
-use marlin_vfs::{ItemId, Kind, Options, Provider, Space, Vfs, VfsError, POSIX};
+use marlin_vfs::{Access, ItemId, Kind, Options, Provider, Space, Vfs, VfsError, POSIX};
 use serde_json::{json, Value};
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
@@ -226,8 +226,10 @@ async fn a_listing_asks_only_for_children_that_are_not_trashed() {
 }
 
 #[tokio::test]
-async fn google_docs_sheets_slides_and_shortcuts_are_left_out_of_a_listing() {
+async fn google_docs_sheets_slides_and_shortcuts_are_shown_as_link_files() {
     let server = MockServer::start().await;
+    let mut shortcut = file_json("link", "Link", "application/vnd.google-apps.shortcut", "0");
+    shortcut["shortcutDetails"] = json!({"targetId": "target"});
     let files = vec![
         file_json("pdf", "notes.pdf", "application/pdf", "10"),
         file_json("doc", "Notes", "application/vnd.google-apps.document", "0"),
@@ -243,18 +245,47 @@ async fn google_docs_sheets_slides_and_shortcuts_are_left_out_of_a_listing() {
             "application/vnd.google-apps.presentation",
             "0",
         ),
-        file_json("link", "Link", "application/vnd.google-apps.shortcut", "0"),
+        shortcut,
         folder_json("sub", "Sub"),
     ];
     mount_script(&server, vec![ok_json(file_page(files, None))]).await;
     let drive = drive(&server);
     let items = drive.list(&ItemId("folder".to_string())).await.unwrap();
-    assert_eq!(items.len(), 2);
-    assert_eq!(items[0].name, "notes.pdf");
-    assert_eq!(items[0].attributes.kind, Kind::File);
-    assert_eq!(items[1].name, "Sub");
-    assert_eq!(items[1].attributes.kind, Kind::Folder);
-    assert_eq!(items[1].attributes.size, 0);
+    let names: Vec<_> = items.iter().map(|item| item.name.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "notes.pdf",
+            "Notes.document.html",
+            "Numbers.spreadsheet.html",
+            "Deck.presentation.html",
+            "Link.shortcut.html",
+            "Sub",
+        ]
+    );
+    let ids: Vec<_> = items.iter().map(|item| item.id.0.as_str()).collect();
+    assert_eq!(
+        ids,
+        [
+            "pdf",
+            "doc#doc",
+            "sheet#sheet",
+            "slides#slides",
+            "link#target",
+            "sub",
+        ]
+    );
+    for item in &items[1..5] {
+        assert_eq!(item.attributes.kind, Kind::File);
+        assert_eq!(item.attributes.modified, modified());
+        let page = drive.read(&item.id, 0, 4096).await.unwrap();
+        assert_eq!(item.attributes.size, page.len() as u64);
+    }
+    let requests = server.received_requests().await.unwrap();
+    assert!(query_of(&requests[0])
+        .get("fields")
+        .unwrap()
+        .contains("shortcutDetails(targetId)"));
 }
 
 #[tokio::test]
@@ -451,7 +482,7 @@ async fn item_of_an_unknown_id_is_not_found() {
 }
 
 #[tokio::test]
-async fn item_of_a_google_doc_is_not_supported() {
+async fn item_of_a_google_doc_is_a_link_file_with_the_size_of_its_page() {
     let server = MockServer::start().await;
     mount_path(
         &server,
@@ -465,10 +496,263 @@ async fn item_of_a_google_doc_is_not_supported() {
     )
     .await;
     let drive = drive(&server);
+    let id = ItemId("doc-1#doc-1".to_string());
+    let item = drive.item(&id).await.unwrap();
+    assert_eq!(item.id, id);
+    assert_eq!(item.name, "Notes.document.html");
+    assert_eq!(item.attributes.kind, Kind::File);
+    let bytes = drive.read(&id, 0, 4096).await.unwrap();
+    assert_eq!(item.attributes.size, bytes.len() as u64);
+}
+
+#[tokio::test]
+async fn item_of_a_shortcut_asks_google_for_its_target() {
+    let server = MockServer::start().await;
+    let mut shortcut = file_json("link", "Link", "application/vnd.google-apps.shortcut", "0");
+    shortcut["shortcutDetails"] = json!({"targetId": "target"});
+    mount_path(&server, "/files/link", ok_json(shortcut)).await;
+    let drive = drive(&server);
+    let id = ItemId("link#target".to_string());
+    let item = drive.item(&id).await.unwrap();
+    assert_eq!(item.id, id);
+    assert_eq!(item.name, "Link.shortcut.html");
+    let requests = server.received_requests().await.unwrap();
+    assert!(query_of(&requests[0])
+        .get("fields")
+        .unwrap()
+        .contains("shortcutDetails(targetId)"));
+}
+
+#[tokio::test]
+async fn item_of_an_id_googles_answer_does_not_build_is_not_found() {
+    let server = MockServer::start().await;
+    mount_path(
+        &server,
+        "/files/doc-1",
+        ok_json(file_json(
+            "doc-1",
+            "Notes",
+            "application/vnd.google-apps.document",
+            "0",
+        )),
+    )
+    .await;
+    mount_path(
+        &server,
+        "/files/file-1",
+        ok_json(file_json("file-1", "notes.txt", "text/plain", "4")),
+    )
+    .await;
+    let mut shortcut = file_json("link", "Link", "application/vnd.google-apps.shortcut", "0");
+    shortcut["shortcutDetails"] = json!({"targetId": "other"});
+    mount_path(&server, "/files/link", ok_json(shortcut)).await;
+    let drive = drive(&server);
     assert_eq!(
         drive.item(&ItemId("doc-1".to_string())).await,
-        Err(VfsError::NotSupported)
+        Err(VfsError::NotFound)
     );
+    assert_eq!(
+        drive.item(&ItemId("file-1#file-1".to_string())).await,
+        Err(VfsError::NotFound)
+    );
+    assert_eq!(
+        drive.item(&ItemId("link#target".to_string())).await,
+        Err(VfsError::NotFound)
+    );
+}
+
+#[tokio::test]
+async fn reading_a_link_file_returns_the_page_and_sends_google_nothing() {
+    let server = MockServer::start().await;
+    let drive = drive(&server);
+    let bytes = drive
+        .read(&ItemId("sc#tgt".to_string()), 0, 4096)
+        .await
+        .unwrap();
+    let expected = "\
+<!doctype html>
+<meta charset=\"utf-8\">
+<meta http-equiv=\"refresh\" content=\"0; url=https://drive.google.com/open?id=tgt\">
+<title>Open in Google Drive</title>
+<a href=\"https://drive.google.com/open?id=tgt\">Open in Google Drive</a>
+";
+    assert_eq!(bytes, expected.as_bytes());
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_read_of_part_of_a_link_file_returns_that_part() {
+    let server = MockServer::start().await;
+    let drive = drive(&server);
+    let id = ItemId("doc#doc".to_string());
+    let whole = drive.read(&id, 0, 4096).await.unwrap();
+    assert_eq!(drive.read(&id, 10, 5).await.unwrap(), whole[10..15]);
+    let short = drive.read(&id, whole.len() as u64 - 3, 10).await.unwrap();
+    assert_eq!(short, whole[whole.len() - 3..]);
+    assert!(drive
+        .read(&id, whole.len() as u64, 10)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(drive.read(&id, u64::MAX, 10).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_link_file_in_a_shared_drive_carries_the_drive_in_its_id() {
+    let server = MockServer::start().await;
+    let doc = file_json("doc", "Notes", "application/vnd.google-apps.document", "0");
+    mount_path(
+        &server,
+        "/files",
+        ok_json(file_page(vec![doc.clone()], None)),
+    )
+    .await;
+    mount_path(&server, "/files/doc", ok_json(doc)).await;
+    let drive = drive(&server);
+    let items = drive
+        .list(&ItemId("drive-1/folder-1".to_string()))
+        .await
+        .unwrap();
+    assert_eq!(items[0].id, ItemId("drive-1/doc#doc".to_string()));
+    let item = drive
+        .item(&ItemId("drive-1/doc#doc".to_string()))
+        .await
+        .unwrap();
+    assert_eq!(item.id, ItemId("drive-1/doc#doc".to_string()));
+    assert_eq!(item.name, "Notes.document.html");
+    let requests = server.received_requests().await.unwrap();
+    assert!(requests
+        .iter()
+        .any(|request| request.url.path() == "/files/doc"));
+}
+
+#[tokio::test]
+async fn a_shortcut_whose_target_is_gone_still_lists() {
+    let server = MockServer::start().await;
+    let mut shortcut = file_json("link", "Link", "application/vnd.google-apps.shortcut", "0");
+    shortcut["shortcutDetails"] = json!({"targetId": "gone"});
+    mount_script(
+        &server,
+        vec![ok_json(file_page(
+            vec![shortcut, plain("file-1", "a.txt")],
+            None,
+        ))],
+    )
+    .await;
+    let drive = drive(&server);
+    let items = drive.list(&ItemId("folder".to_string())).await.unwrap();
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].id, ItemId("link#gone".to_string()));
+    assert_eq!(items[1].id, ItemId("file-1".to_string()));
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_shortcut_with_no_target_in_the_answer_opens_itself() {
+    let server = MockServer::start().await;
+    let bare = file_json("bare", "Bare", "application/vnd.google-apps.shortcut", "0");
+    let mut empty = file_json(
+        "empty",
+        "Empty",
+        "application/vnd.google-apps.shortcut",
+        "0",
+    );
+    empty["shortcutDetails"] = json!({});
+    mount_script(&server, vec![ok_json(file_page(vec![bare, empty], None))]).await;
+    let drive = drive(&server);
+    let items = drive.list(&ItemId("folder".to_string())).await.unwrap();
+    assert_eq!(items[0].id, ItemId("bare#bare".to_string()));
+    assert_eq!(items[1].id, ItemId("empty#empty".to_string()));
+}
+
+#[tokio::test]
+async fn a_third_party_shortcut_is_named_drive_sdk() {
+    let server = MockServer::start().await;
+    let file = file_json(
+        "app",
+        "App file",
+        "application/vnd.google-apps.drive-sdk.12345",
+        "0",
+    );
+    mount_script(&server, vec![ok_json(file_page(vec![file], None))]).await;
+    let drive = drive(&server);
+    let items = drive.list(&ItemId("folder".to_string())).await.unwrap();
+    assert_eq!(items[0].name, "App file.drive-sdk.html");
+}
+
+#[tokio::test]
+async fn listing_a_link_file_is_not_a_folder_and_sends_no_request() {
+    let server = MockServer::start().await;
+    let drive = drive(&server);
+    assert_eq!(
+        drive.list(&ItemId("doc#doc".to_string())).await,
+        Err(VfsError::NotAFolder)
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_google_doc_a_sheet_and_a_file_with_the_docs_name_get_distinct_names_and_the_doc_reads_as_its_page(
+) {
+    let server = MockServer::start().await;
+    mount_path(
+        &server,
+        "/files/root",
+        ok_json(folder_json("alias-root", "My Drive")),
+    )
+    .await;
+    let doc = file_json("doc", "Notes", "application/vnd.google-apps.document", "0");
+    mount_path(&server, "/files/doc", ok_json(doc.clone())).await;
+    mount_path(
+        &server,
+        "/files",
+        ok_json(file_page(
+            vec![
+                doc,
+                file_json(
+                    "sheet",
+                    "Notes",
+                    "application/vnd.google-apps.spreadsheet",
+                    "0",
+                ),
+                file_json("file", "Notes.document.html", "text/plain", "4"),
+            ],
+            None,
+        )),
+    )
+    .await;
+    let drive = Arc::new(drive(&server));
+    let vfs = Vfs::new(drive, POSIX, Options::default());
+    let my_drive = vfs.lookup(Vfs::ROOT, "My Drive").await.unwrap();
+    let folder = vfs.open_folder(my_drive.node).await.unwrap();
+    let names: Vec<_> = vfs
+        .read_folder(folder, 0, 10)
+        .unwrap()
+        .iter()
+        .map(|entry| entry.name.clone())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "Notes.document.html".to_string(),
+            "Notes.spreadsheet.html".to_string(),
+            "Notes.document (2).html".to_string(),
+        ]
+    );
+    let doc = vfs
+        .lookup(my_drive.node, "Notes.document.html")
+        .await
+        .unwrap();
+    let opened = vfs.open(doc.node, Access::Read).await.unwrap();
+    let bytes = vfs.read(opened, 0, 4096).await.unwrap();
+    let page = "\
+<!doctype html>
+<meta charset=\"utf-8\">
+<meta http-equiv=\"refresh\" content=\"0; url=https://drive.google.com/open?id=doc\">
+<title>Open in Google Drive</title>
+<a href=\"https://drive.google.com/open?id=doc\">Open in Google Drive</a>
+";
+    assert_eq!(bytes, page.as_bytes());
 }
 
 #[tokio::test]
@@ -908,7 +1192,13 @@ async fn every_request_is_a_get() {
     mount_path(
         &server,
         "/files",
-        ok_json(file_page(vec![plain("child", "a.txt")], None)),
+        ok_json(file_page(
+            vec![
+                plain("child", "a.txt"),
+                file_json("doc", "Notes", "application/vnd.google-apps.document", "0"),
+            ],
+            None,
+        )),
     )
     .await;
     Mock::given(path("/files/file-1"))
@@ -918,7 +1208,9 @@ async fn every_request_is_a_get() {
         .await;
     mount_path(&server, "/files/file-1", ok_json(plain("file-1", "a.txt"))).await;
     let drive = drive(&server);
-    drive.list(&ItemId("folder".to_string())).await.unwrap();
+    let items = drive.list(&ItemId("folder".to_string())).await.unwrap();
+    let link = items.iter().find(|item| item.id.0 == "doc#doc").unwrap();
+    drive.read(&link.id, 0, 4096).await.unwrap();
     drive.item(&ItemId("file-1".to_string())).await.unwrap();
     drive
         .read(&ItemId("file-1".to_string()), 0, 5)
