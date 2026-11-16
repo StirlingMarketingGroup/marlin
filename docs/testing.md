@@ -41,7 +41,8 @@ CI skips a job when the files it covers did not change (`check.yml` uses path fi
 
 ## Rust tests
 
-- **A plain `cargo test` does not pass today.** The five ZPL thumbnail tests abort the test process when they run in parallel (issue #469). `cargo test --lib -- --skip zpl` avoids the crash, and every other test passes.
+- **A plain `cargo test` passes today.** List a failing test here, with its issue, when that changes.
+- **A test that calls `zpl_rs` holds `RENDER_LOCK`** from `thumbnails/generators/zpl.rs`, as the generator does. Two renders at once abort the whole test process. See [Thumbnails](thumbnails.md#limits).
 - Unit tests sit in `#[cfg(test)]` modules inside the source files, mostly in `locations/` and `thumbnails/`. The SFTP host key test in `locations/sftp/pool.rs` starts an SSH server inside the test process on a free local port.
 - `cargo test -p marlin-vfs` runs the mount core's tests. A plain `cargo test` does not include them. They run on an in-memory provider and need nothing installed. See [Mount core](mount-core.md).
 - `cargo test -p marlin-gdrive` runs the tests of the Google Drive provider for mounts and of the saved Google sign-in. A plain `cargo test` does not include them. They run against a fake Drive server and a fake token endpoint inside the test process, with the in-memory keychain, and need no network and no account. See [Google Drive mount provider](mount-gdrive.md). **Never add `--ignored` or `--include-ignored` to this command.** `tests/live.rs` is a manual test that reads a real Google account. Its header has the command and the one environment variable.
