@@ -105,6 +105,10 @@ pub fn create_menu<R: Runtime>(
         .accelerator("CmdOrCtrl+Alt+N")
         .build(app)?;
 
+    let open_selected_item = MenuItemBuilder::with_id("menu:open_selected", "Open")
+        .accelerator("CmdOrCtrl+O")
+        .build(app)?;
+
     // Get Info / Properties menu item
     let get_info_label = if cfg!(target_os = "macos") {
         "Get Info"
@@ -123,6 +127,7 @@ pub fn create_menu<R: Runtime>(
         .item(&new_file_item)
         .item(&new_folder_item)
         .separator()
+        .item(&open_selected_item)
         .item(&get_info_item)
         .separator()
         .text("menu:refresh", "Refresh")
@@ -139,6 +144,7 @@ pub fn create_menu<R: Runtime>(
         .item(&new_file_item)
         .item(&new_folder_item)
         .separator()
+        .item(&open_selected_item)
         .item(&get_info_item)
         .separator()
         .text("menu:refresh", "Refresh")
@@ -517,6 +523,9 @@ pub fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, event: &tauri::menu::Me
         }
         "menu:get_info" | "ctx:get_info" => {
             let _ = app.emit("menu:get_info", ());
+        }
+        "menu:open_selected" | "ctx:open_selected" => {
+            let _ = app.emit("menu:open_selected", ());
         }
         "ctx:calculate_total_size" => {
             let _ = app.emit("menu:calculate_total_size", ());

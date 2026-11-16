@@ -7,6 +7,8 @@ export const MOCK_HOME_DIR = '/Users/testuser';
 export const MOCK_DOWNLOADS_DIR = `${MOCK_HOME_DIR}/Downloads`;
 // Not listed in the home folder: a spec opens it by typing the path.
 export const MOCK_LONG_NAME_DIR = `${MOCK_HOME_DIR}/LongName`;
+// Not listed in the home folder: a spec opens it through the window start path.
+export const MOCK_PERCENT_DIR = `${MOCK_HOME_DIR}/100% & more`;
 export const MOCK_LONG_NAME =
   '0-coin-stands-7-resize.f55c86b289eb233728c5c475eac70d1e3a9b64f07c2d85e1b3a6f9d4c7e2b1a0-preview.png';
 
@@ -72,6 +74,7 @@ export function getTauriMockScript(): string {
       const mockHomeDir = '${MOCK_HOME_DIR}';
       const mockDownloadsDir = '${MOCK_DOWNLOADS_DIR}';
       const mockLongNameDir = '${MOCK_LONG_NAME_DIR}';
+      const mockPercentDir = '${MOCK_PERCENT_DIR}';
 
       const mockFiles = [
         {
@@ -237,6 +240,22 @@ export function getTauriMockScript(): string {
           permissions: { read: true, write: true, execute: false },
         }));
 
+      const mockPercentFiles = [
+        {
+          name: 'note.txt',
+          path: mockPercentDir + '/note.txt',
+          is_directory: false,
+          is_hidden: false,
+          is_symlink: false,
+          is_git_repo: false,
+          size: 12,
+          modified: new Date().toISOString(),
+          created: new Date().toISOString(),
+          extension: 'txt',
+          permissions: { read: true, write: true, execute: false },
+        },
+      ];
+
       function getFilesForPath(path) {
         const normalizedPath = (path || '').replace(/\\\\/g, '/').replace(/\\/+$/, '') || '/';
         let files;
@@ -246,6 +265,8 @@ export function getTauriMockScript(): string {
           files = mockDocumentsFiles;
         } else if (normalizedPath === mockLongNameDir) {
           files = mockLongNameFiles;
+        } else if (normalizedPath === mockPercentDir) {
+          files = mockPercentFiles;
         } else if (normalizedPath === mockHomeDir || normalizedPath === '/') {
           files = mockFiles;
         } else {
@@ -450,7 +471,9 @@ export function getTauriMockScript(): string {
 
       // Initialize __TAURI_INTERNALS__ (matches @tauri-apps/api/mocks pattern)
       window.__TAURI_INTERNALS__ = window.__TAURI_INTERNALS__ || {};
+      window.__TAURI_INVOKE_LOG__ = window.__TAURI_INVOKE_LOG__ || [];
       window.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
+        window.__TAURI_INVOKE_LOG__.push({ cmd, args });
         console.log('[Tauri Mock] invoke:', cmd, args);
         const handler = commandHandlers[cmd];
         if (handler) {

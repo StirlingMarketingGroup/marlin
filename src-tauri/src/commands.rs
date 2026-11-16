@@ -6740,6 +6740,9 @@ pub fn show_native_context_menu(
 
     let mut builder = MenuBuilder::new(&app);
     if is_file_ctx {
+        let open_item = MenuItemBuilder::with_id("ctx:open_selected", "Open")
+            .build(&app)
+            .map_err(|e| e.to_string())?;
         let rename_item = MenuItemBuilder::with_id("ctx:rename", "Rename")
             .build(&app)
             .map_err(|e| e.to_string())?;
@@ -6832,7 +6835,7 @@ pub fn show_native_context_menu(
         } else {
             None
         };
-        builder = builder.item(&rename_item).separator();
+        builder = builder.item(&open_item).item(&rename_item).separator();
         builder = builder
             .item(&copy_files_item)
             .item(&cut_files_item)

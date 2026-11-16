@@ -499,7 +499,7 @@ function App() {
         // Check if a path was provided via URL parameter (for new windows)
         const urlParams = new URLSearchParams(window.location.search);
         const initialPath = urlParams.get('path');
-        const startPath = initialPath ? decodeURIComponent(initialPath) : lastDir || homeDir;
+        const startPath = initialPath || lastDir || homeDir;
 
         // Now try to load the initial directory
         let loadSuccess = false;
@@ -1005,6 +1005,9 @@ function App() {
       await registerFocused('menu:rename', () => {
         useAppStore.getState().beginRenameSelected();
       });
+      await registerFocused('menu:open_selected', () => {
+        void useAppStore.getState().openSelected();
+      });
       await registerFocused('menu:compress_to_zip', () => {
         const state = useAppStore.getState();
         const selected = state.selectedFiles;
@@ -1171,6 +1174,13 @@ function App() {
       return true;
     };
 
+    const openSelectionFromKey = (e: KeyboardEvent) => {
+      const state = useAppStore.getState();
+      if (e.repeat || state.renameTargetPath || state.selectedFiles.length === 0) return;
+      e.preventDefault();
+      void state.openSelected();
+    };
+
     // Keyboard shortcuts as fallback (mac-like)
     const onKey = (e: KeyboardEvent) => {
       const uaUpper = navigator.userAgent.toUpperCase();
@@ -1303,6 +1313,10 @@ function App() {
           );
           const order = nodes.map((n) => n.getAttribute('data-file-path') || '').filter(Boolean);
           if (order.length === 0) return;
+
+          // The arrow keys move the file selection, so a clicked button gives up the keyboard.
+          // Chromium leaves the focus on it, and Enter would press it again.
+          active?.closest<HTMLElement>('button, a[href]')?.blur();
 
           // Helper: ensure a given index is selected and scrolled into view
           const wrap = (v: number, n: number) => {
@@ -1604,16 +1618,28 @@ function App() {
         return;
       }
 
-      // Rename: F2 everywhere; macOS Return (Enter) with no modifiers
+      // Rename: F2 everywhere. Enter with no modifiers renames on macOS and opens the
+      // selection on Windows and Linux. A focused button or link keeps its own Enter.
       if (!inEditable) {
         if (e.key === 'F2') {
           e.preventDefault();
           useAppStore.getState().beginRenameSelected();
           return;
         }
-        if (isMac && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && e.key === 'Enter') {
-          e.preventDefault();
-          useAppStore.getState().beginRenameSelected();
+        if (
+          e.key === 'Enter' &&
+          !e.metaKey &&
+          !e.ctrlKey &&
+          !e.altKey &&
+          !e.shiftKey &&
+          !active?.closest('button, a[href]')
+        ) {
+          if (isMac) {
+            e.preventDefault();
+            useAppStore.getState().beginRenameSelected();
+          } else {
+            openSelectionFromKey(e);
+          }
           return;
         }
       }
@@ -1637,9 +1663,6 @@ function App() {
       const meta = e.metaKey || e.ctrlKey;
       if (!meta) return;
       const isRenaming = !!useAppStore.getState().renameTargetPath;
-      const hasModal = !!document.querySelector(
-        '[role="dialog"], [aria-modal="true"], [data-modal="true"]'
-      );
 
       // Undo: Cmd/Ctrl+Z
       if (meta && !inEditable && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'z') {
@@ -1650,7 +1673,7 @@ function App() {
 
       // New folder: Cmd/Ctrl+Shift+N
       if (e.shiftKey && !e.altKey && (e.key === 'n' || e.key === 'N')) {
-        if (!inEditable && !isRenaming && !hasModal) {
+        if (!inEditable && !isRenaming) {
           e.preventDefault();
           void useAppStore.getState().createNewFolder();
         }
@@ -1659,7 +1682,7 @@ function App() {
 
       // New file: Cmd/Ctrl+Alt+N
       if (!e.shiftKey && e.altKey && (e.key === 'n' || e.key === 'N')) {
-        if (!inEditable && !isRenaming && !hasModal) {
+        if (!inEditable && !isRenaming) {
           e.preventDefault();
           void useAppStore.getState().createNewFile();
         }
@@ -1673,6 +1696,16 @@ function App() {
         invoke('new_window', { path: currentPath }).catch((err) => {
           console.error('Failed to create new window:', err);
         });
+        return;
+      }
+
+      // Open the selection: Cmd/Ctrl+O; macOS also Cmd+Down, as in Finder
+      if (
+        !e.shiftKey &&
+        !e.altKey &&
+        (e.key === 'o' || e.key === 'O' || (isMac && e.key === 'ArrowDown'))
+      ) {
+        if (!inEditable) openSelectionFromKey(e);
         return;
       }
 

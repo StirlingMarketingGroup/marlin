@@ -385,11 +385,6 @@ export default function MainPanel() {
       (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable);
     if (inEditable) return;
 
-    const hasModal = !!document.querySelector(
-      '[role="dialog"], [aria-modal="true"], [data-modal="true"]'
-    );
-    if (hasModal) return;
-
     const state = useAppStore.getState();
     if (state.renameTargetPath) return;
 

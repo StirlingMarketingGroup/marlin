@@ -35,6 +35,7 @@ A fast, no-nonsense file browser. Gets out of your way and just does files well.
 - **New Folder** (Cmd/Ctrl+Shift+N): VSCode-style creation with instant rename—type `foo/bar/baz` to create nested directories in one go
 - **Rename into subdirs**: Rename any file to `subdir/filename.ext` to create the folder and move it there
 - **Browse archives**: Double-click ZIP, RAR, or TAR files to navigate into them like folders
+- **Open the whole selection** (Cmd/Ctrl+O, Cmd+Down on macOS, or Enter on Windows and Linux): files open in their apps, folders and archives in new windows
 - Calculate folder sizes
 - Keyboard navigation
 - Dark and light themes

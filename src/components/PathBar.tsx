@@ -292,6 +292,8 @@ export default function PathBar() {
     }
 
     if (e.key === 'Enter') {
+      // The path bar owns this Enter. The blur below would let the window handler take it for the files.
+      e.stopPropagation();
       navigateTo(suggestions[activeSuggestion]?.value ?? editPath);
       // The files the person asked for take the focus. The blur closes the list and shows the real path.
       inputRef.current?.blur();

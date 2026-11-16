@@ -27,8 +27,7 @@ import FileNameDisplay from './FileNameDisplay';
 import SymlinkBadge from '@/components/SymlinkBadge';
 import GitRepoBadge from '@/components/GitRepoBadge';
 import { normalizePreviewIcon } from '@/utils/iconSizing';
-import { isArchiveFile, isVideoExtension, isMacOSBundle } from '@/utils/fileTypes';
-import { buildArchiveUri } from '@/utils/archiveUri';
+import { isVideoExtension } from '@/utils/fileTypes';
 import { isGoogleDrivePath, parseGoogleDrivePathEmail } from '@/utils/googleDriveUrl';
 import { isSmbPath } from '@/utils/smbPath';
 import { useScrollContainerRef } from '@/contexts/ScrollContext';
@@ -192,13 +191,12 @@ export default function FileList({ files, preferences }: FileListProps) {
   const {
     selectedFiles,
     setSelectedFiles,
-    navigateTo,
     selectionAnchor,
     setSelectionAnchor,
     setSelectionLead,
     pendingRevealTarget,
     setPendingRevealTarget,
-    openFile,
+    openItem,
     isStreamingComplete,
     streamingTotalCount,
     filterText,
@@ -285,27 +283,6 @@ export default function FileList({ files, preferences }: FileListProps) {
     }
 
     return file.is_symlink ? `${base} (symlink)` : base;
-  };
-
-  // (moved FilePreview to top-level ListFilePreview to avoid remounting)
-
-  const handleDoubleClick = async (file: FileItem) => {
-    const isBundle = isMacOSBundle(file);
-    const shouldNavigate = file.is_directory && (!isBundle || file.is_symlink);
-
-    if (shouldNavigate) {
-      navigateTo(file.path);
-      return;
-    }
-
-    const isArchive = !file.is_directory && isArchiveFile(file);
-
-    if (isArchive) {
-      navigateTo(buildArchiveUri(file.path, '/'));
-      return;
-    }
-
-    await openFile(file);
   };
 
   // Begin rename UX when store renameTargetPath points to an item in this view
@@ -667,7 +644,7 @@ export default function FileList({ files, preferences }: FileListProps) {
         setSelectedFiles([file.path]);
         setSelectionAnchor(file.path);
         setSelectionLead(file.path);
-        void handleDoubleClick(file);
+        void openItem(file);
         return;
       }
       lastClickRef.current = { path: file.path, time: now, x: e.clientX, y: e.clientY };
@@ -787,7 +764,7 @@ export default function FileList({ files, preferences }: FileListProps) {
           setSelectedFiles([file.path]);
           setSelectionAnchor(file.path);
           setSelectionLead(file.path);
-          void handleDoubleClick(file);
+          void openItem(file);
         }}
         onMouseDown={(e) => handleMouseDownForFile(e, file)}
         draggable={false}

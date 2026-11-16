@@ -25,12 +25,12 @@ import { invoke } from '@tauri-apps/api/core';
 import { emit } from '@tauri-apps/api/event';
 import { open as openShell } from '@tauri-apps/plugin-shell';
 import { ask, message, open as openDialog } from '@tauri-apps/plugin-dialog';
-import { getExtractableArchiveFormat, isArchiveFile } from '@/utils/fileTypes';
+import { getExtractableArchiveFormat, isArchiveFile, isMacOSBundle } from '@/utils/fileTypes';
 import { basename, resolveTypedPath } from '@/utils/pathUtils';
 import { useToastStore } from './useToastStore';
 import { useUndoStore, pushUndoAndShowToast } from './useUndoStore';
 import { parseGoogleDriveUrl } from '@/utils/googleDriveUrl';
-import { getArchiveParentUri, isArchiveUri } from '@/utils/archiveUri';
+import { buildArchiveUri, getArchiveParentUri, isArchiveUri } from '@/utils/archiveUri';
 import { withGoogleSignInCheck } from '@/utils/googleSignIn';
 import { withSftpHostKeyCheck } from '@/utils/sftpHostKey';
 import { DEFAULT_THEME_IDS } from '@/themes';
@@ -353,6 +353,8 @@ interface AppState {
   updateFileDimensions: (path: string, width: number, height: number) => void;
   cancelDirectoryStream: () => Promise<void>;
   openFile: (file: FileItem) => Promise<void>;
+  openItem: (file: FileItem) => Promise<void>;
+  openSelected: () => Promise<void>;
   extractArchive: (file: FileItem, options?: { createSubfolder?: boolean }) => Promise<boolean>;
   createNewFolder: () => Promise<void>;
   createNewFile: () => Promise<void>;
@@ -425,6 +427,19 @@ interface AppState {
   isFileExiting: (path: string) => boolean;
   addSkipAnimationPath: (path: string) => void;
   consumeSkipAnimationPaths: () => Set<string>;
+}
+
+const OPEN_CONFIRM_ABOVE_COUNT = 10;
+
+/** Path the app browses to for this item, or undefined when another app opens it. */
+function browsePathForItem(file: FileItem): string | undefined {
+  if (file.is_directory && (!isMacOSBundle(file) || file.is_symlink)) {
+    return file.path;
+  }
+  if (!file.is_directory && isArchiveFile(file)) {
+    return buildArchiveUri(file.path, '/');
+  }
+  return undefined;
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -1585,6 +1600,55 @@ export const useAppStore = create<AppState>((set, get) => ({
         message: `Unable to open ${file.name}: ${messageText}`,
         duration: 6000,
       });
+    }
+  },
+
+  openItem: async (file) => {
+    const browsePath = browsePathForItem(file);
+    if (browsePath !== undefined) {
+      await get().navigateTo(browsePath);
+      return;
+    }
+    await get().openFile(file);
+  },
+
+  openSelected: async () => {
+    const state = get();
+    const filesByPath = new Map(state.files.map((file) => [file.path, file]));
+    const items = state.selectedFiles
+      .map((path) => filesByPath.get(path))
+      .filter((file): file is FileItem => Boolean(file));
+    if (items.length === 0) return;
+    if (items.length === 1) {
+      await get().openItem(items[0]);
+      return;
+    }
+
+    if (items.length > OPEN_CONFIRM_ABOVE_COUNT) {
+      let confirmed = false;
+      try {
+        confirmed = await ask(`Open ${items.length} items?`, {
+          title: 'Open',
+          okLabel: 'Open',
+          cancelLabel: 'Cancel',
+        });
+      } catch (dialogErr) {
+        console.warn('Failed to display open confirmation:', dialogErr);
+      }
+      if (!confirmed) return;
+    }
+
+    for (const item of items) {
+      const browsePath = browsePathForItem(item);
+      if (browsePath !== undefined) {
+        try {
+          await invoke('new_window', { path: browsePath });
+        } catch (error) {
+          console.error('Failed to create new window:', error);
+        }
+        continue;
+      }
+      await get().openFile(item);
     }
   },
 
