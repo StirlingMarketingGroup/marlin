@@ -1,5 +1,11 @@
 import { test, expect } from '@playwright/test';
-import { getTauriMockScript, MOCK_HOME_DIR, MOCK_DOWNLOADS_DIR } from './tauri-mocks';
+import {
+  getTauriMockScript,
+  MOCK_HOME_DIR,
+  MOCK_DOWNLOADS_DIR,
+  MOCK_BIG_DIR,
+  MOCK_BIG_LAST,
+} from './tauri-mocks';
 
 test.describe('File Manager Navigation', () => {
   test.beforeEach(async ({ page }) => {
@@ -173,6 +179,46 @@ test.describe('File Manager Navigation', () => {
     // Title should change after navigation (implementation dependent)
     // Just verify it's still a valid title
     expect(newTitle).toBeTruthy();
+  });
+
+  test.describe('on Linux', () => {
+    // Go up reads the platform from the user agent: Alt+Up here, Cmd+Up on macOS.
+    test.use({
+      userAgent:
+        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+    });
+
+    test('going up selects the folder that was left', async ({ page }) => {
+      const pathInput = page.locator('[data-testid="path-input"]');
+      await pathInput.click();
+      await pathInput.fill(MOCK_DOWNLOADS_DIR);
+      await pathInput.press('Enter');
+      await expect(
+        page.locator('[data-testid="file-item"][data-name="sample.pdf"]').first()
+      ).toBeVisible({ timeout: 5000 });
+
+      await page.keyboard.press('Alt+ArrowUp');
+
+      const selected = page.locator('[data-testid="file-item"].bg-accent-selected');
+      await expect(selected).toHaveCount(1);
+      await expect(selected).toHaveAttribute('data-name', 'Downloads');
+      await expect(pathInput).toHaveValue(MOCK_HOME_DIR);
+    });
+
+    test('going up scrolls a far folder into view', async ({ page }) => {
+      const pathInput = page.locator('[data-testid="path-input"]');
+      await pathInput.click();
+      await pathInput.fill(`${MOCK_BIG_DIR}/${MOCK_BIG_LAST}`);
+      await pathInput.press('Enter');
+      await expect(pathInput).toHaveValue(`${MOCK_BIG_DIR}/${MOCK_BIG_LAST}`);
+
+      await page.keyboard.press('Alt+ArrowUp');
+
+      const tile = page.locator(`[data-testid="file-item"][data-name="${MOCK_BIG_LAST}"]`);
+      await expect(tile).toHaveClass(/bg-accent-selected/);
+      await expect(tile).toBeInViewport();
+      await expect(page.locator('[data-testid="file-item"].bg-accent-selected')).toHaveCount(1);
+    });
   });
 
   test('should handle keyboard shortcuts for navigation', async ({ page }) => {

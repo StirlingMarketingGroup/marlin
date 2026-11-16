@@ -36,7 +36,6 @@ export default function ContextMenu({ x, y, isFileContext, onRequestClose }: Con
     beginRenameSelected,
     openSelected,
     navigateTo,
-    setPendingRevealTarget,
     extractArchive,
     trashSelected,
     deleteSelectedPermanently,
@@ -263,8 +262,7 @@ export default function ContextMenu({ x, y, isFileContext, onRequestClose }: Con
                         path: singleSymlink.path,
                       }
                     );
-                    setPendingRevealTarget(result.target);
-                    navigateTo(result.parent);
+                    navigateTo(result.parent, { reveal: result.target });
                   } catch (error) {
                     console.warn('Failed to resolve symlink parent:', error);
                     useToastStore.getState().addToast({

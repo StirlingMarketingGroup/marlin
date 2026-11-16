@@ -745,6 +745,92 @@ describe('useAppStore', () => {
 
       expect(useAppStore.getState().currentPath).toBe('smb://server/share');
     });
+
+    it('clears a pending reveal target', () => {
+      useAppStore.setState({ pendingRevealTarget: '/a/b' });
+
+      useAppStore.getState().navigateTo('/x');
+
+      expect(useAppStore.getState().currentPath).toBe('/x');
+      expect(useAppStore.getState().pendingRevealTarget).toBeUndefined();
+    });
+
+    it('clears a pending reveal target when going back or forward', () => {
+      useAppStore.setState({
+        pathHistory: ['/a', '/b', '/c'],
+        historyIndex: 1,
+        currentPath: '/b',
+        pendingRevealTarget: '/b/child',
+      });
+
+      useAppStore.getState().goBack();
+      expect(useAppStore.getState().currentPath).toBe('/a');
+      expect(useAppStore.getState().pendingRevealTarget).toBeUndefined();
+
+      useAppStore.setState({ pendingRevealTarget: '/a/child' });
+      useAppStore.getState().goForward();
+      expect(useAppStore.getState().currentPath).toBe('/b');
+      expect(useAppStore.getState().pendingRevealTarget).toBeUndefined();
+    });
+  });
+
+  describe('goUp', () => {
+    it('opens the parent and reveals the folder that was left', () => {
+      useAppStore.setState({ currentPath: '/a/b' });
+
+      useAppStore.getState().goUp();
+
+      expect(useAppStore.getState().currentPath).toBe('/a');
+      expect(useAppStore.getState().pendingRevealTarget).toBe('/a/b');
+    });
+
+    it('reveals the archive file when leaving an archive root', () => {
+      useAppStore.setState({ currentPath: buildArchiveUri('/a/pack.zip', '/') });
+
+      useAppStore.getState().goUp();
+
+      expect(useAppStore.getState().currentPath).toBe('/a');
+      expect(useAppStore.getState().pendingRevealTarget).toBe('/a/pack.zip');
+    });
+
+    it('reveals the folder left inside an archive', () => {
+      const current = buildArchiveUri('/a/pack.zip', '/inner/deep');
+      useAppStore.setState({ currentPath: current });
+
+      useAppStore.getState().goUp();
+
+      expect(useAppStore.getState().currentPath).toBe(buildArchiveUri('/a/pack.zip', '/inner'));
+      expect(useAppStore.getState().pendingRevealTarget).toBe(current);
+    });
+
+    it('leaves a nested archive root for the folder that holds the inner archive', () => {
+      const innerFile = buildArchiveUri('/a/outer.zip', '/dir/inner.zip');
+      useAppStore.setState({ currentPath: buildArchiveUri(innerFile, '/') });
+
+      useAppStore.getState().goUp();
+
+      expect(useAppStore.getState().currentPath).toBe(buildArchiveUri('/a/outer.zip', '/dir'));
+      expect(useAppStore.getState().pendingRevealTarget).toBe(innerFile);
+    });
+
+    it('does nothing at a root', () => {
+      for (const path of ['/', 'smb://server', 'smb://server/', 'gdrive://me@example.com/']) {
+        useAppStore.setState({ currentPath: path, pendingRevealTarget: '/keep' });
+
+        useAppStore.getState().goUp();
+
+        expect(useAppStore.getState().currentPath).toBe(path);
+        expect(useAppStore.getState().pendingRevealTarget).toBe('/keep');
+      }
+    });
+
+    it('goes up from a share to the server', () => {
+      useAppStore.setState({ currentPath: 'smb://server/share' });
+
+      useAppStore.getState().goUp();
+
+      expect(useAppStore.getState().currentPath).toBe('smb://server');
+    });
   });
 
   describe('canGoBack/canGoForward', () => {
@@ -1278,6 +1364,43 @@ describe('useAppStore', () => {
         });
 
         expect(useAppStore.getState().files).toEqual([{ ...mockFile1, size: 250 }]);
+      });
+    });
+
+    describe('isMetadataComplete', () => {
+      it('is false from the start of a stream until the final metadata batch', async () => {
+        mockInvoke.mockResolvedValue({
+          sessionId: 'ignored',
+          location: { raw: 'file:///test', scheme: 'file', path: '/test', displayPath: '/test' },
+          capabilities: {},
+        });
+
+        await useAppStore.getState().refreshCurrentDirectoryStreaming();
+        const sessionId = useAppStore.getState().streamingSessionId as string;
+        expect(useAppStore.getState().isMetadataComplete).toBe(false);
+
+        useAppStore.getState().appendStreamingBatch({
+          sessionId,
+          batchIndex: 0,
+          entries: [],
+          isFinal: true,
+        });
+        expect(useAppStore.getState().isMetadataComplete).toBe(false);
+
+        useAppStore.getState().applyMetadataUpdates({ sessionId, updates: [], isFinal: false });
+        expect(useAppStore.getState().isMetadataComplete).toBe(false);
+
+        useAppStore.getState().applyMetadataUpdates({ sessionId, updates: [], isFinal: true });
+        expect(useAppStore.getState().isMetadataComplete).toBe(true);
+      });
+
+      it('is true again when the stream is cancelled', async () => {
+        useAppStore.setState({ streamingSessionId: 'session-1', isMetadataComplete: false });
+        mockInvoke.mockResolvedValue(undefined);
+
+        await useAppStore.getState().cancelDirectoryStream();
+
+        expect(useAppStore.getState().isMetadataComplete).toBe(true);
       });
     });
 

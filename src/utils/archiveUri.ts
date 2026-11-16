@@ -26,8 +26,14 @@ export const isArchiveUri = (value?: string | null): boolean => {
 
 export const buildArchiveUri = (src: string, path: string = '/'): string => {
   const normalizedPath = normalizeArchiveInternalPath(path);
-  const encodedSrc = encodeURIComponent(src);
-  const encodedPath = encodeURIComponent(normalizedPath);
+  // The backend also encodes !'()*. A URI built here must equal the one it lists for the same entry.
+  const encode = (value: string) =>
+    encodeURIComponent(value).replace(
+      /[!'()*]/g,
+      (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`
+    );
+  const encodedSrc = encode(src);
+  const encodedPath = encode(normalizedPath);
   return `${ARCHIVE_SCHEME}:///?src=${encodedSrc}&path=${encodedPath}`;
 };
 
@@ -42,36 +48,6 @@ export const parseArchiveUri = (uri: string): { src: string; path: string } | nu
   } catch {
     return null;
   }
-};
-
-export const getArchiveParentUri = (uri: string): string | null => {
-  const parsed = parseArchiveUri(uri);
-  if (!parsed) return null;
-  const normalized = normalizeArchiveInternalPath(parsed.path);
-  if (normalized === '/') {
-    if (isArchiveUri(parsed.src)) {
-      return parsed.src;
-    }
-    const schemeMatch = parsed.src.match(/^([a-zA-Z][a-zA-Z0-9+.-]*):\/\//);
-    if (schemeMatch) {
-      const afterScheme = parsed.src.slice(schemeMatch[0].length);
-      const slashIndex = afterScheme.indexOf('/');
-      if (slashIndex === -1) return parsed.src;
-      const authority = afterScheme.slice(0, slashIndex);
-      const pathPart = afterScheme.slice(slashIndex).replace(/\/+$/g, '') || '/';
-      const lastSlash = pathPart.lastIndexOf('/');
-      const parentPath = lastSlash <= 0 ? '/' : pathPart.slice(0, lastSlash);
-      return `${schemeMatch[1]}://${authority}${parentPath}`;
-    }
-    const normalizedSrc = normalizeSlashes(parsed.src).replace(/\/+$/g, '');
-    const lastSlash = normalizedSrc.lastIndexOf('/');
-    if (lastSlash <= 0) return normalizedSrc || '/';
-    return normalizedSrc.slice(0, lastSlash) || '/';
-  }
-  const trimmed = normalized.replace(/\/+$/g, '');
-  const lastSlash = trimmed.lastIndexOf('/');
-  const parent = lastSlash <= 0 ? '/' : trimmed.slice(0, lastSlash);
-  return buildArchiveUri(parsed.src, parent);
 };
 
 const formatArchiveSource = (src: string): string => {

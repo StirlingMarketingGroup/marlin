@@ -2,7 +2,7 @@
 
 Marlin is one Tauri 2 desktop app: a Rust backend that owns all file access, and a React frontend that draws the UI in a webview. The frontend never touches the disk. It calls a Rust command and gets data back.
 
-**Covers:** `src-tauri/src/lib.rs`, `src-tauri/src/commands.rs`, `src-tauri/src/menu.rs`, `src-tauri/Cargo.toml`, `src-tauri/crates/`, `src-tauri/src/fs_watcher.rs`, `src/main.tsx`, `src/App.tsx`, `src/store/`, `src/windows/`, `src/components/PathBar.tsx`, `src/hooks/useDirectoryWatcher.ts`
+**Covers:** `src-tauri/src/lib.rs`, `src-tauri/src/commands.rs`, `src-tauri/src/menu.rs`, `src-tauri/Cargo.toml`, `src-tauri/crates/`, `src-tauri/src/fs_watcher.rs`, `src/main.tsx`, `src/App.tsx`, `src/store/`, `src/windows/`, `src/components/PathBar.tsx`, `src/hooks/useDirectoryWatcher.ts`, `src/hooks/useRevealTarget.ts`
 **Checked against the code:** 2026-11-16
 
 ## Processes
@@ -58,6 +58,10 @@ The workspace has five library-only crates under `src-tauri/crates/`. `marlin-vf
 - More than 10 items asks first.
 - Enter belongs to a focused button or link, not to the selection. The arrow keys blur a clicked button, so Enter reaches the files again.
 - A new window gets its folder as `index.html?path=`, encoded once by `new_window`. `App.tsx` reads it with `URLSearchParams`, which decodes it. Do not decode it again: an archive URI holds an encoded part of its own.
+
+**Revealing an item.** `pendingRevealTarget` in `useAppStore` names an item to select and scroll to once it is listed. `navigateTo(path, { reveal })` sets it for the folder being opened. Creating, pasting, or extracting an item sets it for the current folder. `navigateTo` without `reveal`, back, and forward clear it. `useRevealTarget` acts on it once the item is listed and the listing has its sizes and dates (`isMetadataComplete`), because those can reorder the list. A row that is not rendered is reached through the virtualizer. A file path typed into the path bar uses `pendingFileSelectionRef` in `App.tsx` instead.
+
+**Going up.** `parentPath` in `src/utils/pathUtils.ts` is the one rule for the folder above a path. `goUp` and the Up button both use it. A root has no folder above it, so the button is off there: `/`, a Windows drive, and the root of a remote such as `smb://server`. The root of an archive stands for the archive file, so the folder above it is the one that holds the file. Going up reveals the folder left, or the archive file.
 
 **Path bar.** `src/components/PathBar.tsx` is a text field that holds a draft of the path. Enter sends the draft to `navigateTo` and gives the focus to the files. Cmd/Ctrl+L or the first click focuses the field and selects the whole path; a later click places the caret. Clicking away drops the draft; switching to another app keeps it.
 

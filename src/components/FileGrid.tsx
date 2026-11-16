@@ -30,6 +30,7 @@ import { isGoogleDrivePath, parseGoogleDrivePathEmail } from '@/utils/googleDriv
 import { isSmbPath } from '@/utils/smbPath';
 import { useScrollContainerRef } from '@/contexts/ScrollContext';
 import { useSortedFiles } from '@/hooks/useSortedFiles';
+import { useRevealTarget } from '@/hooks/useRevealTarget';
 
 interface FileGridProps {
   files: FileItem[];
@@ -252,8 +253,6 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     selectionAnchor,
     setSelectionAnchor,
     setSelectionLead,
-    pendingRevealTarget,
-    setPendingRevealTarget,
     openItem,
     isStreamingComplete,
     streamingTotalCount,
@@ -730,40 +729,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
     overscan: 3,
   });
 
-  useEffect(() => {
-    if (!pendingRevealTarget) return;
-    const targetPath = pendingRevealTarget;
-    if (!files.some((file) => file.path === targetPath)) return;
-
-    setSelectedFiles([targetPath]);
-    setSelectionAnchor(targetPath);
-    setSelectionLead(targetPath);
-
-    requestAnimationFrame(() => {
-      const container = gridRef.current;
-      if (!container) return;
-      const candidates = container.querySelectorAll<HTMLElement>('[data-file-item="true"]');
-      for (const el of candidates) {
-        if (el.getAttribute('data-file-path') === targetPath) {
-          try {
-            el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-          } catch (error) {
-            console.warn('Failed to scroll reveal target into view:', error);
-          }
-          break;
-        }
-      }
-    });
-
-    setPendingRevealTarget(undefined);
-  }, [
-    pendingRevealTarget,
-    files,
-    setPendingRevealTarget,
-    setSelectedFiles,
-    setSelectionAnchor,
-    setSelectionLead,
-  ]);
+  useRevealTarget(filteredFiles, gridRef, virtualizer, columnCount);
 
   if (filteredFiles.length === 0) {
     return (
