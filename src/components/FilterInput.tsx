@@ -1,6 +1,8 @@
-import { useRef, useEffect } from 'react';
+import { useRef, useEffect, useMemo } from 'react';
 import { X, MagnifyingGlass } from 'phosphor-react';
 import { useAppStore } from '@/store/useAppStore';
+import { usePlatform } from '@/hooks/usePlatform';
+import { useSortedFiles } from '@/hooks/useSortedFiles';
 import type { FileItem } from '@/types';
 
 // Stable empty array to avoid infinite re-render loop in Zustand selector
@@ -12,24 +14,59 @@ export default function FilterInput() {
     showFilterInput,
     setFilterText,
     clearFilter,
+    openFilter,
     setSelectedFiles,
     setSelectionAnchor,
+    setSelectionLead,
   } = useAppStore();
-  // Only subscribe to files when we have a filter to avoid re-renders during streaming
-  const files = useAppStore((state) => (state.filterText ? state.files : EMPTY_FILES));
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  const filteredFiles = files.filter((f) =>
-    f.name.toLowerCase().includes(filterText.toLowerCase())
+  // Read the files only while the box is open, so a closed box sorts nothing.
+  const files = useAppStore((state) => (state.showFilterInput ? state.files : EMPTY_FILES));
+  const globalPreferences = useAppStore((state) => state.globalPreferences);
+  const directoryPreferences = useAppStore(
+    (state) => state.directoryPreferences[state.currentPath]
   );
+  const inputRef = useRef<HTMLInputElement>(null);
+  const { isMac } = usePlatform();
+
+  // The same files in the same order as the view, so the count and the arrow keys agree with it.
+  const preferences = { ...globalPreferences, ...directoryPreferences };
+  const sortedFiles = useSortedFiles(files, preferences);
+  const filteredFiles = useMemo(() => {
+    const hiddenFiltered = preferences.showHidden
+      ? sortedFiles
+      : sortedFiles.filter((file) => !file.is_hidden);
+    return filterText
+      ? hiddenFiltered.filter((file) => file.name.toLowerCase().includes(filterText.toLowerCase()))
+      : hiddenFiltered;
+  }, [sortedFiles, preferences.showHidden, filterText]);
   const matchCount = filteredFiles.length;
 
   useEffect(() => {
     if (showFilterInput && inputRef.current) {
       inputRef.current.focus();
-      // Don't select - user is typing char by char via appendToFilter
+      // No select: the box opens with one typed character, or empty from the shortcut.
     }
   }, [showFilterInput]);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (
+        (isMac ? e.metaKey : e.ctrlKey) &&
+        !e.altKey &&
+        !e.shiftKey &&
+        e.key.toLowerCase() === 'f'
+      ) {
+        e.preventDefault();
+        // Closed: openFilter mounts the input, and the effect above focuses it.
+        // Open: the input is mounted, so focus it and select its text here.
+        openFilter();
+        inputRef.current?.focus();
+        inputRef.current?.select();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [isMac, openFilter]);
 
   if (!showFilterInput) return null;
 
@@ -51,6 +88,7 @@ export default function FilterInput() {
         e.key === 'ArrowDown' ? filteredFiles[0] : filteredFiles[filteredFiles.length - 1];
       setSelectedFiles([targetFile.path]);
       setSelectionAnchor(targetFile.path);
+      setSelectionLead(targetFile.path);
 
       // Blur input and focus the file container so arrow keys continue working
       inputRef.current?.blur();

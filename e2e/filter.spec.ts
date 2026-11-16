@@ -100,6 +100,118 @@ test.describe('Type-to-Filter', () => {
     await expect(page.locator('[data-testid="filter-input"]')).not.toBeFocused();
   });
 
+  test('should open an empty filter with the shortcut so a name can be pasted', async ({
+    page,
+  }) => {
+    await page.keyboard.press('ControlOrMeta+f');
+
+    const filterInput = page.locator('[data-testid="filter-input"]');
+    await expect(filterInput).toBeVisible();
+    await expect(filterInput).toHaveValue('');
+    await expect(filterInput).toBeFocused();
+
+    await page.keyboard.insertText('ments');
+
+    await expect(page.locator('[data-testid="file-item"][data-name="Documents"]')).toBeVisible();
+    await expect(
+      page.locator('[data-testid="file-item"][data-name="Downloads"]')
+    ).not.toBeVisible();
+  });
+
+  test('should replace the filter text when the shortcut refocuses an open filter', async ({
+    page,
+  }) => {
+    await page.keyboard.type('Do');
+    await page.keyboard.press('ArrowDown');
+    await expect(page.locator('[data-testid="filter-input"]')).not.toBeFocused();
+
+    await page.keyboard.press('ControlOrMeta+f');
+
+    const filterInput = page.locator('[data-testid="filter-input"]');
+    await expect(filterInput).toBeFocused();
+    await page.keyboard.type('x');
+    await expect(filterInput).toHaveValue('x');
+  });
+
+  test('should move to the first file on ArrowDown from an empty filter', async ({ page }) => {
+    await page.keyboard.press('ControlOrMeta+f');
+    await expect(page.locator('[data-testid="filter-input"]')).toBeFocused();
+
+    await page.keyboard.press('ArrowDown');
+
+    await expect(page.locator('[data-testid="file-item"][data-name="Documents"]')).toHaveClass(
+      /bg-accent-selected/
+    );
+    await expect(page.locator('[data-testid="filter-input"]')).not.toBeFocused();
+  });
+
+  test('should not count a hidden file the view does not show', async ({ page }) => {
+    await page.keyboard.type('hid');
+
+    await expect(page.getByText(/No files match/)).toBeVisible();
+    await expect(page.getByText('0 matches')).toBeVisible();
+  });
+
+  // Select all and the view shortcuts read the user agent. Playwright's Desktop Chrome agent
+  // says Windows, and ControlOrMeta sends Meta on a Mac, so these tests need an agent that
+  // matches the host.
+  test.describe('with shortcuts that read the user agent', () => {
+    test.use({
+      userAgent:
+        process.platform === 'darwin'
+          ? 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'
+          : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+    });
+
+    test('should select only the files the filter shows', async ({ page }) => {
+      await page.keyboard.type('ments');
+      await page.keyboard.press('ArrowDown');
+      await page.keyboard.press('ControlOrMeta+a');
+      await page.keyboard.press('Escape');
+
+      await expect(page.locator('[data-testid="file-item"][data-name="Documents"]')).toHaveClass(
+        /bg-accent-selected/
+      );
+      await expect(
+        page.locator('[data-testid="file-item"][data-name="Downloads"]')
+      ).not.toHaveClass(/bg-accent-selected/);
+    });
+
+    test('should select the top row on ArrowDown when the list is sorted Z to A', async ({
+      page,
+    }) => {
+      await page.keyboard.press('ControlOrMeta+2');
+      await page.getByRole('button', { name: 'Name' }).click();
+
+      await page.keyboard.type('Do');
+      await page.keyboard.press('ArrowDown');
+
+      await expect(page.locator('[data-testid="file-item"][data-name="Downloads"]')).toHaveClass(
+        /bg-accent-selected/
+      );
+    });
+
+    test('should clear the selection when select all matches nothing', async ({ page }) => {
+      await page.locator('[data-testid="file-item"][data-name="Documents"]').click();
+      await expect(page.locator('[data-testid="file-item"][data-name="Documents"]')).toHaveClass(
+        /bg-accent-selected/
+      );
+
+      await page.keyboard.type('zzzzz');
+      await expect(page.getByText(/No files match/)).toBeVisible();
+
+      // The filter input keeps Cmd/Ctrl+A for its own text, and a click on the empty
+      // folder would clear the selection. Tab moves the focus to the clear button.
+      await page.keyboard.press('Tab');
+      await expect(page.getByLabel('Clear filter')).toBeFocused();
+
+      await page.keyboard.press('ControlOrMeta+a');
+      await page.keyboard.press('Escape');
+
+      await expect(page.locator('[data-testid="file-item"].bg-accent-selected')).toHaveCount(0);
+    });
+  });
+
   test('should select last file on ArrowUp from filter', async ({ page }) => {
     // Type to filter
     await page.keyboard.type('Do');

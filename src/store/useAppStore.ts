@@ -340,6 +340,7 @@ interface AppState {
   scheduleHideZoomSlider: (delayMs?: number) => void;
   setFilterText: (text: string) => void;
   appendToFilter: (char: string) => void;
+  openFilter: () => void;
   clearFilter: () => void;
   navigateTo: (path: string, options?: { reveal?: string }) => Promise<void>;
   goBack: () => void;
@@ -758,6 +759,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       filterText: state.filterText + char,
       showFilterInput: true,
     })),
+
+  openFilter: () =>
+    set({
+      showFilterInput: true,
+    }),
 
   clearFilter: () =>
     set({

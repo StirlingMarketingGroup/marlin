@@ -21,8 +21,13 @@ describe('FilterInput', () => {
     const fullState = {
       ...state,
       files: state.files ?? [],
+      globalPreferences: {},
+      directoryPreferences: {},
+      currentPath: '/',
+      isStreamingComplete: true,
       setFilterText: mockSetFilterText,
       clearFilter: mockClearFilter,
+      openFilter: vi.fn(),
     };
     (useAppStore as unknown as ReturnType<typeof vi.fn>).mockImplementation(
       (selector?: (s: typeof fullState) => unknown) => {

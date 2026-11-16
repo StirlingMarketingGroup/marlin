@@ -1752,14 +1752,17 @@ function App() {
         const state = useAppStore.getState();
         const currentDirPrefs = state.directoryPreferences[state.currentPath] || {};
         const effectivePrefs = { ...state.globalPreferences, ...currentDirPrefs };
-        const filteredFiles = effectivePrefs.showHidden
+        const hiddenFiltered = effectivePrefs.showHidden
           ? state.files
-          : state.files.filter((f) => !f.is_hidden);
-        if (filteredFiles.length > 0) {
-          state.setSelectedFiles(filteredFiles.map((f) => f.path));
-          state.setSelectionAnchor(filteredFiles[0].path);
-          state.setSelectionLead(filteredFiles[filteredFiles.length - 1].path);
-        }
+          : state.files.filter((file) => !file.is_hidden);
+        const visibleItems = state.filterText
+          ? hiddenFiltered.filter((file) =>
+              file.name.toLowerCase().includes(state.filterText.toLowerCase())
+            )
+          : hiddenFiltered;
+        state.setSelectedFiles(visibleItems.map((file) => file.path));
+        state.setSelectionAnchor(visibleItems[0]?.path);
+        state.setSelectionLead(visibleItems[visibleItems.length - 1]?.path);
         return;
       }
 

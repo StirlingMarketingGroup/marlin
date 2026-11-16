@@ -102,6 +102,20 @@ describe('useAppStore filter state', () => {
     expect(useAppStore.getState().showFilterInput).toBe(false);
   });
 
+  it('should show the filter box with empty text via openFilter', () => {
+    const { openFilter } = useAppStore.getState();
+    openFilter();
+    expect(useAppStore.getState().showFilterInput).toBe(true);
+    expect(useAppStore.getState().filterText).toBe('');
+  });
+
+  it('should keep existing filter text when opening the filter', () => {
+    useAppStore.setState({ filterText: 'Do', showFilterInput: true });
+    useAppStore.getState().openFilter();
+    expect(useAppStore.getState().showFilterInput).toBe(true);
+    expect(useAppStore.getState().filterText).toBe('Do');
+  });
+
   it('should append character to filter text via appendToFilter', () => {
     const { appendToFilter } = useAppStore.getState();
     appendToFilter('a');
