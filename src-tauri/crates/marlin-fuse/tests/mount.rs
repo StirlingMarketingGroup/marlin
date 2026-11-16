@@ -394,7 +394,7 @@ async fn unmount_succeeds_after_an_unmount_from_outside() {
         .unwrap();
 
     let at = point.clone();
-    let status = tokio::task::spawn_blocking(move || unmount_from_outside(&at))
+    let status = tokio::task::spawn_blocking(move || unmount_from_outside(&at, false))
         .await
         .unwrap();
     assert!(status.success());
@@ -546,7 +546,7 @@ impl Provider for CountingFile {
     }
 }
 
-// macOS does not ask the kernel to keep a file's cached bytes, so a second open reads the provider again.
+// Linux only: this tests keep_cache, a flag the macOS adapter does not set.
 #[cfg(target_os = "linux")]
 #[ignore = "mounts for real: run crates/marlin-fuse/test-in-docker.sh on Linux, crates/marlin-fuse/test-on-mac.sh on a Mac"]
 #[tokio::test(flavor = "multi_thread")]
@@ -577,15 +577,18 @@ async fn a_second_open_reads_nothing_again_and_a_changed_file_is_read_again() {
     mount.unmount().await.unwrap();
 }
 
-fn unmount_from_outside(path: &Path) -> std::process::ExitStatus {
-    let mut command = if cfg!(target_os = "linux") {
-        let mut command = std::process::Command::new("fusermount3");
-        command.arg("-u");
-        command
+/// Unmounts as a user would from a terminal. A plain unmount is refused while a file is open. A forced one is not.
+fn unmount_from_outside(path: &Path, forced: bool) -> std::process::ExitStatus {
+    let (program, plain, force): (&str, &[&str], &[&str]) = if cfg!(target_os = "linux") {
+        ("fusermount3", &["-u"], &["-u", "-z"])
     } else {
-        std::process::Command::new("umount")
+        ("umount", &[], &["-f"])
     };
-    command.arg(path).status().unwrap()
+    std::process::Command::new(program)
+        .args(if forced { force } else { plain })
+        .arg(path)
+        .status()
+        .unwrap()
 }
 
 /// A file whose `read` waits until the test releases it.
@@ -699,7 +702,8 @@ async fn an_outside_unmount_during_a_read_does_not_crash() {
     let reading = tokio::task::spawn_blocking(move || std::fs::read(path));
     entered.await.unwrap();
     let at = point.clone();
-    let unmounting = tokio::task::spawn_blocking(move || unmount_from_outside(&at));
+    // Forced: the waiting read holds the file open. On Linux the forced form is the lazy unmount, which detaches at once. macOS holds even a forced unmount until the read is answered, so the read is released while the unmount runs.
+    let unmounting = tokio::task::spawn_blocking(move || unmount_from_outside(&at, true));
     tokio::time::sleep(Duration::from_millis(200)).await;
     let _ = release.send(());
     let read = tokio::time::timeout(Duration::from_secs(10), reading)
@@ -707,7 +711,7 @@ async fn an_outside_unmount_during_a_read_does_not_crash() {
         .expect("the read never returned")
         .unwrap();
     read_settled(read);
-    let _ = tokio::time::timeout(Duration::from_secs(10), unmounting).await;
+    assert!(unmounting.await.unwrap().success());
     mount.unmount().await.unwrap();
 }
 
@@ -755,7 +759,7 @@ async fn dropping_the_first_mount_leaves_a_second_mount_at_the_same_path() {
         .await
         .unwrap();
     let at = point.clone();
-    let status = tokio::task::spawn_blocking(move || unmount_from_outside(&at))
+    let status = tokio::task::spawn_blocking(move || unmount_from_outside(&at, false))
         .await
         .unwrap();
     assert!(status.success());
@@ -804,7 +808,7 @@ async fn a_mount_on_a_file_fails() {
     std::fs::write(&point, b"not a folder").unwrap();
     let started = Instant::now();
     let failed = marlin_fuse::mount(vfs(Arc::new(MemoryProvider::new())), &point).await;
-    assert!(matches!(failed, Err(marlin_fuse::Error::Mount(_))));
+    assert!(matches!(failed, Err(marlin_fuse::Error::Refused)));
     // macOS reports this by ending the session, not through an error code. The adapter must notice that, not wait out its 30 seconds.
     assert!(started.elapsed() < Duration::from_secs(15));
     assert!(mount_line(&point).is_none());

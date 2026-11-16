@@ -2,7 +2,7 @@ use std::ffi::{CStr, CString};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
-use marlin_vfs::{Access, Attributes, HandleId, Kind, NodeId, Vfs};
+use marlin_vfs::{Access, Attributes, HandleId, Kind, NodeId, Space, Vfs};
 
 use super::sys::{FuseBuf, FuseBufvec, FuseEntryParam, FuseFileInfo, FuseLowlevelOps, Req, Sys};
 use super::Life;
@@ -151,7 +151,7 @@ pub(super) static OPS: FuseLowlevelOps = FuseLowlevelOps {
     fsync: None,
     opendir: Some(ll_opendir),
     readdir: Some(ll_readdir),
-    releasedir: Some(ll_releasedir),
+    releasedir: Some(ll_release),
     fsyncdir: None,
     statfs: Some(ll_statfs),
 };
@@ -252,6 +252,7 @@ extern "C" fn ll_read(req: Req, _ino: u64, size: usize, off: i64, fi: *mut FuseF
     });
 }
 
+/// Serves `release` and `releasedir`: the core closes a file handle and a folder handle the same way.
 extern "C" fn ll_release(req: Req, _ino: u64, fi: *mut FuseFileInfo) {
     // SAFETY: libfuse calls this with a request for this session.
     let fs = unsafe { session(req) };
@@ -381,38 +382,32 @@ fn add(
     false
 }
 
-extern "C" fn ll_releasedir(req: Req, _ino: u64, fi: *mut FuseFileInfo) {
-    // SAFETY: libfuse calls this with a request for this session.
-    let fs = unsafe { session(req) };
-    let reply = Reply::new(fs, req);
-    // SAFETY: libfuse passes its own file info to this callback, and it is valid until the callback returns.
-    let fh = unsafe { (*fi).fh };
-    fs.vfs.release(HandleId(fh));
-    reply.err(0);
-}
-
 extern "C" fn ll_statfs(req: Req, _ino: u64) {
     // SAFETY: libfuse calls this with a request for this session.
     let fs = unsafe { session(req) };
     let reply = Reply::new(fs, req);
     let vfs = Arc::clone(&fs.vfs);
     fs.runtime.spawn(async move {
-        let block = u64::from(crate::BLOCK_SIZE);
         match vfs.space().await {
-            Ok(space) => {
-                // SAFETY: statvfs is plain numbers. Zero leaves the counts we do not report at zero.
-                let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
-                st.f_bsize = u64::from(crate::BLOCK_SIZE);
-                st.f_frsize = u64::from(crate::BLOCK_SIZE);
-                st.f_blocks = (space.total / block) as _;
-                st.f_bfree = (space.free / block) as _;
-                st.f_bavail = (space.free / block) as _;
-                st.f_namemax = crate::NAME_MAX as _;
-                reply.statfs(&st);
-            }
+            Ok(space) => reply.statfs(&fill_statvfs(&space)),
             Err(error) => reply.err(crate::errno(&error)),
         }
     });
+}
+
+fn fill_statvfs(space: &Space) -> libc::statvfs {
+    let block = u64::from(crate::BLOCK_SIZE);
+    // macOS counts blocks in 32 bits. A bigger account reports the most that fits, which is 16 TiB.
+    let blocks = |bytes: u64| u32::try_from(bytes / block).unwrap_or(u32::MAX);
+    // SAFETY: statvfs is plain numbers. Zero leaves the counts this filesystem does not report at zero.
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    st.f_bsize = block;
+    st.f_frsize = block;
+    st.f_blocks = blocks(space.total);
+    st.f_bfree = blocks(space.free);
+    st.f_bavail = blocks(space.free);
+    st.f_namemax = crate::NAME_MAX as _;
+    st
 }
 
 fn fill_stat(node: NodeId, attributes: &Attributes, uid: u32, gid: u32) -> libc::stat {
@@ -480,6 +475,28 @@ mod tests {
         assert_eq!(st.st_atime_nsec, 0);
         assert_eq!(st.st_uid, 11);
         assert_eq!(st.st_gid, 22);
+    }
+
+    #[test]
+    fn free_space_counts_blocks_and_stops_at_what_32_bits_hold() {
+        let small = fill_statvfs(&Space {
+            total: 1_000_000,
+            free: 250_000,
+        });
+        assert_eq!(small.f_frsize, 4096);
+        assert_eq!(small.f_blocks, 244);
+        assert_eq!(small.f_bfree, 61);
+        assert_eq!(small.f_bavail, 61);
+        assert_eq!(small.f_namemax, 255);
+
+        // What the Google provider reports for an account with no limit.
+        let no_limit = fill_statvfs(&Space {
+            total: 5_000 + (1 << 50),
+            free: 1 << 50,
+        });
+        assert_eq!(no_limit.f_blocks, u32::MAX);
+        assert_eq!(no_limit.f_bfree, u32::MAX);
+        assert_eq!(no_limit.f_bavail, u32::MAX);
     }
 
     #[test]

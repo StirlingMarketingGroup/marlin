@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use marlin_vfs::Vfs;
 use tokio::sync::oneshot;
 
-/// Why a mount or an unmount failed. `Display` is the text the user sees. `NoMacFuse` and `MacOsTooOld` say how to fix the machine.
+/// Why a mount or an unmount failed. `Display` is the text the user sees. `NoMacFuse`, `MacOsTooOld`, and `Refused` say how to fix the machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     /// macFUSE is not installed, or its library did not load.
@@ -20,6 +20,9 @@ pub enum Error {
 
     /// macOS is older than 15.4.
     MacOsTooOld,
+
+    /// The mount ended before its volume appeared. macFUSE's mount program writes the reason to its own stderr, which this process cannot read. Turned-off extensions are the usual reason.
+    Refused,
 
     /// The mount failed.
     Mount(String),
@@ -35,6 +38,9 @@ impl std::fmt::Display for Error {
                 "Marlin needs macFUSE 5 or later to mount. Install it from https://macfuse.github.io. Then open System Settings, General, Login Items & Extensions, File System Extensions, and turn on both \"macFUSE\" and \"macFUSE (local)\".",
             ),
             Self::MacOsTooOld => f.write_str("Marlin needs macOS 15.4 or later to mount."),
+            Self::Refused => f.write_str(
+                "macFUSE refused the mount. Open System Settings, General, Login Items & Extensions, File System Extensions, and check that both \"macFUSE\" and \"macFUSE (local)\" are turned on.",
+            ),
             Self::Mount(text) => write!(f, "macOS could not mount: {text}"),
             Self::Unmount(text) => write!(f, "macOS could not unmount: {text}"),
         }
@@ -44,9 +50,6 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 
 const LIBFUSE: &str = "/usr/local/lib/libfuse3.4.dylib";
-
-/// The text for a mount that ended before its volume appeared. macFUSE's own mount program writes the reason to its stderr, which this process cannot read. Turned-off extensions are the usual reason.
-const REFUSED: &str = "macFUSE refused the mount. Open System Settings, General, Login Items & Extensions, File System Extensions, and check that both \"macFUSE\" and \"macFUSE (local)\" are turned on.";
 
 const MOUNT_WAIT: Duration = Duration::from_secs(30);
 
@@ -117,7 +120,7 @@ pub async fn mount(vfs: Arc<Vfs>, mount_point: &Path) -> Result<Mount, Error> {
         return Err(Error::Mount(std::io::Error::last_os_error().to_string()));
     }
     let version = String::from_utf8_lossy(&version[..len]);
-    preflight(Path::new(LIBFUSE), version.trim_end_matches('\0'))?;
+    preflight(version.trim_end_matches('\0'))?;
     let sys = sys::load(Path::new(LIBFUSE)).map_err(|_| Error::NoMacFuse)?;
 
     // The volume is named after the folder. libfuse splits options at a comma and reads a backslash as an escape, so each gets a backslash in front.
@@ -164,7 +167,7 @@ pub async fn mount(vfs: Arc<Vfs>, mount_point: &Path) -> Result<Mount, Error> {
         // macFUSE starts the real mount when the loop starts, and the volume appears a second or two later. A mount that macOS or macFUSE refuses ends the loop instead.
         loop {
             if life.left_loop() {
-                return Err(Error::Mount(REFUSED.into()));
+                return Err(Error::Refused);
             }
             if is_mounted(&mount_point).map_err(|error| Error::Mount(error.to_string()))? {
                 return Ok(());
@@ -229,7 +232,7 @@ fn serve(fs: Box<fs::Fs>, options: &CStr, path: &CStr, tx: oneshot::Sender<Resul
         Err(Error::Mount("macFUSE could not start a session".into()))
     // SAFETY: `session` came from session_new, and `path` is the mount folder.
     } else if unsafe { (sys.session_mount)(session, path.as_ptr()) } != 0 {
-        Err(Error::Mount(REFUSED.into()))
+        Err(Error::Refused)
     } else {
         Ok(())
     };
@@ -341,16 +344,13 @@ fn is_mounted(mount_point: &Path) -> std::io::Result<bool> {
     }))
 }
 
-/// Checks what a mount needs. The two inputs are parameters so a test can name a library that is not there and an old version.
-fn preflight(library: &Path, version: &str) -> Result<(), Error> {
+/// Checks that this macOS can mount. FSKit, which the adapter mounts through, came with macOS 15.4. The version is a parameter so a test can name an old one.
+fn preflight(version: &str) -> Result<(), Error> {
     let mut parts = version.split('.').map(|part| part.parse::<u32>().ok());
     let major = parts.next().flatten();
     let minor = parts.next().flatten().unwrap_or(0);
     if !major.is_some_and(|major| (major, minor) >= (15, 4)) {
         return Err(Error::MacOsTooOld);
-    }
-    if !library.exists() {
-        return Err(Error::NoMacFuse);
     }
     Ok(())
 }
@@ -360,17 +360,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn preflight_reports_an_old_macos_and_a_missing_library() {
-        assert_eq!(preflight(Path::new("/"), "15.3"), Err(Error::MacOsTooOld));
-        assert_eq!(preflight(Path::new("/"), "14.6.1"), Err(Error::MacOsTooOld));
-        assert_eq!(preflight(Path::new("/"), "15"), Err(Error::MacOsTooOld));
-        assert_eq!(
-            preflight(Path::new("/no/such/libfuse"), "15.4"),
-            Err(Error::NoMacFuse)
-        );
-        assert!(preflight(Path::new("/"), "15.4").is_ok());
-        assert!(preflight(Path::new("/"), "15.4.1").is_ok());
-        assert!(preflight(Path::new("/"), "27.2").is_ok());
+    fn an_old_macos_is_refused_and_a_missing_library_does_not_load() {
+        assert_eq!(preflight("15.3"), Err(Error::MacOsTooOld));
+        assert_eq!(preflight("14.6.1"), Err(Error::MacOsTooOld));
+        assert_eq!(preflight("15"), Err(Error::MacOsTooOld));
+        assert!(preflight("15.4").is_ok());
+        assert!(preflight("15.4.1").is_ok());
+        assert!(preflight("27.2").is_ok());
+        // No unit test loads the real library, so nothing has filled the slot this call reads first.
+        assert!(sys::load(Path::new("/marlin-no-such-library")).is_err());
         assert_eq!(
             Error::NoMacFuse.to_string(),
             "Marlin needs macFUSE 5 or later to mount. Install it from https://macfuse.github.io. Then open System Settings, General, Login Items & Extensions, File System Extensions, and turn on both \"macFUSE\" and \"macFUSE (local)\"."
@@ -379,8 +377,9 @@ mod tests {
             Error::MacOsTooOld.to_string(),
             "Marlin needs macOS 15.4 or later to mount."
         );
-        assert!(Error::Mount(REFUSED.into())
-            .to_string()
-            .contains("macFUSE refused the mount"));
+        assert_eq!(
+            Error::Refused.to_string(),
+            "macFUSE refused the mount. Open System Settings, General, Login Items & Extensions, File System Extensions, and check that both \"macFUSE\" and \"macFUSE (local)\" are turned on."
+        );
     }
 }
