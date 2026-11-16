@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 pub const JSONRPC_VERSION: &str = "2.0";
 
 /// Protocol number the helper and the app speak. Raised when the control API changes.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// JSON-RPC and helper error codes.
 pub mod error_codes {
@@ -27,6 +27,8 @@ pub mod error_codes {
     pub const HELLO_REQUIRED: i32 = -1010;
     pub const PROTOCOL_MISMATCH: i32 = -1011;
     pub const DEAD_MOUNT: i32 = -1012;
+    pub const SIGN_IN_NEEDED: i32 = -1013;
+    pub const UNREACHABLE: i32 = -1014;
 }
 
 /// Control methods and the one notification the helper sends.

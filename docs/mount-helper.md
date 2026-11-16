@@ -1,22 +1,24 @@
 # Mount helper (`marlin-mount`)
 
-`marlin-mount` is the process that will own every native mount. It runs once per user, apart from the app, so a mount outlives a hot reload, an app crash, and every window. The app tells it what to mount over a local socket.
+`marlin-mount` is the process that owns every native mount. It runs once per user, apart from the app, so a mount outlives a hot reload, an app crash, and every window. The app tells it what to mount over a local socket.
 
-It cannot mount anything yet. Linux has an adapter, the [Linux mount adapter](mount-linux.md). macOS (#373) and Windows (#375) have none. The helper links no provider yet: the [Google Drive mount provider](mount-gdrive.md) is built, and #529 wires it in. So no mount request can succeed: one that passes the name checks fails with -1004, unknown provider. The app starts the helper on the first mount command: see [The app side](#the-app-side). No part of the UI sends one yet (#377). The app bundle holds the helper: see [Building and bundling](#building-and-bundling).
+On Linux it can mount a Google account, read-only: see [Providers](#providers) and the [Linux mount adapter](mount-linux.md). macOS (#373) has no adapter yet: a mount there opens the account and makes the first call, then fails with -1006. The helper does not run on Windows (#375). The app starts the helper on the first mount command: see [The app side](#the-app-side). No part of the UI sends one yet (#377). The app bundle holds the helper: see [Building and bundling](#building-and-bundling).
 
 **Covers:** `src-tauri/crates/marlin-mount/`, `src-tauri/crates/marlin-mount-client/`, `src-tauri/src/mount_helper.rs`, `src-tauri/build.rs`, `scripts/run-tauri.mjs`, `scripts/check-bundled-mount-helper.mjs`
-**Checked against the code:** 2026-11-13
+**Checked against the code:** 2026-11-16
 
 The design is in [decision 0001](decisions/0001-mount-architecture.md), choices 3 to 6. The helper builds each mount on the [mount core](mount-core.md).
 
 ## The parts
 
-| File        | Holds                                                                                                |
-| ----------- | ---------------------------------------------------------------------------------------------------- |
-| `main.rs`   | The binary: two flags, the default paths, and the signals.                                           |
-| `server.rs` | The socket, the lock that allows one helper per user, the connections, and the request dispatch.     |
-| `mounts.rs` | The mount table and its rules, the three traits that adapters and providers plug into, `MountError`. |
-| `log.rs`    | The log writer, and `redact`.                                                                        |
+| File           | Holds                                                                                                |
+| -------------- | ---------------------------------------------------------------------------------------------------- |
+| `main.rs`      | The binary: two flags, the default paths, and the signals.                                           |
+| `server.rs`    | The socket, the lock that allows one helper per user, the connections, and the request dispatch.     |
+| `mounts.rs`    | The mount table and its rules, the three traits that adapters and providers plug into, `MountError`. |
+| `adapter.rs`   | `OsAdapter`, the mount adapter this OS has.                                                          |
+| `providers.rs` | `LinkedProviders`, the storage providers the helper links.                                           |
+| `log.rs`       | The log writer, and `redact`.                                                                        |
 
 The wire types and the client are in a second crate, `marlin-mount-client`. The helper and the app both link it, so the app never links the helper's provider and adapter code.
 
@@ -97,23 +99,25 @@ What a client must know:
 
 **Error codes.**
 
-| Code   | Meaning                                                                |
-| ------ | ---------------------------------------------------------------------- |
-| -32700 | The line is not a request.                                             |
-| -32601 | Unknown method.                                                        |
-| -32602 | Wrong params.                                                          |
-| -1001  | The mount name is not one plain folder name.                           |
-| -1002  | Another account's mount has this name, ignoring letter case.           |
-| -1003  | The mount point exists and is not an empty folder.                     |
-| -1004  | Unknown provider.                                                      |
-| -1005  | The provider could not open the account.                               |
-| -1006  | The adapter could not mount.                                           |
-| -1007  | The adapter could not unmount.                                         |
-| -1008  | A folder could not be made or read.                                    |
-| -1009  | The helper is shutting down and takes no new mount.                    |
-| -1010  | `hello` must come first.                                               |
-| -1011  | The protocol versions differ, and the request was not a `shutdown`.    |
-| -1012  | A dead mount is at the mount point, and the helper could not clear it. |
+| Code   | Meaning                                                                                    |
+| ------ | ------------------------------------------------------------------------------------------ |
+| -32700 | The line is not a request.                                                                 |
+| -32601 | Unknown method.                                                                            |
+| -32602 | Wrong params.                                                                              |
+| -1001  | The mount name is not one plain folder name.                                               |
+| -1002  | Another account's mount has this name, ignoring letter case.                               |
+| -1003  | The mount point exists and is not an empty folder.                                         |
+| -1004  | Unknown provider.                                                                          |
+| -1005  | The provider could not open the account, or the account's [first call](#providers) failed. |
+| -1006  | The adapter could not mount.                                                               |
+| -1007  | The adapter could not unmount.                                                             |
+| -1008  | A folder could not be made or read.                                                        |
+| -1009  | The helper is shutting down and takes no new mount.                                        |
+| -1010  | `hello` must come first.                                                                   |
+| -1011  | The protocol versions differ, and the request was not a `shutdown`.                        |
+| -1012  | A dead mount is at the mount point, and the helper could not clear it.                     |
+| -1013  | The account's first call said the sign-in is gone. The user must sign in again.            |
+| -1014  | The account's first call could not reach the remote. Try again later.                      |
 
 The protocol has no `health` request. A helper that answers `hello` is alive, and a machine that cannot mount says why in the error of a `mount`.
 
@@ -183,8 +187,35 @@ Rules the table keeps:
 - **A failed unmount keeps the mount.** The mount comes back with its current health, and the request gets the error.
 - **An operation finishes even when its client has gone.**
 - **The helper never mounts over anything.** A mount point must be absent or an empty real folder. A file, a folder with something in it, or a symbolic link fails with -1003 and is left as it was. The one thing the helper clears first is a [dead mount](#dead-mounts). This guards the user's files against a mistake. It is not a defense against another process of the same user.
-- **Folders.** The helper opens the account before it makes any folder, so a mount the provider refuses leaves nothing behind. It makes the mount point with mode 0700. It removes it after an unmount and after a failed mount. It only ever removes an empty folder, and an empty folder at a mount point counts as the helper's own.
+- **Folders.** The helper opens the account and makes [the first call](#providers) before it makes any folder, so a mount the provider refuses leaves nothing behind. It makes the mount point with mode 0700. It removes it after an unmount and after a failed mount. It only ever removes an empty folder, and an empty folder at a mount point counts as the helper's own.
 - **Shutdown.** From the moment a shutdown starts, a new `mount` gets -1009. If any unmount fails, `shutdown` returns -1007, the helper keeps running, and it takes mounts again: a mount that is still served must not lose its helper. The mounts that did unmount stay unmounted, so call `list`. A signal is different. It is an order to exit, so the helper unmounts what it can and exits anyway. A mount it could not unmount is then dead, and the next helper clears it when it starts: see [Dead mounts](#dead-mounts). On Linux the adapter may detach it as the helper exits instead: see [Linux mount adapter](mount-linux.md).
+
+## Providers
+
+`LinkedProviders` in `providers.rs` opens an account for a mount. It knows one provider. Any other name fails with -1004.
+
+| Provider | Account                    | Storage                                                   |
+| -------- | -------------------------- | --------------------------------------------------------- |
+| `gdrive` | The Google account's email | [Google Drive mount provider](mount-gdrive.md), read-only |
+
+**Opening a Google account** makes no request. The helper finds Marlin's OAuth client and builds the provider on the account's [saved sign-in](mount-gdrive.md#the-saved-sign-in). A build with no OAuth client (#536) fails here with -1005, "this build of Marlin has no Google OAuth client". No text from the OAuth client loader reaches a log or a response: it can hold a file path.
+
+**One saved sign-in per account, for the life of the helper.** It keeps the refresh token in memory, so an unmount and a new mount of the account read the keychain once in all.
+
+**The first call.** Before the helper makes any folder, it asks the provider for the account's free space, with the limits of any call of a mount. For Google that is one request to the Drive API, and a token request before it when the helper holds no fresh token. A failure leaves no folder:
+
+| The call ends with                   | Code  | Text                                                |
+| ------------------------------------ | ----- | --------------------------------------------------- |
+| `SignInNeeded`                       | -1013 | "the account needs a new sign-in"                   |
+| `Offline` or `TimedOut`              | -1014 | "the account's storage could not be reached"        |
+| `AccessDenied`                       | -1005 | "the account's storage does not let Marlin read it" |
+| `Other`, or any other provider error | -1005 | The error's own text                                |
+
+-1013 tells the app to offer a new sign-in without reading the text. -1014 means no answer came. An `Other` stays -1005 because the remote did answer, and its text says how: a 5xx, or a rate limit. A later try can work for both.
+
+- **Why the helper asks.** A mount starts as `mounted`, and its [health](#health) only changes at a provider call. A mount that came up while the remote was out of reach would show `mounted`. A token is no proof: the helper can hold one from an earlier mount.
+- **A mount needs its remote at the start.** Send `mount` again when the network is back. A mount that is already up survives a lost network: it shows `offline` and recovers by itself.
+- **The rule is the mount table's, not Google's.** It is in `Mounts::mount`, so every provider gets it. `Providers::open` need not reach the remote.
 
 ## Dead mounts
 
@@ -201,7 +232,7 @@ A dead mount is a mount whose server was killed. The OS still lists it, and noth
 The helper clears dead mounts at two moments:
 
 - **The sweep, when the helper starts.** It looks at each real folder in the mount folder. It unmounts a dead mount, then removes the folder if it is empty. A folder that holds anything, a file, a symbolic link, and a live mount are left as they were. It never deletes anything but an empty folder.
-- **A `mount` request.** If a dead mount is at the mount point, the helper unmounts it and then mounts. The provider is opened first, so a provider error (-1004, -1005) comes before this.
+- **A `mount` request.** If a dead mount is at the mount point, the helper unmounts it and then mounts. The provider is opened and asked first, so a provider error (-1004, -1005, -1013, -1014) comes before this.
 
 **A dead mount the helper cannot clear** does not stop the helper. It shows in three places:
 
@@ -220,7 +251,7 @@ The user can then run the command from the table by hand. If that fails too, a r
 
 ## Health
 
-The helper judges a mount's remote from how each provider call ends. It makes no calls of its own. A mount that nothing reads keeps its last state.
+The helper judges a mount's remote from how each provider call ends. After [the first call](#providers) of a mount, it makes no calls of its own. A mount that nothing reads keeps its last state.
 
 | The call ended with                                                             | Kind          |
 | ------------------------------------------------------------------------------- | ------------- |
@@ -241,7 +272,7 @@ Each mount has its own count. One mount never changes another.
 
 Only a mount that is up shows its health. `starting`, `unmounting`, and `failed` win. A failed unmount puts the mount back with its current health: calls that end during the unmount still count.
 
-A health state carries no `error`. Provider error text can hold a file name, so it reaches no status and no log line.
+A health state carries no `error`. The helper logs the text of a failure the provider could not name: see [Logs and secrets](#logs-and-secrets).
 
 A mount recovers by itself. In `auth-required`, the next call the remote answers after the user signs in again moves the mount back to `mounted`. No unmount is needed. An `unmount` and a `mount` also work. A `mount` of an unhealthy mount returns its status and mounts nothing.
 
@@ -258,15 +289,17 @@ Results count in the order the calls finish. A call that finishes later is later
 - `Adapter::mount(vfs, mount_point)` serves a `marlin_vfs::Vfs` at an empty folder and returns a `Session` once the OS shows the mount.
 - `Adapter::is_dead_mount(mount_point)` says whether a [dead mount](#dead-mounts) is there. A symbolic link is never one. `Adapter::unmount_dead(mount_point)` unmounts it and leaves the folder.
 - `Session::unmount()` unmounts. After an error the mount must still be served.
-- `Providers::open(provider, account)` returns the `marlin_vfs::Provider` for an account. `account` names the account and is never a secret. The provider reads its own credentials from the OS keychain.
+- `Providers::open(provider, account)` returns the `marlin_vfs::Provider` for an account. `account` names the account and is never a secret. The provider reads its own credentials from the OS keychain. It need not reach the remote: the mount table makes [the first call](#providers).
 
-A provider's errors decide a mount's [health](#health). `VfsError` in `marlin-vfs/src/error.rs` says which error to return: `Other` is for a failure of the remote, never for one item. After `SignInNeeded`, a provider reads the keychain again on its next call, so the mount recovers without an unmount.
+A provider's errors decide a mount's [health](#health). `VfsError` in `marlin-vfs/src/error.rs` says which error to return: `Other` is for a failure of the remote, never for one item, and its text holds no file name and no secret, because the helper logs it. After `SignInNeeded`, a provider reads the keychain again on its next call, so the mount recovers without an unmount.
 
-`main.rs` passes one adapter and one `Providers` value to `Server::bind`. The adapter is `adapter::OsAdapter`, chosen per OS at the top of `main.rs`: on Linux it is `marlin-fuse`, and on macOS it refuses every mount but can clear a dead macFUSE mount. The `Providers` value refuses everything. An adapter lives in its own crate, so `marlin-mount` implements `Adapter` for it in a few lines and the adapter crate does not depend on the helper.
+`main.rs` passes one adapter and one `Providers` value to `Server::bind`. The adapter is `OsAdapter`, chosen per OS in `adapter.rs`: on Linux it is `marlin-fuse`, and on macOS it refuses every mount but can clear a dead macFUSE mount. The `Providers` value is `LinkedProviders`, which opens `gdrive` and refuses every other name. An adapter lives in its own crate, so `marlin-mount` implements `Adapter` for it in a few lines and the adapter crate does not depend on the helper. Both values are in the library, not in `main.rs`, so a test can run the real server with them inside the test process.
 
 ## Logs and secrets
 
 The helper writes one JSON object per line to stderr: `timeMs`, `level`, `event`, and the fields of the event. It logs its start and stop, a failed start, a dead mount the sweep could not clear, a failed unmount at a signal, a refused connection, a line that was too long, and each mount state change with the mount's status (provider, account, name, mount point, state, error). It logs nothing else from a request, and never file names inside a mount or file contents.
+
+**A provider failure with a text.** When a provider call ends with `VfsError::Other(text)`, the helper logs `mount.call_failed` with the provider, the account, and the text, passed through `redact`. A mount gets a call for every file the OS touches, so a mount logs the same text once a minute at most. Another text is logged at once. A first call that fails with a text logs both this line and the `failed` state. `Offline`, `TimedOut`, and `SignInNeeded` carry no text. The state change they cause is the log line.
 
 Whoever starts the helper must point stderr at a file or `/dev/null`, never at a pipe. The helper drops a log line it cannot write, but a pipe that is full and never read blocks it.
 
@@ -276,11 +309,13 @@ No secret crosses the socket or the command line. The text inside a `MountError`
 
 ## Testing
 
-`cd src-tauri && cargo test -p marlin-mount` needs no kernel driver, no network, and no account. On a Mac it does not compile the Linux adapter wiring in `main.rs`. `src-tauri/crates/marlin-fuse/test-in-docker.sh` does.
+`cd src-tauri && cargo test -p marlin-mount` needs no kernel driver, no network, and no account. On a Mac it does not compile the Linux adapter wiring in `adapter.rs`. `src-tauri/crates/marlin-fuse/test-in-docker.sh` does.
 
 - `tests/control.rs` runs the server on a real socket in a temporary folder, with a fake adapter and the core's `MemoryProvider`. The fake adapter can hold a mount or an unmount open, so the tests for two requests at once do not depend on timing. The fake adapter keeps each mount's `Vfs`, so a test makes provider calls through it and sets failures with `MemoryProvider::fail_with`.
-- One test starts the built binary and checks its flags, a refused mount, and a clean exit.
-- The fake adapter can call a folder a dead mount, and can refuse to clear it. Two tests cover the sweep, `deadMounts`, and error -1012 that way. A unit test in `main.rs` checks the real macOS rule on a folder, a missing path, and a symbolic link.
+- One test starts the built binary and checks its flags, a refused mount, and a clean exit. **A test never sends provider `gdrive` to the built binary.** On a developer's machine that would read the real keychain. Those tests use the provider name `memory`, which the binary does not know.
+- One test reads the log. The server runs inside the test process, so the test points the process's stderr at a file while it makes the failed calls. It moves tokio's clock a minute ahead to see the same text logged again.
+- `tests/gdrive.rs` runs the real server with `OsAdapter` and `LinkedProviders` against a fake Google: one `wiremock` server that is the Drive API and the token endpoint, and the in-memory keychain. It talks to the server through `Client`. Four tests run on any Unix: a sign-in that is gone (-1013), Google out of reach (-1014), a Drive API that answers 503 or 403 (-1005), and a missing OAuth client (-1005). Each fails and leaves no folder. Two tests mount through FUSE and run only in `test-in-docker.sh`. The first lists a folder that Google sends in two pages, with a duplicate name and a `/` in a name, reads a file whole and at an offset, checks that a write, a delete, and a rename fail and that the fake Google got nothing but GETs and one token request, and mounts the account a second time, which asks Google again though the helper still holds a token. The second rejects the sign-in, waits for `auth-required`, signs in again, and waits for `mounted`.
+- The fake adapter can call a folder a dead mount, and can refuse to clear it. Two tests cover the sweep, `deadMounts`, and error -1012 that way. A unit test in `adapter.rs` checks the real macOS rule on a folder, a missing path, and a symbolic link.
 - `src-tauri/crates/marlin-mount/test-sweep.sh` makes a real dead mount and a live one with the spike programs in `spikes/mount-hello/`, starts the built helper, and checks that only the dead mount and the empty folder are gone. Run it on a Mac with macFUSE, both of its switches on. `test-in-docker.sh` runs it on Linux.
 - `tests/client.rs` tests `Client` against the built helper: the first connect starts it, a second one reuses it, it outlives its client, it runs in its own process group, and `shutdown` stops it. A fake helper, a plain socket listener in the test, covers another protocol version, a refused shutdown, and a notification in front of an answer.
 - The Tauri layer in `src-tauri/src/mount_helper.rs` has one test: the request at quit runs outside the async runtime, with no helper. Nothing drives the real app yet (#497), so the `Exit` event, the five commands, and the two events are untested.

@@ -7,12 +7,16 @@
 use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use marlin_vfs::{MemoryProvider, Options, Provider, Vfs, VfsError};
+use marlin_vfs::{
+    Attributes, Item, ItemId, Kind, MemoryProvider, Options, Provider, Space, Vfs, VfsError,
+};
 
-fn vfs(provider: Arc<MemoryProvider>) -> Arc<Vfs> {
+fn vfs<P: Provider + 'static>(provider: Arc<P>) -> Arc<Vfs> {
+    let provider: Arc<dyn Provider> = provider;
     Arc::new(Vfs::new(
         provider,
         marlin_vfs::POSIX,
@@ -410,6 +414,118 @@ async fn a_live_mount_is_not_a_dead_mount() {
     assert!(!marlin_fuse::is_dead_mount(&link).await);
     assert!(mount_line(&point).is_some());
     assert_eq!(read_file(&point.join("note.txt")).await.unwrap(), b"note");
+
+    mount.unmount().await.unwrap();
+}
+
+/// One file whose bytes and modified time a test can replace. `reads` counts `read` calls.
+struct CountingFile {
+    inner: Mutex<(Vec<u8>, SystemTime)>,
+    reads: AtomicUsize,
+}
+
+impl CountingFile {
+    fn new(bytes: Vec<u8>) -> Self {
+        Self {
+            inner: Mutex::new((bytes, UNIX_EPOCH + Duration::from_secs(1_700_000_000))),
+            reads: AtomicUsize::new(0),
+        }
+    }
+
+    fn set(&self, bytes: Vec<u8>, modified: SystemTime) {
+        *self.inner.lock().unwrap() = (bytes, modified);
+    }
+
+    fn file_item(&self) -> Item {
+        let inner = self.inner.lock().unwrap();
+        Item {
+            id: ItemId("file".to_string()),
+            name: "file.bin".to_string(),
+            attributes: Attributes {
+                kind: Kind::File,
+                size: inner.0.len() as u64,
+                modified: inner.1,
+            },
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider for CountingFile {
+    fn root(&self) -> ItemId {
+        ItemId("root".to_string())
+    }
+
+    async fn item(&self, id: &ItemId) -> Result<Item, VfsError> {
+        if id.0 == "root" {
+            return Ok(Item {
+                id: id.clone(),
+                name: String::new(),
+                attributes: Attributes {
+                    kind: Kind::Folder,
+                    size: 0,
+                    modified: UNIX_EPOCH,
+                },
+            });
+        }
+        if id.0 == "file" {
+            return Ok(self.file_item());
+        }
+        Err(VfsError::NotFound)
+    }
+
+    async fn list(&self, folder: &ItemId) -> Result<Vec<Item>, VfsError> {
+        if folder.0 != "root" {
+            return Err(VfsError::NotAFolder);
+        }
+        Ok(vec![self.file_item()])
+    }
+
+    async fn read(&self, id: &ItemId, offset: u64, length: u32) -> Result<Vec<u8>, VfsError> {
+        if id.0 != "file" {
+            return Err(VfsError::NotFound);
+        }
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        let inner = self.inner.lock().unwrap();
+        let size = inner.0.len() as u64;
+        let start = offset.min(size) as usize;
+        let end = offset.saturating_add(u64::from(length)).min(size) as usize;
+        Ok(inner.0[start..end].to_vec())
+    }
+
+    async fn space(&self) -> Result<Space, VfsError> {
+        Ok(Space {
+            total: 1_000_000,
+            free: 250_000,
+        })
+    }
+}
+
+#[ignore = "needs /dev/fuse and fusermount3: run crates/marlin-fuse/test-in-docker.sh"]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_open_reads_nothing_again_and_a_changed_file_is_read_again() {
+    let original = pattern(10_000);
+    let file = Arc::new(CountingFile::new(original.clone()));
+    let (_dir, point) = empty_dir();
+    let mut mount = marlin_fuse::mount(vfs(Arc::clone(&file)), &point)
+        .await
+        .unwrap();
+
+    let path = point.join("file.bin");
+    assert_eq!(read_file(&path).await.unwrap(), original);
+    let reads = file.reads.load(Ordering::SeqCst);
+    assert!(reads > 0);
+    assert_eq!(read_file(&path).await.unwrap(), original);
+    assert_eq!(file.reads.load(Ordering::SeqCst), reads);
+
+    let changed: Vec<u8> = original.iter().map(|byte| byte.wrapping_add(1)).collect();
+    file.set(
+        changed.clone(),
+        UNIX_EPOCH + Duration::from_secs(1_700_000_100),
+    );
+    // The adapter tells the kernel it may cache names and attributes for one second.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(read_file(&path).await.unwrap(), changed);
 
     mount.unmount().await.unwrap();
 }

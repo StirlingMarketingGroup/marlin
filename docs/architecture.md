@@ -3,7 +3,7 @@
 Marlin is one Tauri 2 desktop app: a Rust backend that owns all file access, and a React frontend that draws the UI in a webview. The frontend never touches the disk. It calls a Rust command and gets data back.
 
 **Covers:** `src-tauri/src/lib.rs`, `src-tauri/src/commands.rs`, `src-tauri/Cargo.toml`, `src-tauri/crates/`, `src-tauri/src/fs_watcher.rs`, `src/main.tsx`, `src/store/`, `src/windows/`, `src/components/PathBar.tsx`, `src/hooks/useDirectoryWatcher.ts`
-**Checked against the code:** 2026-11-13
+**Checked against the code:** 2026-11-16
 
 ## Processes
 
@@ -11,13 +11,13 @@ Marlin is one Tauri 2 desktop app: a Rust backend that owns all file access, and
 | -------------- | ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------- |
 | `marlin`       | `src-tauri/src/main.rs` → `app_lib::run()` in `lib.rs` | The app. Hosts the webview, runs every command.                                                          |
 | `marlin-smb`   | `src-tauri/crates/marlin-smb/`, its own crate          | SMB helper. Keeps `libsmbclient` out of the main app so the app starts even when samba is not installed. |
-| `marlin-mount` | `src-tauri/crates/marlin-mount/`, its own crate        | Mount helper. Will own every native mount. The app starts it on demand, and it cannot mount yet.         |
+| `marlin-mount` | `src-tauri/crates/marlin-mount/`, its own crate        | Mount helper. Owns every native mount. The app starts it on demand. On Linux it mounts a Google account. |
 
 The main app starts `marlin-smb` on demand and talks to it over stdin and stdout. See [Location providers](location-providers.md). `marlin-mount` is controlled over a local socket instead, so that it can outlive the app. The app starts it detached on the first mount command and asks it to stop when the user quits. See [Mount helper](mount-helper.md).
 
 `src-tauri/Cargo.toml` is both the app package and the root of a Cargo workspace. Each helper is a member, so it shares the lockfile and the `target/` folder but none of the app's code. A plain `cargo build`, `check`, or `test` in `src-tauri/` acts on the app only. Name a helper to build or test it: `cargo test -p marlin-smb` (it needs samba installed) or `cargo test -p marlin-mount`. New binaries and shared crates go under `src-tauri/crates/`. A helper reaches the app as a file in `src-tauri/binaries/`: see [Mount helper](mount-helper.md#building-and-bundling).
 
-The workspace has five library-only crates under `src-tauri/crates/`. `marlin-vfs` is the core for native mounts. `marlin-gdrive` is the Google Drive provider for mounts and the saved Google sign-in. The app links it for the sign-in, and the helper does not link it yet (#529). `marlin-test-keychain` is an in-memory keychain that only tests link. `marlin-fuse` is the Linux mount adapter. `marlin-mount-client` holds the helper's wire types and the client that speaks them. `marlin-mount` links `marlin-vfs` and `marlin-mount-client` everywhere and `marlin-fuse` on Linux. The app links `marlin-mount-client` and `marlin-gdrive`. See [Mount core](mount-core.md), [Google Drive mount provider](mount-gdrive.md), [Linux mount adapter](mount-linux.md), and [Mount helper](mount-helper.md). `npm run check` checks them and `marlin-mount` along with the app.
+The workspace has five library-only crates under `src-tauri/crates/`. `marlin-vfs` is the core for native mounts. `marlin-gdrive` is the Google Drive provider for mounts and the saved Google sign-in. The app links it for the sign-in, and the helper links it to mount a Google account. `marlin-test-keychain` is an in-memory keychain that only tests link. `marlin-fuse` is the Linux mount adapter. `marlin-mount-client` holds the helper's wire types and the client that speaks them. `marlin-mount` links `marlin-vfs`, `marlin-gdrive`, and `marlin-mount-client` everywhere and `marlin-fuse` on Linux. The app links `marlin-mount-client` and `marlin-gdrive`. See [Mount core](mount-core.md), [Google Drive mount provider](mount-gdrive.md), [Linux mount adapter](mount-linux.md), and [Mount helper](mount-helper.md). `npm run check` checks them and `marlin-mount` along with the app.
 
 ## How the frontend and backend talk
 

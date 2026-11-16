@@ -3929,6 +3929,7 @@ dependencies = [
 name = "marlin-fuse"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "fuser",
  "libc",
  "marlin-vfs",
@@ -3964,13 +3965,16 @@ dependencies = [
  "dirs",
  "libc",
  "marlin-fuse",
+ "marlin-gdrive",
  "marlin-mount-client",
+ "marlin-test-keychain",
  "marlin-vfs",
  "regex",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
+ "wiremock",
 ]
 
 [[package]]

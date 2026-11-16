@@ -36,10 +36,10 @@ pub trait Session: Send + 'static {
     async fn unmount(&mut self) -> Result<(), MountError>;
 }
 
-/// Opens the storage behind an account. Issue #529 adds the first real one.
+/// Opens the storage behind an account. `LinkedProviders` is the one the helper links.
 #[async_trait::async_trait]
 pub trait Providers: Send + Sync + 'static {
-    /// `provider` is a kind such as `gdrive`. `account` names the account and is never a secret: the provider reads its own credentials from the OS keychain.
+    /// `provider` is a kind such as `gdrive`. `account` names the account and is never a secret: the provider reads its own credentials from the OS keychain. `open` need not reach the remote: the mount table makes the first call.
     async fn open(&self, provider: &str, account: &str) -> Result<Arc<dyn Provider>, MountError>;
 }
 
@@ -58,6 +58,10 @@ pub enum MountError {
     DeadMount(String),
     Io(String),
     ShuttingDown,
+    /// The account's first call said the sign-in is gone. Only a new sign-in fixes it.
+    SignInNeeded,
+    /// The account's first call got no answer from the remote. A later try can work.
+    Unreachable,
 }
 
 impl fmt::Display for MountError {
@@ -75,6 +79,8 @@ impl fmt::Display for MountError {
             | Self::DeadMount(text)
             | Self::Io(text) => f.write_str(&redact(text)),
             Self::ShuttingDown => f.write_str("the helper is shutting down"),
+            Self::SignInNeeded => f.write_str("the account needs a new sign-in"),
+            Self::Unreachable => f.write_str("the account's storage could not be reached"),
         }
     }
 }
@@ -102,6 +108,8 @@ impl From<MountError> for RpcError {
                 MountError::DeadMount(_) => error_codes::DEAD_MOUNT,
                 MountError::Io(_) => error_codes::IO,
                 MountError::ShuttingDown => error_codes::SHUTTING_DOWN,
+                MountError::SignInNeeded => error_codes::SIGN_IN_NEEDED,
+                MountError::Unreachable => error_codes::UNREACHABLE,
             },
         }
     }
@@ -115,6 +123,9 @@ struct Key {
 
 /// How many provider calls must fail in a row before a mount becomes `offline` or `degraded`. One slow call or one dropped connection is not news.
 const FAILURES_IN_A_ROW: u32 = 3;
+
+/// How long a mount waits before it logs the same failure text again.
+const LOG_SAME_TEXT_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// What the last provider calls say about a mount's remote, from best to worst. A run of failed calls only moves a mount toward the worse end. The first call the remote answers moves it back to `Healthy`.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -143,6 +154,9 @@ struct MountEntry {
 
     /// Provider calls that failed in a row.
     failures: u32,
+
+    /// The text of the last `VfsError::Other` this mount logged, and when. A mount gets a call for every file the OS touches, so the same text is logged once in `LOG_SAME_TEXT_EVERY`, not once per call.
+    logged_other: Option<(String, tokio::time::Instant)>,
 }
 
 struct Table {
@@ -287,6 +301,7 @@ impl Mounts {
                 attempt,
                 health: Health::Healthy,
                 failures: 0,
+                logged_other: None,
             };
             let starting = self.announce(&key, &entry);
             table.entries.insert(key.clone(), entry);
@@ -298,6 +313,25 @@ impl Mounts {
         let mounted = async {
             // The provider comes first, so a mount it refuses leaves no folder behind.
             let provider = self.providers.open(provider, account).await?;
+            let mounts = Arc::downgrade(self);
+            let watched = key.clone();
+            let vfs = Vfs::new(provider, marlin_vfs::POSIX, Options::default()).watch_calls(
+                // Weak, because a session can hold the `Vfs`, and the table holds the session.
+                move |error| {
+                    if let Some(mounts) = mounts.upgrade() {
+                        mounts.record(&watched, attempt, error);
+                    }
+                },
+            );
+            // A mount starts as `mounted`, and its health only changes at a provider call. So the remote answers one call before the mount comes up, and before any folder is made. A provider that kept a token from an earlier mount cannot hide a remote that is out of reach.
+            vfs.space().await.map_err(|error| match error {
+                VfsError::SignInNeeded => MountError::SignInNeeded,
+                VfsError::Offline | VfsError::TimedOut => MountError::Unreachable,
+                VfsError::AccessDenied => {
+                    MountError::Provider("the account's storage does not let Marlin read it".into())
+                }
+                error => MountError::Provider(error.to_string()),
+            })?;
             std::fs::create_dir_all(&self.root)?;
             // A dead mount can still be here: one the sweep could not clear, or one left after the helper started. This comes before the checks below because they fail on a dead mount, the first of them included, with an error that says nothing.
             if self.adapter.is_dead_mount(&mount_point).await {
@@ -319,16 +353,6 @@ impl Mounts {
                     }
                 }
             }
-            let mounts = Arc::downgrade(self);
-            let watched = key.clone();
-            let vfs = Vfs::new(provider, marlin_vfs::POSIX, Options::default()).watch_calls(
-                // Weak, because a session can hold the `Vfs`, and the table holds the session.
-                move |error| {
-                    if let Some(mounts) = mounts.upgrade() {
-                        mounts.record(&watched, attempt, error);
-                    }
-                },
-            );
             self.adapter.mount(Arc::new(vfs), &mount_point).await
         }
         .await;
@@ -444,9 +468,9 @@ impl Mounts {
         table.locks.entry(key.clone()).or_default().clone()
     }
 
-    /// Applies how one provider call ended to its mount's health. The rules are in `docs/mount-helper.md`, under "Health".
+    /// Applies how one provider call ended to its mount's health, and logs the text of an `Other`. The rules are in `docs/mount-helper.md`, under "Health" and "Logs and secrets".
     fn record(&self, key: &Key, attempt: u64, error: Option<&VfsError>) {
-        let changed = {
+        let (to_log, changed) = {
             let mut table = self.table.lock().unwrap();
             let Some(entry) = table.entries.get_mut(key) else {
                 return;
@@ -454,6 +478,17 @@ impl Mounts {
             if entry.attempt != attempt {
                 return;
             }
+            let to_log = match error {
+                Some(VfsError::Other(text))
+                    if !entry.logged_other.as_ref().is_some_and(|(logged, at)| {
+                        logged == text && at.elapsed() < LOG_SAME_TEXT_EVERY
+                    }) =>
+                {
+                    entry.logged_other = Some((text.clone(), tokio::time::Instant::now()));
+                    Some(text.clone())
+                }
+                _ => None,
+            };
             let before = entry.health;
             let says = match error {
                 Some(VfsError::SignInNeeded) => Health::AuthRequired,
@@ -473,12 +508,28 @@ impl Mounts {
                 }
             }
             // Health is kept in every lifecycle, but only a mount that is up shows it.
-            if entry.health == before || !matches!(entry.lifecycle, Lifecycle::Mounted(_)) {
-                return;
-            }
-            self.announce(key, entry)
+            let changed =
+                if entry.health == before || !matches!(entry.lifecycle, Lifecycle::Mounted(_)) {
+                    None
+                } else {
+                    Some(self.announce(key, entry))
+                };
+            (to_log, changed)
         };
-        log_state(&changed);
+        if let Some(text) = to_log {
+            log::write(
+                "warn",
+                "mount.call_failed",
+                serde_json::json!({
+                    "provider": key.provider,
+                    "account": key.account,
+                    "message": redact(&text),
+                }),
+            );
+        }
+        if let Some(changed) = changed {
+            log_state(&changed);
+        }
     }
 
     /// Moves a mount to a new state and tells every listener.

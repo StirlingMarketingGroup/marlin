@@ -3,9 +3,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use fuser::{
-    Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, Generation, INodeNo, LockOwner,
-    OpenAccMode, OpenFlags, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry,
-    ReplyOpen, ReplyStatfs, Request,
+    Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, Generation, INodeNo, InitFlags,
+    KernelConfig, LockOwner, OpenAccMode, OpenFlags, ReplyAttr, ReplyData, ReplyDirectory,
+    ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, Request,
 };
 use marlin_vfs::{Access, Attributes, HandleId, Kind, NodeId, Vfs, VfsError};
 
@@ -29,9 +29,22 @@ pub(crate) struct Fs {
     pub(crate) runtime: tokio::runtime::Handle,
     pub(crate) uid: u32,
     pub(crate) gid: u32,
+    /// Whether an open may keep the kernel's cached bytes of the file. Set in `init`.
+    pub(crate) keep_cache: bool,
 }
 
 impl Filesystem for Fs {
+    fn init(&mut self, _req: &Request, config: &mut KernelConfig) -> std::io::Result<()> {
+        // fuser asks the kernel for async reads, big writes, and the max page count only.
+        // FOPEN_KEEP_CACHE keeps a file's pages across opens. Those pages stay safe only
+        // with FUSE_AUTO_INVAL_DATA, which drops them when the modified time or the size
+        // changes. A kernel that cannot do that must not be asked to keep pages.
+        self.keep_cache = config
+            .add_capabilities(InitFlags::FUSE_AUTO_INVAL_DATA)
+            .is_ok();
+        Ok(())
+    }
+
     fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
         let Some(name) = name.to_str() else {
             return reply.error(Errno::ENOENT);
@@ -81,9 +94,14 @@ impl Filesystem for Fs {
             Access::Write
         };
         let vfs = Arc::clone(&self.vfs);
+        let flags = if self.keep_cache {
+            FopenFlags::FOPEN_KEEP_CACHE
+        } else {
+            FopenFlags::empty()
+        };
         self.runtime.spawn(async move {
             match vfs.open(NodeId(ino.0), access).await {
-                Ok(handle) => reply.opened(FileHandle(handle.0), FopenFlags::empty()),
+                Ok(handle) => reply.opened(FileHandle(handle.0), flags),
                 Err(error) => reply.error(errno(&error)),
             }
         });

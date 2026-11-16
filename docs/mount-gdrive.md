@@ -1,22 +1,23 @@
 # Google Drive mount provider (`marlin-gdrive`)
 
-`marlin-gdrive` shows one Google account to the [mount core](mount-core.md) as a `Provider`. It reads the Drive API and never changes anything. It also holds the code that turns a saved Google sign-in into an access token, for the mount and for the app. The app links the crate for that sign-in code. The [mount helper](mount-helper.md) does not link it yet (#529).
+`marlin-gdrive` shows one Google account to the [mount core](mount-core.md) as a `Provider`. It reads the Drive API and never changes anything. It also holds the code that turns a saved Google sign-in into an access token, for the mount and for the app. The app links the crate for that sign-in code. The [mount helper](mount-helper.md) links it as the provider `gdrive`: see [Providers](mount-helper.md#providers).
 
 This is not the code behind `gdrive://` paths. That is the older provider in the app, described in [Location providers](location-providers.md), and it stays as it is until #377.
 
 **Covers:** `src-tauri/crates/marlin-gdrive/`
-**Checked against the code:** 2026-11-13
+**Checked against the code:** 2026-11-16
 
 ## The parts
 
-| File               | Holds                                                                                                |
-| ------------------ | ---------------------------------------------------------------------------------------------------- |
-| `src/provider.rs`  | `DriveProvider`, its five `Provider` calls, the item IDs, and the two things a caller supplies.      |
-| `src/api.rs`       | `get`, the one path every request takes: the token, the retries, and the error table. Google's JSON. |
-| `src/sign_in.rs`   | `OAuthClient`, `SavedSignIn`, and the keychain entry: see [The saved sign-in](#the-saved-sign-in).   |
-| `build.rs`         | Passes the OAuth client ID and secret to the compiler.                                               |
-| `tests/drive.rs`   | The provider's tests. They run against a fake Drive server in the test process.                      |
-| `tests/sign_in.rs` | The sign-in's tests. They run against a fake token endpoint and an in-memory keychain.               |
+| File               | Holds                                                                                                            |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------- |
+| `src/provider.rs`  | `DriveProvider`, its five `Provider` calls, the item IDs, and the two things a caller supplies.                  |
+| `src/api.rs`       | `get`, the one path every request takes: the token, the retries, and the error table. Google's JSON.             |
+| `src/sign_in.rs`   | `OAuthClient`, `SavedSignIn`, and the keychain entry: see [The saved sign-in](#the-saved-sign-in).               |
+| `build.rs`         | Passes the OAuth client ID and secret to the compiler.                                                           |
+| `tests/drive.rs`   | The provider's tests. They run against a fake Drive server in the test process.                                  |
+| `tests/sign_in.rs` | The sign-in's tests. They run against a fake token endpoint and an in-memory keychain.                           |
+| `tests/live.rs`    | One manual test against a real account: see [Not checked against real Google](#not-checked-against-real-google). |
 
 The provider does not sign in, read a keychain, or know about the helper. A caller gives it two things:
 
@@ -91,7 +92,7 @@ What follows from that:
 - **Retries.** A call is sent again at most 3 times. The waits are 0.5, 1, and 2 seconds, each with up to half as much again added at random, so calls that failed together do not come back together. A failed connection is not retried: the helper counts those toward `offline` ([Health](mount-helper.md#health)).
 - **The core's time limit covers the retries.** The core cancels a call after 30 seconds by dropping it, and that stops a wait or a request in flight.
 - **Every failure to reach Google is `Offline`.** The only time limit on the HTTP client is 10 seconds to connect, so a timeout there also means Google could not be reached. `TimedOut` comes from the core alone.
-- **The text of an `Other` is one of the three in this table, or the one from the sign-in:** "Marlin could not use the saved Google sign-in". No file name, ID, address, token, or message from Google is in it, so the helper can log it (#529).
+- **The text of an `Other` is one of the three in this table, or the one from the sign-in:** "Marlin could not use the saved Google sign-in". No file name, ID, address, token, or message from Google is in it, so the helper logs it ([Logs and secrets](mount-helper.md#logs-and-secrets)).
 - The errors follow the rules on `VfsError` in `marlin-vfs/src/error.rs`: `Other` is a failure of the remote, never of one item.
 
 ## The saved sign-in
@@ -128,15 +129,49 @@ No text holds a token, the client secret, or any part of Google's answer: only t
 
 The app's side is in `src-tauri/src/locations/gdrive/auth.rs`: the account list, the browser sign-in, the service account, and the error text the user sees. See [Location providers](location-providers.md).
 
+## Google's limits
+
+Google counts Drive API use in quota units. The numbers are from [Usage limits](https://developers.google.com/workspace/drive/api/guides/limits), read on 2026-11-16.
+
+| Provider call | Request                           | Units                                                                         |
+| ------------- | --------------------------------- | ----------------------------------------------------------------------------- |
+| `item`        | `files.get`                       | 5                                                                             |
+| `list`        | `files.list` or `drives.list`     | 100 a page. A folder that lists no items costs one `files.get` more, 5 units. |
+| `read`        | `files.get` with `alt=media`      | 200, however many bytes it asks for                                           |
+| `space`       | `about.get`                       | 5                                                                             |
+| A new token   | A POST to Google's token endpoint | None. It is not a Drive API request.                                          |
+
+| Limit                         | Units       |
+| ----------------------------- | ----------- |
+| One user, one minute          | 325,000     |
+| The whole project, one minute | 1,000,000   |
+| The whole project, one day    | 400,000,000 |
+
+- **The project is Marlin's OAuth client, so every user of one build shares the project's limits.**
+- **These are the limits of a Google Cloud project made on or after 2026-05-01.** An older project keeps the limits it had. The Quotas page of the project in the Google Cloud Console shows which ones apply.
+- **Past a minute's limit,** Google answers 403 or 429, and the provider waits and retries: see [Errors and retries](#errors-and-retries).
+- **Past the day's limit, Google plans to charge the project.** Its page says that billing starts "later in 2026", with 90 days' notice. The same page sets 1 TB a day of downloaded bytes before charges apply.
+- **Reads are what reach a limit.** One user's minute holds 1,625 reads, about 27 a second. The whole project's minute holds 5,000. Linux asks for a file about 128 KiB at a time, and each piece is one `read`. That is about 3.4 MiB a second for one user. #538 tracks reading in bigger pieces.
+
+**What this means for the core's limits.** The [mount core](mount-core.md) runs at most 16 provider calls at once and ends a call after 30 seconds. Both defaults fit Drive, with one limit.
+
+- **16 calls at once is not a rate.** Sixteen reads that each take half a second make 32 reads a second, which is over one user's limit. A lower number would slow every mount and still not hold a rate. The fix is fewer, bigger reads (#538).
+- **30 seconds covers the retries.** The three waits add up to 5.25 seconds at most. A listing is the long call: every page of a folder, one request after another, inside one call. How long a page of 1,000 items takes is not measured.
+- **A listing kept for 5 seconds** costs at most 12 listings a minute for a folder that stays open: 1,200 units a page.
+
 ## Not checked against real Google
 
-Every test runs against the fake server. Until #529 runs the provider on a real account, these rest on Google's documentation:
+Every automated test runs against the fake server. `tests/live.rs` is a manual test on a real account, with the five `Provider` calls only. It checks the second and fourth lines below. It lists a shared drive, but it cannot tell whether that listing is complete. It reads the real keychain, it never changes anything, and it prints counts, sizes, and times but no name. Its header has the command. Nobody has run it yet, so these still rest on Google's documentation:
 
 - That `corpora=drive` with `driveId` lists every child of a folder in a shared drive.
 - What `files.get` returns for the top folder of a shared drive: its name and its modified time.
 - That every child of a folder is in the folder's own drive.
 - That Google answers a read at the end of a file with 416, and a read of an empty file too.
-- Whether the request limits and the retry waits fit a real account's quota.
+- How long one page of a listing takes, and so how big a folder can be before its listing passes the core's 30 seconds.
+- **A dead connection after sleep.** The HTTP client's only time limit is 10 seconds to connect. After a laptop sleeps or changes network, a kept connection can be dead, and each call on it may hang until the core's 30 seconds.
+- **A 403 that covers the whole account.** Any 403 that is not a rate limit is `AccessDenied`, which the helper counts as an answer. If Google answers the free-space request that way, a mount of such an account fails at its first call with -1005. A reason such as `domainPolicy` that starts while a mount is up leaves it `mounted` while every call fails.
+- **Two 30-second limits.** A token refresh times out after 30 seconds, and so does the core's call. A slow token endpoint may show as `TimedOut` and never as `Offline`.
+- **A new token after a 401.** If Google hands back the same access token after a 401, the second 401 is `SignInNeeded`.
 
 ## Testing
 
@@ -147,3 +182,5 @@ Every test runs against the fake server. Until #529 runs the provider on a real 
 - The test token source hands out `token-1`, then `token-2` after `token-1` is rejected. One test holds eight calls until all have `token-1`, and checks that they cause one new token, not eight.
 - Two tests put the provider under a real `Vfs`: one for duplicate names and a `/` in a name, one for a rename seen on the remote.
 - One test checks that every request the server got was a GET.
+- The helper's tests mount this provider through FUSE against a fake Google: see [Mount helper](mount-helper.md#testing).
+- `tests/live.rs` is marked `#[ignore]`. Never run this crate's tests with `--ignored` or `--include-ignored` unless you mean to read a real account.

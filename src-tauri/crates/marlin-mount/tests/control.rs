@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -684,7 +685,7 @@ impl Drop for KillOnDrop {
 }
 
 #[tokio::test]
-async fn the_built_helper_answers_refuses_every_mount_and_exits_on_shutdown() {
+async fn the_built_helper_answers_refuses_an_unknown_provider_and_exits_on_shutdown() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("mount.sock");
     let helper = env!("CARGO_BIN_EXE_marlin-mount");
@@ -706,7 +707,7 @@ async fn the_built_helper_answers_refuses_every_mount_and_exits_on_shutdown() {
     }
     let mut client = Client::connect(&socket).await;
     assert_eq!(client.call("list", Value::Null).await["result"], json!([]));
-    // The shipped helper knows no provider yet (#529), and it opens the provider before it asks the adapter.
+    // The shipped helper knows no provider named `memory`, and it opens the provider before it asks the adapter.
     let refused = client.call("mount", mount("ana", "drive")).await;
     assert_eq!(code(&refused), -1004);
     assert!(!dir.path().join("Marlin").exists());
@@ -1039,4 +1040,78 @@ async fn a_dead_mount_that_cannot_be_cleared_is_reported_and_fails_its_mount_unt
         client.call("deadMounts", Value::Null).await["result"],
         json!([])
     );
+}
+
+/// Sends this process's stderr to a file until it is dropped. The helper's log is its stderr, and a server that runs inside the test process has no other place a test can read it. Every test in the process logs there, so match on a text only one test writes. Drop this before any assertion: a panic's message would land in the file.
+struct CapturedStderr {
+    saved: libc::c_int,
+    _file: std::fs::File,
+}
+
+impl CapturedStderr {
+    fn start(path: &Path) -> Self {
+        let file = std::fs::File::create(path).unwrap();
+        // SAFETY: dup and dup2 only change this process's file-descriptor table.
+        let saved = unsafe { libc::dup(libc::STDERR_FILENO) };
+        assert!(saved >= 0);
+        let redirected = unsafe { libc::dup2(file.as_raw_fd(), libc::STDERR_FILENO) };
+        assert_eq!(redirected, libc::STDERR_FILENO);
+        Self { saved, _file: file }
+    }
+}
+
+impl Drop for CapturedStderr {
+    fn drop(&mut self) {
+        // SAFETY: the saved fd came from dup and still belongs to this value.
+        unsafe {
+            libc::dup2(self.saved, libc::STDERR_FILENO);
+            libc::close(self.saved);
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_text_of_a_provider_failure_is_logged_once_a_minute_with_secrets_masked() {
+    let harness = start();
+    let mut client = Client::connect(&harness.socket).await;
+    client.call("mount", mount("ana", "drive")).await;
+    let path = harness.dir.path().join("stderr.log");
+    let capture = CapturedStderr::start(&path);
+    let marker = "marlin-logged-once-7f3c";
+    let text = format!("{marker} for Bearer abc123");
+    fail(&harness, "ana", Some(VfsError::Other(text.clone())));
+    for _ in 0..3 {
+        call(&harness, "drive").await;
+    }
+    // An answered call in between does not bring the line back.
+    fail(&harness, "ana", None);
+    call(&harness, "drive").await;
+    fail(&harness, "ana", Some(VfsError::Other(text.clone())));
+    call(&harness, "drive").await;
+    // A minute later the same text is news again.
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(61)).await;
+    tokio::time::resume();
+    call(&harness, "drive").await;
+    // Another text is logged at once.
+    let other = format!("{marker} again for Bearer abc123");
+    fail(&harness, "ana", Some(VfsError::Other(other)));
+    call(&harness, "drive").await;
+    drop(capture);
+
+    let logged = std::fs::read_to_string(&path).unwrap();
+    assert!(!logged.contains("abc123"), "{logged}");
+    let lines: Vec<_> = logged
+        .lines()
+        .filter(|line| line.contains(marker))
+        .collect();
+    assert_eq!(lines.len(), 3, "{logged}");
+    for line in lines {
+        let value: Value = serde_json::from_str(line).expect(line);
+        assert_eq!(value["event"], "mount.call_failed");
+        assert_eq!(value["provider"], "memory");
+        assert_eq!(value["account"], "ana");
+        let message = value["message"].as_str().unwrap();
+        assert!(message.ends_with("Bearer [redacted]"), "{message}");
+    }
 }

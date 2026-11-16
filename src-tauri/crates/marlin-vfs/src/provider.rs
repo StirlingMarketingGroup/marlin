@@ -24,7 +24,7 @@ pub struct Attributes {
     /// Byte length. A folder's length is the provider's own choice.
     pub size: u64,
 
-    /// When the remote last changed the item.
+    /// When the remote last changed the item. When a file's bytes change, this time or the size must change too, because an adapter may keep bytes it already read until one of the two changes.
     pub modified: std::time::SystemTime,
 }
 
