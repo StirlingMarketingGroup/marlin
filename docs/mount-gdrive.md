@@ -224,12 +224,15 @@ The [mount core](mount-core.md) runs at most 16 provider calls at once and ends 
 
 ## Checked against real Google
 
-`tests/live.rs` is a manual test on a real account, with the five `Provider` calls only. It reads the real keychain, it never changes anything, and it prints counts, sizes, and times but no name. Its header has the command. It ran on 2026-11-16 against one Google Workspace account with two shared drives:
+`tests/live.rs` is a manual test on a real account, with the five `Provider` calls only. It reads the real keychain, it never changes anything, and it prints counts, sizes, times, and the type words of link files, but no name. Its header has the command. It ran on 2026-11-16 against one Google Workspace account with two shared drives:
 
 - **A read at the end of a file, and past it, returns no bytes.**
 - **A read at an offset returns the same bytes as that part of a read from the start.**
 - **`files.get` gives the top folder of a shared drive another name than the drive's.** So `item` asks `drives.get` for that folder, and on this account its answer equals the drive's line in the `Shared drives` listing: see [The five calls](#the-five-calls).
-- **One request takes a quarter to half a second.** In three runs, a listing of 62 items took 372, 431, and 512 ms, and a read of 14 KiB took 254, 507, and 528 ms.
+- **Google accepts the field list with `shortcutDetails(targetId)`,** in a listing and in `files.get`. The top of My Drive listed 150 items, 88 of them link files: Google Docs, Google Sheets, and shortcuts.
+- **A real shortcut carries its target, in a listing and in `files.get`.** The ID of a shortcut held a target that is not the shortcut itself. `item` of a Google Sheet and of that shortcut each returned the line from the listing.
+- **A link file opens its item in the browser.** The helper mounted the account on macOS through macFUSE. The top of My Drive showed the same 150 entries, 88 of them link files. One Google Doc's link file had the same size from `stat` as the bytes read, and Firefox showed the Doc within two seconds of opening it. The page for a public Google Sheet, in a normal folder, opened the Sheet the same way.
+- **One request takes a quarter to half a second.** In six runs, a listing of 150 items took 287 to 512 ms, and a read of 14 KiB took 254 to 528 ms.
 
 Every automated test runs against the fake server, so these still rest on Google's documentation:
 
@@ -238,7 +241,7 @@ Every automated test runs against the fake server, so these still rest on Google
 - That Google answers a read of an empty file with 416. The account had no empty file at the top of My Drive.
 - How long a page of 1,000 items takes, and so how big a folder can be before its listing passes the core's 30 seconds.
 - **A dead connection after sleep.** The HTTP client's only time limit is 10 seconds to connect. After a laptop sleeps or changes network, a kept connection can be dead, and each call on it may hang until the core's 30 seconds.
-- **Link files.** Nobody has opened one from a real mount in a browser, or looked at what Quick Look or a thumbnailer does with one. One request with no sign-in to `https://drive.google.com/open?id=` and the ID of a public Google Sheet was redirected to the sheet's editor address. A Doc, a Slides file, a folder, and a real shortcut are not checked, and no request with the field list `shortcutDetails(targetId)` has gone to real Google. The field name is in Google's API description, and the form matches the examples in Google's guide to the `fields` parameter.
+- **Link files in another browser or on another OS.** Two were opened as a double click does, on macOS with Firefox: see above. Nobody has tried another browser or another OS, or looked at what Quick Look or a thumbnailer does with one. A Doc, a Slides file, a folder, and a shortcut's target are not checked that way. The account had no Slides file, Form, or third-party shortcut at the top of My Drive, so the names of those rest on Google's list of MIME types.
 - **A 403 that covers the whole account.** Any 403 that is not a rate limit is `AccessDenied`, which the helper counts as an answer. If Google answers the free-space request that way, a mount of such an account fails at its first call with -1005. A reason such as `domainPolicy` that starts while a mount is up leaves it `mounted` while every call fails.
 - **Two 30-second limits.** A token refresh times out after 30 seconds, and so does the core's call. A slow token endpoint may show as `TimedOut` and never as `Offline`.
 - **A new token after a 401.** If Google hands back the same access token after a 401, the second 401 is `SignInNeeded`.
