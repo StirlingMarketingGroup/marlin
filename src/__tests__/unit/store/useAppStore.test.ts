@@ -1,11 +1,18 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { useAppStore } from '../../../store/useAppStore';
+import { useToastStore } from '../../../store/useToastStore';
 import { invoke } from '@tauri-apps/api/core';
 import { ask } from '@tauri-apps/plugin-dialog';
+import { open as openShell } from '@tauri-apps/plugin-shell';
 import { getPlatform } from '@/hooks/usePlatform';
+import { FileItem } from '@/types';
+import { buildArchiveUri } from '@/utils/archiveUri';
 
 vi.mock('@tauri-apps/api/core');
 vi.mock('@tauri-apps/plugin-dialog');
+vi.mock('@tauri-apps/plugin-shell', () => ({
+  open: vi.fn(),
+}));
 // jsdom's user agent on a Mac holds "darwin", which `getPlatform` reads as Windows.
 vi.mock('@/hooks/usePlatform', () => ({
   getPlatform: vi.fn(() => ({ isMac: false, isWindows: false, isLinux: true })),
@@ -13,6 +20,35 @@ vi.mock('@/hooks/usePlatform', () => ({
 
 const mockInvoke = vi.mocked(invoke);
 const mockAsk = vi.mocked(ask);
+const mockOpen = vi.mocked(openShell);
+
+function fileItem(overrides: Partial<FileItem> & Pick<FileItem, 'name' | 'path'>): FileItem {
+  return {
+    size: 1,
+    modified: '2026-01-01T00:00:00.000Z',
+    is_directory: false,
+    is_hidden: false,
+    is_symlink: false,
+    is_git_repo: false,
+    ...overrides,
+  };
+}
+
+function shellOpenPaths(): string[] {
+  return mockOpen.mock.calls.map((call) => call[0]);
+}
+
+function newWindowPaths(): string[] {
+  return mockInvoke.mock.calls
+    .filter((call) => call[0] === 'new_window')
+    .map((call) => (call[1] as { path: string }).path);
+}
+
+function openPathsCalls(): string[][] {
+  return mockInvoke.mock.calls
+    .filter((call) => call[0] === 'open_paths')
+    .map((call) => (call[1] as { paths: string[] }).paths);
+}
 
 describe('useAppStore', () => {
   beforeEach(() => {
@@ -1372,6 +1408,350 @@ describe('useAppStore', () => {
         expect(newSessionId).toBeTruthy();
         expect(newSessionId).not.toBe('old-session');
       });
+    });
+  });
+
+  describe('openSelected', () => {
+    it('opens nothing when the selection is empty', async () => {
+      const note = fileItem({ name: 'note.txt', path: '/test/note.txt', extension: 'txt' });
+      useAppStore.setState({ files: [note], selectedFiles: [] });
+
+      await useAppStore.getState().openSelected();
+
+      expect(mockOpen).not.toHaveBeenCalled();
+      expect(mockAsk).not.toHaveBeenCalled();
+      expect(newWindowPaths()).toEqual([]);
+      expect(useAppStore.getState().currentPath).toBe('/test');
+    });
+
+    it('navigates into one selected folder and opens no window', async () => {
+      const folder = fileItem({ name: 'Docs', path: '/test/Docs', is_directory: true });
+      useAppStore.setState({ files: [folder], selectedFiles: [folder.path] });
+
+      await useAppStore.getState().openSelected();
+
+      const updated = useAppStore.getState();
+      expect(updated.currentPath).toBe('/test/Docs');
+      expect(updated.pathHistory).toEqual(['/test', '/test/Docs']);
+      expect(updated.historyIndex).toBe(1);
+      expect(mockOpen).not.toHaveBeenCalled();
+      expect(newWindowPaths()).toEqual([]);
+    });
+
+    it('opens one plain file with the shell', async () => {
+      const note = fileItem({ name: 'note.txt', path: '/test/note.txt', extension: 'txt' });
+      useAppStore.setState({ files: [note], selectedFiles: [note.path] });
+
+      await useAppStore.getState().openSelected();
+
+      expect(mockOpen).toHaveBeenCalledTimes(1);
+      expect(mockOpen).toHaveBeenCalledWith(note.path);
+      expect(useAppStore.getState().currentPath).toBe('/test');
+    });
+
+    it('opens two plain files in selection order', async () => {
+      const first = fileItem({ name: 'a.txt', path: '/test/a.txt', extension: 'txt' });
+      const second = fileItem({ name: 'b.txt', path: '/test/b.txt', extension: 'txt' });
+      useAppStore.setState({
+        files: [second, first],
+        selectedFiles: [first.path, second.path],
+      });
+
+      await useAppStore.getState().openSelected();
+
+      expect(shellOpenPaths()).toEqual([first.path, second.path]);
+      expect(openPathsCalls()).toEqual([]);
+    });
+
+    it('opens a folder and an archive in new windows and a plain file with the shell', async () => {
+      const folder = fileItem({ name: 'Docs', path: '/test/Docs', is_directory: true });
+      const zip = fileItem({ name: 'bundle.zip', path: '/test/bundle.zip', extension: 'zip' });
+      const note = fileItem({ name: 'note.txt', path: '/test/note.txt', extension: 'txt' });
+      useAppStore.setState({
+        files: [folder, zip, note],
+        selectedFiles: [folder.path, zip.path, note.path],
+      });
+
+      await useAppStore.getState().openSelected();
+
+      expect(newWindowPaths()).toEqual([folder.path, buildArchiveUri(zip.path, '/')]);
+      expect(shellOpenPaths()).toEqual([note.path]);
+      expect(useAppStore.getState().currentPath).toBe('/test');
+    });
+
+    it('opens nothing when opening more than 10 items is cancelled', async () => {
+      const files = Array.from({ length: 11 }, (_, index) =>
+        fileItem({
+          name: `file-${index}.txt`,
+          path: `/test/file-${index}.txt`,
+          extension: 'txt',
+        })
+      );
+      useAppStore.setState({
+        files,
+        selectedFiles: files.map((file) => file.path),
+      });
+      mockAsk.mockResolvedValueOnce(false);
+
+      await useAppStore.getState().openSelected();
+
+      expect(mockAsk).toHaveBeenCalledWith('Open 11 items?', {
+        title: 'Open',
+        okLabel: 'Open',
+        cancelLabel: 'Cancel',
+      });
+      expect(mockOpen).not.toHaveBeenCalled();
+      expect(newWindowPaths()).toEqual([]);
+    });
+
+    it('opens every file when opening more than 10 items is confirmed', async () => {
+      const files = Array.from({ length: 11 }, (_, index) =>
+        fileItem({
+          name: `file-${index}.txt`,
+          path: `/test/file-${index}.txt`,
+          extension: 'txt',
+        })
+      );
+      useAppStore.setState({
+        files,
+        selectedFiles: files.map((file) => file.path),
+      });
+      mockAsk.mockResolvedValueOnce(true);
+
+      await useAppStore.getState().openSelected();
+
+      expect(shellOpenPaths()).toEqual(files.map((file) => file.path));
+    });
+
+    it('does not ask before opening 10 files', async () => {
+      const files = Array.from({ length: 10 }, (_, index) =>
+        fileItem({
+          name: `file-${index}.txt`,
+          path: `/test/file-${index}.txt`,
+          extension: 'txt',
+        })
+      );
+      useAppStore.setState({
+        files,
+        selectedFiles: files.map((file) => file.path),
+      });
+
+      await useAppStore.getState().openSelected();
+
+      expect(mockAsk).not.toHaveBeenCalled();
+      expect(shellOpenPaths()).toEqual(files.map((file) => file.path));
+    });
+
+    it('skips a selected path that is not in the file list', async () => {
+      const first = fileItem({ name: 'a.txt', path: '/test/a.txt', extension: 'txt' });
+      const second = fileItem({ name: 'b.txt', path: '/test/b.txt', extension: 'txt' });
+      useAppStore.setState({
+        files: [first, second],
+        selectedFiles: ['/test/missing', first.path, second.path],
+      });
+
+      await useAppStore.getState().openSelected();
+
+      expect(shellOpenPaths()).toEqual([first.path, second.path]);
+    });
+
+    describe('on macOS', () => {
+      beforeEach(() => {
+        vi.mocked(getPlatform).mockReturnValue({ isMac: true, isWindows: false, isLinux: false });
+      });
+
+      afterEach(() => {
+        vi.mocked(getPlatform).mockReturnValue({ isMac: false, isWindows: false, isLinux: true });
+      });
+
+      it('opens two plain files in one open_paths call', async () => {
+        const first = fileItem({ name: 'a.txt', path: '/test/a.txt', extension: 'txt' });
+        const second = fileItem({ name: 'b.txt', path: '/test/b.txt', extension: 'txt' });
+        useAppStore.setState({
+          files: [second, first],
+          selectedFiles: [first.path, second.path],
+        });
+
+        await useAppStore.getState().openSelected();
+
+        expect(openPathsCalls()).toEqual([[first.path, second.path]]);
+        expect(mockOpen).not.toHaveBeenCalled();
+      });
+
+      it('opens a folder and a zip in new windows and two plain files together', async () => {
+        const folder = fileItem({ name: 'Docs', path: '/test/Docs', is_directory: true });
+        const zip = fileItem({ name: 'bundle.zip', path: '/test/bundle.zip', extension: 'zip' });
+        const first = fileItem({ name: 'a.txt', path: '/test/a.txt', extension: 'txt' });
+        const second = fileItem({ name: 'b.txt', path: '/test/b.txt', extension: 'txt' });
+        useAppStore.setState({
+          files: [folder, zip, first, second],
+          selectedFiles: [folder.path, zip.path, first.path, second.path],
+        });
+
+        await useAppStore.getState().openSelected();
+
+        expect(newWindowPaths()).toEqual([folder.path, buildArchiveUri(zip.path, '/')]);
+        expect(openPathsCalls()).toEqual([[first.path, second.path]]);
+        expect(mockOpen).not.toHaveBeenCalled();
+      });
+
+      it('opens a folder in a new window and one plain file with the shell', async () => {
+        const folder = fileItem({ name: 'Docs', path: '/test/Docs', is_directory: true });
+        const note = fileItem({ name: 'note.txt', path: '/test/note.txt', extension: 'txt' });
+        useAppStore.setState({
+          files: [folder, note],
+          selectedFiles: [folder.path, note.path],
+        });
+
+        await useAppStore.getState().openSelected();
+
+        expect(newWindowPaths()).toEqual([folder.path]);
+        expect(shellOpenPaths()).toEqual([note.path]);
+        expect(openPathsCalls()).toEqual([]);
+      });
+
+      it('opens 11 files together when confirmed', async () => {
+        const files = Array.from({ length: 11 }, (_, index) =>
+          fileItem({
+            name: `file-${index}.txt`,
+            path: `/test/file-${index}.txt`,
+            extension: 'txt',
+          })
+        );
+        useAppStore.setState({
+          files,
+          selectedFiles: files.map((file) => file.path),
+        });
+        mockAsk.mockResolvedValueOnce(true);
+
+        await useAppStore.getState().openSelected();
+
+        expect(openPathsCalls()).toEqual([files.map((file) => file.path)]);
+        expect(mockOpen).not.toHaveBeenCalled();
+      });
+
+      it('opens nothing when opening 11 items is cancelled', async () => {
+        const files = Array.from({ length: 11 }, (_, index) =>
+          fileItem({
+            name: `file-${index}.txt`,
+            path: `/test/file-${index}.txt`,
+            extension: 'txt',
+          })
+        );
+        useAppStore.setState({
+          files,
+          selectedFiles: files.map((file) => file.path),
+        });
+        mockAsk.mockResolvedValueOnce(false);
+
+        await useAppStore.getState().openSelected();
+
+        expect(openPathsCalls()).toEqual([]);
+        expect(mockOpen).not.toHaveBeenCalled();
+      });
+
+      it('opens only folders in new windows', async () => {
+        const docs = fileItem({ name: 'Docs', path: '/test/Docs', is_directory: true });
+        const photos = fileItem({ name: 'Photos', path: '/test/Photos', is_directory: true });
+        useAppStore.setState({
+          files: [docs, photos],
+          selectedFiles: [docs.path, photos.path],
+        });
+
+        await useAppStore.getState().openSelected();
+
+        expect(newWindowPaths()).toEqual([docs.path, photos.path]);
+        expect(openPathsCalls()).toEqual([]);
+        expect(mockOpen).not.toHaveBeenCalled();
+      });
+
+      it('hands an archive entry to open_paths as its extracted path', async () => {
+        const note = fileItem({ name: 'a.txt', path: '/test/a.txt', extension: 'txt' });
+        const entry = fileItem({
+          name: 'b.txt',
+          path: buildArchiveUri('/test/bundle.zip', '/b.txt'),
+          extension: 'txt',
+        });
+        useAppStore.setState({
+          files: [note, entry],
+          selectedFiles: [note.path, entry.path],
+        });
+        mockInvoke.mockImplementation((cmd: string) =>
+          Promise.resolve(cmd === 'extract_archive_entry_to_temp' ? '/tmp/x/b.txt' : undefined)
+        );
+
+        await useAppStore.getState().openSelected();
+
+        expect(openPathsCalls()).toEqual([['/test/a.txt', '/tmp/x/b.txt']]);
+      });
+
+      it('opens the other files when one archive entry cannot be extracted', async () => {
+        const first = fileItem({ name: 'a.txt', path: '/test/a.txt', extension: 'txt' });
+        const second = fileItem({ name: 'c.txt', path: '/test/c.txt', extension: 'txt' });
+        const entry = fileItem({
+          name: 'b.txt',
+          path: buildArchiveUri('/test/bundle.zip', '/b.txt'),
+          extension: 'txt',
+        });
+        useAppStore.setState({
+          files: [first, entry, second],
+          selectedFiles: [first.path, entry.path, second.path],
+        });
+        mockInvoke.mockImplementation((cmd: string) =>
+          cmd === 'extract_archive_entry_to_temp'
+            ? Promise.reject(new Error('bad zip'))
+            : Promise.resolve(undefined)
+        );
+
+        await useAppStore.getState().openSelected();
+
+        expect(openPathsCalls()).toEqual([[first.path, second.path]]);
+        expect(
+          useToastStore
+            .getState()
+            .toasts.some((item) => item.message === 'Unable to open b.txt: bad zip')
+        ).toBe(true);
+      });
+
+      it('shows an error toast when open_paths fails', async () => {
+        const first = fileItem({ name: 'a.txt', path: '/test/a.txt', extension: 'txt' });
+        const second = fileItem({ name: 'b.txt', path: '/test/b.txt', extension: 'txt' });
+        useAppStore.setState({
+          files: [first, second],
+          selectedFiles: [first.path, second.path],
+        });
+        mockInvoke.mockImplementation((cmd: string) => {
+          if (cmd === 'open_paths') {
+            return Promise.reject(new Error('open failed'));
+          }
+          return Promise.resolve(undefined);
+        });
+
+        await useAppStore.getState().openSelected();
+
+        const toast = useToastStore
+          .getState()
+          .toasts.find((item) => item.message === 'Unable to open some items: open failed');
+        expect(toast).toMatchObject({ type: 'error', duration: 6000 });
+      });
+    });
+  });
+
+  describe('openItem', () => {
+    it('opens a macOS bundle with the shell instead of navigating into it', async () => {
+      const bundle = fileItem({
+        name: 'Foo.app',
+        path: '/test/Foo.app',
+        is_directory: true,
+        is_symlink: false,
+      });
+
+      await useAppStore.getState().openItem(bundle);
+
+      expect(mockOpen).toHaveBeenCalledTimes(1);
+      expect(mockOpen).toHaveBeenCalledWith(bundle.path);
+      expect(useAppStore.getState().currentPath).toBe('/test');
+      expect(useAppStore.getState().pathHistory).toEqual(['/test']);
     });
   });
 });

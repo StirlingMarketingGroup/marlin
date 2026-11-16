@@ -25,12 +25,13 @@ import { invoke } from '@tauri-apps/api/core';
 import { emit } from '@tauri-apps/api/event';
 import { open as openShell } from '@tauri-apps/plugin-shell';
 import { ask, message, open as openDialog } from '@tauri-apps/plugin-dialog';
-import { getExtractableArchiveFormat, isArchiveFile } from '@/utils/fileTypes';
+import { getPlatform } from '@/hooks/usePlatform';
+import { getExtractableArchiveFormat, isArchiveFile, isMacOSBundle } from '@/utils/fileTypes';
 import { basename, resolveTypedPath } from '@/utils/pathUtils';
 import { useToastStore } from './useToastStore';
 import { useUndoStore, pushUndoAndShowToast } from './useUndoStore';
 import { parseGoogleDriveUrl } from '@/utils/googleDriveUrl';
-import { getArchiveParentUri, isArchiveUri } from '@/utils/archiveUri';
+import { buildArchiveUri, getArchiveParentUri, isArchiveUri } from '@/utils/archiveUri';
 import { withGoogleSignInCheck } from '@/utils/googleSignIn';
 import { withSftpHostKeyCheck } from '@/utils/sftpHostKey';
 import { DEFAULT_THEME_IDS } from '@/themes';
@@ -353,6 +354,8 @@ interface AppState {
   updateFileDimensions: (path: string, width: number, height: number) => void;
   cancelDirectoryStream: () => Promise<void>;
   openFile: (file: FileItem) => Promise<void>;
+  openItem: (file: FileItem) => Promise<void>;
+  openSelected: () => Promise<void>;
   extractArchive: (file: FileItem, options?: { createSubfolder?: boolean }) => Promise<boolean>;
   createNewFolder: () => Promise<void>;
   createNewFile: () => Promise<void>;
@@ -425,6 +428,148 @@ interface AppState {
   isFileExiting: (path: string) => boolean;
   addSkipAnimationPath: (path: string) => void;
   consumeSkipAnimationPaths: () => Set<string>;
+}
+
+const OPEN_CONFIRM_ABOVE_COUNT = 10;
+
+/** Path the app browses to for this item, or undefined when another app opens it. */
+function browsePathForItem(file: FileItem): string | undefined {
+  if (file.is_directory && (!isMacOSBundle(file) || file.is_symlink)) {
+    return file.path;
+  }
+  if (!file.is_directory && isArchiveFile(file)) {
+    return buildArchiveUri(file.path, '/');
+  }
+  return undefined;
+}
+
+/** Local path to hand to the OS, or undefined after this function has shown its error toast. */
+async function localPathForOpening(file: FileItem): Promise<string | undefined> {
+  const toastStore = useToastStore.getState();
+
+  let pathToOpen = file.path;
+  let downloadToastId: string | undefined;
+
+  if (file.path.startsWith('archive://')) {
+    try {
+      downloadToastId = toastStore.addToast({
+        type: 'info',
+        message: `Extracting ${file.name}...`,
+        duration: 0,
+      });
+
+      pathToOpen = await invoke<string>('extract_archive_entry_to_temp', {
+        archiveUri: file.path,
+      });
+    } catch (extractError) {
+      console.error('Failed to extract archive entry:', extractError);
+      const errorMessage =
+        extractError instanceof Error ? extractError.message : String(extractError);
+      toastStore.addToast({
+        type: 'error',
+        message: `Unable to open ${file.name}: ${errorMessage}`,
+        duration: 6000,
+      });
+      return undefined;
+    } finally {
+      if (downloadToastId) {
+        toastStore.removeToast(downloadToastId);
+      }
+    }
+  } else if (file.path.startsWith('gdrive://')) {
+    // Remote files: download to a temp path before opening.
+    if (!file.remote_id) {
+      toastStore.addToast({
+        type: 'error',
+        message: `Unable to open ${file.name}: missing Google Drive file id.`,
+        duration: 6000,
+      });
+      return undefined;
+    }
+
+    try {
+      // Extract email from path: gdrive://email/path
+      const pathWithoutScheme = file.path.slice('gdrive://'.length);
+      const slashIndex = pathWithoutScheme.indexOf('/');
+      const email = slashIndex >= 0 ? pathWithoutScheme.slice(0, slashIndex) : pathWithoutScheme;
+
+      downloadToastId = toastStore.addToast({
+        type: 'info',
+        message: `Downloading ${file.name}...`,
+        duration: 0,
+      });
+
+      pathToOpen = await invoke<string>('download_gdrive_file', {
+        email,
+        fileId: file.remote_id,
+        fileName: file.name,
+      });
+    } catch (downloadError) {
+      console.error('Failed to download Google Drive file:', downloadError);
+      const errorMessage =
+        downloadError instanceof Error ? downloadError.message : String(downloadError);
+      toastStore.addToast({
+        type: 'error',
+        message: `Unable to open ${file.name}: ${errorMessage}`,
+        duration: 6000,
+      });
+      return undefined;
+    } finally {
+      if (downloadToastId) {
+        toastStore.removeToast(downloadToastId);
+      }
+    }
+  } else if (file.path.startsWith('smb://') && !file.is_directory) {
+    try {
+      downloadToastId = toastStore.addToast({
+        type: 'info',
+        message: `Downloading ${file.name}...`,
+        duration: 0,
+      });
+
+      pathToOpen = await invoke<string>('download_smb_file', { path: file.path });
+    } catch (downloadError) {
+      console.error('Failed to download SMB file:', downloadError);
+      const errorMessage =
+        downloadError instanceof Error ? downloadError.message : String(downloadError);
+      toastStore.addToast({
+        type: 'error',
+        message: `Unable to open ${file.name}: ${errorMessage}`,
+        duration: 6000,
+      });
+      return undefined;
+    } finally {
+      if (downloadToastId) {
+        toastStore.removeToast(downloadToastId);
+      }
+    }
+  } else if (file.path.startsWith('sftp://') && !file.is_directory) {
+    try {
+      downloadToastId = toastStore.addToast({
+        type: 'info',
+        message: `Downloading ${file.name}...`,
+        duration: 0,
+      });
+
+      pathToOpen = await invoke<string>('download_sftp_file', { path: file.path });
+    } catch (downloadError) {
+      console.error('Failed to download SFTP file:', downloadError);
+      const errorMessage =
+        downloadError instanceof Error ? downloadError.message : String(downloadError);
+      toastStore.addToast({
+        type: 'error',
+        message: `Unable to open ${file.name}: ${errorMessage}`,
+        duration: 6000,
+      });
+      return undefined;
+    } finally {
+      if (downloadToastId) {
+        toastStore.removeToast(downloadToastId);
+      }
+    }
+  }
+
+  return pathToOpen;
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -1383,129 +1528,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   openFile: async (file) => {
+    const pathToOpen = await localPathForOpening(file);
+    if (pathToOpen === undefined) return;
+
     const toastStore = useToastStore.getState();
-
-    let pathToOpen = file.path;
-    let downloadToastId: string | undefined;
-
-    if (file.path.startsWith('archive://')) {
-      try {
-        downloadToastId = toastStore.addToast({
-          type: 'info',
-          message: `Extracting ${file.name}...`,
-          duration: 0,
-        });
-
-        pathToOpen = await invoke<string>('extract_archive_entry_to_temp', {
-          archiveUri: file.path,
-        });
-      } catch (extractError) {
-        console.error('Failed to extract archive entry:', extractError);
-        const errorMessage =
-          extractError instanceof Error ? extractError.message : String(extractError);
-        toastStore.addToast({
-          type: 'error',
-          message: `Unable to open ${file.name}: ${errorMessage}`,
-          duration: 6000,
-        });
-        return;
-      } finally {
-        if (downloadToastId) {
-          toastStore.removeToast(downloadToastId);
-        }
-      }
-    } else if (file.path.startsWith('gdrive://')) {
-      // Remote files: download to a temp path before opening.
-      if (!file.remote_id) {
-        toastStore.addToast({
-          type: 'error',
-          message: `Unable to open ${file.name}: missing Google Drive file id.`,
-          duration: 6000,
-        });
-        return;
-      }
-
-      try {
-        // Extract email from path: gdrive://email/path
-        const pathWithoutScheme = file.path.slice('gdrive://'.length);
-        const slashIndex = pathWithoutScheme.indexOf('/');
-        const email = slashIndex >= 0 ? pathWithoutScheme.slice(0, slashIndex) : pathWithoutScheme;
-
-        downloadToastId = toastStore.addToast({
-          type: 'info',
-          message: `Downloading ${file.name}...`,
-          duration: 0,
-        });
-
-        pathToOpen = await invoke<string>('download_gdrive_file', {
-          email,
-          fileId: file.remote_id,
-          fileName: file.name,
-        });
-      } catch (downloadError) {
-        console.error('Failed to download Google Drive file:', downloadError);
-        const errorMessage =
-          downloadError instanceof Error ? downloadError.message : String(downloadError);
-        toastStore.addToast({
-          type: 'error',
-          message: `Unable to open ${file.name}: ${errorMessage}`,
-          duration: 6000,
-        });
-        return;
-      } finally {
-        if (downloadToastId) {
-          toastStore.removeToast(downloadToastId);
-        }
-      }
-    } else if (file.path.startsWith('smb://') && !file.is_directory) {
-      try {
-        downloadToastId = toastStore.addToast({
-          type: 'info',
-          message: `Downloading ${file.name}...`,
-          duration: 0,
-        });
-
-        pathToOpen = await invoke<string>('download_smb_file', { path: file.path });
-      } catch (downloadError) {
-        console.error('Failed to download SMB file:', downloadError);
-        const errorMessage =
-          downloadError instanceof Error ? downloadError.message : String(downloadError);
-        toastStore.addToast({
-          type: 'error',
-          message: `Unable to open ${file.name}: ${errorMessage}`,
-          duration: 6000,
-        });
-        return;
-      } finally {
-        if (downloadToastId) {
-          toastStore.removeToast(downloadToastId);
-        }
-      }
-    } else if (file.path.startsWith('sftp://') && !file.is_directory) {
-      try {
-        downloadToastId = toastStore.addToast({
-          type: 'info',
-          message: `Downloading ${file.name}...`,
-          duration: 0,
-        });
-
-        pathToOpen = await invoke<string>('download_sftp_file', { path: file.path });
-      } catch (downloadError) {
-        console.error('Failed to download SFTP file:', downloadError);
-        const errorMessage =
-          downloadError instanceof Error ? downloadError.message : String(downloadError);
-        toastStore.addToast({
-          type: 'error',
-          message: `Unable to open ${file.name}: ${errorMessage}`,
-          duration: 6000,
-        });
-        return;
-      } finally {
-        if (downloadToastId) {
-          toastStore.removeToast(downloadToastId);
-        }
-      }
-    }
 
     try {
       await openShell(pathToOpen);
@@ -1585,6 +1611,84 @@ export const useAppStore = create<AppState>((set, get) => ({
         message: `Unable to open ${file.name}: ${messageText}`,
         duration: 6000,
       });
+    }
+  },
+
+  openItem: async (file) => {
+    const browsePath = browsePathForItem(file);
+    if (browsePath !== undefined) {
+      await get().navigateTo(browsePath);
+      return;
+    }
+    await get().openFile(file);
+  },
+
+  openSelected: async () => {
+    const state = get();
+    const filesByPath = new Map(state.files.map((file) => [file.path, file]));
+    const items = state.selectedFiles
+      .map((path) => filesByPath.get(path))
+      .filter((file): file is FileItem => Boolean(file));
+    if (items.length === 0) return;
+    if (items.length === 1) {
+      await get().openItem(items[0]);
+      return;
+    }
+
+    if (items.length > OPEN_CONFIRM_ABOVE_COUNT) {
+      let confirmed = false;
+      try {
+        confirmed = await ask(`Open ${items.length} items?`, {
+          title: 'Open',
+          okLabel: 'Open',
+          cancelLabel: 'Cancel',
+        });
+      } catch (dialogErr) {
+        console.warn('Failed to display open confirmation:', dialogErr);
+      }
+      if (!confirmed) return;
+    }
+
+    const filesToOpen: FileItem[] = [];
+    for (const item of items) {
+      const browsePath = browsePathForItem(item);
+      if (browsePath !== undefined) {
+        try {
+          await invoke('new_window', { path: browsePath });
+        } catch (error) {
+          console.error('Failed to create new window:', error);
+        }
+        continue;
+      }
+      filesToOpen.push(item);
+    }
+
+    if (getPlatform().isMac && filesToOpen.length >= 2) {
+      const paths: string[] = [];
+      for (const file of filesToOpen) {
+        const path = await localPathForOpening(file);
+        if (path !== undefined) {
+          paths.push(path);
+        }
+      }
+      if (paths.length === 0) return;
+
+      try {
+        await invoke('open_paths', { paths });
+      } catch (error) {
+        console.error('Failed to open paths:', error);
+        const messageText = error instanceof Error ? error.message : String(error);
+        useToastStore.getState().addToast({
+          type: 'error',
+          message: `Unable to open some items: ${messageText}`,
+          duration: 6000,
+        });
+      }
+      return;
+    }
+
+    for (const file of filesToOpen) {
+      await get().openFile(file);
     }
   },
 

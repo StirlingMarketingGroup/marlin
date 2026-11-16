@@ -5940,6 +5940,31 @@ pub fn open_path(path: String) -> Result<(), String> {
 }
 
 #[command]
+pub fn open_paths(paths: Vec<String>) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        // One call hands every file to the system together, so files for the same app
+        // arrive as one request (two images share one Preview window).
+        let output = OsCommand::new("open")
+            .args(&paths)
+            .output()
+            .map_err(|e| format!("Failed to spawn 'open': {}", e))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            // `open` names the file it could not open on stderr. That is the whole error the user sees.
+            Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = paths;
+        Err("open_paths is not supported on this platform".to_string())
+    }
+}
+
+#[command]
 pub fn open_path_with(path: String, application_path: String) -> Result<(), String> {
     let expanded_path = expand_path(&path)?;
     let expanded_application = expand_path(&application_path)?;
@@ -6740,6 +6765,9 @@ pub fn show_native_context_menu(
 
     let mut builder = MenuBuilder::new(&app);
     if is_file_ctx {
+        let open_item = MenuItemBuilder::with_id("ctx:open_selected", "Open")
+            .build(&app)
+            .map_err(|e| e.to_string())?;
         let rename_item = MenuItemBuilder::with_id("ctx:rename", "Rename")
             .build(&app)
             .map_err(|e| e.to_string())?;
@@ -6832,7 +6860,7 @@ pub fn show_native_context_menu(
         } else {
             None
         };
-        builder = builder.item(&rename_item).separator();
+        builder = builder.item(&open_item).item(&rename_item).separator();
         builder = builder
             .item(&copy_files_item)
             .item(&cut_files_item)

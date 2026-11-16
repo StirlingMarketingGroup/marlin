@@ -34,6 +34,7 @@ export default function ContextMenu({ x, y, isFileContext, onRequestClose }: Con
     toggleHiddenFiles,
     toggleFoldersFirst,
     beginRenameSelected,
+    openSelected,
     navigateTo,
     setPendingRevealTarget,
     extractArchive,
@@ -164,6 +165,15 @@ export default function ContextMenu({ x, y, isFileContext, onRequestClose }: Con
       <div className="py-1 text-sm">
         {fileSpecific && (
           <>
+            <button
+              className="w-full text-left px-3 py-2 hover:bg-app-light"
+              onClick={() => {
+                onRequestClose();
+                void openSelected();
+              }}
+            >
+              Open
+            </button>
             <button
               className="w-full text-left px-3 py-2 hover:bg-app-light"
               onClick={() => {
