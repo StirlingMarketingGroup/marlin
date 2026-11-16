@@ -53,7 +53,8 @@ The workspace has five library-only crates under `src-tauri/crates/`. `marlin-vf
 **Opening items.** Two store actions in `useAppStore` decide what "open" means. `openItem` is the double-click: a folder or an archive is browsed in this window, and any other item, a macOS bundle included, opens in its app through `openFile`. `openSelected` opens the whole selection. The file context menu, File > Open, Cmd/Ctrl+O, Cmd+Down on macOS, and Enter on Windows and Linux all call it. (Return on macOS renames.)
 
 - One selected item goes to `openItem`.
-- With several items, each folder and archive opens in a new window (`new_window`) and each other item opens in its app, in selection order.
+- With several items, each folder and archive opens in a new window (`new_window`), and the other items open in their apps.
+- On macOS, two or more files go to the system in one `open` call (`open_paths`), as Finder does. Files for the same app then arrive together: two images share one Preview window. Windows and Linux have no such call, so there each file opens by itself through `openFile`.
 - More than 10 items asks first.
 - Enter belongs to a focused button or link, not to the selection. The arrow keys blur a clicked button, so Enter reaches the files again.
 - A new window gets its folder as `index.html?path=`, encoded once by `new_window`. `App.tsx` reads it with `URLSearchParams`, which decodes it. Do not decode it again: an archive URI holds an encoded part of its own.

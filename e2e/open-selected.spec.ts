@@ -6,17 +6,20 @@ import {
   MOCK_PERCENT_DIR,
 } from './tauri-mocks';
 
-const shellOpenPaths = (page: Page) =>
+// macOS hands several files to one open_paths call. Every other open is one shell call per file.
+const openedPaths = (page: Page) =>
   page.evaluate(() => {
     const log =
       (
         window as unknown as {
-          __TAURI_INVOKE_LOG__?: { cmd: string; args?: { path?: string } }[];
+          __TAURI_INVOKE_LOG__?: { cmd: string; args?: { path?: string; paths?: string[] } }[];
         }
       ).__TAURI_INVOKE_LOG__ ?? [];
-    return log
-      .filter((entry) => entry.cmd === 'plugin:shell|open')
-      .map((entry) => entry.args?.path);
+    return log.flatMap((entry) => {
+      if (entry.cmd === 'plugin:shell|open') return [entry.args?.path];
+      if (entry.cmd === 'open_paths') return entry.args?.paths ?? [];
+      return [];
+    });
   });
 
 test.beforeEach(async ({ page }) => {
@@ -41,7 +44,7 @@ test.describe('Open selected', () => {
     ).toBeVisible({ timeout: 5000 });
   });
 
-  test('opens each selected file with the shell', async ({ page }) => {
+  test('opens each selected file', async ({ page }) => {
     await page.locator('[data-testid="file-item"][data-name="sample.pdf"]').click();
     await page.locator('[data-testid="file-item"][data-name="image.png"]').click({
       modifiers: ['ControlOrMeta'],
@@ -50,7 +53,7 @@ test.describe('Open selected', () => {
     await page.keyboard.press('ControlOrMeta+o');
 
     await expect
-      .poll(() => shellOpenPaths(page))
+      .poll(() => openedPaths(page))
       .toEqual([`${MOCK_DOWNLOADS_DIR}/sample.pdf`, `${MOCK_DOWNLOADS_DIR}/image.png`]);
   });
 
@@ -72,7 +75,7 @@ test.describe('Open selected', () => {
 
       await expect(page.locator('[data-testid="file-item"][data-name="Documents"]')).toBeVisible();
       await expect(pathInput).toHaveValue(MOCK_HOME_DIR);
-      expect(await shellOpenPaths(page)).toEqual([]);
+      expect(await openedPaths(page)).toEqual([]);
     });
 
     test('Enter opens the selection, and a focused button keeps its own Enter', async ({
@@ -80,20 +83,20 @@ test.describe('Open selected', () => {
     }) => {
       await page.locator('[data-testid="file-item"][data-name="sample.pdf"]').click();
       await page.keyboard.press('Enter');
-      await expect.poll(() => shellOpenPaths(page)).toEqual([`${MOCK_DOWNLOADS_DIR}/sample.pdf`]);
+      await expect.poll(() => openedPaths(page)).toEqual([`${MOCK_DOWNLOADS_DIR}/sample.pdf`]);
 
       // Tab reaches a button: Enter presses it.
       await page.locator('button[title^="Refresh"]').focus();
       await page.keyboard.press('Enter');
       await expect(page.locator('[data-testid="file-item"][data-name="sample.pdf"]')).toBeVisible();
-      expect(await shellOpenPaths(page)).toEqual([`${MOCK_DOWNLOADS_DIR}/sample.pdf`]);
+      expect(await openedPaths(page)).toEqual([`${MOCK_DOWNLOADS_DIR}/sample.pdf`]);
 
       // A clicked button keeps the focus in Chromium. The arrow keys give the keyboard to the files.
       await page.locator('button[title^="Refresh"]').click();
       await expect(page.locator('[data-testid="file-item"][data-name="sample.pdf"]')).toBeVisible();
       await page.keyboard.press('ArrowDown');
       await page.keyboard.press('Enter');
-      await expect.poll(async () => (await shellOpenPaths(page)).length).toBe(2);
+      await expect.poll(async () => (await openedPaths(page)).length).toBe(2);
     });
   });
 });

@@ -137,6 +137,7 @@ pub fn run() {
             commands::clear_thumbnail_cache,
             commands::reveal_in_file_browser,
             commands::open_path,
+            commands::open_paths,
             commands::new_window,
             commands::open_folder_size_window,
             commands::folder_size_window_ready,
