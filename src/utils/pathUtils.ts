@@ -1,4 +1,5 @@
 import { getPlatform } from '@/hooks/usePlatform';
+import { buildArchiveUri, isArchiveUri, parseArchiveUri } from '@/utils/archiveUri';
 
 /**
  * Extract the filename/basename from a path.
@@ -22,6 +23,27 @@ export function dirname(path: string): string {
   const lastSlash = normalized.lastIndexOf('/');
   if (lastSlash <= 0) return '/';
   return normalized.substring(0, lastSlash);
+}
+
+/**
+ * The folder that holds `path`, or undefined at a root: `/`, a Windows drive,
+ * or the root of a remote such as `smb://server`.
+ */
+export function parentPath(path: string): string | undefined {
+  if (isArchiveUri(path)) {
+    const archive = parseArchiveUri(path);
+    if (!archive) return undefined;
+    // The root of an archive stands for the archive file, so the folder above it holds that file.
+    if (archive.path === '/') return parentPath(archive.src);
+    return buildArchiveUri(archive.src, archive.path.slice(0, archive.path.lastIndexOf('/')));
+  }
+  if (!path || path === '/') return undefined;
+  const normalized = path.replace(/\\/g, '/').replace(/\/+$/g, '') || '/';
+  if (normalized === '/') return undefined;
+  if (/^[A-Za-z]:$/.test(normalized)) return undefined;
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^/]*$/.test(normalized)) return undefined;
+  const lastSlash = normalized.lastIndexOf('/');
+  return lastSlash <= 0 ? '/' : normalized.slice(0, lastSlash);
 }
 
 /**

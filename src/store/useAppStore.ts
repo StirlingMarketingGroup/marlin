@@ -27,11 +27,11 @@ import { open as openShell } from '@tauri-apps/plugin-shell';
 import { ask, message, open as openDialog } from '@tauri-apps/plugin-dialog';
 import { getPlatform } from '@/hooks/usePlatform';
 import { getExtractableArchiveFormat, isArchiveFile, isMacOSBundle } from '@/utils/fileTypes';
-import { basename, resolveTypedPath } from '@/utils/pathUtils';
+import { basename, parentPath, resolveTypedPath } from '@/utils/pathUtils';
 import { useToastStore } from './useToastStore';
 import { useUndoStore, pushUndoAndShowToast } from './useUndoStore';
 import { parseGoogleDriveUrl } from '@/utils/googleDriveUrl';
-import { buildArchiveUri, getArchiveParentUri, isArchiveUri } from '@/utils/archiveUri';
+import { buildArchiveUri, parseArchiveUri } from '@/utils/archiveUri';
 import { withGoogleSignInCheck } from '@/utils/googleSignIn';
 import { withSftpHostKeyCheck } from '@/utils/sftpHostKey';
 import { DEFAULT_THEME_IDS } from '@/themes';
@@ -250,6 +250,9 @@ interface AppState {
   streamingSessionId: string | null;
   streamingTotalCount: number | null;
   isStreamingComplete: boolean;
+  // False while a local listing still waits for sizes and dates. They arrive after the
+  // names and can reorder the list.
+  isMetadataComplete: boolean;
   gitStatus: GitStatus | null;
   gitStatusLoading: boolean;
   gitStatusError?: string;
@@ -338,13 +341,12 @@ interface AppState {
   setFilterText: (text: string) => void;
   appendToFilter: (char: string) => void;
   clearFilter: () => void;
-  navigateTo: (path: string) => Promise<void>;
+  navigateTo: (path: string, options?: { reveal?: string }) => Promise<void>;
   goBack: () => void;
   goForward: () => void;
   canGoBack: () => boolean;
   canGoForward: () => boolean;
   goUp: () => void;
-  canGoUp: () => boolean;
   toggleHiddenFiles: (forceValue?: boolean) => Promise<void>;
   toggleFoldersFirst: () => Promise<void>;
   refreshCurrentDirectory: () => Promise<void>;
@@ -415,6 +417,10 @@ interface AppState {
   beginRenameSelected: () => void;
   cancelRename: () => Promise<void>;
   renameFile: (newName: string) => Promise<void>;
+  // The item to select and scroll to once it is listed: set by `navigateTo` with `reveal`,
+  // and by creating, pasting, or extracting an item. It is a full path, so it matches only
+  // in the folder that holds it. The next navigation replaces it. A target that is not
+  // shown stays until then, so turning hidden files on still selects it.
   pendingRevealTarget?: string;
   setPendingRevealTarget: (path?: string) => void;
 
@@ -590,6 +596,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   streamingSessionId: null,
   streamingTotalCount: null,
   isStreamingComplete: true,
+  isMetadataComplete: true,
   gitStatus: null,
   gitStatusLoading: false,
   gitStatusError: undefined,
@@ -758,7 +765,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       showFilterInput: false,
     }),
 
-  navigateTo: async (path) => {
+  navigateTo: async (path, options) => {
     // Cancel any in-flight thumbnail generation from the previous directory
     void invoke('cancel_all_thumbnails');
 
@@ -802,6 +809,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           showFilterInput: false,
           justCreatedPath: undefined,
           renameTargetPath: undefined,
+          pendingRevealTarget: options?.reveal,
         });
         // Explicitly refresh the directory for Google Drive URLs
         await get().refreshCurrentDirectory();
@@ -837,6 +845,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       showFilterInput: false,
       justCreatedPath: undefined,
       renameTargetPath: undefined,
+      pendingRevealTarget: options?.reveal,
     });
 
     // For URI paths (smb://, gdrive://, archive://, etc.), explicitly refresh the directory
@@ -868,6 +877,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         historyIndex: newIndex,
         justCreatedPath: undefined,
         renameTargetPath: undefined,
+        pendingRevealTarget: undefined,
       });
       const scheme = getUriScheme(newPath);
       if (!scheme || scheme === 'file') {
@@ -894,6 +904,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         historyIndex: newIndex,
         justCreatedPath: undefined,
         renameTargetPath: undefined,
+        pendingRevealTarget: undefined,
       });
       const scheme = getUriScheme(newPath);
       if (!scheme || scheme === 'file') {
@@ -914,38 +925,11 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   goUp: () => {
     const { currentPath, navigateTo } = get();
-    if (isArchiveUri(currentPath)) {
-      const parent = getArchiveParentUri(currentPath);
-      if (parent) {
-        navigateTo(parent);
-      }
-      return;
-    }
-    // Handle POSIX and basic Windows paths
-    if (!currentPath || currentPath === '/') return;
-    // Normalize backslashes to slashes for finding parent
-    const normalized = currentPath.replace(/\\/g, '/').replace(/\/+$/g, '') || '/';
-    // If after trimming it's root, nothing to do
-    if (normalized === '/') return;
-    // Windows drive root like C:/
-    const driveRootMatch = normalized.match(/^([A-Za-z]:)(\/$)?$/);
-    if (driveRootMatch) return;
-    const lastSlash = normalized.lastIndexOf('/');
-    const parent = lastSlash <= 0 ? '/' : normalized.slice(0, lastSlash) || '/';
-    navigateTo(parent);
-  },
-
-  canGoUp: () => {
-    const { currentPath } = get();
-    if (isArchiveUri(currentPath)) {
-      return Boolean(getArchiveParentUri(currentPath));
-    }
-    if (!currentPath || currentPath === '/') return false;
-    const normalized = currentPath.replace(/\\/g, '/').replace(/\/+$/g, '') || '/';
-    if (normalized === '/') return false;
-    const driveRootMatch = normalized.match(/^([A-Za-z]:)(\/$)?$/);
-    if (driveRootMatch) return false;
-    return true;
+    const parent = parentPath(currentPath);
+    if (parent === undefined) return;
+    // Leaving the root of an archive lands in the folder that holds the archive file.
+    const archive = parseArchiveUri(currentPath);
+    navigateTo(parent, { reveal: archive?.path === '/' ? archive.src : currentPath });
   },
 
   toggleHiddenFiles: async (forceValue?: boolean) => {
@@ -1132,6 +1116,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         streamingSessionId: sessionId,
         streamingTotalCount: null,
         isStreamingComplete: false,
+        isMetadataComplete: false,
       });
 
       // Start streaming - pass the session ID to the backend
@@ -1170,7 +1155,12 @@ export const useAppStore = create<AppState>((set, get) => ({
       const msg = err instanceof Error ? err.message : String(err);
       console.error('❌ refreshCurrentDirectoryStreaming failed:', msg);
       setError(msg);
-      set({ isStreamingComplete: true, loading: false, streamingSessionId: null });
+      set({
+        isStreamingComplete: true,
+        isMetadataComplete: true,
+        loading: false,
+        streamingSessionId: null,
+      });
     }
     // Note: We don't set loading=false in finally because streaming continues in background
     // It will be set to false when isStreamingComplete becomes true via appendStreamingBatch
@@ -1225,7 +1215,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         };
       });
 
-      return { files: uniqueFilesByPath(updatedFiles) };
+      return { files: uniqueFilesByPath(updatedFiles), isMetadataComplete: batch.isFinal };
     });
   },
 
@@ -1260,6 +1250,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({
         streamingSessionId: null,
         isStreamingComplete: true,
+        isMetadataComplete: true,
       });
     }
   },

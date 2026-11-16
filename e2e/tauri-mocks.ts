@@ -5,6 +5,10 @@
 // Export constants for use in test files
 export const MOCK_HOME_DIR = '/Users/testuser';
 export const MOCK_DOWNLOADS_DIR = `${MOCK_HOME_DIR}/Downloads`;
+// A folder of many subfolders, so going up has to scroll the one that was left.
+export const MOCK_BIG_DIR = `${MOCK_HOME_DIR}/BigFolder`;
+export const MOCK_BIG_COUNT = 600;
+export const MOCK_BIG_LAST = `dir-${String(MOCK_BIG_COUNT - 1).padStart(3, '0')}`;
 // Not listed in the home folder: a spec opens it by typing the path.
 export const MOCK_LONG_NAME_DIR = `${MOCK_HOME_DIR}/LongName`;
 // Not listed in the home folder: a spec opens it through the window start path.
@@ -75,6 +79,23 @@ export function getTauriMockScript(): string {
       const mockDownloadsDir = '${MOCK_DOWNLOADS_DIR}';
       const mockLongNameDir = '${MOCK_LONG_NAME_DIR}';
       const mockPercentDir = '${MOCK_PERCENT_DIR}';
+      const mockBigDir = '${MOCK_BIG_DIR}';
+      const mockBigFolders = Array.from({ length: ${MOCK_BIG_COUNT} }, (_, index) => {
+        const name = 'dir-' + String(index).padStart(3, '0');
+        return {
+          name,
+          path: mockBigDir + '/' + name,
+          is_directory: true,
+          is_hidden: false,
+          is_symlink: false,
+          is_git_repo: false,
+          size: 0,
+          modified: new Date().toISOString(),
+          created: new Date().toISOString(),
+          extension: null,
+          permissions: { read: true, write: true, execute: true },
+        };
+      });
 
       const mockFiles = [
         {
@@ -267,6 +288,8 @@ export function getTauriMockScript(): string {
           files = mockLongNameFiles;
         } else if (normalizedPath === mockPercentDir) {
           files = mockPercentFiles;
+        } else if (normalizedPath === mockBigDir) {
+          files = mockBigFolders;
         } else if (normalizedPath === mockHomeDir || normalizedPath === '/') {
           files = mockFiles;
         } else {
@@ -376,6 +399,13 @@ export function getTauriMockScript(): string {
             };
             for (const handler of eventListeners) {
               runCallback(handler, { event: 'directory-batch', payload });
+            }
+            // The backend ends every stream with a final metadata batch.
+            for (const handler of listeners.get('metadata-batch') || []) {
+              runCallback(handler, {
+                event: 'metadata-batch',
+                payload: { sessionId, updates: [], isFinal: true },
+              });
             }
           }, 50);
         });

@@ -32,6 +32,7 @@ import { isGoogleDrivePath, parseGoogleDrivePathEmail } from '@/utils/googleDriv
 import { isSmbPath } from '@/utils/smbPath';
 import { useScrollContainerRef } from '@/contexts/ScrollContext';
 import { useSortedFiles } from '@/hooks/useSortedFiles';
+import { useRevealTarget } from '@/hooks/useRevealTarget';
 
 interface FileListProps {
   files: FileItem[];
@@ -194,8 +195,6 @@ export default function FileList({ files, preferences }: FileListProps) {
     selectionAnchor,
     setSelectionAnchor,
     setSelectionLead,
-    pendingRevealTarget,
-    setPendingRevealTarget,
     openItem,
     isStreamingComplete,
     streamingTotalCount,
@@ -573,40 +572,7 @@ export default function FileList({ files, preferences }: FileListProps) {
     overscan: 5,
   });
 
-  useEffect(() => {
-    if (!pendingRevealTarget) return;
-    const targetPath = pendingRevealTarget;
-    if (!filteredFiles.some((file) => file.path === targetPath)) return;
-
-    setSelectedFiles([targetPath]);
-    setSelectionAnchor(targetPath);
-    setSelectionLead(targetPath);
-
-    requestAnimationFrame(() => {
-      const container = listRef.current;
-      if (!container) return;
-      const nodes = container.querySelectorAll<HTMLElement>('[data-file-item="true"]');
-      for (const el of nodes) {
-        if (el.getAttribute('data-file-path') === targetPath) {
-          try {
-            el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-          } catch (error) {
-            console.warn('Failed to scroll list reveal target:', error);
-          }
-          break;
-        }
-      }
-    });
-
-    setPendingRevealTarget(undefined);
-  }, [
-    pendingRevealTarget,
-    filteredFiles,
-    setPendingRevealTarget,
-    setSelectedFiles,
-    setSelectionAnchor,
-    setSelectionLead,
-  ]);
+  useRevealTarget(filteredFiles, listRef, virtualizer, 1);
 
   if (filteredFiles.length === 0) {
     return (

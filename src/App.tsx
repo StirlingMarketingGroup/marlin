@@ -1074,8 +1074,7 @@ function App() {
               path: target,
             }
           );
-          state.setPendingRevealTarget(result.target);
-          state.navigateTo(result.parent);
+          state.navigateTo(result.parent, { reveal: result.target });
         } catch (error) {
           console.warn('Failed to resolve symlink parent from menu:', error);
           useToastStore.getState().addToast({
