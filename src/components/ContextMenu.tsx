@@ -5,6 +5,7 @@ import { useAppStore } from '@/store/useAppStore';
 import { useToastStore } from '@/store/useToastStore';
 import { openFolderSizeWindow } from '@/store/useFolderSizeStore';
 import { getSuggestedZipName } from '@/utils/zipNaming';
+import { matchesFilter } from '@/utils/filterMatch';
 import { getArchiveBaseName, isArchiveFile } from '@/utils/fileTypes';
 import { getShowInLabel, isLocalPath, revealInFileBrowser } from '@/utils/fileBrowser';
 
@@ -118,8 +119,7 @@ export default function ContextMenu({ x, y, isFileContext, onRequestClose }: Con
   const visibleItems = useMemo(() => {
     const hiddenFiltered = prefs.showHidden ? files : files.filter((file) => !file.is_hidden);
     if (!filterText) return hiddenFiltered;
-    const needle = filterText.toLowerCase();
-    return hiddenFiltered.filter((file) => file.name.toLowerCase().includes(needle));
+    return hiddenFiltered.filter((file) => matchesFilter(file.name, filterText));
   }, [files, filterText, prefs.showHidden]);
 
   const suggestedZipName = useMemo(

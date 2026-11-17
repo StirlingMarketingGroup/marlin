@@ -4,6 +4,7 @@ import { useAppStore } from '@/store/useAppStore';
 import { usePlatform } from '@/hooks/usePlatform';
 import { useSortedFiles } from '@/hooks/useSortedFiles';
 import type { FileItem } from '@/types';
+import { matchesFilter } from '@/utils/filterMatch';
 
 // Stable empty array to avoid infinite re-render loop in Zustand selector
 const EMPTY_FILES: FileItem[] = [];
@@ -36,7 +37,7 @@ export default function FilterInput() {
       ? sortedFiles
       : sortedFiles.filter((file) => !file.is_hidden);
     return filterText
-      ? hiddenFiltered.filter((file) => file.name.toLowerCase().includes(filterText.toLowerCase()))
+      ? hiddenFiltered.filter((file) => matchesFilter(file.name, filterText))
       : hiddenFiltered;
   }, [sortedFiles, preferences.showHidden, filterText]);
   const matchCount = filteredFiles.length;

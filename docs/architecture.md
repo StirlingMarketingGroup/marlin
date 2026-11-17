@@ -2,7 +2,7 @@
 
 Marlin is one Tauri 2 desktop app: a Rust backend that owns all file access, and a React frontend that draws the UI in a webview. The frontend never touches the disk. It calls a Rust command and gets data back.
 
-**Covers:** `src-tauri/src/lib.rs`, `src-tauri/src/commands.rs`, `src-tauri/src/menu.rs`, `src-tauri/Cargo.toml`, `src-tauri/crates/`, `src-tauri/src/fs_watcher.rs`, `src/main.tsx`, `src/App.tsx`, `src/store/`, `src/windows/`, `src/components/PathBar.tsx`, `src/components/FilterInput.tsx`, `src/hooks/useDirectoryWatcher.ts`, `src/hooks/useFileAnimations.ts`, `src/hooks/useRevealTarget.ts`, `src/components/MainPanel.tsx`, `src/components/FileGrid.tsx`, `src/components/FileList.tsx`
+**Covers:** `src-tauri/src/lib.rs`, `src-tauri/src/commands.rs`, `src-tauri/src/menu.rs`, `src-tauri/Cargo.toml`, `src-tauri/crates/`, `src-tauri/src/fs_watcher.rs`, `src/main.tsx`, `src/App.tsx`, `src/store/`, `src/windows/`, `src/components/PathBar.tsx`, `src/components/FilterInput.tsx`, `src/hooks/useDirectoryWatcher.ts`, `src/hooks/useFileAnimations.ts`, `src/hooks/useRevealTarget.ts`, `src/components/MainPanel.tsx`, `src/components/FileGrid.tsx`, `src/components/FileList.tsx`, `src/utils/filterMatch.ts`, `src/components/FileNameDisplay.tsx`
 **Checked against the code:** 2026-11-17
 
 ## Processes
@@ -73,7 +73,8 @@ The workspace has five library-only crates under `src-tauri/crates/`. `marlin-vf
 
 **Filter.** `src/components/FilterInput.tsx` is the box at the bottom right. Typing with the focus on the files shows the box and appends to `filterText`. Cmd/Ctrl+F shows it empty, so a name can be pasted. When the box is already open, the shortcut focuses it and selects its text. Escape or the X button clears the text and hides the box. An empty box stays open.
 
-- A file is shown when it passes two tests: it is not hidden (unless `showHidden` is on), and its name contains the text, ignoring case. The views, the box, select all, and the suggested zip name each apply this rule inline.
+- A file is shown when it passes two tests. It is not hidden, unless `showHidden` is on. Its name passes `matchesFilter` in `src/utils/filterMatch.ts`. Text with no `*` is a contains test, ignoring case. Text with a `*` must match the whole name, and `*` stands for any run of characters. `?` is a plain character, and `*` has no escape, so a `*` in the text also matches a `*` in a name. The test runs on the real name, not the name as shown: on macOS `*.app` matches an app, and `*ari` does not match `Safari.app`.
+- The views, the box, select all, and the suggested zip name each call `matchesFilter`. The highlight in `FileNameDisplay.tsx` marks the ranges from `filterMatchRanges`, run on the name as shown, so a shortened name that no longer matches gets no highlight.
 - The box sorts with `useSortedFiles`, as the views do. So its match count is the number of rows on screen, and Down or Up from the box selects the first or last row.
 
 **State.** Zustand stores in `src/store/`:

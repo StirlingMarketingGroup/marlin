@@ -21,7 +21,7 @@ A fast, no-nonsense file browser. Gets out of your way and just does files well.
 
 - Grid view with thumbnails and list view
 - Editable path bar with autocomplete (Cmd/Ctrl+L jumps to it)
-- Type-to-filter: just start typing to filter files instantly, or press Cmd/Ctrl+F to open the filter and paste a name
+- Type-to-filter: just start typing to filter files instantly, or press Cmd/Ctrl+F to open the filter and paste a name. `*` is a wildcard (`*.ai` matches names that end in `.ai`)
 - Marquee selection: click and drag to select multiple files
 - Select all with Cmd/Ctrl+A
 - Collapsible sidebar with file tree

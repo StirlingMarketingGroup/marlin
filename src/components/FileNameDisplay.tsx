@@ -1,10 +1,11 @@
-import { memo, useEffect, useRef, useState } from 'react';
+import { Fragment, memo, useEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { FileItem } from '../types';
 import QuickTooltip from './QuickTooltip';
 import { truncateTextToWidth } from '@/utils/textMeasure';
 import { truncateToTwoLines } from '@/utils/multiLineTruncate';
 import { formatBytes } from '@/utils/formatBytes';
+import { filterMatchRanges } from '@/utils/filterMatch';
 
 interface FileNameDisplayProps {
   file: FileItem;
@@ -18,28 +19,23 @@ interface FileNameDisplayProps {
 }
 
 function highlightMatch(text: string, highlight: string): React.ReactNode {
-  if (!highlight) return text;
-
-  const lowerText = text.toLowerCase();
-  const lowerHighlight = highlight.toLowerCase();
-  const index = lowerText.indexOf(lowerHighlight);
-
-  if (index === -1) return text;
-
-  const before = text.slice(0, index);
-  const match = text.slice(index, index + highlight.length);
-  const after = text.slice(index + highlight.length);
+  const ranges = filterMatchRanges(text, highlight);
+  if (ranges === null || ranges.length === 0) return text;
 
   return (
     <>
-      {before}
-      <span
-        data-testid="highlight-match"
-        className="bg-yellow-500/40 text-yellow-200 rounded-sm px-0.5 -mx-0.5"
-      >
-        {match}
-      </span>
-      {after}
+      {ranges.map(([start, end], i) => (
+        <Fragment key={start}>
+          {text.slice(i === 0 ? 0 : ranges[i - 1][1], start)}
+          <span
+            data-testid="highlight-match"
+            className="bg-yellow-500/40 text-yellow-200 rounded-sm px-0.5 -mx-0.5"
+          >
+            {text.slice(start, end)}
+          </span>
+        </Fragment>
+      ))}
+      {text.slice(ranges[ranges.length - 1][1])}
     </>
   );
 }

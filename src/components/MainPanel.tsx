@@ -10,6 +10,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { invoke } from '@tauri-apps/api/core';
 import { ScrollContext } from '../contexts/ScrollContext';
 import { getArchiveBaseName, isArchiveFile } from '@/utils/fileTypes';
+import { matchesFilter } from '@/utils/filterMatch';
 import { getPlatform } from '@/hooks/usePlatform';
 import {
   GRID_SIZE_MIN,
@@ -301,9 +302,7 @@ export default function MainPanel() {
             ? state.files
             : state.files.filter((file) => !file.is_hidden);
           const visibleItems = filterText
-            ? hiddenFiltered.filter((file) =>
-                file.name.toLowerCase().includes(filterText.toLowerCase())
-              )
+            ? hiddenFiltered.filter((file) => matchesFilter(file.name, filterText))
             : hiddenFiltered;
           suggestedZipName = getSuggestedZipName({
             selectedItems,
