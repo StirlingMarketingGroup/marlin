@@ -155,8 +155,11 @@ async function ensureLinuxdeployPlugin() {
 }
 
 if (process.platform === 'linux') {
-  await ensureLinuxdeployBinary();
-  await ensureLinuxdeployPlugin();
+  // Only a bundle needs linuxdeploy.
+  if (args[0] === 'build' && !args.includes('--no-bundle')) {
+    await ensureLinuxdeployBinary();
+    await ensureLinuxdeployPlugin();
+  }
 
   if (!env.APPIMAGE_EXTRACT_AND_RUN) {
     env.APPIMAGE_EXTRACT_AND_RUN = '1';

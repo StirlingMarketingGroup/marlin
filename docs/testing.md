@@ -1,8 +1,8 @@
 # Testing
 
-Marlin has static checks and eleven test suites. CI runs the static checks, the unit tests, the end-to-end tests, and the Rust tests that need no mount, server, or account. It does not run the tests that mount for real or that need samba, a server, or an account, so run those yourself when you change that code.
+Marlin has static checks and twelve test suites. CI runs the static checks, the unit tests, the end-to-end tests, and the Rust tests that need no mount, server, or account. It does not run the real-app tests, the tests that mount for real, or the tests that need samba, a server, or an account, so run those yourself when you change that code.
 
-**Covers:** `package.json` (the test scripts), `vitest.config.ts`, `src/test-setup.ts`, `playwright.config.ts`, `e2e/`, `.github/workflows/check.yml`, `.husky/pre-push`, `src-tauri/tests/`, `src-tauri/crates/marlin-smb/tests/`, `src-tauri/crates/marlin-vfs/tests/`, `src-tauri/crates/marlin-gdrive/tests/`, `src-tauri/crates/marlin-test-keychain/`, `src-tauri/crates/marlin-mount/tests/`, `src-tauri/crates/marlin-mount/test-sweep.sh`, `src-tauri/crates/marlin-fuse/tests/`, `src-tauri/crates/marlin-fuse/test-in-docker.sh`, `src-tauri/crates/marlin-fuse/test-on-mac.sh`
+**Covers:** `package.json` (the test scripts), `vitest.config.ts`, `src/test-setup.ts`, `playwright.config.ts`, `e2e/`, `vitest.app.config.ts`, `app-tests/`, `.github/workflows/check.yml`, `.husky/pre-push`, `src-tauri/tests/`, `src-tauri/crates/marlin-smb/tests/`, `src-tauri/crates/marlin-vfs/tests/`, `src-tauri/crates/marlin-gdrive/tests/`, `src-tauri/crates/marlin-test-keychain/`, `src-tauri/crates/marlin-mount/tests/`, `src-tauri/crates/marlin-mount/test-sweep.sh`, `src-tauri/crates/marlin-fuse/tests/`, `src-tauri/crates/marlin-fuse/test-in-docker.sh`, `src-tauri/crates/marlin-fuse/test-on-mac.sh`
 **Checked against the code:** 2026-11-17
 
 ## The suites
@@ -12,6 +12,7 @@ Marlin has static checks and eleven test suites. CI runs the static checks, the 
 | Static checks        | `npm run check`                          | ESLint, Prettier, `tsc`, `cargo check`                          | yes        | nothing                             |
 | Unit                 | `npm run test:run` (`npm test` to watch) | Vitest, Testing Library, jsdom                                  | yes        | nothing                             |
 | End-to-end           | `npm run test:e2e`                       | Playwright, Chromium                                            | yes        | nothing; it starts Vite itself      |
+| Real app             | `npm run test:app`                       | Vitest, WebdriverIO, the app's own WebDriver server             | no         | a Rust toolchain; a display         |
 | Rust                 | `npm run test:rust`                      | `cargo test`                                                    | yes        | a Rust toolchain                    |
 | Mount core           | `npm run test:rust`                      | `cargo test`                                                    | yes        | a Rust toolchain                    |
 | Drive mount provider | `npm run test:rust`                      | `cargo test`                                                    | yes        | a Rust toolchain                    |
@@ -36,9 +37,26 @@ CI skips a job's steps when the files they cover did not change (`check.yml` use
 
 - They live in `e2e/`, one `*.spec.ts` per area.
 - **They do not run the desktop app.** Playwright starts `npm run dev` on port 1420 and opens the frontend in Chromium. `e2e/tauri-mocks.ts` is injected before page load and fakes every Tauri command with an in-memory file tree.
-- So these tests cover the React UI and the store. They cannot catch a bug in Rust or in a real OS integration.
+- So these tests cover the React UI and the store. They cannot catch a bug in Rust or in a real OS integration. The [real-app tests](#real-app-tests) can.
 - Locally, Playwright reuses a server already on port 1420. In CI it starts a fresh one, uses one worker, and retries a failed test twice.
 - A new backend command that the UI calls on load needs a fake in `tauri-mocks.ts`, or the page fails in every spec.
+
+## Real-app tests
+
+These start the real app and drive its window: click, type, read the page, take a screenshot. [Decision 0004](decisions/0004-real-app-tests.md) says why they work this way.
+
+- **Run them with `npm run test:app`.** It builds a test build of the app, then runs every `app-tests/*.test.ts` with Vitest. To run one file, add its path: `npm run test:app -- app-tests/directory-watcher.test.ts`.
+- **The test build** is a debug build with the Cargo feature `app-test`, in its own folder, `src-tauri/target/app-test/`. The feature serves WebDriver on a local port and keeps secrets in memory, not in the OS keychain. It does not compile in a release build. The first build takes a few minutes and about 8 GB. Later runs take seconds to build.
+- **It runs beside `npm run tauri dev`.** It never touches `src-tauri/target/debug/`. Its window opens on screen but does not take the keyboard.
+- **Each test file starts its own app** with `startApp()` from `app-tests/app.ts`, and stops it in `afterAll`. The app gets a temporary home folder and temp folder, and sees only a short list of environment variables. So it starts with default settings and no accounts, and it cannot read or change yours. `startApp()` returns once the app has opened its first folder. It returns `browser` (a WebdriverIO client), `files` (an empty folder to put test files in), and `stop`.
+- **The clipboard is the real one.** A test that copies or cuts replaces what you copied, and a test that pastes can read it.
+- **A test acts like a user.** It finds elements by `data-testid` and the `data-*` attributes on a file row, as the end-to-end tests do. `await browser.saveScreenshot('/tmp/shot.png')` saves a picture of the window. `browser.execute` runs a script in the page; use it to wait for app state that has no sign on screen, not to skip the UI.
+- **A wait for a change on disk needs a long timeout on macOS.** macOS can hand the app its file events minutes late on a busy machine (see "How a change on disk reaches the list" in [Architecture](architecture.md), #577). `directory-watcher.test.ts` waits 120 seconds for each change, and can still fail on a Mac that busy. On Linux the events come at once.
+- **On Linux, run `app-tests/test-in-docker.sh`.** It runs the same command in a container with a virtual display. Use it for a change whose Linux behavior a Mac cannot show, like the folder watcher.
+- **What it cannot reach:** the app menu, the native context menu, a drag out of the window, and system dialogs. WebDriver sees the page only. A test that mounts an account is also out for now: the mount helper is its own process and uses the real keychain (#580).
+- **CI does not run it yet** (#578).
+
+**An agent checks its own work with this suite.** When a change can only be seen in the running app, write a test for it in `app-tests/`, run it, and keep the test in the branch. For a one-off look, write a throwaway test that saves a screenshot, read the picture, and delete the test.
 
 ## Rust tests
 
@@ -54,7 +72,7 @@ CI skips a job's steps when the files they cover did not change (`check.yml` use
 - `src-tauri/crates/marlin-fuse/test-on-mac.sh` runs the macOS mount adapter's tests on a Mac: the same mount tests through macFUSE, the helper's tests, and `test-sweep.sh`. It needs macFUSE 5 with both switches on, and CI does not run it. On a Mac, a plain `cargo test -p marlin-fuse` runs only the unit tests of the macOS half. See [macOS mount adapter](mount-macos.md).
 - `scripts/check-bundled-mount-helper.mjs` is not a `cargo test`. The release dry run in CI runs it on each built bundle: it starts the helper from the macOS app or the `deb` and checks that it answers. See [Mount helper](mount-helper.md#building-and-bundling).
 - `cargo test -p marlin-smb` runs the SMB helper's test. It starts the built helper, sends a `ping`, and checks the reply and a clean exit. It needs samba installed, and CI does not run it.
-- A test that uses the keychain calls `marlin_test_keychain::install()` first. The `marlin-test-keychain` crate (`src-tauri/crates/marlin-test-keychain/`) is an in-memory keychain that takes the place of the real one. Only tests link it: the app's unit tests and the tests of `marlin-gdrive` and `marlin-mount`. There is one for the whole test process, because the `keyring` crate holds one store per process. A unit test that reaches for the real Google accounts file gets an error, because reading that file can rewrite it.
+- A test that uses the keychain calls `marlin_test_keychain::install()` first. The `marlin-test-keychain` crate (`src-tauri/crates/marlin-test-keychain/`) is an in-memory keychain that takes the place of the real one. Tests link it: the app's unit tests and the tests of `marlin-gdrive` and `marlin-mount`. The one build that links it is the test build of the app (the `app-test` feature), for the [real-app tests](#real-app-tests). There is one for the whole test process, because the `keyring` crate holds one store per process. A unit test that reaches for the real Google accounts file gets an error, because reading that file can rewrite it.
 - `src-tauri/tests/smb_integration.rs` holds manual tests that need a real SMB server. They are marked `#[ignore]`. The file's header lists the environment variables and the command to run them.
 - `src-tauri/tests/gdrive_integration.rs` holds manual tests that call the live Drive API as the first account Marlin lists (the service account when `GOOGLE_SERVICE_ACCOUNT_KEY_FILE` is set). They are marked `#[ignore]`, and they read the real keychain. The file's header lists the command, the one environment variable, and what to do before the first run.
 
@@ -64,4 +82,5 @@ CI skips a job's steps when the files they cover did not change (`check.yml` use
 - **Store logic:** a unit test.
 - **A user flow in the UI:** an end-to-end test.
 - **Rust logic:** a Rust unit test next to the code.
-- **Real desktop behavior** (native drag, the clipboard, an actual remote server): no automated suite covers it. Test it by hand in `npm run tauri dev` and say so in the PR.
+- **Rust and the frontend working together, or a real OS integration the page shows** (the folder watcher, a real listing, a file operation): a real-app test.
+- **Native drag, the app menu, system dialogs, an actual remote server:** no automated suite covers them. Test them by hand in `npm run tauri dev` and say so in the PR.

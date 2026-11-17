@@ -76,10 +76,21 @@ fn apply_linux_menu_css() {
     });
 }
 use tauri::Manager;
+
+#[cfg(all(feature = "app-test", not(debug_assertions)))]
+compile_error!("The `app-test` feature opens a control port. Build it in debug only.");
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     ensure_rustls_crypto_provider();
-    tauri::Builder::default()
+    // The test app must never read or write the developer's real keychain.
+    #[cfg(feature = "app-test")]
+    marlin_test_keychain::install();
+    let builder = tauri::Builder::default();
+    // Registered on the builder, not in `setup`: the plugin adds a script to each webview as it is created.
+    #[cfg(feature = "app-test")]
+    let builder = builder.plugin(tauri_plugin_wdio_webdriver::init());
+    builder
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_shell::init())
