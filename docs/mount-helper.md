@@ -22,11 +22,12 @@ The design is in [decision 0001](decisions/0001-mount-architecture.md), choices 
 
 The wire types and the client are in a second crate, `marlin-mount-client`. The helper and the app both link it, so the app never links the helper's provider and adapter code.
 
-| File          | Holds                                                                                      |
-| ------------- | ------------------------------------------------------------------------------------------ |
-| `protocol.rs` | The wire types. The helper exports them again as `marlin_mount::protocol`.                 |
-| `client.rs`   | `Client`, which connects to the helper or starts one, and `shutdown`. Unix only.           |
-| `lib.rs`      | `default_socket`, the one definition of the socket path that the helper and the app share. |
+| File            | Holds                                                                                      |
+| --------------- | ------------------------------------------------------------------------------------------ |
+| `protocol.rs`   | The wire types. The helper exports them again as `marlin_mount::protocol`.                 |
+| `client.rs`     | `Client`, which connects to the helper or starts one, and `shutdown`. Unix only.           |
+| `lib.rs`        | `default_socket`, the one definition of the socket path that the helper and the app share. |
+| `mount_name.rs` | `build`, the folder name an account mounts at.                                             |
 
 `marlin-mount` and `Client` are Unix only. A Windows named pipe comes with the Windows adapter (#375). On Windows the five commands fail with the message "Marlin cannot mount on this OS yet."
 
@@ -165,7 +166,17 @@ The types are in `src/types/index.ts`. A failed command rejects with a `MountCom
 
 A mount is keyed by provider and account. Its mount point is the mount folder plus `name`.
 
-**The caller sends the name.** Decision 0001 says a mount's name is built once and stored with the account. So the helper checks the name and never invents one. Nothing builds names yet: that is #526.
+**The caller sends the name.** Decision 0001 says a mount's name is built once and stored with the account. So the helper checks the name and never invents one. The app builds it with `mount_name::build` in `marlin-mount-client` when an account is added, and for each stored account that has none.
+
+The name follows these rules:
+
+- It starts with the provider, a hyphen, and the account, for example `gdrive-ana@example.com`.
+- A character a folder name cannot hold becomes `_`. That is a control character, and `<` `>` `:` `"` `/` `\` `|` `?` `*`.
+- It is at most 255 bytes, cut on a character boundary.
+- A `.` or a space at the end becomes `_`.
+- A name that matches another account's stored name, ignoring letter case, gets `-2`, then `-3`, and so on. The helper compares names the same way. Neither sees two names that differ only by Unicode form as one name (#542).
+- The result is a valid folder name on Linux, macOS, and Windows, because the accounts file can move between machines.
+- The app stores the name and never builds it again.
 
 | State           | Meaning                                                                                              |
 | --------------- | ---------------------------------------------------------------------------------------------------- |

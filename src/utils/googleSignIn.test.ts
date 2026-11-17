@@ -42,7 +42,7 @@ describe('withGoogleSignInCheck', () => {
 
   it('signs in and runs the call again', async () => {
     const attempt = attemptThatFailsUntilSignedIn('listing');
-    const signIn = vi.fn(() => Promise.resolve({ email }));
+    const signIn = vi.fn(() => Promise.resolve({ email, mountName: `gdrive-${email}` }));
     mockAsk.mockResolvedValue(true);
 
     await expect(withGoogleSignInCheck(email, signIn, attempt)).resolves.toBe('listing');
@@ -77,7 +77,9 @@ describe('withGoogleSignInCheck', () => {
 
   it('rejects when the user signs in as a different account', async () => {
     const attempt = attemptThatFailsUntilSignedIn('listing');
-    const signIn = vi.fn(() => Promise.resolve({ email: 'other@example.com' }));
+    const signIn = vi.fn(() =>
+      Promise.resolve({ email: 'other@example.com', mountName: 'gdrive-other@example.com' })
+    );
     mockAsk.mockResolvedValue(true);
 
     await expect(withGoogleSignInCheck(email, signIn, attempt)).rejects.toThrow(
@@ -90,7 +92,7 @@ describe('withGoogleSignInCheck', () => {
   it('asks once when two calls fail for the same account', async () => {
     const first = attemptThatFailsUntilSignedIn('one');
     const second = attemptThatFailsUntilSignedIn('two');
-    const signIn = vi.fn(() => Promise.resolve({ email }));
+    const signIn = vi.fn(() => Promise.resolve({ email, mountName: `gdrive-${email}` }));
     mockAsk.mockResolvedValue(true);
 
     const results = await Promise.all([
@@ -104,7 +106,7 @@ describe('withGoogleSignInCheck', () => {
   });
 
   it('asks again after the first sign-in has settled', async () => {
-    const signIn = vi.fn(() => Promise.resolve({ email }));
+    const signIn = vi.fn(() => Promise.resolve({ email, mountName: `gdrive-${email}` }));
     mockAsk.mockResolvedValue(true);
 
     await withGoogleSignInCheck(email, signIn, attemptThatFailsUntilSignedIn('one'));

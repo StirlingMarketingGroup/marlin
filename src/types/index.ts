@@ -279,6 +279,7 @@ export interface GoogleAccountInfo {
   email: string;
   displayName?: string | null;
   photoUrl?: string | null;
+  mountName: string | null; // The folder name the account mounts at. Null only for the service account.
 }
 
 export interface ResolveGoogleDriveUrlResult {

@@ -42,7 +42,7 @@ function getGdriveMockScript(): string {
       const mockFolderName = '${MOCK_FOLDER_NAME}';
 
       const mockGoogleAccounts = [
-        { email: mockEmail, displayName: null }
+        { email: mockEmail, displayName: null, mountName: 'gdrive-' + mockEmail }
       ];
 
       const mockGdriveVirtualFolders = [
@@ -317,7 +317,7 @@ function getSignInNeededMockScript(answer: 'Sign In' | 'Cancel'): string {
         if (cmd === 'add_google_account') {
           state.signIns.push(args);
           state.needed = false;
-          return { email: '${MOCK_EMAIL}', displayName: null };
+          return { email: '${MOCK_EMAIL}', displayName: null, mountName: 'gdrive-${MOCK_EMAIL}' };
         }
         return gdriveInvoke(cmd, args);
       };
