@@ -3,8 +3,7 @@ import path from 'node:path';
 import { afterAll, beforeAll, expect, test } from 'vitest';
 import { startApp } from './app';
 
-// macOS can hand the app its file events minutes late when the machine is busy (#577).
-const eventWait = { timeout: 120_000 };
+const eventWait = { timeout: 10_000 };
 
 let app: Awaited<ReturnType<typeof startApp>>;
 
@@ -19,7 +18,7 @@ afterAll(async () => {
 // The #194 case: a browser downloads to a temporary name and renames the file when it is done.
 test(
   'a file written under a temporary name and then renamed shows its final name without a refresh',
-  { timeout: 300_000 },
+  { timeout: 60_000 },
   async () => {
     const { browser, files } = app;
     const row = (name: string) => browser.$(`[data-file-item="true"][data-name="${name}"]`);
