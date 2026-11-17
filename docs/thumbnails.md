@@ -3,7 +3,7 @@
 The backend makes every thumbnail. The frontend asks for one by path and size, and gets back a data URL. Results are cached in memory and on disk, keyed by the file's identity, so a changed file gets a new thumbnail.
 
 **Covers:** `src-tauri/src/thumbnails/`, the thumbnail commands in `src-tauri/src/commands.rs`, `src/hooks/useThumbnail.ts`
-**Checked against the code:** 2026-11-11
+**Checked against the code:** 2026-11-16
 
 ## Flow
 
@@ -33,12 +33,15 @@ Leaving a folder calls `cancel_all_thumbnails`. A row that scrolls away calls `c
 
 ## Limits
 
-| Limit                 | Value                        | Where       |
-| --------------------- | ---------------------------- | ----------- |
-| Requests in flight    | one per CPU core             | `worker.rs` |
-| Generator thread pool | one per CPU core, at least 4 | `worker.rs` |
-| Memory cache          | 1,000 entries or 100 MiB     | `cache.rs`  |
-| Disk cache            | 500 MiB                      | `cache.rs`  |
+| Limit                 | Value                        | Where               |
+| --------------------- | ---------------------------- | ------------------- |
+| Requests in flight    | one per CPU core             | `worker.rs`         |
+| Generator thread pool | one per CPU core, at least 4 | `worker.rs`         |
+| ZPL renders in flight | one                          | `generators/zpl.rs` |
+| Memory cache          | 1,000 entries or 100 MiB     | `cache.rs`          |
+| Disk cache            | 500 MiB                      | `cache.rs`          |
+
+ZPL labels render one at a time because the Go library under `zpl-rs` is not safe to call from two threads. Two renders at once abort the app ([go-zpl issue 33](https://github.com/StirlingMarketingGroup/go-zpl/issues/33)).
 
 The memory cache drops the least recently used entry first. The disk cache is in `<cache dir>/marlin_thumbnails`.
 

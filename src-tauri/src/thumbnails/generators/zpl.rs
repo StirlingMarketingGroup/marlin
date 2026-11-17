@@ -5,6 +5,8 @@ use std::path::Path;
 use std::sync::Mutex;
 
 /// Mutex to serialize ZPL renders — the underlying Go library is not thread-safe.
+/// Two renders at once make the Go side panic, which aborts the whole process
+/// (go-zpl issue 33). Every call into `zpl_rs` holds this lock, tests included.
 /// Recovery from poisoning is safe since the lock guards no shared state.
 static RENDER_LOCK: Mutex<()> = Mutex::new(());
 
@@ -92,6 +94,7 @@ mod tests {
     #[test]
     fn test_zpl_render_basic() {
         let zpl = "^XA^FO50,50^A0N,30,30^FDHello!^FS^XZ";
+        let _lock = RENDER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let png = zpl_rs::render(zpl).expect("zpl_rs::render failed");
         assert!(png.len() > 8, "PNG too small: {} bytes", png.len());
         assert_eq!(&png[0..4], &[0x89, b'P', b'N', b'G'], "Not a valid PNG");
@@ -101,6 +104,7 @@ mod tests {
     fn test_zpl_render_bytes() {
         // render_bytes should handle the same content as render
         let zpl = b"^XA^FO50,50^A0N,30,30^FDHello!^FS^XZ";
+        let _lock = RENDER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let png = zpl_rs::render_bytes(zpl).expect("zpl_rs::render_bytes failed");
         assert!(png.len() > 8, "PNG too small: {} bytes", png.len());
         assert_eq!(&png[0..4], &[0x89, b'P', b'N', b'G'], "Not a valid PNG");
@@ -130,6 +134,44 @@ mod tests {
         assert!(result.data_url.starts_with("data:image/png;base64,"));
         assert!(result.image_width.unwrap() > 0);
         assert!(result.image_height.unwrap() > 0);
+    }
+
+    #[test]
+    fn test_zpl_generate_from_many_threads() {
+        // The thumbnail worker runs one generator per CPU core. Text is what
+        // races in the Go library, so the label is all text.
+        let mut zpl = String::from("^XA");
+        for i in 0..40 {
+            zpl.push_str(&format!(
+                "^FO20,{}^A0N,30,30^FDShip to BANGLADESH Dhaka {i} WXYZ abcdefghijklmnop^FS",
+                20 + i * 25
+            ));
+        }
+        zpl.push_str("^XZ");
+
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let zpl_path = dir.path().join("label.zpl");
+        std::fs::write(&zpl_path, zpl).expect("write");
+
+        let request = ThumbnailRequest {
+            id: "test".to_string(),
+            path: zpl_path.to_string_lossy().to_string(),
+            size: 256,
+            quality: ThumbnailQuality::Medium,
+            format: ThumbnailFormat::PNG,
+            priority: crate::thumbnails::ThumbnailPriority::High,
+            accent: None,
+        };
+
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    for _ in 0..5 {
+                        ZplGenerator::generate(&request).expect("generate failed");
+                    }
+                });
+            }
+        });
     }
 
     #[test]
