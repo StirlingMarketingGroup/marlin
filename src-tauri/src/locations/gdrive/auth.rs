@@ -60,6 +60,9 @@ pub struct GoogleAccountInfo {
     pub email: String,
     pub display_name: Option<String>,
     pub photo_url: Option<String>,
+    /// The folder name the account mounts at. `None` only for the service account, which is not
+    /// stored in the accounts file and which the mount helper cannot sign in as.
+    pub mount_name: Option<String>,
 }
 
 /// Storage structure for accounts file
@@ -122,9 +125,9 @@ fn delete_refresh_token(email: &str) -> Result<(), String> {
     }
 }
 
-/// Reads the account list. A file written by an older version also holds tokens: this moves
-/// each refresh token into the keychain and rewrites the file without them.
-fn read_accounts_file_moving_tokens(path: &Path) -> Result<Vec<GoogleAccountInfo>, String> {
+/// Reads the account list. A file written by an older version holds tokens and no mount names: this moves
+/// each refresh token into the keychain, builds each missing mount name, and rewrites the file.
+fn read_and_upgrade_accounts_file(path: &Path) -> Result<Vec<GoogleAccountInfo>, String> {
     if !path.exists() {
         return Ok(Vec::new());
     }
@@ -139,6 +142,8 @@ fn read_accounts_file_moving_tokens(path: &Path) -> Result<Vec<GoogleAccountInfo
         display_name: Option<String>,
         photo_url: Option<String>,
         #[serde(default)]
+        mount_name: Option<String>,
+        #[serde(default)]
         access_token: Option<String>,
         #[serde(default)]
         refresh_token: Option<String>,
@@ -152,24 +157,40 @@ fn read_accounts_file_moving_tokens(path: &Path) -> Result<Vec<GoogleAccountInfo
     let storage: AccountStorageDisk = serde_json::from_str(&contents)
         .map_err(|e| format!("Failed to parse accounts file: {}", e))?;
 
-    let mut had_tokens = false;
+    let mut needs_rewrite = false;
+    let mut mount_names: Vec<String> = storage
+        .accounts
+        .iter()
+        .filter_map(|account| account.mount_name.clone())
+        .collect();
     let mut accounts = Vec::with_capacity(storage.accounts.len());
     for account in storage.accounts {
         if account.access_token.is_some() || account.refresh_token.is_some() {
-            had_tokens = true;
+            needs_rewrite = true;
         }
         if let Some(refresh_token) = account.refresh_token {
             set_refresh_token(&account.email, &refresh_token)?;
         }
+        let mount_name = match account.mount_name {
+            Some(name) => name,
+            None => {
+                let name =
+                    marlin_mount_client::mount_name::build("gdrive", &account.email, &mount_names);
+                mount_names.push(name.clone());
+                needs_rewrite = true;
+                name
+            }
+        };
         accounts.push(GoogleAccountInfo {
             email: account.email,
             display_name: account.display_name,
             photo_url: account.photo_url,
+            mount_name: Some(mount_name),
         });
     }
 
     // Every keychain write has succeeded by now, so a failed one leaves the file as it was.
-    if had_tokens {
+    if needs_rewrite {
         write_accounts_file(path, &accounts)?;
     }
 
@@ -202,12 +223,13 @@ pub fn get_google_accounts() -> Result<Vec<GoogleAccountInfo>, String> {
             email: sa_email,
             display_name: Some("Service Account".to_string()),
             photo_url: None,
+            mount_name: None,
         });
     }
 
     let mut cache = ACCOUNTS_CACHE.lock().map_err(|e| e.to_string())?;
     if cache.is_none() {
-        *cache = Some(read_accounts_file_moving_tokens(&get_accounts_path()?)?);
+        *cache = Some(read_and_upgrade_accounts_file(&get_accounts_path()?)?);
 
         // A sign-in by an older version can leave a token file in this folder.
         if let Some(cache_dir) = dirs::cache_dir() {
@@ -297,6 +319,45 @@ impl TokenStorage for SignInTokens {
     }
 }
 
+/// What Google returns for the signed-in user.
+#[derive(Deserialize)]
+struct GoogleUserInfo {
+    email: String,
+    name: Option<String>,
+    picture: Option<String>,
+}
+
+/// Puts a signed-in account in the list. An account that is already listed keeps its mount name: signing in again never moves its mount.
+fn add_or_update_account(
+    accounts: &mut Vec<GoogleAccountInfo>,
+    user: GoogleUserInfo,
+) -> GoogleAccountInfo {
+    if let Some(existing) = accounts
+        .iter_mut()
+        .find(|account| account.email == user.email)
+    {
+        log::info!("Updating existing account: {}", user.email);
+        existing.display_name = user.name;
+        existing.photo_url = user.picture;
+        return existing.clone();
+    }
+
+    log::info!("Adding new account: {}", user.email);
+    let names: Vec<String> = accounts
+        .iter()
+        .filter_map(|account| account.mount_name.clone())
+        .collect();
+    let mount_name = marlin_mount_client::mount_name::build("gdrive", &user.email, &names);
+    let account = GoogleAccountInfo {
+        email: user.email,
+        display_name: user.name,
+        photo_url: user.picture,
+        mount_name: Some(mount_name),
+    };
+    accounts.push(account.clone());
+    account
+}
+
 /// Signs in to a Google account in the browser. Adds the account, or updates it when it is already listed.
 /// `login_hint` is the email the user is expected to pick.
 pub async fn add_google_account(login_hint: Option<String>) -> Result<GoogleAccountInfo, String> {
@@ -369,35 +430,25 @@ pub async fn add_google_account(login_hint: Option<String>) -> Result<GoogleAcco
 
     // Get user info to get the email
     log::info!("Fetching user info...");
-    let user_info = fetch_user_info(&access_token).await.map_err(|e| {
+    let user = fetch_user_info(&access_token).await.map_err(|e| {
         log::error!("Failed to fetch user info: {}", e);
         e
     })?;
-    log::info!("User info received: {}", user_info.email);
+    log::info!("User info received: {}", user.email);
 
     let mut tokens = TOKENS.lock().await;
     let mut cache = ACCOUNTS_CACHE.lock().map_err(|e| e.to_string())?;
 
-    // Check if account already exists
     let path = get_accounts_path()?;
-    let mut accounts = read_accounts_file_moving_tokens(&path).map_err(|e| {
+    let mut accounts = read_and_upgrade_accounts_file(&path).map_err(|e| {
         log::error!("Failed to load accounts: {}", e);
         e
     })?;
     log::info!("Loaded {} existing accounts", accounts.len());
 
-    set_refresh_token(&user_info.email, &refresh_token)?;
+    set_refresh_token(&user.email, &refresh_token)?;
 
-    if let Some(existing) = accounts.iter_mut().find(|a| a.email == user_info.email) {
-        // Update existing account
-        log::info!("Updating existing account: {}", user_info.email);
-        existing.display_name = user_info.display_name.clone();
-        existing.photo_url = user_info.photo_url.clone();
-    } else {
-        // Add new account
-        log::info!("Adding new account: {}", user_info.email);
-        accounts.push(user_info.clone());
-    }
+    let account = add_or_update_account(&mut accounts, user);
 
     write_accounts_file(&path, &accounts).map_err(|e| {
         log::error!("Failed to save accounts: {}", e);
@@ -407,9 +458,9 @@ pub async fn add_google_account(login_hint: Option<String>) -> Result<GoogleAcco
 
     *cache = Some(accounts);
     tokens.insert(
-        user_info.email.clone(),
+        account.email.clone(),
         SavedSignIn::signed_in(
-            &user_info.email,
+            &account.email,
             client,
             refresh_token,
             access_token,
@@ -418,11 +469,11 @@ pub async fn add_google_account(login_hint: Option<String>) -> Result<GoogleAcco
     );
     log::info!("Account cache updated, returning user info");
 
-    Ok(user_info)
+    Ok(account)
 }
 
 /// Fetch user info from Google
-async fn fetch_user_info(access_token: &str) -> Result<GoogleAccountInfo, String> {
+async fn fetch_user_info(access_token: &str) -> Result<GoogleUserInfo, String> {
     let client = reqwest::Client::new();
 
     let response = client
@@ -436,23 +487,10 @@ async fn fetch_user_info(access_token: &str) -> Result<GoogleAccountInfo, String
         return Err(format!("User info request failed: {}", response.status()));
     }
 
-    #[derive(Deserialize)]
-    struct UserInfo {
-        email: String,
-        name: Option<String>,
-        picture: Option<String>,
-    }
-
-    let user_info: UserInfo = response
+    response
         .json()
         .await
-        .map_err(|e| format!("Failed to parse user info: {}", e))?;
-
-    Ok(GoogleAccountInfo {
-        email: user_info.email,
-        display_name: user_info.name,
-        photo_url: user_info.picture,
-    })
+        .map_err(|e| format!("Failed to parse user info: {}", e))
 }
 
 /// Remove a Google account
@@ -460,7 +498,7 @@ pub async fn remove_google_account(email: &str) -> Result<(), String> {
     let mut tokens = TOKENS.lock().await;
     let mut cache = ACCOUNTS_CACHE.lock().map_err(|e| e.to_string())?;
     let path = get_accounts_path()?;
-    let mut accounts = read_accounts_file_moving_tokens(&path)?;
+    let mut accounts = read_and_upgrade_accounts_file(&path)?;
 
     let original_len = accounts.len();
     accounts.retain(|a| a.email != email);
@@ -521,15 +559,15 @@ pub async fn ensure_valid_token(email: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        delete_refresh_token, read_accounts_file_moving_tokens, write_accounts_file,
-        GoogleAccountInfo,
+        add_or_update_account, delete_refresh_token, read_and_upgrade_accounts_file,
+        write_accounts_file, GoogleAccountInfo, GoogleUserInfo,
     };
     use marlin_gdrive::KEYRING_SERVICE;
     use marlin_test_keychain as test_keychain;
     use std::fs;
 
     #[test]
-    fn read_accounts_file_moves_tokens_to_the_keychain() {
+    fn read_and_upgrade_accounts_file_moves_tokens_to_the_keychain() {
         test_keychain::install();
         let temp_dir = tempfile::tempdir().unwrap();
         let path = temp_dir.path().join("gdrive-accounts.json");
@@ -566,7 +604,7 @@ mod tests {
         )
         .unwrap();
 
-        let accounts = read_accounts_file_moving_tokens(&path).unwrap();
+        let accounts = read_and_upgrade_accounts_file(&path).unwrap();
         assert_eq!(accounts.len(), 2);
         assert_eq!(accounts[0].email, ada);
         assert_eq!(accounts[0].display_name.as_deref(), Some("Ada"));
@@ -596,17 +634,18 @@ mod tests {
         assert!(!rewritten.contains("accessToken"));
         assert!(!rewritten.contains("refreshToken"));
 
-        let again = read_accounts_file_moving_tokens(&path).unwrap();
+        let again = read_and_upgrade_accounts_file(&path).unwrap();
         assert_eq!(again.len(), accounts.len());
         for (left, right) in again.iter().zip(&accounts) {
             assert_eq!(left.email, right.email);
             assert_eq!(left.display_name, right.display_name);
             assert_eq!(left.photo_url, right.photo_url);
+            assert_eq!(left.mount_name, right.mount_name);
         }
     }
 
     #[test]
-    fn read_accounts_file_keeps_the_file_when_the_keychain_fails() {
+    fn read_and_upgrade_accounts_file_keeps_the_file_when_the_keychain_fails() {
         test_keychain::install();
         let temp_dir = tempfile::tempdir().unwrap();
         let path = temp_dir.path().join("gdrive-accounts.json");
@@ -617,7 +656,7 @@ mod tests {
         fs::write(&path, &original).unwrap();
         test_keychain::fail_writes_for(KEYRING_SERVICE, email);
 
-        let err = read_accounts_file_moving_tokens(&path).unwrap_err();
+        let err = read_and_upgrade_accounts_file(&path).unwrap_err();
         assert!(
             err.contains("Failed to store Google sign-in in keychain"),
             "{err}"
@@ -626,7 +665,7 @@ mod tests {
     }
 
     #[test]
-    fn read_accounts_file_rewrites_a_file_with_only_an_access_token() {
+    fn read_and_upgrade_accounts_file_rewrites_a_file_with_only_an_access_token() {
         test_keychain::install();
         let temp_dir = tempfile::tempdir().unwrap();
         let path = temp_dir.path().join("gdrive-accounts.json");
@@ -649,7 +688,7 @@ mod tests {
         )
         .unwrap();
 
-        let accounts = read_accounts_file_moving_tokens(&path).unwrap();
+        let accounts = read_and_upgrade_accounts_file(&path).unwrap();
         assert_eq!(accounts.len(), 1);
         assert_eq!(accounts[0].email, email);
         assert_eq!(accounts[0].display_name.as_deref(), Some("Access"));
@@ -659,14 +698,14 @@ mod tests {
     }
 
     #[test]
-    fn read_accounts_file_leaves_a_file_without_tokens_alone() {
+    fn read_and_upgrade_accounts_file_leaves_a_file_without_tokens_and_with_mount_names_alone() {
         test_keychain::install();
         let temp_dir = tempfile::tempdir().unwrap();
         let path = temp_dir.path().join("gdrive-accounts.json");
-        let original = "{\"accounts\":[ {\"email\":\"plain-spacing@example.com\", \"displayName\":\"Pat\", \"photoUrl\":null} ]}";
+        let original = "{\"accounts\":[ {\"email\":\"plain-spacing@example.com\", \"displayName\":\"Pat\", \"photoUrl\":null, \"mountName\":\"gdrive-plain-spacing@example.com\"} ]}";
         fs::write(&path, original).unwrap();
 
-        let accounts = read_accounts_file_moving_tokens(&path).unwrap();
+        let accounts = read_and_upgrade_accounts_file(&path).unwrap();
         assert_eq!(accounts.len(), 1);
         assert_eq!(accounts[0].email, "plain-spacing@example.com");
         assert_eq!(accounts[0].display_name.as_deref(), Some("Pat"));
@@ -696,6 +735,7 @@ mod tests {
                 email: "write-replace@example.com".to_string(),
                 display_name: Some("Writer".to_string()),
                 photo_url: None,
+                mount_name: Some("gdrive-write-replace@example.com".to_string()),
             }],
         )
         .unwrap();
@@ -708,5 +748,167 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect();
         assert_eq!(names.len(), 1);
+    }
+
+    #[test]
+    fn read_and_upgrade_accounts_file_builds_mount_names_for_an_older_file() {
+        test_keychain::install();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("gdrive-accounts.json");
+        let ada = "older-ada@example.com";
+        let bea = "older-bea@example.com";
+        fs::write(
+            &path,
+            format!(
+                r#"{{"accounts":[
+                    {{"email":"{ada}","displayName":"Ada","photoUrl":"https://example.com/ada.png"}},
+                    {{"email":"{bea}","displayName":"Bea","photoUrl":"https://example.com/bea.png"}}
+                ]}}"#
+            ),
+        )
+        .unwrap();
+
+        let accounts = read_and_upgrade_accounts_file(&path).unwrap();
+        assert_eq!(accounts[0].email, ada);
+        assert_eq!(accounts[0].display_name.as_deref(), Some("Ada"));
+        assert_eq!(
+            accounts[0].photo_url.as_deref(),
+            Some("https://example.com/ada.png")
+        );
+        assert_eq!(
+            accounts[0].mount_name.as_deref(),
+            Some("gdrive-older-ada@example.com")
+        );
+        assert_eq!(accounts[1].email, bea);
+        assert_eq!(accounts[1].display_name.as_deref(), Some("Bea"));
+        assert_eq!(
+            accounts[1].photo_url.as_deref(),
+            Some("https://example.com/bea.png")
+        );
+        assert_eq!(
+            accounts[1].mount_name.as_deref(),
+            Some("gdrive-older-bea@example.com")
+        );
+
+        let rewritten = fs::read(&path).unwrap();
+        let text = String::from_utf8(rewritten.clone()).unwrap();
+        assert!(text.contains("gdrive-older-ada@example.com"), "{text}");
+        assert!(text.contains("gdrive-older-bea@example.com"), "{text}");
+
+        let again = read_and_upgrade_accounts_file(&path).unwrap();
+        assert_eq!(again[0].mount_name, accounts[0].mount_name);
+        assert_eq!(again[1].mount_name, accounts[1].mount_name);
+        assert_eq!(fs::read(&path).unwrap(), rewritten);
+    }
+
+    #[test]
+    fn a_mount_name_keeps_its_suffix_after_the_other_account_is_removed() {
+        test_keychain::install();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("gdrive-accounts.json");
+        let first = "Case-Clash@example.com";
+        let second = "case-clash@example.com";
+        fs::write(
+            &path,
+            format!(
+                r#"{{"accounts":[
+                    {{"email":"{first}","displayName":"First","photoUrl":null}},
+                    {{"email":"{second}","displayName":"Second","photoUrl":null}}
+                ]}}"#
+            ),
+        )
+        .unwrap();
+
+        let mut accounts = read_and_upgrade_accounts_file(&path).unwrap();
+        assert_eq!(
+            accounts[0].mount_name.as_deref(),
+            Some("gdrive-Case-Clash@example.com")
+        );
+        assert_eq!(
+            accounts[1].mount_name.as_deref(),
+            Some("gdrive-case-clash@example.com-2")
+        );
+
+        accounts.retain(|account| account.email != first);
+        write_accounts_file(&path, &accounts).unwrap();
+        let again = read_and_upgrade_accounts_file(&path).unwrap();
+        assert_eq!(again.len(), 1);
+        assert_eq!(
+            again[0].mount_name.as_deref(),
+            Some("gdrive-case-clash@example.com-2")
+        );
+    }
+
+    #[test]
+    fn a_stored_mount_name_wins_when_an_earlier_account_would_build_it() {
+        test_keychain::install();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("gdrive-accounts.json");
+        let first = "Stored-Wins@example.com";
+        let second = "stored-wins-other@example.com";
+        let stored = "gdrive-stored-wins@example.com";
+        fs::write(
+            &path,
+            format!(
+                r#"{{"accounts":[
+                    {{"email":"{first}","displayName":"First","photoUrl":null}},
+                    {{"email":"{second}","displayName":"Second","photoUrl":null,"mountName":"{stored}"}}
+                ]}}"#
+            ),
+        )
+        .unwrap();
+
+        let accounts = read_and_upgrade_accounts_file(&path).unwrap();
+        assert_eq!(
+            accounts[0].mount_name.as_deref(),
+            Some("gdrive-Stored-Wins@example.com-2")
+        );
+        assert_eq!(accounts[1].mount_name.as_deref(), Some(stored));
+    }
+
+    #[test]
+    fn add_or_update_account_keeps_a_mount_name_and_numbers_a_clash() {
+        let mut accounts = Vec::new();
+        let email = "add-or-update@example.com";
+        let added = add_or_update_account(
+            &mut accounts,
+            GoogleUserInfo {
+                email: email.to_string(),
+                name: Some("Old".to_string()),
+                picture: Some("https://example.com/old.png".to_string()),
+            },
+        );
+        assert_eq!(
+            added.mount_name.as_deref(),
+            Some("gdrive-add-or-update@example.com")
+        );
+        assert_eq!(accounts.len(), 1);
+
+        let updated = add_or_update_account(
+            &mut accounts,
+            GoogleUserInfo {
+                email: email.to_string(),
+                name: Some("New".to_string()),
+                picture: None,
+            },
+        );
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(updated.display_name.as_deref(), Some("New"));
+        assert_eq!(updated.photo_url, None);
+        assert_eq!(updated.mount_name, added.mount_name);
+
+        let clash = add_or_update_account(
+            &mut accounts,
+            GoogleUserInfo {
+                email: "Add-Or-Update@example.com".to_string(),
+                name: None,
+                picture: None,
+            },
+        );
+        assert_eq!(
+            clash.mount_name.as_deref(),
+            Some("gdrive-Add-Or-Update@example.com-2")
+        );
+        assert_eq!(accounts.len(), 2);
     }
 }

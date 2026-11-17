@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+pub mod mount_name;
 pub mod protocol;
 
 /// `marlin/mount.sock` under the runtime folder, or the local data folder when there is none.

@@ -566,12 +566,18 @@ describe('useAppStore', () => {
   describe('Google accounts', () => {
     it('replaces an account that is already listed and appends a new email', async () => {
       useAppStore.setState({
-        googleAccounts: [{ email: 'a@example.com', displayName: 'Old' }],
+        googleAccounts: [
+          { email: 'a@example.com', displayName: 'Old', mountName: 'gdrive-a@example.com' },
+        ],
       });
 
       mockInvoke.mockImplementation((cmd) => {
         if (cmd === 'add_google_account') {
-          return Promise.resolve({ email: 'a@example.com', displayName: 'New' });
+          return Promise.resolve({
+            email: 'a@example.com',
+            displayName: 'New',
+            mountName: 'gdrive-a@example.com',
+          });
         }
         return Promise.resolve(undefined);
       });
@@ -579,12 +585,16 @@ describe('useAppStore', () => {
       await useAppStore.getState().addGoogleAccount();
 
       expect(useAppStore.getState().googleAccounts).toEqual([
-        { email: 'a@example.com', displayName: 'New' },
+        { email: 'a@example.com', displayName: 'New', mountName: 'gdrive-a@example.com' },
       ]);
 
       mockInvoke.mockImplementation((cmd) => {
         if (cmd === 'add_google_account') {
-          return Promise.resolve({ email: 'b@example.com', displayName: 'B' });
+          return Promise.resolve({
+            email: 'b@example.com',
+            displayName: 'B',
+            mountName: 'gdrive-b@example.com',
+          });
         }
         return Promise.resolve(undefined);
       });
@@ -592,13 +602,16 @@ describe('useAppStore', () => {
       await useAppStore.getState().addGoogleAccount();
 
       expect(useAppStore.getState().googleAccounts).toEqual([
-        { email: 'a@example.com', displayName: 'New' },
-        { email: 'b@example.com', displayName: 'B' },
+        { email: 'a@example.com', displayName: 'New', mountName: 'gdrive-a@example.com' },
+        { email: 'b@example.com', displayName: 'B', mountName: 'gdrive-b@example.com' },
       ]);
     });
 
     it('sends the email as loginHint when signing in to a named account', async () => {
-      mockInvoke.mockResolvedValue({ email: 'a@example.com' });
+      mockInvoke.mockResolvedValue({
+        email: 'a@example.com',
+        mountName: 'gdrive-a@example.com',
+      });
 
       await useAppStore.getState().addGoogleAccount('a@example.com');
 
@@ -608,7 +621,9 @@ describe('useAppStore', () => {
     });
 
     it('keeps listed accounts when loading fails and clears the error on the next success', async () => {
-      const listed = [{ email: 'a@example.com', displayName: 'A' }];
+      const listed = [
+        { email: 'a@example.com', displayName: 'A', mountName: 'gdrive-a@example.com' },
+      ];
       useAppStore.setState({ googleAccounts: listed, googleAccountsError: undefined });
 
       mockInvoke.mockImplementation((cmd) => {
@@ -625,7 +640,9 @@ describe('useAppStore', () => {
 
       mockInvoke.mockImplementation((cmd) => {
         if (cmd === 'get_google_accounts') {
-          return Promise.resolve([{ email: 'b@example.com', displayName: 'B' }]);
+          return Promise.resolve([
+            { email: 'b@example.com', displayName: 'B', mountName: 'gdrive-b@example.com' },
+          ]);
         }
         return Promise.resolve(undefined);
       });
@@ -634,7 +651,7 @@ describe('useAppStore', () => {
 
       expect(useAppStore.getState().googleAccountsError).toBeUndefined();
       expect(useAppStore.getState().googleAccounts).toEqual([
-        { email: 'b@example.com', displayName: 'B' },
+        { email: 'b@example.com', displayName: 'B', mountName: 'gdrive-b@example.com' },
       ]);
     });
   });

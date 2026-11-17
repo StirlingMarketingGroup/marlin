@@ -391,6 +391,31 @@ async fn a_name_that_is_not_one_plain_folder_name_is_refused() {
 }
 
 #[tokio::test]
+async fn built_account_names_mount() {
+    let harness = start();
+    let mut client = Client::connect(&harness.socket).await;
+    let long = "a".repeat(300);
+    let mut changed = long.clone();
+    changed.pop();
+    changed.push('b');
+    let accounts = [
+        "Ana@example.com".to_string(),
+        "ana@example.com".to_string(),
+        "a/b:c*d@example.com".to_string(),
+        long,
+        changed,
+    ];
+    let mut taken = Vec::new();
+    for account in &accounts {
+        let name = marlin_mount_client::mount_name::build("memory", account, &taken);
+        taken.push(name.clone());
+        let response = client.call("mount", mount(account, &name)).await;
+        assert_eq!(response["result"]["state"], "mounted", "{name}");
+        assert_eq!(response["result"]["name"], name);
+    }
+}
+
+#[tokio::test]
 async fn a_mount_point_that_holds_a_file_is_left_alone() {
     let harness = start();
     let mount_point = harness.root.join("drive");
