@@ -41,6 +41,28 @@ test.describe('Type-to-Filter', () => {
     ).not.toBeVisible();
   });
 
+  test('should treat * as a wildcard for the whole name', async ({ page }) => {
+    await page.keyboard.type('*ments');
+
+    await expect(page.locator('[data-testid="file-item"][data-name="Documents"]')).toBeVisible();
+    await expect(
+      page.locator('[data-testid="file-item"][data-name="Downloads"]')
+    ).not.toBeVisible();
+    await expect(page.getByText('1 match')).toBeVisible();
+
+    await page.keyboard.press('Escape');
+    await page.keyboard.type('do*s');
+
+    await expect(page.locator('[data-testid="file-item"][data-name="Documents"]')).toBeVisible();
+    await expect(page.locator('[data-testid="file-item"][data-name="Downloads"]')).toBeVisible();
+    await expect(page.getByText('2 matches')).toBeVisible();
+
+    await page.keyboard.press('Escape');
+    await page.keyboard.type('ments*');
+
+    await expect(page.getByText('0 matches')).toBeVisible();
+  });
+
   test('should clear filter on Escape', async ({ page }) => {
     // Type to create a filter
     await page.keyboard.type('doc');

@@ -33,6 +33,7 @@ import { isSmbPath } from '@/utils/smbPath';
 import { useScrollContainerRef } from '@/contexts/ScrollContext';
 import { useSortedFiles } from '@/hooks/useSortedFiles';
 import { useRevealTarget } from '@/hooks/useRevealTarget';
+import { matchesFilter } from '@/utils/filterMatch';
 
 interface FileListProps {
   files: FileItem[];
@@ -548,7 +549,7 @@ export default function FileList({ files, preferences }: FileListProps) {
       : sortedFiles.filter((file) => !file.is_hidden);
 
     return filterText
-      ? hiddenFiltered.filter((file) => file.name.toLowerCase().includes(filterText.toLowerCase()))
+      ? hiddenFiltered.filter((file) => matchesFilter(file.name, filterText))
       : hiddenFiltered;
   }, [sortedFiles, preferences.showHidden, filterText]);
 

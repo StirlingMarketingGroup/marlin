@@ -19,6 +19,7 @@ import { getEffectiveExtension, isArchiveFile } from './utils/fileTypes';
 import { basename, dirname } from './utils/pathUtils';
 import { applyAccentVariables, DEFAULT_ACCENT, normalizeHexColor } from '@/utils/accent';
 import { getSuggestedZipName } from './utils/zipNaming';
+import { matchesFilter } from '@/utils/filterMatch';
 import { revealInFileBrowser } from '@/utils/fileBrowser';
 import { GOOGLE_SIGN_IN_CANCELLED } from '@/utils/googleSignIn';
 
@@ -1045,9 +1046,7 @@ function App() {
           ? state.files
           : state.files.filter((file) => !file.is_hidden);
         const visibleItems = state.filterText
-          ? hiddenFiltered.filter((file) =>
-              file.name.toLowerCase().includes(state.filterText.toLowerCase())
-            )
+          ? hiddenFiltered.filter((file) => matchesFilter(file.name, state.filterText))
           : hiddenFiltered;
         const suggestedName = getSuggestedZipName({
           selectedItems,
@@ -1776,9 +1775,7 @@ function App() {
           ? state.files
           : state.files.filter((file) => !file.is_hidden);
         const visibleItems = state.filterText
-          ? hiddenFiltered.filter((file) =>
-              file.name.toLowerCase().includes(state.filterText.toLowerCase())
-            )
+          ? hiddenFiltered.filter((file) => matchesFilter(file.name, state.filterText))
           : hiddenFiltered;
         state.setSelectedFiles(visibleItems.map((file) => file.path));
         state.setSelectionAnchor(visibleItems[0]?.path);
