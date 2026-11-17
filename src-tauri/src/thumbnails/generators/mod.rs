@@ -173,7 +173,7 @@ impl ThumbnailGenerator {
             return svg::SvgGenerator::generate(request);
         }
 
-        // Check if it's a PDF file (includes AI and EPS)
+        // Check if it's a PDF file (includes AI)
         if Self::is_pdf_file(path) {
             return pdf::PdfGenerator::generate(request);
         }
@@ -225,7 +225,7 @@ impl ThumbnailGenerator {
         if let Some(extension) = path.extension().and_then(|s| s.to_str()) {
             matches!(
                 extension.to_lowercase().as_str(),
-                "pdf" | "ai" | "eps" // PDF and Adobe Illustrator/EPS files
+                "pdf" | "ai" // PDF and Adobe Illustrator files
             )
         } else {
             false
@@ -415,5 +415,12 @@ mod tests {
     fn test_parse_gdrive_path_invalid() {
         assert!(parse_gdrive_path("not-a-url").is_err());
         assert!(parse_gdrive_path("gdrive:///no-host").is_err());
+    }
+
+    #[test]
+    fn pdf_and_ai_go_to_the_pdf_generator() {
+        assert!(!ThumbnailGenerator::is_pdf_file(Path::new("a.eps")));
+        assert!(ThumbnailGenerator::is_pdf_file(Path::new("a.pdf")));
+        assert!(ThumbnailGenerator::is_pdf_file(Path::new("a.AI")));
     }
 }
