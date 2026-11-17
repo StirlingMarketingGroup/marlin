@@ -32,6 +32,11 @@ updates:
       - dependency-name: 'tauri-plugin-macos-permissions-api'
         update-types:
           - 'version-update:semver-minor'
+      # typescript-eslint supports TypeScript below 6.1 only, so `npm ci`
+      # fails on TypeScript 7. Remove this rule when it supports 7.
+      - dependency-name: 'typescript'
+        update-types:
+          - 'version-update:semver-major'
     groups:
       # Group routine updates to reduce PR noise
       dev-dependencies:
