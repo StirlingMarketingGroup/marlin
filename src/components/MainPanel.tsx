@@ -718,7 +718,10 @@ export default function MainPanel() {
       >
         {/* Mask old content while loading to avoid layout flicker during view changes */}
         <ScrollContext.Provider value={scrollRef}>
-          <div className={`${loading ? 'invisible' : 'visible'}`}>
+          {/* The file view never scrolls sideways. The grid's column count is one render
+              behind its width, and a list narrower than its column gaps cannot fit, so
+              both are clipped. */}
+          <div className={`overflow-x-clip ${loading ? 'invisible' : 'visible'}`}>
             {currentPrefs.viewMode === 'grid' ? (
               <FileGrid files={files} preferences={currentPrefs} />
             ) : (

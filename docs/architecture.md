@@ -2,8 +2,8 @@
 
 Marlin is one Tauri 2 desktop app: a Rust backend that owns all file access, and a React frontend that draws the UI in a webview. The frontend never touches the disk. It calls a Rust command and gets data back.
 
-**Covers:** `src-tauri/src/lib.rs`, `src-tauri/src/commands.rs`, `src-tauri/src/menu.rs`, `src-tauri/Cargo.toml`, `src-tauri/crates/`, `src-tauri/src/fs_watcher.rs`, `src/main.tsx`, `src/App.tsx`, `src/store/`, `src/windows/`, `src/components/PathBar.tsx`, `src/components/FilterInput.tsx`, `src/hooks/useDirectoryWatcher.ts`, `src/hooks/useRevealTarget.ts`
-**Checked against the code:** 2026-11-16
+**Covers:** `src-tauri/src/lib.rs`, `src-tauri/src/commands.rs`, `src-tauri/src/menu.rs`, `src-tauri/Cargo.toml`, `src-tauri/crates/`, `src-tauri/src/fs_watcher.rs`, `src/main.tsx`, `src/App.tsx`, `src/store/`, `src/windows/`, `src/components/PathBar.tsx`, `src/components/FilterInput.tsx`, `src/hooks/useDirectoryWatcher.ts`, `src/hooks/useFileAnimations.ts`, `src/hooks/useRevealTarget.ts`, `src/components/MainPanel.tsx`, `src/components/FileGrid.tsx`, `src/components/FileList.tsx`
+**Checked against the code:** 2026-11-17
 
 ## Processes
 
@@ -90,6 +90,20 @@ The workspace has five library-only crates under `src-tauri/crates/`. `marlin-vf
 **Hooks worth knowing.** `useDirectoryStream` consumes `directory-batch`. `useDirectoryWatcher` reacts to `directory-changed`. `useThumbnail` requests thumbnails. `useDragDetector` handles files dropped onto the window.
 
 **How a change on disk reaches the list.** `fs_watcher.rs` collects watcher events for 300 ms and emits one `directory-changed`. `useDirectoryWatcher` treats that event only as a signal. It waits for 400 ms with no new event, reads the whole folder again with `read_directory`, and replaces the list. When events keep coming, it reads anyway 2 seconds after the first event it has not acted on. A folder that is still loading, or a read that is still running, puts the next read off until it is done. The 2-second cap matters on Linux: inotify reports every write, so a file that is still downloading sends an event about every 300 ms. macOS reports a file written through one open handle only when it is created and when it is closed or renamed.
+
+**What is in the file list.** `files` in `useAppStore` is the list that both views draw. A read of the folder decides what is in it. These are all the writers:
+
+| When                                                                                                                                 | Writer                                                                                                                                                                                   |
+| ------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A local folder opens, or the app reads it again after an operation (a paste, an undo, a delete that does not fade out)               | `refreshCurrentDirectoryStreaming` empties the list. `appendStreamingBatch` adds each `directory-batch`. `applyMetadataUpdates` fills in sizes and dates.                                |
+| A remote folder opens, the app reads it again after an operation, or the user clicks the refresh button in the path bar (any folder) | `refreshCurrentDirectory` replaces the list in one step.                                                                                                                                 |
+| A local folder changes on disk                                                                                                       | `useDirectoryWatcher` replaces the list through `setFiles`, as described above. A remote folder has no watcher. F5 or Cmd/Ctrl+R reads the folder and calls `setFiles` too.              |
+| The user deletes 10 files or fewer, with reduced motion off                                                                          | `markFilesExiting` marks them, so they fade out. `removeExitedFiles` takes them out of the list when the fade ends, or after 250 ms. It is the one writer that does not read the folder. |
+| An image reports its size                                                                                                            | `updateFileDimensions` sets the width and height of one file.                                                                                                                            |
+
+A writer that adds files goes through `uniqueFilesByPath`, so a path is in the list once. `useFileAnimations` marks a new file as entering for two animation frames, so it fades in. `e2e/file-view-width.spec.ts` checks that the view matches the folder after a burst of changes.
+
+**The file view never scrolls sideways.** `FileGrid` works out its column count from the width of the element that holds its rows. A `ResizeObserver` follows that element, because it is not rendered while the folder is empty. `FileList` gives each column a share of the row, and a cell cuts its text with an ellipsis. Two cases are still wider than the view: the grid's column count is one render behind a change of width, and a list narrower than about 160 px cannot hold the gaps between its columns. So `MainPanel` clips the view sideways (`overflow-x-clip`), which shows no scrollbar and cannot be scrolled.
 
 ## Where settings live
 

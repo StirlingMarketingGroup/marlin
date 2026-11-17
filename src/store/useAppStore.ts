@@ -321,9 +321,6 @@ interface AppState {
   setCurrentPath: (path: string) => void;
   setHomeDir: (path: string) => void;
   setFiles: (files: FileItem[]) => void;
-  addFiles: (files: FileItem[]) => void;
-  updateFiles: (files: FileItem[]) => void;
-  removeFilesByPath: (paths: Set<string>) => void;
   setLoading: (loading: boolean) => void;
   setError: (error?: string) => void;
   setSelectedFiles: (files: string[]) => void;
@@ -431,8 +428,6 @@ interface AppState {
   clearEnteringState: (paths: string[]) => void;
   removeExitedFiles: (paths: string[]) => void;
   clearAllAnimationState: () => void;
-  isFileEntering: (path: string) => boolean;
-  isFileExiting: (path: string) => boolean;
   addSkipAnimationPath: (path: string) => void;
   consumeSkipAnimationPaths: () => Set<string>;
 }
@@ -663,26 +658,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
   setHomeDir: (path) => set({ homeDir: path }),
   setFiles: (files) => set((state) => ({ files: uniqueFilesByPath(files, state.files) })),
-  addFiles: (files) =>
-    set((state) => ({
-      files: uniqueFilesByPath([...state.files, ...files]),
-    })),
-  updateFiles: (updatedFiles) =>
-    set((state) => {
-      const updateMap = new Map(updatedFiles.map((f) => [f.path, f]));
-      return {
-        files: uniqueFilesByPath(
-          state.files.map((file) => {
-            const updated = updateMap.get(file.path);
-            return updated ? mergeFileItem(file, updated) : file;
-          })
-        ),
-      };
-    }),
-  removeFilesByPath: (paths) =>
-    set((state) => ({
-      files: state.files.filter((f) => !paths.has(f.path)),
-    })),
   setLoading: (loading) => set({ loading }),
   setError: (error) => set({ error }),
   setSelectedFiles: (files) => {
@@ -3192,14 +3167,6 @@ export const useAppStore = create<AppState>((set, get) => ({
         _skipAnimationPaths: new Set<string>(),
       };
     }),
-
-  isFileEntering: (path: string) => {
-    return Boolean(get().animationState.entering[path]);
-  },
-
-  isFileExiting: (path: string) => {
-    return Boolean(get().animationState.exiting[path]);
-  },
 
   addSkipAnimationPath: (path: string) =>
     set((state) => {

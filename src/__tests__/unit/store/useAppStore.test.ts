@@ -314,26 +314,6 @@ describe('useAppStore', () => {
 
       expect(useAppStore.getState().files).toEqual([{ ...baseFile, size: 20 }]);
     });
-
-    it('upserts repeated additions instead of appending duplicate rows', () => {
-      const path = '/test/download.zip';
-      const baseFile = {
-        name: 'download.zip',
-        path,
-        size: 10,
-        modified: '2024-01-01T00:00:00.000Z',
-        is_directory: false,
-        is_hidden: false,
-        is_symlink: false,
-        is_git_repo: false,
-        extension: 'zip',
-      };
-
-      useAppStore.getState().addFiles([baseFile]);
-      useAppStore.getState().addFiles([{ ...baseFile, size: 20 }]);
-
-      expect(useAppStore.getState().files).toEqual([{ ...baseFile, size: 20 }]);
-    });
   });
 
   describe('refreshCurrentDirectory', () => {

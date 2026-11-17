@@ -13,6 +13,8 @@ export const MOCK_BIG_LAST = `dir-${String(MOCK_BIG_COUNT - 1).padStart(3, '0')}
 export const MOCK_LONG_NAME_DIR = `${MOCK_HOME_DIR}/LongName`;
 // Not listed in the home folder: a spec opens it through the window start path.
 export const MOCK_PERCENT_DIR = `${MOCK_HOME_DIR}/100% & more`;
+// Not listed in the home folder: a spec sets its files and changes them while the folder is open.
+export const MOCK_CHANGING_DIR = `${MOCK_HOME_DIR}/Changing`;
 export const MOCK_LONG_NAME =
   '0-coin-stands-7-resize.f55c86b289eb233728c5c475eac70d1e3a9b64f07c2d85e1b3a6f9d4c7e2b1a0-preview.png';
 
@@ -34,6 +36,21 @@ export function getTestUtilsScript(): string {
         },
         getThumbnailRequestCount: function(path) {
           return this.thumbnailRequests.filter(r => r.path === path).length;
+        },
+        setChangingFiles: function(names) {
+          window.__MOCK_CHANGING_NAMES__ = names;
+
+          const eventListeners = window.__TAURI_EVENT_LISTENERS__?.get('directory-changed') || [];
+          const payload = {
+            path: '${MOCK_CHANGING_DIR}',
+            changeType: 'created',
+            affectedFiles: [],
+            affectedPaths: []
+          };
+
+          for (const handler of eventListeners) {
+            window.__TAURI_INTERNALS__.runCallback(handler, { event: 'directory-changed', payload });
+          }
         },
         // Simulate file modification - updates mtime and emits directory-changed event
         simulateFileModification: function(filePath, newMtime) {
@@ -72,13 +89,14 @@ export function getTestUtilsScript(): string {
   `;
 }
 
-export function getTauriMockScript(): string {
+export function getTauriMockScript(viewMode: 'list' | 'grid' = 'list'): string {
   return `
     (function() {
       const mockHomeDir = '${MOCK_HOME_DIR}';
       const mockDownloadsDir = '${MOCK_DOWNLOADS_DIR}';
       const mockLongNameDir = '${MOCK_LONG_NAME_DIR}';
       const mockPercentDir = '${MOCK_PERCENT_DIR}';
+      const mockChangingDir = '${MOCK_CHANGING_DIR}';
       const mockBigDir = '${MOCK_BIG_DIR}';
       const mockBigFolders = Array.from({ length: ${MOCK_BIG_COUNT} }, (_, index) => {
         const name = 'dir-' + String(index).padStart(3, '0');
@@ -288,6 +306,20 @@ export function getTauriMockScript(): string {
           files = mockLongNameFiles;
         } else if (normalizedPath === mockPercentDir) {
           files = mockPercentFiles;
+        } else if (normalizedPath === mockChangingDir) {
+          files = (window.__MOCK_CHANGING_NAMES__ || []).map((name) => ({
+            name,
+            path: mockChangingDir + '/' + name,
+            is_directory: false,
+            is_hidden: false,
+            is_symlink: false,
+            is_git_repo: false,
+            size: 12,
+            modified: new Date().toISOString(),
+            created: new Date().toISOString(),
+            extension: 'txt',
+            permissions: { read: true, write: true, execute: false },
+          }));
         } else if (normalizedPath === mockBigDir) {
           files = mockBigFolders;
         } else if (normalizedPath === mockHomeDir || normalizedPath === '/') {
@@ -434,7 +466,7 @@ export function getTauriMockScript(): string {
         cancel_directory_stream: () => undefined,
         read_preferences: () => JSON.stringify({
           globalPreferences: {
-            viewMode: 'list',
+            viewMode: '${viewMode}',
             sortBy: 'name',
             sortOrder: 'asc',
             showHidden: false,
