@@ -36,6 +36,8 @@ jobs:
               - 'eslint.config.cjs'
               - 'vite.config.ts'
               - 'vitest.config.ts'
+              - 'vitest.app.config.ts'
+              - 'app-tests/**'
               - 'scripts/**'
               - 'src/**'
               - 'src-tauri/**'

@@ -12,7 +12,7 @@ This file holds the rules that always apply. Everything longer lives in the wiki
 | Remote storage: Google Drive, SMB, SFTP, archives, paste, drag/drop | [`docs/location-providers.md`](docs/location-providers.md) |
 | Mounting remotes as native filesystems (epic #368)                  | `docs/location-providers.md`, then `docs/decisions/`       |
 | Thumbnails                                                          | [`docs/thumbnails.md`](docs/thumbnails.md)                 |
-| Writing or running tests                                            | [`docs/testing.md`](docs/testing.md)                       |
+| Writing or running tests, or checking a change in the real app      | [`docs/testing.md`](docs/testing.md)                       |
 | Releases, signing, notarization                                     | [`docs/release-signing.md`](docs/release-signing.md)       |
 | A design choice that later work must not reopen                     | [`docs/decisions/README.md`](docs/decisions/README.md)     |
 
@@ -23,6 +23,7 @@ This file holds the rules that always apply. Everything longer lives in the wiki
 - `npm run check` runs ESLint on changed files, Prettier, both TypeScript projects, and `cargo check` with warnings as errors. The pre-push hook runs it.
 - `npm run test:run` runs the unit tests once.
 - `npm run test:e2e` runs the Playwright tests. They start their own Vite server and mock Tauri, so the desktop app does not need to run.
+- `npm run test:app` builds a test build of the real app and drives its window with the tests in `app-tests/`. It runs beside `npm run tauri dev`. CI does not run it.
 - `npm run test:rust` runs the Rust tests with warnings as errors: the app's, then those of every workspace crate but `marlin-smb`.
 - `npm run format:fix` and `npm run lint:fix` fix formatting and lint errors.
 - `npm run build:smb-sidecar` builds the SMB helper binary. It needs samba installed (see `README.md`).
@@ -32,7 +33,8 @@ This file holds the rules that always apply. Everything longer lives in the wiki
 1. Run `npm run check` and `npm run test:run`. Both must pass with no warnings.
 2. If you changed Rust, run `npm run test:rust`. CI runs it too, on Linux, when a file under `src-tauri/` or `check.yml` changes. It must pass. It covers the app and every workspace crate but `marlin-smb`: the tests for `marlin-mount-client` are in `marlin-mount`. If you changed `marlin-smb`, also run `cargo test -p marlin-smb` in `src-tauri/`: it needs samba, and CI does not run it. If you changed `marlin-fuse`, `marlin-gdrive`, or the `Adapter` or `Session` trait, `adapter.rs`, or `providers.rs` in `marlin-mount`, run `src-tauri/crates/marlin-fuse/test-in-docker.sh`: CI does not run the tests that mount, and the Linux code is compiled out on a Mac. For the same changes, also run `src-tauri/crates/marlin-fuse/test-on-mac.sh` on a Mac with macFUSE: CI does not run the macOS mount tests. If you changed how the helper finds or clears a dead mount, also run `src-tauri/crates/marlin-mount/test-sweep.sh` on a Mac.
 3. If you changed `src/` or `e2e/`, run `npm run test:e2e`.
-4. Update the wiki page that covers what you changed (see "Keeping the wiki true").
+4. If the change can only be seen in the running app (Rust and the frontend working together, the folder watcher, a real listing or file operation), see it work there: write or extend a test in `app-tests/` and run `npm run test:app`. If you changed `app-tests/`, the `app-test` feature, or `fs_watcher.rs`, also run `app-tests/test-in-docker.sh`. [`docs/testing.md`](docs/testing.md#real-app-tests) says how.
+5. Update the wiki page that covers what you changed (see "Keeping the wiki true").
 
 ## Never kill the dev server
 

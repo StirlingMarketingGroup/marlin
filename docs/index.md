@@ -19,7 +19,7 @@ Start here. Each line says what a page answers. The rules for keeping these page
 
 | Page                                  | Read it to learn                                                             |
 | ------------------------------------- | ---------------------------------------------------------------------------- |
-| [Testing](testing.md)                 | The eleven test suites, what each one covers, and which ones CI runs.        |
+| [Testing](testing.md)                 | The twelve test suites, what each one covers, and which ones CI runs.        |
 | [Release signing](release-signing.md) | How a release gets built, signed, and notarized, and which secrets it needs. |
 
 ## Decisions
@@ -31,6 +31,7 @@ Start here. Each line says what a page answers. The rules for keeping these page
 | [0001: Mount architecture](decisions/0001-mount-architecture.md)                       | How remotes become native mounts (epic #368): the portable core, the adapter per OS, the helper process, and the risks. |
 | [0002: Node IDs follow lookup counts](decisions/0002-node-ids-follow-lookup-counts.md) | How long a mount's node ID lasts, and why it is not the life of the mount.                                              |
 | [0003: Google Drive link files](decisions/0003-gdrive-link-files.md)                   | How a Google Drive mount shows Google Docs, Sheets, Slides, and shortcuts, which have no bytes to read.                 |
+| [0004: Real-app tests](decisions/0004-real-app-tests.md)                               | How a test drives the real app on macOS and Linux, and which other routes lost.                                         |
 
 ## Frozen history
 

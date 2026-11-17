@@ -17,6 +17,9 @@ default = []
 cargo-clippy = []
 # Gates the manual tests in tests/smb_integration.rs. They need a real SMB server.
 smb = []
+# The build that `npm run test:app` drives: it serves WebDriver on a local port and keeps secrets in memory, not in the OS keychain.
+# Debug builds only. See docs/decisions/0004-real-app-tests.md.
+app-test = ["dep:tauri-plugin-wdio-webdriver", "dep:marlin-test-keychain"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -33,6 +36,7 @@ serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 marlin-mount-client = { path = "crates/marlin-mount-client" }
 marlin-gdrive = { path = "crates/marlin-gdrive" }
+marlin-test-keychain = { path = "crates/marlin-test-keychain", optional = true }
 log = "0.4"
 tauri = { version = "2.11.2", features = [] }
 tauri-plugin-log = "2.3.1"
@@ -43,6 +47,7 @@ tauri-plugin-decorum = "1.1.1"
 tauri-plugin-dialog = "2.7.1"
 tauri-plugin-drag = "2.1.1"
 tauri-plugin-opener = "2.5.4"
+tauri-plugin-wdio-webdriver = { version = "1.5.1", optional = true }
 git2 = { version = "0.21", default-features = false, features = ["https", "vendored-openssl"] }
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "7.0"
