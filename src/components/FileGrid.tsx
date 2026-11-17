@@ -284,9 +284,6 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
   const lastClickRef = useRef<{ path: string; time: number; x: number; y: number } | null>(null);
   const lastHandledDoubleRef = useRef<{ path: string; time: number } | null>(null);
 
-  // Clean up dragged state when drag ends
-  // No longer needed - native drag handles cleanup
-
   const [renameInputOffset, setRenameInputOffset] = useState<number>(0);
   const [renameInputWidth, setRenameInputWidth] = useState<number | undefined>(undefined);
 
@@ -295,55 +292,20 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
   const tile = Math.max(80, Math.min(320, preferences.gridSize ?? 120));
 
   // Container dimensions for virtual scrolling
-  const parentRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useScrollContainerRef();
   const [containerWidth, setContainerWidth] = useState(0);
+  const [rowsElement, setRowsElement] = useState<HTMLDivElement | null>(null);
 
-  // Measure container width for column calculation
+  // The grid element comes and goes with the empty state, so the observer must follow the element.
   useLayoutEffect(() => {
-    const el = parentRef.current;
-    if (!el) return;
+    if (!rowsElement) return;
 
-    let rafId: number | undefined;
-
-    const measureWidth = () => {
-      if (el.clientWidth > 0) {
-        setContainerWidth(el.clientWidth);
-      } else {
-        // Element not yet laid out, retry on next frame
-        rafId = requestAnimationFrame(measureWidth);
-      }
-    };
-
-    const observer = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        if (entry.contentRect.width > 0) {
-          setContainerWidth(entry.contentRect.width);
-        }
-      }
-    });
-
-    observer.observe(el);
-    // Initial measurement with retry for race conditions
-    measureWidth();
-
-    return () => {
-      observer.disconnect();
-      if (rafId !== undefined) {
-        cancelAnimationFrame(rafId);
-      }
-    };
-  }, []);
-
-  // Safety: re-measure if width is still 0 when files change (navigation)
-  useEffect(() => {
-    if (containerWidth === 0 && parentRef.current) {
-      const width = parentRef.current.clientWidth;
-      if (width > 0) {
-        setContainerWidth(width);
-      }
-    }
-  }, [containerWidth, files]);
+    const measure = () => setContainerWidth(rowsElement.clientWidth);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(rowsElement);
+    return () => observer.disconnect();
+  }, [rowsElement]);
 
   // Calculate grid layout constants
   const gap = 8; // gap-2 = 8px
@@ -707,7 +669,6 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
 
   // Group files into rows for virtual scrolling
   const rows = useMemo(() => {
-    if (columnCount === 0) return [];
     const result: FileItem[][] = [];
     for (let i = 0; i < filteredFiles.length; i += columnCount) {
       result.push(filteredFiles.slice(i, i + columnCount));
@@ -999,10 +960,11 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
   };
 
   return (
-    <div ref={parentRef} className="p-2" data-testid="file-grid" data-grid-scroll-container="true">
+    <div className="p-2" data-testid="file-grid" data-grid-scroll-container="true">
       <div ref={gridRef}>
         {/* Virtual scroll container. `isolate` keeps the rows' z-index inside the grid. */}
         <div
+          ref={setRowsElement}
           className="isolate"
           style={{
             height: `${virtualizer.getTotalSize()}px`,
@@ -1028,12 +990,7 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
               >
                 <div
                   className="grid gap-2 file-grid"
-                  style={{
-                    gridTemplateColumns:
-                      columnCount > 0
-                        ? `repeat(${columnCount}, 1fr)`
-                        : `repeat(auto-fill, minmax(${tile + 24}px, 1fr))`,
-                  }}
+                  style={{ gridTemplateColumns: `repeat(${columnCount}, 1fr)` }}
                 >
                   {rowFiles.map((file) => renderFileItem(file))}
                 </div>

@@ -231,9 +231,6 @@ export default function FileList({ files, preferences }: FileListProps) {
   // Row height for virtual scrolling (py-[2px] + leading-5 = ~24px)
   const ROW_HEIGHT = 24;
 
-  // Clean up dragged state when drag ends
-  // No longer needed - native drag handles cleanup
-
   const sortBy = preferences.sortBy;
   const sortOrder = preferences.sortOrder;
   const toggleSort = (field: typeof preferences.sortBy) => {
@@ -688,6 +685,13 @@ export default function FileList({ files, preferences }: FileListProps) {
     const isOdd = virtualIndex % 2 === 1;
     const fileIsEntering = isEntering(file.path);
     const fileIsExiting = isExiting(file.path);
+    const sizeLabel = file.is_directory
+      ? file.child_count != null
+        ? `${file.child_count} item${file.child_count !== 1 ? 's' : ''}`
+        : '—'
+      : formatBytes(file.size);
+    const typeLabel = getTypeLabel(file);
+    const modifiedLabel = formatDateFull(file.modified);
 
     return (
       <div
@@ -816,27 +820,26 @@ export default function FileList({ files, preferences }: FileListProps) {
 
         {/* Size column */}
         <div
-          className={`col-span-2 flex items-center ${isSelected ? 'text-white' : 'text-app-muted'}`}
+          className={`col-span-2 truncate ${isSelected ? 'text-white' : 'text-app-muted'}`}
+          title={sizeLabel}
         >
-          {file.is_directory
-            ? file.child_count != null
-              ? `${file.child_count} item${file.child_count !== 1 ? 's' : ''}`
-              : '—'
-            : formatBytes(file.size)}
+          {sizeLabel}
         </div>
 
         {/* Type column */}
         <div
-          className={`col-span-2 flex items-center ${isSelected ? 'text-white' : 'text-app-muted'}`}
+          className={`col-span-2 truncate ${isSelected ? 'text-white' : 'text-app-muted'}`}
+          title={typeLabel}
         >
-          {getTypeLabel(file)}
+          {typeLabel}
         </div>
 
         {/* Modified column */}
         <div
-          className={`col-span-3 flex items-center ${isSelected ? 'text-white' : 'text-app-muted'} whitespace-nowrap`}
+          className={`col-span-3 truncate ${isSelected ? 'text-white' : 'text-app-muted'}`}
+          title={modifiedLabel}
         >
-          {formatDateFull(file.modified)}
+          {modifiedLabel}
         </div>
       </div>
     );
