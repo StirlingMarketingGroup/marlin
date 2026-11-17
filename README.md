@@ -214,7 +214,7 @@ How the code works is written up in the wiki. Start at [`docs/index.md`](docs/in
 1. Fork the repo
 2. Create a branch from `master`: `git checkout -b feat/thing`
 3. Make one change per branch and commit
-4. Run `npm run check` and `npm run test:run`
+4. Run `npm run check` and `npm run test:run`. If you changed Rust, also run `npm run test:rust`
 5. Push and open a PR
 
 The working rules are in [`AGENTS.md`](AGENTS.md).

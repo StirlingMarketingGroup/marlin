@@ -23,14 +23,14 @@ This file holds the rules that always apply. Everything longer lives in the wiki
 - `npm run check` runs ESLint on changed files, Prettier, both TypeScript projects, and `cargo check` with warnings as errors. The pre-push hook runs it.
 - `npm run test:run` runs the unit tests once.
 - `npm run test:e2e` runs the Playwright tests. They start their own Vite server and mock Tauri, so the desktop app does not need to run.
-- `cd src-tauri && cargo test` runs the Rust tests.
+- `npm run test:rust` runs the Rust tests with warnings as errors: the app's, then those of every workspace crate but `marlin-smb`.
 - `npm run format:fix` and `npm run lint:fix` fix formatting and lint errors.
 - `npm run build:smb-sidecar` builds the SMB helper binary. It needs samba installed (see `README.md`).
 
 ## Before you call work done
 
 1. Run `npm run check` and `npm run test:run`. Both must pass with no warnings.
-2. If you changed Rust, run `cargo test` in `src-tauri/`. CI does not run it yet (issue #462). [`docs/testing.md`](docs/testing.md) lists the tests that fail today and the issue for each. A failure listed there does not block your branch. Any other failure does. A plain `cargo test` skips the workspace crates. If you changed one under `src-tauri/crates/` (`marlin-smb`, `marlin-vfs`, `marlin-gdrive`, `marlin-mount`), also run `cargo test -p <crate>` there. The tests for `marlin-mount-client` are in `marlin-mount`: run `cargo test -p marlin-mount`. If you changed `marlin-fuse`, `marlin-gdrive`, or the `Adapter` or `Session` trait, `adapter.rs`, or `providers.rs` in `marlin-mount`, run `src-tauri/crates/marlin-fuse/test-in-docker.sh`: the Linux code is compiled out on a Mac. For the same changes, also run `src-tauri/crates/marlin-fuse/test-on-mac.sh` on a Mac with macFUSE: CI does not run the macOS mount tests. If you changed how the helper finds or clears a dead mount, also run `src-tauri/crates/marlin-mount/test-sweep.sh` on a Mac.
+2. If you changed Rust, run `npm run test:rust`. CI runs it too, on Linux, when a file under `src-tauri/` or `check.yml` changes. It must pass. It covers the app and every workspace crate but `marlin-smb`: the tests for `marlin-mount-client` are in `marlin-mount`. If you changed `marlin-smb`, also run `cargo test -p marlin-smb` in `src-tauri/`: it needs samba, and CI does not run it. If you changed `marlin-fuse`, `marlin-gdrive`, or the `Adapter` or `Session` trait, `adapter.rs`, or `providers.rs` in `marlin-mount`, run `src-tauri/crates/marlin-fuse/test-in-docker.sh`: CI does not run the tests that mount, and the Linux code is compiled out on a Mac. For the same changes, also run `src-tauri/crates/marlin-fuse/test-on-mac.sh` on a Mac with macFUSE: CI does not run the macOS mount tests. If you changed how the helper finds or clears a dead mount, also run `src-tauri/crates/marlin-mount/test-sweep.sh` on a Mac.
 3. If you changed `src/` or `e2e/`, run `npm run test:e2e`.
 4. Update the wiki page that covers what you changed (see "Keeping the wiki true").
 
