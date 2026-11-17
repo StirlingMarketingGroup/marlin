@@ -5,7 +5,7 @@
 This is not the code behind `gdrive://` paths. That is the older provider in the app, described in [Location providers](location-providers.md), and it stays as it is until #377.
 
 **Covers:** `src-tauri/crates/marlin-gdrive/`
-**Checked against the code:** 2026-11-16
+**Checked against the code:** 2026-11-17
 
 ## The parts
 
@@ -62,7 +62,7 @@ Some Drive items have no bytes to read: Google Docs, Sheets, Slides, Forms, and 
   ```
 
 - **The size is the length of the page.** The page depends on the ID alone, so the size is known when the folder is listed, and it never changes.
-- **A read of a link file sends Google no request.** The ID to open is in the item's ID: see [Item IDs](#item-ids). Opening one, and asking for its attributes, each cost one `files.get`, as for any file.
+- **A read of a link file sends Google no request.** The ID to open is in the item's ID: see [Item IDs](#item-ids). Opening one, and asking for its attributes, cost one `files.get` when the core holds no fresh answer, as for any file.
 - **The modified time** is the item's own, as for any file.
 - **A shortcut is never followed.** The provider does not ask Google about the target. A shortcut whose target is gone, or is not shared with the account, lists like any other, and its page leads to Google's error page. A shortcut to a folder is a file, so no folder is reachable through two parents.
 - **A link file is a file.** Listing one returns `NotAFolder` and sends no request.
@@ -221,6 +221,8 @@ The [mount core](mount-core.md) runs at most 16 provider calls at once and ends 
 - **16 calls at once is not a rate.** It stays under the request limit of Marlin's own project at the measured speed (above). It does not hold a limit in units: sixteen reads that each take half a second are 32 reads a second, over a newer project's 27. A lower number would slow every mount and still not hold a rate. The fix is fewer, bigger reads (#538).
 - **30 seconds covers the retries.** The three waits add up to 5.25 seconds at most. A listing is the long call: every page of a folder, one request after another, inside one call. How long a page of 1,000 items takes is not measured.
 - **A listing kept for 5 seconds** costs at most 12 listings a minute for a folder that stays open.
+- **Attributes kept for 5 seconds** cost at most 12 `files.get` a minute for a file that a program keeps asking about. After a listing, the attributes of its items cost nothing for those 5 seconds.
+- **Free space kept for 30 seconds** costs at most 2 `about.get` a minute.
 
 ## Checked against real Google
 

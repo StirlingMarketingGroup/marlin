@@ -51,6 +51,12 @@ pub struct Options {
 
     /// How many folder listings to keep. 0 turns the cache off.
     pub max_listings: usize,
+
+    /// How long an answer about one item's attributes may be reused. Zero turns it off.
+    pub attributes_ttl: Duration,
+
+    /// How long the account's total and free space may be reused. Zero turns it off.
+    pub space_ttl: Duration,
 }
 
 impl Default for Options {
@@ -60,7 +66,28 @@ impl Default for Options {
             max_calls: 16,
             listing_ttl: Duration::from_secs(5),
             max_listings: 64,
+            attributes_ttl: Duration::from_secs(5),
+            space_ttl: Duration::from_secs(30),
         }
+    }
+}
+
+/// When the core asked the provider for an answer, and when the answer came.
+#[derive(Clone, Copy)]
+struct Asked {
+    /// When the call started. Answers are ordered by it, so a slow call's answer is never taken for a later one.
+    at: Instant,
+
+    /// `State::generation` when the call started.
+    generation: u64,
+
+    /// When the answer came. It is fresh for its time limit from then, until the mount is refreshed.
+    answered: Instant,
+}
+
+impl Asked {
+    fn is_fresh(self, generation: u64, ttl: Duration) -> bool {
+        self.generation == generation && self.answered.elapsed() < ttl
     }
 }
 
@@ -68,6 +95,9 @@ struct Node {
     item: ItemId,
     lookups: u64,
     handles: u64,
+
+    /// What the provider last said about the item.
+    attributes: Option<(Asked, Attributes)>,
 }
 
 enum Opened {
@@ -81,7 +111,8 @@ struct State {
     next_node: u64,
     handles: HashMap<HandleId, Opened>,
     next_handle: u64,
-    listings: HashMap<ItemId, (Instant, Arc<Vec<Item>>)>,
+    listings: HashMap<ItemId, (Asked, Arc<Vec<Item>>)>,
+    space: Option<(Asked, Space)>,
     generation: u64,
 }
 
@@ -113,6 +144,7 @@ impl Vfs {
                 item: root.clone(),
                 lookups: 0,
                 handles: 0,
+                attributes: None,
             },
         );
         by_item.insert(root, Self::ROOT);
@@ -128,13 +160,14 @@ impl Vfs {
                 handles: HashMap::new(),
                 next_handle: 1,
                 listings: HashMap::new(),
+                space: None,
                 generation: 0,
             }),
             watcher: None,
         }
     }
 
-    /// Tells `watcher` how every provider call ended: `None` for a value, or the error. The core's own time limit reports [`VfsError::TimedOut`]. A call the adapter cancels reports nothing, and neither does a listing served from the cache.
+    /// Tells `watcher` how every provider call ended: `None` for a value, or the error. The core's own time limit reports [`VfsError::TimedOut`]. A call the adapter cancels reports nothing, and neither does a listing, an attributes answer, or a space answer the core already holds.
     pub fn watch_calls(
         mut self,
         watcher: impl Fn(Option<&VfsError>) + Send + Sync + 'static,
@@ -146,7 +179,7 @@ impl Vfs {
     /// Finds `name` in `parent` and adds one lookup to the item's node.
     pub async fn lookup(&self, parent: NodeId, name: &str) -> Result<Entry, VfsError> {
         let parent_item = self.item_of(parent)?;
-        let items = self.listing(&parent_item).await?;
+        let (asked, items) = self.listing(&parent_item).await?;
         let wanted = (self.rules.key)(name);
         let Some(found) = items
             .iter()
@@ -157,11 +190,13 @@ impl Vfs {
         };
         let mut state = self.state.lock().unwrap();
         let node = node_for(&mut state, found.id);
-        state.nodes.get_mut(&node).unwrap().lookups += 1;
+        let found_node = state.nodes.get_mut(&node).unwrap();
+        found_node.lookups += 1;
+        let attributes = remember(&mut found_node.attributes, asked, found.attributes);
         Ok(Entry {
             node,
             name: found.name,
-            attributes: found.attributes,
+            attributes,
         })
     }
 
@@ -175,16 +210,37 @@ impl Vfs {
         drop_unreferenced(&mut state, node);
     }
 
-    /// Asks the provider for this node's current attributes.
+    /// This node's attributes: the answer the node holds while it is fresh, or a new one from the provider.
     pub async fn attributes(&self, node: NodeId) -> Result<Attributes, VfsError> {
-        let item = self.item_of(node)?;
-        Ok(self.call(self.provider.item(&item)).await?.attributes)
+        let (item, at, generation) = {
+            let state = self.state.lock().unwrap();
+            let Some(found) = state.nodes.get(&node) else {
+                return Err(VfsError::StaleHandle);
+            };
+            if let Some((held, attributes)) = found.attributes {
+                if held.is_fresh(state.generation, self.options.attributes_ttl) {
+                    return Ok(attributes);
+                }
+            }
+            (found.item.clone(), Instant::now(), state.generation)
+        };
+        let attributes = self.call(self.provider.item(&item)).await?.attributes;
+        let asked = Asked {
+            at,
+            generation,
+            answered: Instant::now(),
+        };
+        let mut state = self.state.lock().unwrap();
+        let Some(found) = state.nodes.get_mut(&node) else {
+            return Ok(attributes);
+        };
+        Ok(remember(&mut found.attributes, asked, attributes))
     }
 
     /// Opens a folder and freezes that listing. The folder and each item in it keep a handle reference until `release`.
     pub async fn open_folder(&self, node: NodeId) -> Result<HandleId, VfsError> {
         let item = self.item_of(node)?;
-        let items = self.listing(&item).await?;
+        let (asked, items) = self.listing(&item).await?;
         let mut state = self.state.lock().unwrap();
         let Some(opened) = state.nodes.get_mut(&node) else {
             return Err(VfsError::StaleHandle);
@@ -193,11 +249,13 @@ impl Vfs {
         let mut entries = Vec::with_capacity(items.len());
         for item in items.iter() {
             let child = node_for(&mut state, item.id.clone());
-            state.nodes.get_mut(&child).unwrap().handles += 1;
+            let child_node = state.nodes.get_mut(&child).unwrap();
+            child_node.handles += 1;
+            let attributes = remember(&mut child_node.attributes, asked, item.attributes);
             entries.push(Entry {
                 node: child,
                 name: item.name.clone(),
-                attributes: item.attributes,
+                attributes,
             });
         }
         Ok(insert_handle(&mut state, Opened::Folder { node, entries }))
@@ -224,9 +282,8 @@ impl Vfs {
         if access == Access::Write {
             return Err(VfsError::ReadOnly);
         }
-        let item = self.item_of(node)?;
-        let found = self.call(self.provider.item(&item)).await?;
-        if found.attributes.kind == Kind::Folder {
+        let attributes = self.attributes(node).await?;
+        if attributes.kind == Kind::Folder {
             return Err(VfsError::IsAFolder);
         }
         let mut state = self.state.lock().unwrap();
@@ -234,10 +291,11 @@ impl Vfs {
             return Err(VfsError::StaleHandle);
         };
         opened.handles += 1;
+        let item = opened.item.clone();
         Ok(insert_handle(&mut state, Opened::File { node, item }))
     }
 
-    /// Reads one byte range. The core keeps no file length, so a file that grows can be read to its new end.
+    /// Reads one byte range. The size a node holds never limits a read, so a file that grows can be read to its new end.
     pub async fn read(
         &self,
         handle: HandleId,
@@ -274,12 +332,28 @@ impl Vfs {
         }
     }
 
-    /// Asks the provider how much space the account has.
+    /// How much space the account has: the answer the core holds while it is fresh, or a new one from the provider.
     pub async fn space(&self) -> Result<Space, VfsError> {
-        self.call(self.provider.space()).await
+        let (at, generation) = {
+            let state = self.state.lock().unwrap();
+            if let Some((held, space)) = state.space {
+                if held.is_fresh(state.generation, self.options.space_ttl) {
+                    return Ok(space);
+                }
+            }
+            (Instant::now(), state.generation)
+        };
+        let space = self.call(self.provider.space()).await?;
+        let asked = Asked {
+            at,
+            generation,
+            answered: Instant::now(),
+        };
+        let mut state = self.state.lock().unwrap();
+        Ok(remember(&mut state.space, asked, space))
     }
 
-    /// Drops cached listings. A listing already in flight cannot put its result back.
+    /// Drops cached listings and makes every stored attributes and space answer stale. A call already in flight cannot put a fresh result back, and a listing in flight is not kept.
     pub fn refresh(&self) {
         let mut state = self.state.lock().unwrap();
         state.listings.clear();
@@ -314,29 +388,40 @@ impl Vfs {
         result
     }
 
-    async fn listing(&self, folder: &ItemId) -> Result<Arc<Vec<Item>>, VfsError> {
+    async fn listing(&self, folder: &ItemId) -> Result<(Asked, Arc<Vec<Item>>), VfsError> {
         let ttl = self.options.listing_ttl;
-        let generation = {
+        let (at, generation) = {
             let state = self.state.lock().unwrap();
-            if let Some((at, items)) = state.listings.get(folder) {
-                if at.elapsed() < ttl {
-                    return Ok(Arc::clone(items));
+            if let Some((held, items)) = state.listings.get(folder) {
+                if held.is_fresh(state.generation, ttl) {
+                    return Ok((*held, Arc::clone(items)));
                 }
             }
-            state.generation
+            (Instant::now(), state.generation)
         };
         let mut items = self.call(self.provider.list(folder)).await?;
+        let asked = Asked {
+            at,
+            generation,
+            answered: Instant::now(),
+        };
         unique_names(&mut items, &self.rules);
         let items = Arc::new(items);
         let mut state = self.state.lock().unwrap();
-        if state.generation != generation {
-            return Ok(items);
+        let held = state.listings.get(folder);
+        if state.generation != generation || held.is_some_and(|(held, _)| held.at > at) {
+            return Ok((asked, items));
         }
         if state.listings.len() >= self.options.max_listings {
-            state.listings.retain(|_, (at, _)| at.elapsed() < ttl);
+            state
+                .listings
+                .retain(|_, (held, _)| held.answered.elapsed() < ttl);
         }
         if state.listings.len() >= self.options.max_listings {
-            let oldest = state.listings.iter().min_by_key(|(_, (at, _))| *at);
+            let oldest = state
+                .listings
+                .iter()
+                .min_by_key(|(_, (held, _))| held.answered);
             if let Some(oldest) = oldest.map(|(id, _)| id.clone()) {
                 state.listings.remove(&oldest);
             }
@@ -344,9 +429,9 @@ impl Vfs {
         if state.listings.len() < self.options.max_listings {
             state
                 .listings
-                .insert(folder.clone(), (Instant::now(), Arc::clone(&items)));
+                .insert(folder.clone(), (asked, Arc::clone(&items)));
         }
-        Ok(items)
+        Ok((asked, items))
     }
 }
 
@@ -363,9 +448,21 @@ fn node_for(state: &mut State, item: ItemId) -> NodeId {
             item,
             lookups: 0,
             handles: 0,
+            attributes: None,
         },
     );
     id
+}
+
+/// Stores an answer from the provider and returns the latest answer held. An answer asked for earlier never replaces one asked for later: a lookup can carry a listing that is older than the node's own answer, and a slow call can end after a later one.
+fn remember<T: Copy>(held: &mut Option<(Asked, T)>, asked: Asked, answer: T) -> T {
+    match *held {
+        Some((kept, latest)) if (kept.generation, kept.at) > (asked.generation, asked.at) => latest,
+        _ => {
+            *held = Some((asked, answer));
+            answer
+        }
+    }
 }
 
 fn drop_unreferenced(state: &mut State, node: NodeId) {

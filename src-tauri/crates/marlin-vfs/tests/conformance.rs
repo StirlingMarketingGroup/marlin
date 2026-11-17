@@ -170,6 +170,7 @@ async fn open_is_stale_when_the_node_is_forgotten_during_the_call() {
     let (provider, vfs) = mount(Options::default());
     provider.add_file(&provider.root(), "a.txt", b"hello");
     let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    vfs.refresh();
     provider.set_delay(Duration::from_secs(5));
     let vfs_for_open = Arc::clone(&vfs);
     let node = file.node;
@@ -372,7 +373,10 @@ async fn a_watcher_hears_how_every_provider_call_ended() {
     let provider = Arc::new(MemoryProvider::new());
     let heard = Arc::new(Mutex::new(Vec::new()));
     let heard_for_watch = Arc::clone(&heard);
-    let options = Options::default();
+    let options = Options {
+        space_ttl: Duration::ZERO,
+        ..Options::default()
+    };
     let vfs = Vfs::new(provider.clone(), POSIX, options).watch_calls(move |error| {
         heard_for_watch.lock().unwrap().push(error.cloned());
     });
@@ -411,10 +415,26 @@ async fn a_watcher_hears_how_every_provider_call_ended() {
         ]
     );
 
+    provider.add_file(&provider.root(), "a.txt", b"hello");
+    vfs.refresh();
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    assert_eq!(
+        *heard.lock().unwrap(),
+        vec![
+            None,
+            Some(VfsError::Offline),
+            Some(VfsError::TimedOut),
+            None,
+            None,
+        ]
+    );
+    vfs.attributes(file.node).await.unwrap();
+    assert_eq!(heard.lock().unwrap().len(), 5);
+
     provider.set_delay(Duration::from_secs(5));
     let cancelled = tokio::time::timeout(Duration::from_secs(1), vfs.space()).await;
     assert!(cancelled.is_err());
-    assert_eq!(heard.lock().unwrap().len(), 4);
+    assert_eq!(heard.lock().unwrap().len(), 5);
 }
 
 #[tokio::test]
@@ -442,4 +462,225 @@ async fn zero_listings_turns_the_cache_off() {
     vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
     provider.add_file(&provider.root(), "b.txt", b"b");
     assert_eq!(vfs.lookup(Vfs::ROOT, "b.txt").await.unwrap().name, "b.txt");
+}
+
+#[tokio::test]
+async fn attributes_after_a_listing_ask_the_provider_nothing() {
+    let (provider, vfs) = mount(Options::default());
+    for name in ["a.txt", "b.txt", "c.txt"] {
+        provider.add_file(&provider.root(), name, b"hello");
+    }
+    let handle = vfs.open_folder(Vfs::ROOT).await.unwrap();
+    let entries = vfs.read_folder(handle, 0, 10).unwrap();
+    assert_eq!(entries.len(), 3);
+    for entry in &entries {
+        assert_eq!(vfs.attributes(entry.node).await.unwrap(), entry.attributes);
+    }
+    assert_eq!(provider.calls(), 1);
+    let found = vfs.lookup(Vfs::ROOT, &entries[0].name).await.unwrap();
+    vfs.open(found.node, Access::Read).await.unwrap();
+    assert_eq!(provider.calls(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn attributes_are_asked_again_when_the_answer_is_too_old() {
+    let ttl = Duration::from_secs(10);
+    let (provider, vfs) = mount(Options {
+        attributes_ttl: ttl,
+        listing_ttl: ttl,
+        ..Options::default()
+    });
+    let id = provider.add_file(&provider.root(), "a.txt", b"hello");
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    let calls = provider.calls();
+    provider.write(&id, b"helloworld");
+    tokio::time::advance(ttl - Duration::from_millis(1)).await;
+    assert_eq!(vfs.attributes(file.node).await.unwrap().size, 5);
+    assert_eq!(provider.calls(), calls);
+    tokio::time::advance(Duration::from_millis(1)).await;
+    assert_eq!(vfs.attributes(file.node).await.unwrap().size, 10);
+    assert_eq!(provider.calls(), calls + 1);
+    assert_eq!(vfs.attributes(file.node).await.unwrap().size, 10);
+    assert_eq!(provider.calls(), calls + 1);
+}
+
+#[tokio::test]
+async fn refresh_makes_stored_attributes_stale() {
+    let (provider, vfs) = mount(Options::default());
+    let id = provider.add_file(&provider.root(), "a.txt", b"hello");
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    provider.write(&id, b"helloworld");
+    vfs.refresh();
+    assert_eq!(vfs.attributes(file.node).await.unwrap().size, 10);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_refresh_during_an_attributes_call_keeps_its_answer_out() {
+    let (provider, vfs) = mount(Options::default());
+    let id = provider.add_file(&provider.root(), "a.txt", b"hello");
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    vfs.refresh();
+    provider.set_delay(Duration::from_secs(1));
+    let vfs_for_attributes = Arc::clone(&vfs);
+    let node = file.node;
+    let task = tokio::spawn(async move { vfs_for_attributes.attributes(node).await });
+    until_in_flight(&provider, 1).await;
+    provider.write(&id, b"helloworld");
+    vfs.refresh();
+    assert_eq!(task.await.unwrap().unwrap().size, 5);
+    provider.set_delay(Duration::ZERO);
+    assert_eq!(vfs.attributes(file.node).await.unwrap().size, 10);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cancelled_attributes_call_stores_nothing() {
+    let (provider, vfs) = mount(Options::default());
+    let id = provider.add_file(&provider.root(), "a.txt", b"hello");
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    vfs.refresh();
+    provider.set_delay(Duration::from_secs(60));
+    let vfs_for_attributes = Arc::clone(&vfs);
+    let node = file.node;
+    let task = tokio::spawn(async move { vfs_for_attributes.attributes(node).await });
+    until_in_flight(&provider, 1).await;
+    task.abort();
+    let _ = task.await;
+    provider.write(&id, b"helloworld");
+    provider.set_delay(Duration::ZERO);
+    let calls = provider.calls();
+    assert_eq!(vfs.attributes(file.node).await.unwrap().size, 10);
+    assert_eq!(provider.calls(), calls + 1);
+}
+
+#[tokio::test]
+async fn a_stored_size_does_not_cut_a_read_short() {
+    let (provider, vfs) = mount(Options::default());
+    let id = provider.add_file(&provider.root(), "a.txt", b"hello");
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    let handle = vfs.open(file.node, Access::Read).await.unwrap();
+    provider.write(&id, b"helloworld");
+    assert_eq!(vfs.attributes(file.node).await.unwrap().size, 5);
+    assert_eq!(vfs.read(handle, 5, 5).await.unwrap(), b"world");
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_older_listing_does_not_replace_a_later_answer() {
+    let (provider, vfs) = mount(Options {
+        attributes_ttl: Duration::from_secs(2),
+        listing_ttl: Duration::from_secs(10),
+        ..Options::default()
+    });
+    let id = provider.add_file(&provider.root(), "a.txt", b"hello");
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    let calls = provider.calls();
+    provider.write(&id, b"helloworld");
+    tokio::time::advance(Duration::from_secs(3)).await;
+    assert_eq!(vfs.attributes(file.node).await.unwrap().size, 10);
+    assert_eq!(provider.calls(), calls + 1);
+    let again = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    assert_eq!(again.attributes.size, 10);
+    assert_eq!(vfs.attributes(file.node).await.unwrap().size, 10);
+    assert_eq!(provider.calls(), calls + 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_slow_answer_does_not_replace_one_asked_for_later() {
+    let (provider, vfs) = mount(Options::default());
+    let id = provider.add_file(&provider.root(), "a.txt", b"hello");
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    vfs.refresh();
+    provider.set_delay(Duration::from_secs(3));
+    let vfs_for_attributes = Arc::clone(&vfs);
+    let node = file.node;
+    let first = tokio::spawn(async move { vfs_for_attributes.attributes(node).await });
+    until_in_flight(&provider, 1).await;
+    tokio::time::advance(Duration::from_millis(1)).await;
+    provider.write(&id, b"helloworld");
+    provider.set_delay(Duration::from_secs(1));
+    assert_eq!(vfs.attributes(file.node).await.unwrap().size, 10);
+    assert_eq!(first.await.unwrap().unwrap().size, 10);
+    provider.set_delay(Duration::ZERO);
+    let calls = provider.calls();
+    assert_eq!(vfs.attributes(file.node).await.unwrap().size, 10);
+    assert_eq!(provider.calls(), calls);
+}
+
+#[tokio::test]
+async fn zero_attributes_ttl_turns_the_cache_off() {
+    let (provider, vfs) = mount(Options {
+        attributes_ttl: Duration::ZERO,
+        ..Options::default()
+    });
+    let id = provider.add_file(&provider.root(), "a.txt", b"hello");
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    provider.write(&id, b"helloworld");
+    assert_eq!(vfs.attributes(file.node).await.unwrap().size, 10);
+}
+
+#[tokio::test(start_paused = true)]
+async fn space_is_asked_again_when_the_answer_is_too_old_or_after_a_refresh() {
+    let ttl = Duration::from_secs(30);
+    let (provider, vfs) = mount(Options {
+        space_ttl: ttl,
+        ..Options::default()
+    });
+    let space = vfs.space().await.unwrap();
+    tokio::time::advance(ttl - Duration::from_millis(1)).await;
+    assert_eq!(vfs.space().await.unwrap(), space);
+    assert_eq!(provider.calls(), 1);
+    tokio::time::advance(Duration::from_millis(1)).await;
+    vfs.space().await.unwrap();
+    assert_eq!(provider.calls(), 2);
+    vfs.refresh();
+    vfs.space().await.unwrap();
+    assert_eq!(provider.calls(), 3);
+}
+
+#[tokio::test]
+async fn a_failed_space_call_is_not_kept() {
+    let (provider, vfs) = mount(Options::default());
+    provider.fail_with(Some(VfsError::Offline));
+    assert_eq!(vfs.space().await, Err(VfsError::Offline));
+    provider.fail_with(None);
+    assert!(vfs.space().await.is_ok());
+    assert_eq!(provider.calls(), 2);
+    assert!(vfs.space().await.is_ok());
+    assert_eq!(provider.calls(), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_slow_listing_is_reused_from_when_it_came() {
+    let options = Options::default();
+    let (provider, vfs) = mount(options);
+    provider.add_file(&provider.root(), "a.txt", b"hello");
+    provider.set_delay(options.listing_ttl + Duration::from_secs(1));
+    let handle = vfs.open_folder(Vfs::ROOT).await.unwrap();
+    vfs.release(handle);
+    provider.set_delay(Duration::ZERO);
+    tokio::time::advance(options.listing_ttl - Duration::from_millis(1)).await;
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    vfs.attributes(file.node).await.unwrap();
+    assert_eq!(provider.calls(), 1);
+    tokio::time::advance(Duration::from_millis(1)).await;
+    vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    assert_eq!(provider.calls(), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_slow_listing_does_not_replace_one_asked_for_later() {
+    let (provider, vfs) = mount(Options::default());
+    provider.add_file(&provider.root(), "a.txt", b"a");
+    provider.set_delay(Duration::from_secs(3));
+    let vfs_for_lookup = Arc::clone(&vfs);
+    let first = tokio::spawn(async move { vfs_for_lookup.lookup(Vfs::ROOT, "a.txt").await });
+    until_in_flight(&provider, 1).await;
+    tokio::time::advance(Duration::from_millis(1)).await;
+    provider.add_file(&provider.root(), "b.txt", b"b");
+    provider.set_delay(Duration::from_secs(1));
+    vfs.lookup(Vfs::ROOT, "b.txt").await.unwrap();
+    first.await.unwrap().unwrap();
+    provider.set_delay(Duration::ZERO);
+    let calls = provider.calls();
+    assert_eq!(vfs.lookup(Vfs::ROOT, "b.txt").await.unwrap().name, "b.txt");
+    assert_eq!(provider.calls(), calls);
 }

@@ -16,6 +16,7 @@ struct Inner {
     error: Option<VfsError>,
     in_flight: usize,
     peak: usize,
+    calls: usize,
 }
 
 /// A provider that keeps its tree in memory, for tests. Like Google Drive, it allows two items with one name in a folder and any character in a name.
@@ -58,6 +59,7 @@ impl MemoryProvider {
                 error: None,
                 in_flight: 0,
                 peak: 0,
+                calls: 0,
             }),
         }
     }
@@ -70,6 +72,16 @@ impl MemoryProvider {
     /// Adds a file under `parent` and returns its new ID.
     pub fn add_file(&self, parent: &ItemId, name: &str, contents: &[u8]) -> ItemId {
         self.add(parent, name, Kind::File, contents)
+    }
+
+    /// Replaces a file's bytes. Its size follows, and its modified time moves forward.
+    pub fn write(&self, id: &ItemId, contents: &[u8]) {
+        let mut inner = self.inner.lock().unwrap();
+        let stored = inner.stored.iter_mut().find(|stored| stored.item.id == *id);
+        let stored = stored.expect("no item has this ID");
+        stored.contents = contents.to_vec();
+        stored.item.attributes.size = contents.len() as u64;
+        stored.item.attributes.modified += Duration::from_secs(1);
     }
 
     /// Moves an item and gives it a new name. Its ID stays the same.
@@ -107,6 +119,11 @@ impl MemoryProvider {
         self.inner.lock().unwrap().peak
     }
 
+    /// How many provider calls have started.
+    pub fn calls(&self) -> usize {
+        self.inner.lock().unwrap().calls
+    }
+
     fn add(&self, parent: &ItemId, name: &str, kind: Kind, contents: &[u8]) -> ItemId {
         let mut inner = self.inner.lock().unwrap();
         inner.added += 1;
@@ -136,6 +153,7 @@ impl MemoryProvider {
         let (delay, result) = {
             let mut inner = self.inner.lock().unwrap();
             inner.in_flight += 1;
+            inner.calls += 1;
             inner.peak = inner.peak.max(inner.in_flight);
             let result = match &inner.error {
                 Some(error) => Err(error.clone()),

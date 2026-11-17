@@ -3,19 +3,19 @@
 `marlin-vfs` is the layer between a storage provider and an OS mount adapter. An adapter asks it for nodes and bytes. It asks a provider for items. The [mount helper](mount-helper.md) builds one `Vfs` per mount. The [Linux mount adapter](mount-linux.md) and the [macOS mount adapter](mount-macos.md) serve it to the OS. The first real provider is the [Google Drive mount provider](mount-gdrive.md). The Windows adapter (#375) comes next. It is read-only until #376.
 
 **Covers:** `src-tauri/crates/marlin-vfs/`
-**Checked against the code:** 2026-11-16
+**Checked against the code:** 2026-11-17
 
 The design is in [decision 0001](decisions/0001-mount-architecture.md). [Decision 0002](decisions/0002-node-ids-follow-lookup-counts.md) sets how long a node ID lasts.
 
 ## The parts
 
-| File          | Holds                                                                                               |
-| ------------- | --------------------------------------------------------------------------------------------------- |
-| `provider.rs` | `Provider`, the trait a storage backend implements, keyed by the backend's own `ItemId`.            |
-| `vfs.rs`      | `Vfs`, what an adapter calls. It owns the node table, the open handles, and the listing cache.      |
-| `names.rs`    | The rules that make the names in one folder unique and safe for the OS.                             |
-| `error.rs`    | `VfsError`, the one error type. Each adapter maps it to an `errno` or an `NTSTATUS`.                |
-| `memory.rs`   | `MemoryProvider`, a provider that lives in memory. Tests here and in later crates run on top of it. |
+| File          | Holds                                                                                                       |
+| ------------- | ----------------------------------------------------------------------------------------------------------- |
+| `provider.rs` | `Provider`, the trait a storage backend implements, keyed by the backend's own `ItemId`.                    |
+| `vfs.rs`      | `Vfs`, what an adapter calls. It owns the node table, the open handles, and the provider answers it reuses. |
+| `names.rs`    | The rules that make the names in one folder unique and safe for the OS.                                     |
+| `error.rs`    | `VfsError`, the one error type. Each adapter maps it to an `errno` or an `NTSTATUS`.                        |
+| `memory.rs`   | `MemoryProvider`, a provider that lives in memory. Tests here and in later crates run on top of it.         |
 
 The crate has no FUSE, WinFsp, Tauri, or serde types. It depends on `tokio` and `async-trait` only.
 
@@ -35,11 +35,11 @@ An `ItemId` should stay with an item when the remote renames or moves it. Google
 | --------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
 | `lookup(parent, name)`                  | Finds a name in a folder and returns its node. Counts one lookup on that node.                             |
 | `forget(node, lookups)`                 | Gives lookups back. The adapter must call it for every lookup, or the node table grows.                    |
-| `attributes(node)`                      | Asks the provider for the kind, size, and modified time. Not cached (#528).                                |
+| `attributes(node)`                      | Returns the kind, size, and modified time. Asks the provider only when the node holds no fresh answer.     |
 | `open_folder`, `read_folder`, `release` | Takes a fixed copy of a folder's listing and reads it in pages. The copy does not change while it is open. |
 | `open`, `read`, `release`               | Opens a file and reads any byte range. Opening for write fails with `ReadOnly`.                            |
-| `space()`                               | Total and free bytes.                                                                                      |
-| `refresh()`                             | Drops the cached listings.                                                                                 |
+| `space()`                               | Total and free bytes. Asks the provider only when the core holds no fresh answer.                          |
+| `refresh()`                             | Drops the cached listings and makes every stored attributes and space answer stale.                        |
 
 ## Rules the core keeps
 
@@ -49,10 +49,13 @@ An `ItemId` should stay with an item when the remote renames or moves it. Google
 - **Name rules per OS.** `NameRules` holds two functions: which characters are forbidden, and the key that decides whether two names are the same name. `POSIX` is the only rule set today. Windows reserved names come with the Windows adapter (#375). macOS mounts use `POSIX` until they get rules of their own (#542).
 - **Limits.** Each mount runs at most `max_calls` provider calls at once (default 16). A call that does not finish within `call_timeout` (default 30 seconds), waiting included, fails with `TimedOut`. Dropping the future of a core call cancels its provider call.
 - **Listing cache.** A folder's listing is reused for `listing_ttl` (default 5 seconds). The cache holds at most `max_listings` folders (default 64), and 0 turns it off. A listing that started before a `refresh()` is never put in the cache.
+- **Attributes.** A node keeps the provider's latest answer about its item. The answer comes from a listing or from an `item` call. `attributes`, and the folder check in `open`, reuse it for `attributes_ttl` (default 5 seconds), and 0 turns that off. So a listing and then the attributes of each item in it cost one provider call. The answer goes away with its node, so the node table is the bound and there is no size option. `lookup` and `open_folder` return the latest answer the node holds. A stored size never limits a `read`. An `open` in that time does not notice that the remote removed the file.
+- **Free space.** The core reuses the provider's answer for `space_ttl` (default 30 seconds), and 0 turns that off. A failed call is not kept. macOS asks for the free space at every open of a file ([macOS mount adapter](mount-macos.md#how-a-mount-behaves)).
+- **Age and order.** A listing, an attributes answer, and a space answer are each fresh for their time limit from when the answer came. So a listing that took longer than `listing_ttl` is still reused. The core orders answers by when it asked: one asked for earlier never replaces one asked for later, however late it comes.
 - **Locking.** All state is behind one mutex that is never held across a provider call.
-- **Call results.** `Vfs::watch_calls` gives a mount's owner the result of every provider call, including the core's own `TimedOut`. A cancelled call and a cached listing report nothing. The mount helper builds a mount's health on it ([Health](mount-helper.md#health)).
+- **Call results.** `Vfs::watch_calls` gives a mount's owner the result of every provider call, including the core's own `TimedOut`. A cancelled call, a cached listing, attributes a node already holds, and a space answer the core already holds report nothing. The mount helper builds a mount's health on it ([Health](mount-helper.md#health)).
 
-Every mount uses the four defaults. [Google's limits](mount-gdrive.md#googles-limits) says how they fit the Drive API. Nobody has measured them against a real account.
+Every mount uses the six defaults. [Google's limits](mount-gdrive.md#googles-limits) says how they fit the Drive API. Nobody has measured them against a real account.
 
 ## Testing
 

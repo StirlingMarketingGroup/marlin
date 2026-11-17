@@ -254,9 +254,10 @@ fn code(response: &Value) -> i64 {
     response["error"]["code"].as_i64().expect("an error")
 }
 
-/// Makes one provider call through the mount named `name` and ignores the result.
+/// Makes one provider call through the mount named `name` and ignores the result. The refresh comes first, so the core asks the provider and does not reuse the space answer it holds.
 async fn call(harness: &Harness, name: &str) {
     let vfs = harness.fake.vfs.lock().unwrap()[name].clone();
+    vfs.refresh();
     let _ = vfs.space().await;
 }
 
@@ -978,6 +979,7 @@ async fn a_call_from_an_earlier_mount_of_the_account_changes_nothing() {
     mount_and_settle(&mut client, &mut watcher, "ana", "drive").await;
 
     old_provider.fail_with(Some(VfsError::SignInNeeded));
+    old_vfs.refresh();
     let _ = old_vfs.space().await;
     assert_eq!(
         client.call("status", account("ana")).await["result"]["state"],
