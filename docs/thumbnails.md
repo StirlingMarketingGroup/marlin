@@ -3,7 +3,7 @@
 The backend makes every thumbnail. The frontend asks for one by path and size, and gets back a data URL. Results are cached in memory and on disk, keyed by the file's identity, so a changed file gets a new thumbnail.
 
 **Covers:** `src-tauri/src/thumbnails/`, the thumbnail commands in `src-tauri/src/commands.rs`, `src/hooks/useThumbnail.ts`
-**Checked against the code:** 2026-11-16
+**Checked against the code:** 2026-11-17
 
 ## Flow
 
@@ -22,7 +22,7 @@ Leaving a folder calls `cancel_all_thumbnails`. A row that scrolls away calls `c
 | ------------------- | ----------------------------------------------------------------------- |
 | `images.rs`         | JPG, PNG, GIF, WebP, BMP, TIFF, TGA, ICO                                |
 | `psd.rs`            | Photoshop files                                                         |
-| `pdf.rs`            | PDF, AI, EPS                                                            |
+| `pdf.rs`            | PDF, AI                                                                 |
 | `svg.rs`            | SVG                                                                     |
 | `stl.rs`            | STL 3D models, shaded with the accent color                             |
 | `video.rs`          | Video files, one frame                                                  |
@@ -61,5 +61,7 @@ For `smb` and `sftp` paths the identity comes from the provider. If that lookup 
 
 ## Rough spots
 
-- `ThumbnailService::request` re-generates a cached SMB image thumbnail when the cache entry has no dimensions. This backfills entries written before dimensions were stored, and it is SMB-only.
+- `ThumbnailService::request` re-generates a cached SMB image thumbnail when its cache entry has no dimensions. It does this for SMB only.
 - Remote thumbnails download the whole file. A large remote video costs a full download for one frame.
+- PDF and AI thumbnails are drawn by `hayro`, a pure Rust renderer. It reads the whole file into memory. A PDF that needs a password to open gets no thumbnail: Marlin gives `hayro` no password. Its README says it does not yet draw blend modes, isolated or knockout transparency groups, or color key masks. In a debug build (`npm run tauri dev`) it is 20 to 30 times slower than in a release build: a page takes 0.1 to 6 seconds.
+- EPS files and Illustrator files older than version 9 are PostScript, not PDF. They get no thumbnail. The frontend asks for one for `.eps` and gets an error.

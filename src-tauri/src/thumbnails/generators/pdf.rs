@@ -1,132 +1,130 @@
 use super::super::{ThumbnailGenerationResult, ThumbnailRequest};
 use crate::thumbnails::generators::ThumbnailGenerator;
+use hayro::hayro_interpret::InterpreterSettings;
+use hayro::hayro_syntax::Pdf;
+use hayro::vello_cpu::color::palette::css::WHITE;
+use hayro::{render, PixmapSettings, RenderCache, RenderSettings};
 use image::{DynamicImage, RgbaImage};
-use mupdf::Document;
-use std::path::Path;
 
 pub struct PdfGenerator;
 
 impl PdfGenerator {
     pub fn generate(request: &ThumbnailRequest) -> Result<ThumbnailGenerationResult, String> {
-        let path = Path::new(&request.path);
+        let data = std::fs::read(&request.path).map_err(|e| format!("Failed to read PDF: {e}"))?;
+        let pdf = Pdf::new(data).map_err(|e| format!("Failed to open PDF: {:?}", e))?;
+        let page = pdf
+            .pages()
+            .first()
+            .ok_or_else(|| "Failed to load first page".to_string())?;
 
-        if !path.exists() {
-            return Err("PDF file does not exist".to_string());
-        }
-
-        // Use MuPDF for cross-platform PDF rendering
-        Self::generate_with_mupdf(request)
-    }
-
-    fn generate_with_mupdf(
-        request: &ThumbnailRequest,
-    ) -> Result<ThumbnailGenerationResult, String> {
-        // Open the PDF document with MuPDF
-        let doc =
-            Document::open(&request.path).map_err(|e| format!("Failed to open PDF: {:?}", e))?;
-
-        // Get the first page
-        let page = doc
-            .load_page(0)
-            .map_err(|e| format!("Failed to load first page: {:?}", e))?;
-
-        // Get page bounds (in points, 72 points = 1 inch)
-        let bounds = page
-            .bounds()
-            .map_err(|e| format!("Failed to get page bounds: {:?}", e))?;
-
-        let page_width = bounds.x1 - bounds.x0;
-        let page_height = bounds.y1 - bounds.y0;
-
-        // Calculate scale to fit within requested size
+        let (page_width, page_height) = page.render_dimensions();
         let scale = if page_width > page_height {
             request.size as f32 / page_width
         } else {
             request.size as f32 / page_height
         };
 
-        // Create a transformation matrix for scaling
-        let matrix = mupdf::Matrix::new_scale(scale, scale);
+        let pixmap = render(
+            page,
+            &RenderCache::new(),
+            &InterpreterSettings::default(),
+            &RenderSettings::default(),
+            &PixmapSettings {
+                x_scale: scale,
+                y_scale: scale,
+                bg_color: WHITE,
+            },
+        );
 
-        // Render the page to a pixmap with white background
-        // Using RGB format to avoid alpha channel issues
-        let pixmap = page
-            .to_pixmap(
-                &matrix,
-                &mupdf::Colorspace::device_rgb(),
-                false, // no alpha channel (opaque background)
-                true,  // interpolate
-            )
-            .map_err(|e| format!("Failed to render page: {:?}", e))?;
+        // A white background makes every pixel opaque, so premultiplied and straight alpha match.
+        let rgba_image = RgbaImage::from_raw(
+            u32::from(pixmap.width()),
+            u32::from(pixmap.height()),
+            pixmap.data_as_u8_slice().to_vec(),
+        )
+        .ok_or_else(|| "Failed to create image from PDF render data".to_string())?;
+        let image = DynamicImage::ImageRgba8(rgba_image);
 
-        // Get pixmap dimensions and data
-        let width = pixmap.width() as u32;
-        let height = pixmap.height() as u32;
-        let stride = pixmap.stride() as usize;
-        let n = pixmap.n() as usize; // number of components per pixel
-        let samples = pixmap.samples();
-
-        // Convert MuPDF pixmap to image::RgbaImage
-        // MuPDF gives us RGB data, we need to convert to RGBA
-        let mut rgba_buffer = Vec::with_capacity((width * height * 4) as usize);
-
-        for y in 0..height {
-            for x in 0..width {
-                let pixel_offset = y as usize * stride + x as usize * n;
-
-                if n == 3 {
-                    // RGB format
-                    rgba_buffer.push(samples[pixel_offset]); // R
-                    rgba_buffer.push(samples[pixel_offset + 1]); // G
-                    rgba_buffer.push(samples[pixel_offset + 2]); // B
-                    rgba_buffer.push(255); // A (fully opaque)
-                } else if n == 4 {
-                    // RGBA format
-                    rgba_buffer.push(samples[pixel_offset]); // R
-                    rgba_buffer.push(samples[pixel_offset + 1]); // G
-                    rgba_buffer.push(samples[pixel_offset + 2]); // B
-                    rgba_buffer.push(samples[pixel_offset + 3]); // A
-                } else if n == 1 {
-                    // Grayscale
-                    let gray = samples[pixel_offset];
-                    rgba_buffer.push(gray); // R
-                    rgba_buffer.push(gray); // G
-                    rgba_buffer.push(gray); // B
-                    rgba_buffer.push(255); // A
-                } else {
-                    return Err(format!("Unsupported pixel format with {} components", n));
-                }
-            }
-        }
-
-        // Create an RGBA image from the buffer
-        let rgba_image = RgbaImage::from_vec(width, height, rgba_buffer)
-            .ok_or_else(|| "Failed to create image from PDF render data".to_string())?;
-
-        // Convert to DynamicImage
-        let dynamic_image = DynamicImage::ImageRgba8(rgba_image);
-
-        // Ensure we're at the target size (might need additional resizing)
-        let final_image = if width != request.size || height != request.size {
-            ThumbnailGenerator::resize_image(dynamic_image, request.size, request.quality)?
-        } else {
-            dynamic_image
-        };
-
-        // Check for transparency (PDFs rendered with white background are typically opaque)
-        let has_transparency = false; // PDFs are rendered with opaque background
-
-        // Encode to data URL
         let data_url =
-            ThumbnailGenerator::encode_to_data_url(&final_image, request.format, request.quality)?;
+            ThumbnailGenerator::encode_to_data_url(&image, request.format, request.quality)?;
 
-        // PDF dimensions are in points, convert to approximate pixels at 72 DPI
-        // These are the original page dimensions, not the rendered thumbnail size
+        // The caller wants the page size in points, not the thumbnail size.
         Ok(ThumbnailGenerationResult {
             data_url,
-            has_transparency,
+            has_transparency: false,
             image_width: Some(page_width.round() as u32),
             image_height: Some(page_height.round() as u32),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::thumbnails::{ThumbnailFormat, ThumbnailQuality, ThumbnailRequest};
+    use base64::Engine as _;
+    use image::GenericImageView;
+
+    const PAGE_PDF: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/pdf/page.pdf");
+    const LOCKED_PDF: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/pdf/locked.pdf");
+
+    fn request_for(path: &str) -> ThumbnailRequest {
+        ThumbnailRequest {
+            id: "test".to_string(),
+            path: path.to_string(),
+            size: 256,
+            quality: ThumbnailQuality::Medium,
+            format: ThumbnailFormat::PNG,
+            priority: crate::thumbnails::ThumbnailPriority::High,
+            accent: None,
+        }
+    }
+
+    #[test]
+    fn renders_the_first_page() {
+        let result = PdfGenerator::generate(&request_for(PAGE_PDF)).expect("generate");
+        assert!(result.data_url.starts_with("data:image/png;base64,"));
+        assert_eq!(result.image_width, Some(200));
+        assert_eq!(result.image_height, Some(100));
+
+        let encoded = result
+            .data_url
+            .strip_prefix("data:image/png;base64,")
+            .expect("prefix");
+        let png = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .expect("decode base64");
+        let image = image::load_from_memory(&png).expect("decode png");
+        assert_eq!(image.width(), 256);
+        assert_eq!(image.height(), 128);
+
+        let center = image.get_pixel(128, 64);
+        assert!(center[0] > 200, "red channel {}", center[0]);
+        assert!(center[1] < 60, "green channel {}", center[1]);
+        assert!(center[2] < 60, "blue channel {}", center[2]);
+
+        let top_left = image.get_pixel(0, 0);
+        assert_eq!(top_left.0, [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn a_password_protected_pdf_is_an_error() {
+        let err = PdfGenerator::generate(&request_for(LOCKED_PDF)).unwrap_err();
+        assert!(
+            err.starts_with("Failed to open PDF"),
+            "expected open error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_damaged_or_empty_file_is_an_error() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let empty = dir.path().join("empty.pdf");
+        let garbage = dir.path().join("garbage.pdf");
+        std::fs::write(&empty, b"").expect("write empty");
+        std::fs::write(&garbage, vec![0xA7; 300]).expect("write garbage");
+
+        assert!(PdfGenerator::generate(&request_for(&empty.to_string_lossy())).is_err());
+        assert!(PdfGenerator::generate(&request_for(&garbage.to_string_lossy())).is_err());
     }
 }
