@@ -103,6 +103,8 @@ The workspace has five library-only crates under `src-tauri/crates/`. `marlin-vf
 
 A writer that adds files goes through `uniqueFilesByPath`, so a path is in the list once. `useFileAnimations` marks a new file as entering for two animation frames, so it fades in. `e2e/file-view-width.spec.ts` checks that the view matches the folder after a burst of changes.
 
+A folder with no saved preferences gets a smart default when its listing is complete. Grid is the default when at least half the files have thumbnails, and Downloads, Documents, Desktop and the like get a sort rule. `applySmartViewDefaults` in `src/App.tsx` applies these. The default is saved as the folder's preferences, so it is worked out once per folder.
+
 **The file view never scrolls sideways.** `FileGrid` works out its column count from the width of the element that holds its rows. A `ResizeObserver` follows that element, because it is not rendered while the folder is empty. `FileList` gives each column a share of the row, and a cell cuts its text with an ellipsis. Two cases are still wider than the view: the grid's column count is one render behind a change of width, and a list narrower than about 160 px cannot hold the gaps between its columns. So `MainPanel` clips the view sideways (`overflow-x-clip`), which shows no scrollbar and cannot be scrolled.
 
 ## Where settings live

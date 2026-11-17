@@ -1239,6 +1239,7 @@ describe('useAppStore', () => {
       useAppStore.setState({
         files: [],
         streamingSessionId: null,
+        streamingPath: null,
         streamingTotalCount: null,
         isStreamingComplete: true,
         loading: false,
@@ -1388,6 +1389,7 @@ describe('useAppStore', () => {
       it('should cancel active streaming session', async () => {
         useAppStore.setState({
           streamingSessionId: 'session-1',
+          streamingPath: '/test/Artwork',
           isStreamingComplete: false,
         });
 
@@ -1399,6 +1401,7 @@ describe('useAppStore', () => {
           sessionId: 'session-1',
         });
         expect(useAppStore.getState().streamingSessionId).toBeNull();
+        expect(useAppStore.getState().streamingPath).toBeNull();
         expect(useAppStore.getState().isStreamingComplete).toBe(true);
       });
 
@@ -1454,6 +1457,7 @@ describe('useAppStore', () => {
 
         const state = useAppStore.getState();
         expect(state.streamingSessionId).toBeTruthy(); // Frontend generates the sessionId
+        expect(state.streamingPath).toBe('/test');
         expect(state.files).toEqual([]);
         expect(state.isStreamingComplete).toBe(false);
       });

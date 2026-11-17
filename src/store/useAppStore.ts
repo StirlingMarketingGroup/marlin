@@ -248,6 +248,8 @@ interface AppState {
 
   // Streaming state
   streamingSessionId: string | null;
+  // The folder the current streaming session is listing.
+  streamingPath: string | null;
   streamingTotalCount: number | null;
   isStreamingComplete: boolean;
   // False while a local listing still waits for sizes and dates. They arrive after the
@@ -590,6 +592,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   loading: false,
   error: undefined,
   streamingSessionId: null,
+  streamingPath: null,
   streamingTotalCount: null,
   isStreamingComplete: true,
   isMetadataComplete: true,
@@ -1095,6 +1098,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({
         files: [],
         streamingSessionId: sessionId,
+        streamingPath: currentPath,
         streamingTotalCount: null,
         isStreamingComplete: false,
         isMetadataComplete: false,
@@ -1141,6 +1145,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         isMetadataComplete: true,
         loading: false,
         streamingSessionId: null,
+        streamingPath: null,
       });
     }
     // Note: We don't set loading=false in finally because streaming continues in background
@@ -1230,6 +1235,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
       set({
         streamingSessionId: null,
+        streamingPath: null,
         isStreamingComplete: true,
         isMetadataComplete: true,
       });

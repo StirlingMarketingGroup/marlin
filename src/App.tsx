@@ -157,6 +157,8 @@ function App() {
   const directoryPreferences = useAppStore((state) => state.directoryPreferences);
   const globalPreferences = useAppStore((state) => state.globalPreferences);
   const loadPinnedDirectories = useAppStore((state) => state.loadPinnedDirectories);
+  const streamingSessionId = useAppStore((state) => state.streamingSessionId);
+  const isStreamingComplete = useAppStore((state) => state.isStreamingComplete);
 
   // Set up directory streaming event listener
   useDirectoryStream();
@@ -178,6 +180,7 @@ function App() {
   const saveGlobalPrefsTimeoutRef = useRef<number | null>(null);
   const currentDirectoryPreference = directoryPreferences[currentPath];
   const pendingFileSelectionRef = useRef<string | null>(null);
+  const smartDefaultsPathRef = useRef<string | null>(null);
   // Apply smart default view and sort preferences based on folder name or contents
   const applySmartViewDefaults = async (path: string, files?: FileItem[]) => {
     try {
@@ -518,6 +521,10 @@ function App() {
               throw new Error(refreshFailure);
             }
 
+            if (hasUriScheme(path)) {
+              await applySmartViewDefaults(path, useAppStore.getState().files);
+            }
+
             const normalizedPath = useAppStore.getState().currentPath;
             useAppStore.setState({
               pathHistory: [normalizedPath],
@@ -692,6 +699,8 @@ function App() {
     if (!initializedRef.current || firstLoadRef.current) return;
 
     async function loadDirectory() {
+      // A visit to a folder starts here. Its defaults have not been applied yet.
+      smartDefaultsPathRef.current = null;
       try {
         setLoading(true);
         setError(undefined);
@@ -722,9 +731,6 @@ function App() {
         const isRemotePath = currentPath.includes('://');
         if (isRemotePath) {
           await useAppStore.getState().refreshCurrentDirectory();
-          // Apply smart view defaults after loading remote directory
-          const { files } = useAppStore.getState();
-          await applySmartViewDefaults(currentPath, files);
         } else {
           await useAppStore.getState().refreshCurrentDirectoryStreaming();
         }
@@ -732,6 +738,10 @@ function App() {
         const refreshFailure = useAppStore.getState().error;
         if (refreshFailure) {
           throw new Error(refreshFailure);
+        }
+
+        if (isRemotePath) {
+          await applySmartViewDefaults(currentPath, useAppStore.getState().files);
         }
 
         setError(undefined); // Clear any previous errors on success
@@ -826,6 +836,16 @@ function App() {
 
     loadDirectory();
   }, [currentPath, navigateTo, setError, setLoading, setCurrentPath]);
+
+  // The listing streams in after the load call returns, and the smart defaults need all of it.
+  // A refresh of the folder on screen does not re-apply them.
+  useEffect(() => {
+    if (!streamingSessionId || !isStreamingComplete) return;
+    const { streamingPath, files } = useAppStore.getState();
+    if (!streamingPath || smartDefaultsPathRef.current === streamingPath) return;
+    smartDefaultsPathRef.current = streamingPath;
+    void applySmartViewDefaults(streamingPath, files);
+  }, [streamingSessionId, isStreamingComplete]);
 
   // Persist only current directory prefs on change to avoid global clobbering
   useEffect(() => {

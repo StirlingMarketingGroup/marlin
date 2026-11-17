@@ -11,6 +11,8 @@ export const MOCK_BIG_COUNT = 600;
 export const MOCK_BIG_LAST = `dir-${String(MOCK_BIG_COUNT - 1).padStart(3, '0')}`;
 // Not listed in the home folder: a spec opens it by typing the path.
 export const MOCK_LONG_NAME_DIR = `${MOCK_HOME_DIR}/LongName`;
+// Not listed in the home folder: a spec opens it to check the picture-folder view.
+export const MOCK_ARTWORK_DIR = `${MOCK_HOME_DIR}/Artwork`;
 // Not listed in the home folder: a spec opens it through the window start path.
 export const MOCK_PERCENT_DIR = `${MOCK_HOME_DIR}/100% & more`;
 // Not listed in the home folder: a spec sets its files and changes them while the folder is open.
@@ -95,6 +97,7 @@ export function getTauriMockScript(viewMode: 'list' | 'grid' = 'list'): string {
       const mockHomeDir = '${MOCK_HOME_DIR}';
       const mockDownloadsDir = '${MOCK_DOWNLOADS_DIR}';
       const mockLongNameDir = '${MOCK_LONG_NAME_DIR}';
+      const mockArtworkDir = '${MOCK_ARTWORK_DIR}';
       const mockPercentDir = '${MOCK_PERCENT_DIR}';
       const mockChangingDir = '${MOCK_CHANGING_DIR}';
       const mockBigDir = '${MOCK_BIG_DIR}';
@@ -279,6 +282,20 @@ export function getTauriMockScript(viewMode: 'list' | 'grid' = 'list'): string {
           permissions: { read: true, write: true, execute: false },
         }));
 
+      const mockArtworkFiles = ['sketch.png', 'study.png', 'poster.png', 'notes.txt'].map((name) => ({
+        name,
+        path: mockArtworkDir + '/' + name,
+        is_directory: false,
+        is_hidden: false,
+        is_symlink: false,
+        is_git_repo: false,
+        size: 4096,
+        modified: new Date().toISOString(),
+        created: new Date().toISOString(),
+        extension: name.split('.').pop(),
+        permissions: { read: true, write: true, execute: false },
+      }));
+
       const mockPercentFiles = [
         {
           name: 'note.txt',
@@ -304,6 +321,8 @@ export function getTauriMockScript(viewMode: 'list' | 'grid' = 'list'): string {
           files = mockDocumentsFiles;
         } else if (normalizedPath === mockLongNameDir) {
           files = mockLongNameFiles;
+        } else if (normalizedPath === mockArtworkDir) {
+          files = mockArtworkFiles;
         } else if (normalizedPath === mockPercentDir) {
           files = mockPercentFiles;
         } else if (normalizedPath === mockChangingDir) {
@@ -474,7 +493,11 @@ export function getTauriMockScript(viewMode: 'list' | 'grid' = 'list'): string {
             gridSize: 120,
           },
         }),
-        get_dir_prefs: () => JSON.stringify({}),
+        get_dir_prefs: (args) => {
+          const path = (args?.path || '').replace(/\\/+$/, '');
+          const prefs = window.__MOCK_DIR_PREFS__?.[path];
+          return JSON.stringify(prefs || {});
+        },
         set_dir_prefs: () => undefined,
         set_last_dir: () => undefined,
         get_system_accent_color: () => '#007AFF',
