@@ -5,17 +5,21 @@ import { fileURLToPath } from 'node:url';
 import { shippingPackages } from './check-licenses.mjs';
 
 // A text too many does no harm, and a missing text is the defect. The generator
-// takes every crate cargo-about reports for the whole workspace, every VENDORED
+// takes every crate cargo-about reports for the whole workspace, every CRATE_FILES
 // crate in the target's dependency graph (build dependencies too: openssl-src is
 // one), and every npm package that can ship. It does not try to work out which
 // helper a given release job built.
 
-// These crates build in code, fonts, or data that their stated license does not name.
-// Each entry says which file in the crate holds that part's license. `comment` marks a
-// source file whose license is its opening comment. docs/licenses.md, rule 4.
-const VENDORED = [
+// License files that cargo-about leaves out. Each entry names a file in a crate. Two kinds:
+// - A part the crate builds in (code, fonts, data) under a license its label does not
+//   name. docs/licenses.md, rule 4.
+// - The crate's own license file, when cargo-about cannot match it (one file that holds
+//   several licenses, or an unusual name) and prints a text with no copyright line.
+// `comment` marks a source file whose license is its opening comment.
+const CRATE_FILES = [
   { crate: 'unrar_sys', name: 'UnRAR', file: 'vendor/unrar/license.txt' },
   { crate: 'libgit2-sys', name: 'libgit2', file: 'libgit2/COPYING' },
+  { crate: 'libgit2-sys', name: 'PCRE in libgit2', file: 'libgit2/deps/pcre/LICENCE' },
   {
     crate: 'libgit2-sys',
     name: 'xhistogram.c in libgit2',
@@ -29,6 +33,14 @@ const VENDORED = [
   { crate: 'lzma-sys', name: 'XZ Utils', file: 'xz-5.2/COPYING' },
   { crate: 'hayro-font', name: 'The Foxit fonts', file: 'assets/LICENSE_FOXIT' },
   { crate: 'hayro-cmap', name: "Adobe's CMap resources", file: 'assets/LICENSE.txt' },
+  { crate: 'regex-syntax', name: 'Unicode tables', file: 'src/unicode_tables/LICENSE-UNICODE' },
+  { crate: 'ring', name: 'fiat-crypto', file: 'third_party/fiat/LICENSE' },
+  { crate: 'aws-lc-sys', name: 'AWS-LC', file: 'LICENSE' },
+  { crate: 'chrono', name: 'chrono', file: 'LICENSE.txt' },
+  { crate: 'exr', name: 'exr', file: 'LICENSE.md' },
+  { crate: 'libm', name: 'libm', file: 'LICENSE.txt' },
+  { crate: 'md5', name: 'md5', file: 'LICENSE.md' },
+  { crate: 'siphasher', name: 'siphasher', file: 'COPYING' },
 ];
 
 // These npm packages carry no license text. Each entry says where the text is.
@@ -48,7 +60,7 @@ const BUILD_TOOLS = ['vite', 'rolldown'];
 
 export const SECTIONS = {
   rust: 'Rust crates',
-  vendored: 'Libraries compiled into Rust crates',
+  crateFiles: 'More license texts from Rust crates',
   npm: 'npm packages in the frontend',
 };
 
@@ -84,12 +96,12 @@ export function rustSection(about) {
 }
 
 /**
- * The "Libraries compiled into Rust crates" section. `packages` is the crates
+ * The "More license texts from Rust crates" section. `packages` is the crates
  * in the build's dependency graph: `{ name, version, dir }`.
  */
-export function vendoredSection(packages) {
+export function crateFilesSection(packages) {
   const blocks = [];
-  for (const entry of VENDORED) {
+  for (const entry of CRATE_FILES) {
     // A target that does not build the crate has no package for it.
     for (const pkg of packages.filter((pkg) => pkg.name === entry.crate)) {
       // A missing file fails here, and the error names its path.
@@ -98,10 +110,10 @@ export function vendoredSection(packages) {
       if (text.trim() === '') {
         throw new Error(`${entry.file} in ${entry.crate} ${pkg.version} is empty.`);
       }
-      blocks.push(headed(`${entry.name}, built by the ${entry.crate} ${pkg.version} crate`, text));
+      blocks.push(headed(`${entry.name}, in the ${entry.crate} ${pkg.version} crate`, text));
     }
   }
-  return section(SECTIONS.vendored, blocks);
+  return section(SECTIONS.crateFiles, blocks);
 }
 
 /**
@@ -126,7 +138,7 @@ export function npmSection(lock, root, crates, notices) {
             (entry) =>
               // Some packages have a `licenses` folder.
               entry.isFile() &&
-              /^(licen[cs]e|copying|notice)/i.test(entry.name) &&
+              /^(licen[cs]e|copying|notice|third-party-licen[cs]e)/i.test(entry.name) &&
               !entry.name.endsWith('.spdx')
           )
           .map((entry) => entry.name)
@@ -160,14 +172,14 @@ export function npmSection(lock, root, crates, notices) {
         )
       );
     } else {
-      problems.push(`${pkg.name}@${pkg.version} has no license text`);
+      problems.push(
+        `${pkg.name}@${pkg.version} has no license text. Add the package to TEXT_ELSEWHERE in scripts/generate-license-texts.mjs, or run npm ci.`
+      );
     }
   }
 
   if (problems.length > 0) {
-    throw new Error(
-      `${problems.join('\n')}\nAdd the package to TEXT_ELSEWHERE in scripts/generate-license-texts.mjs, or run npm ci.`
-    );
+    throw new Error(problems.join('\n'));
   }
   return section(SECTIONS.npm, blocks);
 }
@@ -260,7 +272,7 @@ package-lock.json. Beside it:
   const text = [
     intro,
     rustSection(about),
-    vendoredSection(packages),
+    crateFilesSection(packages),
     npmSection(lock, fileURLToPath(ROOT), crates, notices),
   ].join('\n');
 

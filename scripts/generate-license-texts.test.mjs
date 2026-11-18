@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { npmSection, rustSection, SECTIONS, vendoredSection } from './generate-license-texts.mjs';
+import { npmSection, rustSection, SECTIONS, crateFilesSection } from './generate-license-texts.mjs';
 
 const rule = '-'.repeat(80);
 
@@ -49,7 +49,7 @@ describe('rustSection', () => {
   });
 });
 
-describe('vendoredSection', () => {
+describe('crateFilesSection', () => {
   let dir;
 
   afterEach(() => {
@@ -60,12 +60,12 @@ describe('vendoredSection', () => {
     dir = tempDir();
     fs.mkdirSync(path.join(dir, 'src', 'zlib'), { recursive: true });
     fs.writeFileSync(path.join(dir, 'src', 'zlib', 'LICENSE'), 'zlib license text');
-    const text = vendoredSection([
+    const text = crateFilesSection([
       { name: 'libz-sys', version: '1.2.3', dir },
       { name: 'serde', version: '1.0.0', dir },
     ]);
-    expect(text).toContain(SECTIONS.vendored);
-    expect(text).toContain(`${rule}\nzlib, built by the libz-sys 1.2.3 crate\n${rule}`);
+    expect(text).toContain(SECTIONS.crateFiles);
+    expect(text).toContain(`${rule}\nzlib, in the libz-sys 1.2.3 crate\n${rule}`);
     expect(text).toContain('zlib license text');
     expect(text).not.toContain('UnRAR');
     expect(text).not.toContain('OpenSSL');
@@ -75,11 +75,13 @@ describe('vendoredSection', () => {
     dir = tempDir();
     fs.mkdirSync(path.join(dir, 'libgit2', 'deps', 'xdiff'), { recursive: true });
     fs.writeFileSync(path.join(dir, 'libgit2', 'COPYING'), 'libgit2 license text');
+    fs.mkdirSync(path.join(dir, 'libgit2', 'deps', 'pcre'));
+    fs.writeFileSync(path.join(dir, 'libgit2', 'deps', 'pcre', 'LICENCE'), 'pcre license text');
     fs.writeFileSync(
       path.join(dir, 'libgit2', 'deps', 'xdiff', 'xhistogram.c'),
       '/*\n * Copyright (C) 2010, Google Inc.\n */\n\n#include "xinclude.h"\n/* later */\n'
     );
-    const text = vendoredSection([{ name: 'libgit2-sys', version: '0.18.5', dir }]);
+    const text = crateFilesSection([{ name: 'libgit2-sys', version: '0.18.5', dir }]);
     expect(text).toContain('Copyright (C) 2010, Google Inc.');
     expect(text).not.toContain('#include');
     expect(text).not.toContain('later');
@@ -87,7 +89,7 @@ describe('vendoredSection', () => {
 
   it('throws when the crate is in the graph and its license file is missing', () => {
     dir = tempDir();
-    expect(() => vendoredSection([{ name: 'unrar_sys', version: '0.5.8', dir }])).toThrow(
+    expect(() => crateFilesSection([{ name: 'unrar_sys', version: '0.5.8', dir }])).toThrow(
       /license\.txt/
     );
   });
@@ -113,9 +115,12 @@ describe('npmSection', () => {
   }
 
   // The section always appends the build tools, so a lock that omits one is a problem.
-  function withVite(packages) {
+  function withBuildTools(packages) {
     addPackage('node_modules/vite', { 'LICENSE.md': 'vite license text' });
-    addPackage('node_modules/rolldown', { LICENSE: 'rolldown license text' });
+    addPackage('node_modules/rolldown', {
+      LICENSE: 'rolldown license text',
+      'THIRD-PARTY-LICENSE': 'texts of what rolldown is built from',
+    });
     return lockWith({
       'node_modules/vite': { version: '8.3.8', license: 'MIT', dev: true },
       'node_modules/rolldown': { version: '1.2.19', license: 'MIT', dev: true },
@@ -128,7 +133,7 @@ describe('npmSection', () => {
     addPackage('node_modules/left-pad', { LICENSE: 'left-pad license' });
     addPackage('node_modules/only-dev', { LICENSE: 'dev only license' });
     const text = npmSection(
-      withVite({
+      withBuildTools({
         'node_modules/left-pad': { version: '1.0.0', license: 'MIT' },
         'node_modules/only-dev': { version: '2.0.0', license: 'GPL-3.0-only', dev: true },
       }),
@@ -148,7 +153,7 @@ describe('npmSection', () => {
     addPackage('node_modules/half', { 'LICENSE-APACHE': 'apache text', 'LICENSE-MIT': '\n' });
     expect(() =>
       npmSection(
-        withVite({ 'node_modules/half': { version: '1.0.0', license: 'MIT OR Apache-2.0' } }),
+        withBuildTools({ 'node_modules/half': { version: '1.0.0', license: 'MIT OR Apache-2.0' } }),
         root,
         new Set(),
         ''
@@ -172,7 +177,7 @@ describe('npmSection', () => {
   it('points a package at its Rust crate, and throws when that crate is absent', () => {
     root = tempDir();
     addPackage('node_modules/@tauri-apps/plugin-fs', {});
-    const lock = withVite({
+    const lock = withBuildTools({
       'node_modules/@tauri-apps/plugin-fs': { version: '2.7.1', license: 'MIT' },
     });
     const text = npmSection(lock, root, new Set(['tauri-plugin-fs']), '');
@@ -185,7 +190,7 @@ describe('npmSection', () => {
   it('points a package at a notice, and throws when that heading is absent', () => {
     root = tempDir();
     addPackage('node_modules/@iconify-json/vscode-icons', {});
-    const lock = withVite({
+    const lock = withBuildTools({
       'node_modules/@iconify-json/vscode-icons': { version: '1.2.98' },
     });
     const text = npmSection(
@@ -202,11 +207,12 @@ describe('npmSection', () => {
 
   it('includes the build tools though the lock marks them dev', () => {
     root = tempDir();
-    const text = npmSection(withVite({}), root, new Set(), '');
+    const text = npmSection(withBuildTools({}), root, new Set(), '');
     expect(text).toContain(`${rule}\nvite 8.3.8\n${rule}`);
     expect(text).toContain('vite license text');
     expect(text).toContain(`${rule}\nrolldown 1.2.19\n${rule}`);
     expect(text).toContain('rolldown license text');
+    expect(text).toContain('texts of what rolldown is built from');
   });
 
   it('throws when a package has no license file and no entry', () => {
