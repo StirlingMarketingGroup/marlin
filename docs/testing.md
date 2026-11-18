@@ -3,7 +3,7 @@
 Marlin has static checks and twelve test suites. CI runs the static checks, the unit tests, the end-to-end tests, and the Rust tests that need no mount, server, or account. It does not run the real-app tests, the tests that mount for real, or the tests that need samba, a server, or an account, so run those yourself when you change that code.
 
 **Covers:** `package.json` (the test scripts), `vitest.config.ts`, `src/test-setup.ts`, `playwright.config.ts`, `e2e/`, `vitest.app.config.ts`, `app-tests/`, `.github/workflows/check.yml`, `.husky/pre-push`, `src-tauri/tests/`, `src-tauri/crates/marlin-smb/tests/`, `src-tauri/crates/marlin-vfs/tests/`, `src-tauri/crates/marlin-gdrive/tests/`, `src-tauri/crates/marlin-test-keychain/`, `src-tauri/crates/marlin-mount/tests/`, `src-tauri/crates/marlin-mount/test-sweep.sh`, `src-tauri/crates/marlin-fuse/tests/`, `src-tauri/crates/marlin-fuse/test-in-docker.sh`, `src-tauri/crates/marlin-fuse/test-on-mac.sh`
-**Checked against the code:** 2026-11-17
+**Checked against the code:** 2026-11-18
 
 ## The suites
 
@@ -38,9 +38,10 @@ CI skips a job's steps when the files they cover did not change (`check.yml` use
 ## End-to-end tests
 
 - They live in `e2e/`, one `*.spec.ts` per area.
-- **They do not run the desktop app.** Playwright starts `npm run dev` on port 1420 and opens the frontend in Chromium. `e2e/tauri-mocks.ts` is injected before page load and fakes every Tauri command with an in-memory file tree.
+- **They do not run the desktop app.** Playwright starts `npm run dev` and opens the frontend in Chromium. `e2e/tauri-mocks.ts` is injected before page load and fakes every Tauri command with an in-memory file tree.
 - So these tests cover the React UI and the store. They cannot catch a bug in Rust or in a real OS integration. The [real-app tests](#real-app-tests) can.
-- Locally, Playwright reuses a server already on port 1420. In CI it starts a fresh one, uses one worker, and retries a failed test twice.
+- **The port is 1420 unless `E2E_PORT` is set.** `playwright.config.ts` reads it for both the server and the base URL. In CI, the `e2e-tests` job asks the system for a free port and sets `E2E_PORT` to it: the runners are separate processes on one host and share its ports, so two runs on a fixed port collide.
+- Locally, Playwright reuses a server already on that port. In CI it starts a fresh one, uses one worker, and retries a failed test twice.
 - A new backend command that the UI calls on load needs a fake in `tauri-mocks.ts`, or the page fails in every spec.
 
 ## Real-app tests
