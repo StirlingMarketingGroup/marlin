@@ -220,6 +220,7 @@ async fn provider_errors_become_errnos() {
         (VfsError::Conflict, libc::EEXIST),
         (VfsError::NotAFolder, libc::ENOTDIR),
         (VfsError::IsAFolder, libc::EISDIR),
+        (VfsError::NotEmpty, libc::ENOTEMPTY),
         (VfsError::NoSpace, libc::ENOSPC),
         (VfsError::SignInNeeded, libc::EACCES),
         (VfsError::TimedOut, libc::ETIMEDOUT),
@@ -311,6 +312,20 @@ async fn unmount_does_not_wait_for_the_provider() {
     let mut mount = marlin_fuse::mount(vfs(Arc::clone(&provider)), &point)
         .await
         .unwrap();
+
+    // macOS sends a new mount about ten requests of its own in its first moments. One that meets the delay below holds the unmount until it is answered, so wait until half a second passes with no provider call.
+    if cfg!(target_os = "macos") {
+        let mut quiet = false;
+        for _ in 0..20 {
+            let calls = provider.calls();
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            if provider.in_flight() == 0 && provider.calls() == calls {
+                quiet = true;
+                break;
+            }
+        }
+        assert!(quiet, "macOS never stopped sending the new mount requests");
+    }
 
     // An unmount that called into the mount would wait the full delay.
     provider.set_delay(Duration::from_secs(20));

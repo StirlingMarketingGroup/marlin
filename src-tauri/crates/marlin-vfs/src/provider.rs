@@ -2,7 +2,7 @@ use crate::VfsError;
 
 /// The provider's own id for one item.
 ///
-/// A provider should use an id that stays with the item when it is renamed or moved (Google Drive's file id does). The core then keeps the item's node and open handles across the rename. A provider that only has paths (SFTP) uses the path, and for it a rename looks like one item removed and another added: the old node and any handle on it start failing with whatever the provider returns for the old path.
+/// A provider should use an id that stays with the item when it is renamed or moved (Google Drive's file id does). The core then keeps the item's node and open handles across the rename. A provider that only has paths (SFTP) uses the path, and for it a rename that another client makes looks like one item removed and another added: the old node and any handle on it start failing with whatever the provider returns for the old path. For a rename this mount makes, see [`Provider::rename`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ItemId(pub String);
 
@@ -47,7 +47,7 @@ pub struct Space {
     pub free: u64,
 }
 
-/// A storage account the core can read. There are no write methods yet.
+/// A storage account the core can read. A provider that cannot change the remote leaves [`Provider::create_folder`], [`Provider::remove`], and [`Provider::rename`] out, and each then answers [`VfsError::ReadOnly`]. There is no call that writes a file's bytes yet.
 #[async_trait::async_trait]
 pub trait Provider: Send + Sync + 'static {
     /// The folder a mount shows at its top.
@@ -64,4 +64,33 @@ pub trait Provider: Send + Sync + 'static {
 
     /// The account's total and free space, in bytes.
     async fn space(&self) -> Result<Space, VfsError>;
+
+    /// Makes an empty folder named `name` in `parent`, and returns it. The core has checked that its own listing of `parent` holds no such name. A remote that keeps one name per folder answers [`VfsError::Conflict`] when the name is taken.
+    async fn create_folder(&self, parent: &ItemId, name: &str) -> Result<Item, VfsError> {
+        let _ = (parent, name);
+        Err(VfsError::ReadOnly)
+    }
+
+    /// Removes one item from the folder `parent`. An item that is no longer in `parent` is [`VfsError::NotFound`] when the provider can tell: the core's listing can be a few seconds old. A folder that holds anything is [`VfsError::NotEmpty`], and nothing in it is removed. A remote that has a trash moves the item there.
+    async fn remove(&self, id: &ItemId, parent: &ItemId) -> Result<(), VfsError> {
+        let _ = (id, parent);
+        Err(VfsError::ReadOnly)
+    }
+
+    /// Moves `id` out of the folder `from` into the folder `to`, names it `name`, and returns the item as the remote now has it. For a plain rename `from` and `to` are the same folder. An item that is no longer in `from` is [`VfsError::NotFound`] when the provider can tell. A move of a folder into itself, or into a folder inside it, is [`VfsError::NotSupported`].
+    ///
+    /// The returned item keeps its id when the remote's ids allow it. When the id changed, the core moves the item's node and open handles to the new id.
+    ///
+    /// When `replace` names an item, that item holds the name now, and it is gone when the call succeeds: a remote that has a trash moves it there. The provider swaps the two in one step when the remote can. When it cannot, it moves `id` first and removes `replace` second, so a call that fails halfway leaves both items and never leaves the name with none. A `replace` item that is no longer in `to` is [`VfsError::NotFound`] when the provider can tell, and a folder to replace that holds anything is [`VfsError::NotEmpty`]: in both cases nothing changes. With no `replace`, the call never removes or overwrites another item: a remote that keeps one name per folder answers [`VfsError::Conflict`] when the name is taken.
+    async fn rename(
+        &self,
+        id: &ItemId,
+        from: &ItemId,
+        to: &ItemId,
+        name: &str,
+        replace: Option<&ItemId>,
+    ) -> Result<Item, VfsError> {
+        let _ = (id, from, to, name, replace);
+        Err(VfsError::ReadOnly)
+    }
 }

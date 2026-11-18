@@ -1,6 +1,6 @@
 # Linux mount adapter (`marlin-fuse`)
 
-`marlin-fuse` serves one [mount core](mount-core.md) `Vfs` to Linux as a FUSE mount. The [mount helper](mount-helper.md) uses it on Linux. The same crate serves macOS through macFUSE: see [macOS mount adapter](mount-macos.md). It is read-only, like the core, until #376.
+`marlin-fuse` serves one [mount core](mount-core.md) `Vfs` to Linux as a FUSE mount. The [mount helper](mount-helper.md) uses it on Linux. The same crate serves macOS through macFUSE: see [macOS mount adapter](mount-macos.md). A mount is read-only until the adapter serves writes (#598). [Decision 0005](decisions/0005-mount-writes.md) says how it will.
 
 The helper mounts a Google account through it: see [Providers](mount-helper.md#providers). No part of the UI asks for a mount yet (#377).
 
@@ -58,6 +58,7 @@ The `.deb` and `.rpm` packages depend on `fuse3` (`src-tauri/tauri.conf.json`). 
 | `Conflict`     | `EEXIST`      | File exists               |
 | `NotAFolder`   | `ENOTDIR`     | Not a directory           |
 | `IsAFolder`    | `EISDIR`      | Is a directory            |
+| `NotEmpty`     | `ENOTEMPTY`   | Directory not empty       |
 | `NoSpace`      | `ENOSPC`      | No space left on device   |
 | `SignInNeeded` | `EACCES`      | Permission denied         |
 | `TimedOut`     | `ETIMEDOUT`   | Connection timed out      |
@@ -104,5 +105,5 @@ Known limits:
 - A file or folder whose name is longer than 255 bytes is hidden.
 - A file whose bytes change while its size and its modified time stay the same keeps its old cached bytes until the kernel drops them. A provider must change one of the two: see [Mount core](mount-core.md).
 - The adapter does not handle the kernel's interrupt request. A call that an app gave up on still runs until the core's time limit ends it.
-- Read-only: every write fails with `EROFS` until #376.
+- Read-only: every write fails with `EROFS` until #598.
 - Run as root, `fuser` mounts without `fusermount3`, and the mount's type is `fuse` with no subtype. The helper is a per-user process and is not meant to run as root.
