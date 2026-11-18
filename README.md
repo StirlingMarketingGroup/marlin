@@ -167,7 +167,7 @@ npm run tauri dev
 npm run tauri build
 ```
 
-`npm run tauri dev` and `npm run tauri build` build the mount helper (`marlin-mount`) themselves. Nothing else needs a build step. SMB support is the one optional extra.
+`npm run tauri dev` and `npm run tauri build` build the mount helper (`marlin-mount`) themselves. `npm run tauri build` also writes the license texts that go in the installer. That needs cargo-about: run `npm run install:cargo-about` once. SMB support is the one optional extra.
 
 ### SMB Support (Optional)
 

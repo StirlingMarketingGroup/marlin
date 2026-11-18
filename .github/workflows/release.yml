@@ -371,6 +371,10 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      # The build writes the license texts with it. Does nothing when the runner already has this version.
+      - name: Install cargo-about
+        run: npm run install:cargo-about
+
       - name: Import Apple Certificate
         if: runner.os == 'macOS' && env.APPLE_CERTIFICATE != ''
         env:
@@ -577,6 +581,10 @@ jobs:
         if: runner.os == 'Linux'
         run: node scripts/check-linux-package-libraries.mjs "${CARGO_TARGET_DIR:-src-tauri/target}/${{ matrix.target }}/release/bundle" ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'deb' || 'deb rpm' }}
 
+      # The arm64 build makes only the deb.
+      - name: Check the license texts in the installers
+        run: node scripts/check-bundled-licenses.mjs "${CARGO_TARGET_DIR:-src-tauri/target}/${{ matrix.target }}/release/bundle" ${{ runner.os == 'macOS' && 'app' || (matrix.target == 'aarch64-unknown-linux-gnu' && 'deb' || 'deb rpm appimage') }}
+
   dry-run-changes:
     name: Detect changes the dry run builds
     if: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/master' }}
@@ -605,6 +613,8 @@ jobs:
               - 'index.html'
               - 'package.json'
               - 'package-lock.json'
+              - 'LICENSE'
+              - 'THIRD-PARTY-NOTICES.md'
               - 'vite.config.ts'
               - 'tailwind.config.js'
               - 'postcss.config.js'
@@ -815,6 +825,10 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      # The build writes the license texts with it. Does nothing when the runner already has this version.
+      - name: Install cargo-about
+        run: npm run install:cargo-about
+
       - name: Clean up stale build artifacts (macOS)
         if: runner.os == 'macOS'
         run: |
@@ -864,6 +878,10 @@ jobs:
       - name: Check the libraries in the Linux packages
         if: runner.os == 'Linux'
         run: node scripts/check-linux-package-libraries.mjs "${CARGO_TARGET_DIR:-src-tauri/target}/${{ matrix.target }}/release/bundle" ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'deb' || 'deb rpm' }}
+
+      # The arm64 build makes only the deb.
+      - name: Check the license texts in the installers
+        run: node scripts/check-bundled-licenses.mjs "${CARGO_TARGET_DIR:-src-tauri/target}/${{ matrix.target }}/release/bundle" ${{ runner.os == 'macOS' && 'app' || (matrix.target == 'aarch64-unknown-linux-gnu' && 'deb' || 'deb rpm appimage') }}
 
       - name: Dump linuxdeploy diagnostics
         if: failure() && runner.os == 'Linux'

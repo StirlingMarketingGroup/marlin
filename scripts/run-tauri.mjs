@@ -4,9 +4,17 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import { createHash, randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { generateLicenseTexts } from './generate-license-texts.mjs';
 
 const args = process.argv.slice(2);
 const env = { ...process.env };
+
+const makesBundle = (args[0] === 'build' && !args.includes('--no-bundle')) || args[0] === 'bundle';
+const targetFlag = args.findIndex((arg) => arg === '--target' || arg === '-t');
+const target =
+  targetFlag === -1
+    ? args.find((arg) => arg.startsWith('--target='))?.slice('--target='.length)
+    : args[targetFlag + 1];
 
 const LINUXDEPLOY_OVERRIDES = {
   x64: {
@@ -156,7 +164,7 @@ async function ensureLinuxdeployPlugin() {
 
 if (process.platform === 'linux') {
   // Only a bundle needs linuxdeploy.
-  if (args[0] === 'build' && !args.includes('--no-bundle')) {
+  if (makesBundle) {
     await ensureLinuxdeployBinary();
     await ensureLinuxdeployPlugin();
   }
@@ -212,15 +220,16 @@ if (process.platform === 'linux') {
   }
 }
 
+// Only a bundle carries the license texts, and cargo-about takes about ten seconds.
+// This runs before the helper build, so a machine without cargo-about fails at once.
+if (makesBundle) {
+  generateLicenseTexts(target);
+}
+
 // The app bundles `marlin-mount` (`bundle.externalBin`), so `tauri dev` and `tauri build`
 // need the real helper first, built with the app's own profile and target.
 if (args[0] === 'dev' || args[0] === 'build') {
   const srcTauri = fileURLToPath(new URL('../src-tauri', import.meta.url));
-  const targetFlag = args.findIndex((arg) => arg === '--target' || arg === '-t');
-  const target =
-    targetFlag === -1
-      ? args.find((arg) => arg.startsWith('--target='))?.slice('--target='.length)
-      : args[targetFlag + 1];
   const release =
     args[0] === 'dev'
       ? args.includes('--release')

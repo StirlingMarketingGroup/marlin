@@ -70,19 +70,35 @@ export function isAccepted(expression, accepted) {
 }
 
 /**
+ * Every npm package that can ship in the frontend bundle: its name, version,
+ * lockfile location, and license. A dev dependency is not one of them.
+ */
+export function shippingPackages(lock) {
+  const packages = [];
+  for (const [location, entry] of Object.entries(lock.packages)) {
+    if (location === '' || entry.dev) continue;
+    const name = location.slice(location.lastIndexOf('node_modules/') + 'node_modules/'.length);
+    packages.push({
+      name,
+      version: entry.version,
+      location,
+      license: entry.license ?? UNSTATED[name],
+    });
+  }
+  return packages;
+}
+
+/**
  * Returns one line for each package that can ship in the frontend bundle and
  * states a license that is not accepted, or states none.
  */
 export function unacceptedPackages(lock, accepted) {
   const problems = [];
-  for (const [location, entry] of Object.entries(lock.packages)) {
-    if (location === '' || entry.dev) continue;
-    const name = location.slice(location.lastIndexOf('node_modules/') + 'node_modules/'.length);
-    const license = entry.license ?? UNSTATED[name];
-    if (!license) {
-      problems.push(`${name}@${entry.version} states no license`);
-    } else if (!isAccepted(license, accepted)) {
-      problems.push(`${name}@${entry.version} is under ${license}`);
+  for (const pkg of shippingPackages(lock)) {
+    if (!pkg.license) {
+      problems.push(`${pkg.name}@${pkg.version} states no license`);
+    } else if (!isAccepted(pkg.license, accepted)) {
+      problems.push(`${pkg.name}@${pkg.version} is under ${pkg.license}`);
     }
   }
   return problems;
@@ -104,6 +120,21 @@ if (fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
     console.error('These npm packages have a license that src-tauri/about.toml does not accept:');
     for (const problem of problems) console.error(`  ${problem}`);
     console.error('See docs/licenses.md.');
+    process.exit(1);
+  }
+
+  // libzpl.txt is kept by hand, so its first line has to name the zpl-rs we build.
+  const libzplVersion = fs
+    .readFileSync(new URL('src-tauri/licenses/libzpl.txt', root), 'utf8')
+    .split(/\r?\n/, 1)[0]
+    .replace(/^libzpl /, '');
+  const zpl = fs
+    .readFileSync(new URL('src-tauri/Cargo.lock', root), 'utf8')
+    .match(/name = "zpl-rs"\r?\nversion = "([^"]+)"/);
+  if (libzplVersion !== zpl?.[1]) {
+    console.error(
+      `src-tauri/licenses/libzpl.txt holds the license texts of libzpl ${libzplVersion}, and Cargo.lock has zpl-rs ${zpl?.[1]}. See docs/licenses.md.`
+    );
     process.exit(1);
   }
 

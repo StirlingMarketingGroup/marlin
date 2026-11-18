@@ -2,17 +2,17 @@
 
 A release is built, signed, and notarized by `.github/workflows/release.yml`. Pushing a `v*` tag, or running the workflow by hand with a tag, starts it. Signing needs six Apple secrets and two Tauri updater secrets in the repository settings.
 
-**Covers:** `.github/workflows/release.yml`, `src-tauri/Entitlements.plist`, `src-tauri/tauri.conf.json`, `scripts/check-linux-package-libraries.mjs`, `src-tauri/build.rs`
+**Covers:** `.github/workflows/release.yml`, `src-tauri/Entitlements.plist`, `src-tauri/tauri.conf.json`, `scripts/check-linux-package-libraries.mjs`, `scripts/check-bundled-licenses.mjs`, `src-tauri/build.rs`
 **Checked against the code:** 2026-11-18
 
 ## What the workflow does
 
-| Job               | Runs when                                                       | Does                                                                                                                                  |
-| ----------------- | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `sync-version`    | a `v*` tag, or a manual run with a tag                          | Writes the version into `package.json` and `tauri.conf.json`, commits it, and makes sure the tag exists.                              |
-| `release`         | after `sync-version`, never on a PR                             | Builds the helpers, builds and publishes installers, and on macOS signs, makes a DMG, and notarizes it.                               |
-| `dry-run-changes` | every PR and every push to `master`                             | Checks which files changed and decides whether the dry run needs to build.                                                            |
-| `release-dry-run` | a PR or a push to `master` that changes something in the bundle | Builds the bundle without publishing, and checks its mount helper and the Linux package libraries. It also keeps the Rust cache warm. |
+| Job               | Runs when                                                       | Does                                                                                                                                                      |
+| ----------------- | --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sync-version`    | a `v*` tag, or a manual run with a tag                          | Writes the version into `package.json` and `tauri.conf.json`, commits it, and makes sure the tag exists.                                                  |
+| `release`         | after `sync-version`, never on a PR                             | Builds the helpers, builds and publishes installers, and on macOS signs, makes a DMG, and notarizes it.                                                   |
+| `dry-run-changes` | every PR and every push to `master`                             | Checks which files changed and decides whether the dry run needs to build.                                                                                |
+| `release-dry-run` | a PR or a push to `master` that changes something in the bundle | Builds the bundle without publishing, and checks its mount helper, the Linux package libraries, and the license texts. It also keeps the Rust cache warm. |
 
 Build targets:
 
@@ -32,7 +32,7 @@ Both helpers are Tauri `externalBin` files in `src-tauri/binaries/`. The bundler
 - **`marlin-smb`** is built by the "Build SMB sidecar" step, on the targets where samba is installed. On the other target the build script leaves an empty placeholder, and that app has no SMB support.
 - **`marlin-mount`** has no step. "Build and publish installers" and "Build Tauri bundle" both run `npm run tauri build`, and that script builds the helper first. See [Mount helper](mount-helper.md#building-and-bundling).
 - **Signing.** On macOS the bundler signs both helpers inside the app, with the hardened runtime and the app's entitlements. In `release`, when a signing identity is set, `marlin-smb` is also signed by its own step before the bundler runs. `marlin-mount` needs `com.apple.security.cs.disable-library-validation` from those entitlements, or it cannot load macFUSE: see [Mount helper](mount-helper.md#building-and-bundling).
-- **The check.** "Check the bundled mount helper" starts `marlin-mount` from the built bundle and verifies the macOS signatures. The dry run signs ad hoc so that the same check runs on a PR. In `release` that step and the Linux package library check run last, after every installer is uploaded: the dry run is the gate, and those steps make a bad release show as a failed job.
+- **The check.** "Check the bundled mount helper" starts `marlin-mount` from the built bundle and verifies the macOS signatures. The dry run signs ad hoc so that the same check runs on a PR. In `release` that step, the Linux package library check, and the license text check run last, after every installer is uploaded: the dry run is the gate, and those steps make a bad release show as a failed job.
 
 `release` and `release-dry-run` repeat about 200 lines of the same setup steps. Change both when you change one.
 
@@ -55,6 +55,10 @@ The dry run is skipped when a change touches nothing that goes into the bundle. 
 The two package maps (`deb.files`, `rpm.files`) each name the folder. `build.rs` takes the rpath from the deb map. "Check the libraries in the Linux packages" extracts the deb and the rpm and fails when a program in `usr/bin` needs a library that neither the build machine nor the package's rpath folder holds. The arm64 build makes only the deb, and that job checks only the deb. Both jobs delete the bundle folder before the build, so the check reads the packages that build made.
 
 The check does not look at the AppImage. It does not install a package on a clean machine. A library the build machine has, and that the package's `depends` does not name, still passes.
+
+## The license texts in the installers
+
+Both jobs install cargo-about, because `npm run tauri build` writes the license texts with it before it makes a bundle. "Check the license texts in the installers" then opens each installer the job made: the app on macOS, the deb on arm64 Linux, and the deb, the rpm, and the AppImage on x86_64 Linux. [Licenses](licenses.md#license-texts-in-the-installers) says what the files are and where they sit.
 
 ## Secrets
 
