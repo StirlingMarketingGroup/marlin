@@ -1746,7 +1746,6 @@ export const useAppStore = create<AppState>((set, get) => ({
 
         const result = await invoke<{
           folderPath: string;
-          usedSystemFallback?: boolean;
           format?: string;
         }>('extract_archive', {
           archivePath: tempArchivePath,
@@ -1922,7 +1921,6 @@ export const useAppStore = create<AppState>((set, get) => ({
     try {
       const result = await invoke<{
         folderPath: string;
-        usedSystemFallback?: boolean;
         format?: string;
       }>('extract_archive', {
         archivePath: archivePath,
@@ -1935,12 +1933,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         set({ pendingRevealTarget: result.folderPath });
       }
 
-      const usedFallback = result?.usedSystemFallback === true;
       const resolvedFormat = result?.format ?? archiveFormat;
 
       console.info('[extractArchive] success', {
         folderPath: result?.folderPath,
-        usedFallback,
         format: resolvedFormat,
       });
 

@@ -9,6 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use bzip2::read::BzDecoder;
 use flate2::read::GzDecoder;
 use tar::Archive as TarArchive;
+#[cfg(not(target_os = "windows"))]
 use unrar::Archive as RarArchive;
 use uuid::Uuid;
 use xz2::read::XzDecoder;
@@ -399,6 +400,11 @@ pub fn list_directory(
                 );
             }
         }
+        #[cfg(target_os = "windows")]
+        ArchiveFormat::Rar => {
+            return Err("RAR archives are not supported on Windows".to_string());
+        }
+        #[cfg(not(target_os = "windows"))]
         ArchiveFormat::Rar => {
             let archive = RarArchive::new(archive_path)
                 .open_for_listing()
@@ -627,6 +633,11 @@ pub fn get_entry_metadata(
                 }
             }
         }
+        #[cfg(target_os = "windows")]
+        ArchiveFormat::Rar => {
+            return Err("RAR archives are not supported on Windows".to_string());
+        }
+        #[cfg(not(target_os = "windows"))]
         ArchiveFormat::Rar => {
             let archive = RarArchive::new(archive_path)
                 .open_for_listing()
@@ -807,6 +818,9 @@ pub fn extract_entry_to_dir(
                 .map_err(|e| format!("Failed to write output file: {e}"))?;
             Ok(out_path)
         }
+        #[cfg(target_os = "windows")]
+        ArchiveFormat::Rar => Err("RAR archives are not supported on Windows".to_string()),
+        #[cfg(not(target_os = "windows"))]
         ArchiveFormat::Rar => {
             let mut archive = RarArchive::new(archive_path)
                 .open_for_processing()
@@ -935,16 +949,13 @@ pub fn extract_entry_to_path(
     let temp_dir = parent.join(format!(".__marlin_extract_{}", Uuid::new_v4()));
     fs::create_dir_all(&temp_dir).map_err(|e| format!("Failed to create temp directory: {e}"))?;
 
-    let extracted = extract_entry_to_dir(archive_path, internal_path, &temp_dir)?;
-
-    // On Windows, fs::rename fails if target exists, so remove it first
-    if output_path.exists() {
-        let _ = fs::remove_file(output_path);
-    }
-
-    fs::rename(&extracted, output_path)
-        .map_err(|e| format!("Failed to finalize extracted entry: {e}"))?;
+    let result =
+        extract_entry_to_dir(archive_path, internal_path, &temp_dir).and_then(|extracted| {
+            fs::rename(&extracted, output_path)
+                .map_err(|e| format!("Failed to finalize extracted entry: {e}"))
+        });
     let _ = fs::remove_dir_all(&temp_dir);
+    result?;
     Ok(output_path.to_path_buf())
 }
 
@@ -1051,5 +1062,80 @@ mod tests {
         fs::create_dir(&output).unwrap();
         let extracted = extract_entry_to_dir(&archive_path, "/café.txt", &output).unwrap();
         assert_eq!(fs::read(extracted).unwrap(), b"content");
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn rar_lists_the_root_and_a_folder() {
+        let temp = tempfile::tempdir().unwrap();
+        let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rar/sample.rar");
+        let copy = temp.path().join("sample.rar");
+        fs::copy(fixture, &copy).unwrap();
+
+        let metadata = get_entry_metadata(&copy, "/folder/inner.txt").unwrap();
+        assert_eq!(metadata.name, "inner.txt");
+        assert_eq!(metadata.size, 14);
+        assert!(!metadata.is_directory);
+
+        let root = list_directory(&copy, "/").unwrap();
+        assert_eq!(root.len(), 2);
+        let folder = root.iter().find(|entry| entry.name == "folder").unwrap();
+        assert!(folder.is_directory);
+        let notes = root.iter().find(|entry| entry.name == "notes.txt").unwrap();
+        assert_eq!(notes.size, 10);
+        assert!(!notes.is_directory);
+
+        let children = list_directory(&copy, "/folder").unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].name, "inner.txt");
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn rar_extracts_one_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rar/sample.rar");
+        let copy = temp.path().join("sample.rar");
+        fs::copy(fixture, &copy).unwrap();
+
+        let output = temp.path().join("output");
+        fs::create_dir(&output).unwrap();
+        let extracted = extract_entry_to_dir(&copy, "/folder/inner.txt", &output).unwrap();
+        assert_eq!(fs::read(extracted).unwrap(), b"inside folder\n");
+        assert!(extract_entry_to_dir(&copy, "/folder", &output).is_err());
+    }
+
+    #[test]
+    fn a_failed_entry_extraction_leaves_no_temp_folder() {
+        let temp = tempfile::tempdir().unwrap();
+        let zip = temp.path().join("sample.zip");
+        write_test_zip(&zip, &[("a.txt", b"hello")]);
+
+        let out_dir = temp.path().join("out");
+        assert!(extract_entry_to_path(&zip, "/missing.txt", &out_dir.join("missing.txt")).is_err());
+        for entry in fs::read_dir(&out_dir).unwrap() {
+            let name = entry.unwrap().file_name();
+            assert!(!name.to_string_lossy().starts_with(".__marlin_extract_"));
+        }
+
+        let extracted = extract_entry_to_path(&zip, "/a.txt", &out_dir.join("a.txt")).unwrap();
+        assert_eq!(fs::read(extracted).unwrap(), b"hello");
+        for entry in fs::read_dir(&out_dir).unwrap() {
+            let name = entry.unwrap().file_name();
+            assert!(!name.to_string_lossy().starts_with(".__marlin_extract_"));
+        }
+    }
+
+    #[test]
+    fn an_entry_extraction_replaces_an_existing_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let zip = temp.path().join("sample.zip");
+        write_test_zip(&zip, &[("a.txt", b"hello")]);
+        let output = temp.path().join("a.txt");
+        fs::write(&output, b"old contents").unwrap();
+
+        extract_entry_to_path(&zip, "/a.txt", &output).unwrap();
+
+        assert_eq!(fs::read(output).unwrap(), b"hello");
     }
 }

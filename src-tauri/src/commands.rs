@@ -60,7 +60,11 @@ use crate::state::{
 use bzip2::read::BzDecoder;
 use flate2::read::GzDecoder;
 use tar::Archive as TarArchive;
-use unrar::Archive as RarArchive;
+#[cfg(not(target_os = "windows"))]
+use unrar::{
+    error::{Code as RarCode, UnrarError},
+    Archive as RarArchive, VolumeInfo,
+};
 use xz2::read::XzDecoder;
 use zip::{ZipArchive, ZipWriter};
 use zstd::stream::read::Decoder as ZstdDecoder;
@@ -705,7 +709,6 @@ pub struct DiskUsageResponse {
 #[serde(rename_all = "camelCase")]
 pub struct ExtractArchiveResponse {
     pub folder_path: String,
-    pub used_system_fallback: bool,
     pub format: String,
 }
 
@@ -3963,6 +3966,99 @@ fn extract_tar_from_reader<R: Read>(
     Ok(())
 }
 
+#[cfg(not(target_os = "windows"))]
+fn extract_rar_contents(
+    archive_path: &Path,
+    target_dir: &Path,
+    mut on_entry: impl FnMut(&str),
+) -> Result<(), String> {
+    let describe = |err: UnrarError, otherwise: String| match err.code {
+        RarCode::MissingPassword | RarCode::BadPassword => "This archive is password-protected. \
+             Password-protected RAR archives are not yet supported."
+            .to_string(),
+        _ => otherwise,
+    };
+
+    let mut current_archive = RarArchive::new(archive_path)
+        .open_for_processing()
+        .map_err(|err| {
+            if err.code == RarCode::BadArchive {
+                format!(
+                    "The RAR archive appears to be corrupted: {}",
+                    archive_path.display()
+                )
+            } else {
+                let otherwise = format!(
+                    "Failed to open RAR archive {}: {}",
+                    archive_path.display(),
+                    err
+                );
+                describe(err, otherwise)
+            }
+        })?;
+
+    // The name cannot tell: `report.2024.rar` reads like a volume and is not one.
+    if current_archive.volume_info() == VolumeInfo::Subsequent {
+        return Err(format!(
+            "Multi-volume RAR archive detected. Please extract starting from the first part: {}",
+            RarArchive::new(archive_path).first_part().display()
+        ));
+    }
+
+    loop {
+        match current_archive.read_header() {
+            Ok(Some(header)) => {
+                let entry = header.entry();
+                let entry_name = entry.filename.to_string_lossy().to_string();
+
+                // Path traversal protection: check for dangerous path components
+                let entry_path = Path::new(&entry_name);
+                for component in entry_path.components() {
+                    match component {
+                        std::path::Component::ParentDir => {
+                            return Err(format!(
+                                "Refusing to extract entry with path traversal: {}",
+                                entry_name
+                            ));
+                        }
+                        std::path::Component::Prefix(_) => {
+                            return Err(format!(
+                                "Refusing to extract entry with absolute path: {}",
+                                entry_name
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
+                if entry_path.is_absolute() {
+                    return Err(format!(
+                        "Refusing to extract entry with absolute path: {}",
+                        entry_name
+                    ));
+                }
+
+                on_entry(&entry_name);
+
+                current_archive = header.extract_with_base(target_dir).map_err(|err| {
+                    let otherwise = format!("Failed to extract RAR entry {}: {}", entry_name, err);
+                    describe(err, otherwise)
+                })?;
+            }
+            Ok(None) => break,
+            Err(err) => {
+                let otherwise = format!(
+                    "Failed to read RAR header in {}: {}",
+                    archive_path.display(),
+                    err
+                );
+                return Err(describe(err, otherwise));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn create_tar_reader(
     archive_format: ArchiveFormat,
     archive_path: &Path,
@@ -4600,8 +4696,8 @@ pub async fn extract_archive(
 
     emit_archive_progress_update(&app, &archive_name, None, archive_format, false);
 
-    let (extracted_path, used_system_fallback) =
-        tauri::async_runtime::spawn_blocking(move || -> Result<(PathBuf, bool), String> {
+    let extracted_path =
+        tauri::async_runtime::spawn_blocking(move || -> Result<PathBuf, String> {
             let archive_name = archive_name_for_task;
             let target_dir = if let Some(folder) = &folder_name_for_task {
                 destination_for_task.join(folder)
@@ -4662,113 +4758,27 @@ pub async fn extract_archive(
                         archive_for_task.display(),
                         target_dir.display()
                     );
-                    Ok((target_dir, false))
+                    Ok(target_dir)
                 }
+                #[cfg(target_os = "windows")]
                 ArchiveFormat::Rar => {
-                    // Check for multi-volume archives
-                    let rar_archive = RarArchive::new(&archive_for_task);
-                    if rar_archive.is_multipart() {
-                        // For multipart archives, ensure we're starting from the first part
-                        if let Some(first_part) = rar_archive.first_part_option() {
-                            if first_part != archive_for_task {
-                                cleanup_directory(&target_dir);
-                                return Err(format!(
-                                    "Multi-volume RAR archive detected. Please extract starting from the first part: {}",
-                                    first_part.display()
-                                ));
-                            }
-                        }
+                    if should_cleanup {
+                        cleanup_directory(&target_dir);
                     }
-
-                    let extraction_result = (|| -> Result<(), String> {
-                        let archive = RarArchive::new(&archive_for_task)
-                            .open_for_processing()
-                            .map_err(|err| {
-                                let err_str = format!("{:?}", err);
-                                // Check for common error types and provide friendly messages
-                                if err_str.contains("MissingPassword") || err_str.contains("password") {
-                                    "This archive is password-protected. Password-protected RAR archives are not yet supported.".to_string()
-                                } else if err_str.contains("BadArchive") || err_str.contains("corrupt") {
-                                    format!("The RAR archive appears to be corrupted: {}", archive_for_task.display())
-                                } else {
-                                    format!(
-                                        "Failed to open RAR archive {}: {}",
-                                        archive_for_task.display(),
-                                        err
-                                    )
-                                }
-                            })?;
-
-                        let mut current_archive = archive;
-                        loop {
-                            match current_archive.read_header() {
-                                Ok(Some(header)) => {
-                                    let entry = header.entry();
-                                    let entry_name = entry.filename.to_string_lossy().to_string();
-
-                                    // Path traversal protection: check for dangerous path components
-                                    let entry_path = Path::new(&entry_name);
-                                    for component in entry_path.components() {
-                                        match component {
-                                            std::path::Component::ParentDir => {
-                                                return Err(format!(
-                                                    "Refusing to extract entry with path traversal: {}",
-                                                    entry_name
-                                                ));
-                                            }
-                                            std::path::Component::Prefix(_) => {
-                                                return Err(format!(
-                                                    "Refusing to extract entry with absolute path: {}",
-                                                    entry_name
-                                                ));
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                                    if entry_path.is_absolute() {
-                                        return Err(format!(
-                                            "Refusing to extract entry with absolute path: {}",
-                                            entry_name
-                                        ));
-                                    }
-
-                                    emit_archive_progress_update(
-                                        &app_handle,
-                                        &archive_name,
-                                        Some(&entry_name),
-                                        archive_format,
-                                        false,
-                                    );
-
-                                    // Use extract_with_base for directory extraction (not extract_to which expects a file path)
-                                    current_archive = header.extract_with_base(&target_dir).map_err(|err| {
-                                        let err_str = format!("{:?}", err);
-                                        if err_str.contains("MissingPassword") || err_str.contains("password") {
-                                            "This archive is password-protected. Password-protected RAR archives are not yet supported.".to_string()
-                                        } else {
-                                            format!("Failed to extract RAR entry {}: {}", entry_name, err)
-                                        }
-                                    })?;
-                                }
-                                Ok(None) => break,
-                                Err(err) => {
-                                    let err_str = format!("{:?}", err);
-                                    if err_str.contains("MissingPassword") || err_str.contains("password") {
-                                        return Err("This archive is password-protected. Password-protected RAR archives are not yet supported.".to_string());
-                                    }
-                                    return Err(format!(
-                                        "Failed to read RAR header in {}: {}",
-                                        archive_for_task.display(),
-                                        err
-                                    ));
-                                }
-                            }
-                        }
-
-                        Ok(())
-                    })();
-
-                    extraction_result.map_err(|err| {
+                    Err("RAR archives are not supported on Windows".to_string())
+                }
+                #[cfg(not(target_os = "windows"))]
+                ArchiveFormat::Rar => {
+                    extract_rar_contents(&archive_for_task, &target_dir, |entry_name| {
+                        emit_archive_progress_update(
+                            &app_handle,
+                            &archive_name,
+                            Some(entry_name),
+                            archive_format,
+                            false,
+                        );
+                    })
+                    .map_err(|err| {
                         if should_cleanup {
                             cleanup_directory(&target_dir);
                         }
@@ -4780,7 +4790,7 @@ pub async fn extract_archive(
                         archive_for_task.display(),
                         target_dir.display()
                     );
-                    Ok((target_dir, false))
+                    Ok(target_dir)
                 }
                 ArchiveFormat::Tar
                 | ArchiveFormat::TarGz
@@ -4813,7 +4823,7 @@ pub async fn extract_archive(
                         archive_for_task.display(),
                         target_dir.display()
                     );
-                    Ok((target_dir, false))
+                    Ok(target_dir)
                 }
             }
         })
@@ -4821,10 +4831,9 @@ pub async fn extract_archive(
         .map_err(|err| format!("Failed to join archive extraction task: {}", err))??;
 
     info!(
-        "Extraction complete for {} -> {} (fallback: {}, format: {})",
+        "Extraction complete for {} -> {} (format: {})",
         archive_path.display(),
         extracted_path.display(),
-        used_system_fallback,
         archive_format.as_str()
     );
 
@@ -4832,7 +4841,6 @@ pub async fn extract_archive(
 
     Ok(ExtractArchiveResponse {
         folder_path: extracted_path.to_string_lossy().to_string(),
-        used_system_fallback,
         format: archive_format.as_str().to_string(),
     })
 }
@@ -8680,5 +8688,64 @@ mod zip_tests {
         );
         assert_eq!(extracted_entries, ["folder/café.txt"]);
         assert!(!temp.path().join("escape.txt").exists());
+    }
+}
+
+#[cfg(all(test, not(target_os = "windows")))]
+mod rar_tests {
+    use super::extract_rar_contents;
+    use std::fs;
+    use std::path::Path;
+
+    const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rar/sample.rar");
+    // Holds `volumes.part1.rar` and `volumes.part2.rar`, one archive in two volumes.
+    const VOLUMES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rar");
+
+    #[test]
+    fn rar_extraction_writes_every_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("output");
+        fs::create_dir(&output).unwrap();
+        let mut seen = Vec::new();
+
+        extract_rar_contents(Path::new(FIXTURE), &output, |name| {
+            seen.push(name.to_string());
+        })
+        .unwrap();
+
+        assert_eq!(fs::read(output.join("notes.txt")).unwrap(), b"top level\n");
+        assert_eq!(
+            fs::read(output.join("folder/inner.txt")).unwrap(),
+            b"inside folder\n"
+        );
+        assert!(seen.iter().any(|name| name == "notes.txt"));
+        assert!(seen.iter().any(|name| name == "folder/inner.txt"));
+    }
+
+    #[test]
+    fn rar_extraction_refuses_a_later_volume() {
+        let temp = tempfile::tempdir().unwrap();
+        let later = Path::new(VOLUMES).join("volumes.part2.rar");
+
+        let err = extract_rar_contents(&later, temp.path(), |_| {}).unwrap_err();
+
+        assert!(
+            err.contains("Multi-volume RAR archive") && err.contains("volumes.part1.rar"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn rar_extraction_takes_a_name_that_ends_in_digits() {
+        let temp = tempfile::tempdir().unwrap();
+        let copy = temp.path().join("report.2024.rar");
+        fs::copy(FIXTURE, &copy).unwrap();
+        let output = temp.path().join("output");
+        fs::create_dir(&output).unwrap();
+
+        extract_rar_contents(&copy, &output, |_| {}).unwrap();
+
+        assert_eq!(fs::read(output.join("notes.txt")).unwrap(), b"top level\n");
     }
 }
