@@ -728,22 +728,204 @@ async fn a_created_name_reaches_the_provider_unescaped() {
 }
 
 #[tokio::test]
-async fn a_name_the_mount_cannot_show_back_is_refused() {
+async fn a_remote_name_with_percent_shows_as_it_is() {
     let (provider, vfs) = mount(Options::default());
-    provider.add_file(&provider.root(), "a.txt", b"a");
-    vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    provider.add_file(&provider.root(), "My%20File.pdf", b"bytes");
+    let file = vfs.lookup(Vfs::ROOT, "My%20File.pdf").await.unwrap();
+    assert_eq!(file.name, "My%20File.pdf");
+    let handle = vfs.open(file.node, Access::Read).await.unwrap();
+    assert_eq!(vfs.read(handle, 0, 8).await.unwrap(), b"bytes");
+    assert_eq!(
+        vfs.lookup(Vfs::ROOT, "My%2520File.pdf").await,
+        Err(VfsError::NotFound)
+    );
+}
+
+#[tokio::test]
+async fn names_with_percent_can_be_made_and_found() {
+    let (provider, vfs) = mount(Options::default());
+    provider.add_file(&provider.root(), "x.txt", b"x");
+    for (shown, remote_name) in [
+        ("My%20File.pdf", "My%20File.pdf"),
+        ("100%.txt", "100%.txt"),
+        ("%41", "%41"),
+        ("a%2Fb", "a/b"),
+    ] {
+        let created = vfs.create_folder(Vfs::ROOT, shown).await.unwrap();
+        let remote = provider.list(&provider.root()).await.unwrap();
+        assert!(
+            remote.iter().any(|item| item.name == remote_name),
+            "{remote_name}"
+        );
+        let found = vfs.lookup(Vfs::ROOT, shown).await.unwrap();
+        assert_eq!(found.node, created.node);
+    }
+    let file = vfs.lookup(Vfs::ROOT, "x.txt").await.unwrap();
+    let mut current = "x.txt";
+    for (new_name, remote_name) in [
+        ("r%20x", "r%20x"),
+        ("r100%", "r100%"),
+        ("%42", "%42"),
+        ("r%2Fx", "r/x"),
+    ] {
+        vfs.rename(Vfs::ROOT, current, Vfs::ROOT, new_name, IfExists::Replace)
+            .await
+            .unwrap();
+        let found = vfs.lookup(Vfs::ROOT, new_name).await.unwrap();
+        assert_eq!(found.node, file.node);
+        let remote = provider.list(&provider.root()).await.unwrap();
+        assert!(
+            remote.iter().any(|item| item.name == remote_name),
+            "{remote_name}"
+        );
+        current = new_name;
+    }
+}
+
+#[tokio::test]
+async fn a_rename_onto_a_name_the_remote_holds_twice_is_refused() {
+    let (provider, vfs) = mount(Options::default());
+    provider.add_file(&provider.root(), "a.txt", b"first");
+    provider.add_file(&provider.root(), "a.txt", b"second");
+    provider.add_file(&provider.root(), "b.txt", b"b");
+    let plain = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    let duplicate = vfs.lookup(Vfs::ROOT, "a (2).txt").await.unwrap();
+    let other = vfs.lookup(Vfs::ROOT, "b.txt").await.unwrap();
     let calls = provider.calls();
     assert_eq!(
-        vfs.create_folder(Vfs::ROOT, "%41").await,
-        Err(VfsError::NotSupported)
-    );
-    assert_eq!(
-        vfs.rename(Vfs::ROOT, "a.txt", Vfs::ROOT, "%41", IfExists::Replace)
+        vfs.rename(Vfs::ROOT, "b.txt", Vfs::ROOT, "a.txt", IfExists::Replace)
             .await,
-        Err(VfsError::NotSupported)
+        Err(VfsError::Conflict)
     );
     assert_eq!(provider.calls(), calls);
-    assert_eq!(vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap().name, "a.txt");
+    assert_eq!(
+        vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap().node,
+        plain.node
+    );
+    assert_eq!(
+        vfs.lookup(Vfs::ROOT, "a (2).txt").await.unwrap().node,
+        duplicate.node
+    );
+    assert_eq!(
+        vfs.lookup(Vfs::ROOT, "b.txt").await.unwrap().node,
+        other.node
+    );
+}
+
+#[tokio::test]
+async fn the_shown_duplicate_can_take_the_plain_name() {
+    let (provider, vfs) = mount(Options::default());
+    provider.add_file(&provider.root(), "a.txt", b"first");
+    provider.add_file(&provider.root(), "a.txt", b"second");
+    let duplicate = vfs.lookup(Vfs::ROOT, "a (2).txt").await.unwrap();
+    vfs.rename(
+        Vfs::ROOT,
+        "a (2).txt",
+        Vfs::ROOT,
+        "a.txt",
+        IfExists::Replace,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap().node,
+        duplicate.node
+    );
+    assert_eq!(
+        vfs.lookup(Vfs::ROOT, "a (2).txt").await,
+        Err(VfsError::NotFound)
+    );
+    assert_eq!(provider.list(&provider.root()).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_rename_onto_a_shown_duplicate_replaces_that_item() {
+    let (provider, vfs) = mount(Options::default());
+    provider.add_file(&provider.root(), "a.txt", b"first");
+    provider.add_file(&provider.root(), "a.txt", b"second");
+    provider.add_file(&provider.root(), "b.txt", b"b");
+    let plain = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    let moved = vfs.lookup(Vfs::ROOT, "b.txt").await.unwrap();
+    vfs.rename(
+        Vfs::ROOT,
+        "b.txt",
+        Vfs::ROOT,
+        "a (2).txt",
+        IfExists::Replace,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap().node,
+        plain.node
+    );
+    assert_eq!(
+        vfs.lookup(Vfs::ROOT, "a (2).txt").await.unwrap().node,
+        moved.node
+    );
+    let mut names: Vec<_> = provider
+        .list(&provider.root())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|item| item.name)
+        .collect();
+    names.sort();
+    assert_eq!(names, ["a (2).txt", "a.txt"]);
+}
+
+#[tokio::test]
+async fn a_shown_duplicate_cannot_take_a_name_held_three_times() {
+    let (provider, vfs) = mount(Options::default());
+    for contents in [&b"first"[..], b"second", b"third"] {
+        provider.add_file(&provider.root(), "a.txt", contents);
+    }
+    let third = vfs.lookup(Vfs::ROOT, "a (3).txt").await.unwrap();
+    let calls = provider.calls();
+    assert_eq!(
+        vfs.rename(
+            Vfs::ROOT,
+            "a (3).txt",
+            Vfs::ROOT,
+            "a.txt",
+            IfExists::Replace
+        )
+        .await,
+        Err(VfsError::Conflict)
+    );
+    assert_eq!(provider.calls(), calls);
+    assert_eq!(
+        vfs.lookup(Vfs::ROOT, "a (3).txt").await.unwrap().node,
+        third.node
+    );
+}
+
+#[tokio::test]
+async fn a_moved_duplicate_keeps_its_shown_name() {
+    let (provider, vfs) = mount(Options::default());
+    let root = provider.root();
+    let folder_x = provider.add_folder(&root, "x");
+    let folder_y = provider.add_folder(&root, "y");
+    provider.add_file(&folder_x, "a.txt", b"first");
+    provider.add_file(&folder_x, "a.txt", b"second");
+    let x = vfs.lookup(Vfs::ROOT, "x").await.unwrap();
+    let y = vfs.lookup(Vfs::ROOT, "y").await.unwrap();
+    let duplicate = vfs.lookup(x.node, "a (2).txt").await.unwrap();
+    vfs.rename(x.node, "a (2).txt", y.node, "a (2).txt", IfExists::Replace)
+        .await
+        .unwrap();
+    let remote = provider.list(&folder_y).await.unwrap();
+    assert_eq!(remote.len(), 1);
+    assert_eq!(remote[0].name, "a (2).txt");
+    assert_eq!(
+        vfs.lookup(y.node, "a (2).txt").await.unwrap().node,
+        duplicate.node
+    );
+    assert!(vfs.lookup(x.node, "a.txt").await.is_ok());
+    assert_eq!(
+        vfs.lookup(x.node, "a (2).txt").await,
+        Err(VfsError::NotFound)
+    );
 }
 
 #[tokio::test]

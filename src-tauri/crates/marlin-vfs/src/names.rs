@@ -5,7 +5,7 @@ use crate::Item;
 /// How one operating system judges file names.
 #[derive(Clone, Copy)]
 pub struct NameRules {
-    /// True for a character this OS cannot hold in a file name.
+    /// True for a character this OS cannot hold in a file name. `%`, `.`, and the hex digits must never be forbidden: the mapping relies on it.
     pub forbidden: fn(char) -> bool,
 
     /// Two names with the same key are one name to this OS.
@@ -26,21 +26,57 @@ pub const POSIX: NameRules = NameRules {
     key: posix_key,
 };
 
-/// Replaces characters this OS forbids, and the names `.` and `..`, so that [`unescape`] gives the remote name back.
+/// Whether a `%` followed by `after` reads as an escape: any number of `25`, then the escape of a character the OS forbids. At the start of a name, `2E` or `2E%2E` that ends the name counts too, so that the names `%2E` and `%2E%2E` stay free for `.` and `..`.
+fn reads_as_escape(after: &str, at_start: bool, rules: &NameRules) -> bool {
+    let mut rest = after;
+    while let Some(next) = rest.strip_prefix("25") {
+        rest = next;
+    }
+    forbidden_escape(rest, rules).is_some() || (at_start && (rest == "2E" || rest == "2E%2E"))
+}
+
+/// The forbidden character whose escape `after` starts with, and how many bytes of `after` the escape takes. `after` is the text after a `%`: `2F` for `/`, or `E2%98%83` for a character of three bytes.
+fn forbidden_escape(after: &str, rules: &NameRules) -> Option<(char, usize)> {
+    // Upper case only: `escape` writes upper case, and a lower-case `%2f` the OS sends must come back as itself.
+    let digit = |byte: u8| match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    };
+    let text = after.as_bytes();
+    let mut bytes = Vec::with_capacity(4);
+    let mut used = 0;
+    while bytes.len() < 4 {
+        if !bytes.is_empty() {
+            if text.get(used) != Some(&b'%') {
+                return None;
+            }
+            used += 1;
+        }
+        let pair = text.get(used..used + 2)?;
+        bytes.push(digit(pair[0])? * 16 + digit(pair[1])?);
+        used += 2;
+        // A first byte that starts a longer character does not decode alone, so read the next `%XX`.
+        if let Ok(decoded) = std::str::from_utf8(&bytes) {
+            let character = decoded.chars().next()?;
+            return (rules.forbidden)(character).then_some((character, used));
+        }
+    }
+    None
+}
+
+/// Turns a remote name into a name this OS can hold. A forbidden character becomes `%XX`, one per byte, and the names `.` and `..` become `%2E` and `%2E%2E`. A `%` becomes `%25` only where the text after it would read as an escape, and only upper-case hex is an escape, so [`unescape`] gives the remote name back.
 pub fn escape(name: &str, rules: &NameRules) -> String {
     if name == "." || name == ".." {
         return name.replace('.', "%2E");
     }
     let mut out = String::with_capacity(name.len());
-    let mut rest = name.chars();
-    while let Some(character) = rest.next() {
-        let hex_digits_next = rest.as_str().bytes().take(2);
+    for (at, character) in name.char_indices() {
         if (rules.forbidden)(character) {
             for byte in character.encode_utf8(&mut [0; 4]).bytes() {
                 out.push_str(&format!("%{byte:02X}"));
             }
-        } else if character == '%' && hex_digits_next.filter(u8::is_ascii_hexdigit).count() == 2 {
-            // A literal `%41` in a remote name must not come back from `unescape` as `A`.
+        } else if character == '%' && reads_as_escape(&name[at + 1..], at == 0, rules) {
             out.push_str("%25");
         } else {
             out.push(character);
@@ -49,22 +85,36 @@ pub fn escape(name: &str, rules: &NameRules) -> String {
     out
 }
 
-/// Turns each `%XX` back into its byte. If the bytes are not valid UTF-8, the input is returned unchanged.
-pub fn unescape(name: &str) -> String {
-    let bytes = name.as_bytes();
-    let hex = |at: usize| bytes.get(at).and_then(|byte| (*byte as char).to_digit(16));
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if let (b'%', Some(high), Some(low)) = (bytes[index], hex(index + 1), hex(index + 2)) {
-            out.push((high * 16 + low) as u8);
-            index += 3;
+/// Turns a name this OS sent back into the remote name. `%2E` and `%2E%2E` become `.` and `..`, and a `%` followed by the escape of a forbidden character becomes that character. A `%25` that stands in front of an escape becomes a literal `%`, and every other `%` is kept as it is.
+pub fn unescape(name: &str, rules: &NameRules) -> String {
+    match name {
+        "%2E" => return ".".to_string(),
+        "%2E%2E" => return "..".to_string(),
+        _ => {}
+    }
+    let mut out = String::with_capacity(name.len());
+    let mut at = 0;
+    while at < name.len() {
+        if name.as_bytes()[at] == b'%' {
+            let after = &name[at + 1..];
+            if let Some((character, length)) = forbidden_escape(after, rules) {
+                out.push(character);
+                at += 1 + length;
+            } else {
+                out.push('%');
+                at += if after.starts_with("25") && reads_as_escape(&after[2..], at == 0, rules) {
+                    3
+                } else {
+                    1
+                };
+            }
         } else {
-            out.push(bytes[index]);
-            index += 1;
+            let character = name[at..].chars().next().unwrap();
+            out.push(character);
+            at += character.len_utf8();
         }
     }
-    String::from_utf8(out).unwrap_or_else(|_| name.to_string())
+    out
 }
 
 /// Rewrites `item.name` so one folder can be shown on this OS. The result depends only on the set of ids and names. Nothing is stored, so adding or removing a duplicate can change another item's suffix.
@@ -162,12 +212,31 @@ mod tests {
 
     #[test]
     fn escape_and_round_trip() {
+        assert_eq!(escape("My%20File.pdf", &POSIX), "My%20File.pdf");
+        assert_eq!(escape("100%.txt", &POSIX), "100%.txt");
+        assert_eq!(escape("%41", &POSIX), "%41");
+        assert_eq!(escape("%25", &POSIX), "%25");
         assert_eq!(escape("/", &POSIX), "%2F");
         assert_eq!(escape("%2F", &POSIX), "%252F");
-        assert_eq!(escape("100% done.txt", &POSIX), "100% done.txt");
+        assert_eq!(escape("%252F", &POSIX), "%25252F");
+        assert_eq!(escape("%2f", &POSIX), "%2f");
         assert_eq!(escape(".", &POSIX), "%2E");
         assert_eq!(escape("..", &POSIX), "%2E%2E");
+        assert_eq!(escape("%2E", &POSIX), "%252E");
+        assert_eq!(escape("%2E%2E", &POSIX), "%252E%2E");
+        assert_eq!(escape("a%2E", &POSIX), "a%2E");
+        assert_eq!(unescape("%2F", &POSIX), "/");
+        assert_eq!(unescape("%2f", &POSIX), "%2f");
+        assert_eq!(unescape("%252F", &POSIX), "%2F");
+        assert_eq!(unescape("%25", &POSIX), "%25");
+        assert_eq!(unescape("%2E", &POSIX), ".");
+        assert_eq!(unescape("%252E", &POSIX), "%2E");
+        assert_eq!(unescape("a%2Fb", &POSIX), "a/b");
+        assert_eq!(unescape("%FF", &POSIX), "%FF");
         assert_eq!(escape("a\u{2603}b", &SNOWMAN), "a%E2%98%83b");
+        assert_eq!(escape("%E2%98%83", &SNOWMAN), "%25E2%98%83");
+        assert_eq!(unescape("%E2%98%83", &SNOWMAN), "\u{2603}");
+        assert_eq!(unescape("%E2%98", &SNOWMAN), "%E2%98");
         for name in [
             "/",
             "a/b",
@@ -179,9 +248,38 @@ mod tests {
             "a\u{2603}b",
             "a\0b",
         ] {
-            assert_eq!(unescape(&escape(name, &SNOWMAN)), name, "{name:?}");
+            assert_eq!(
+                unescape(&escape(name, &SNOWMAN), &SNOWMAN),
+                name,
+                "{name:?}"
+            );
         }
-        assert_eq!(unescape("%FF"), "%FF");
+    }
+
+    #[test]
+    fn round_trips_hold_for_every_short_name() {
+        // Every name of up to seven characters made of these, so `%2E`, `%2F`, `%25` and chains of them all occur.
+        let alphabet = ['%', '2', '5', 'E', 'F', '/', '.', 'a'];
+        let mut pending = vec![String::new()];
+        while let Some(name) = pending.pop() {
+            let escaped = escape(&name, &POSIX);
+            assert_eq!(unescape(&escaped, &POSIX), name, "{name:?}");
+            assert!(
+                escaped != "." && escaped != ".." && !escaped.chars().any(POSIX.forbidden),
+                "{name:?} -> {escaped:?}"
+            );
+            // The OS never sends `.`, `..`, or a forbidden character.
+            if name != "." && name != ".." && !name.chars().any(POSIX.forbidden) {
+                assert_eq!(escape(&unescape(&name, &POSIX), &POSIX), name, "{name:?}");
+            }
+            if name.len() < 7 {
+                pending.extend(
+                    alphabet
+                        .iter()
+                        .map(|character| format!("{name}{character}")),
+                );
+            }
+        }
     }
 
     #[test]
