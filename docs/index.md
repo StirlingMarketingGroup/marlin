@@ -17,11 +17,11 @@ Start here. Each line says what a page answers. The rules for keeping these page
 
 ## How to work on it
 
-| Page                                  | Read it to learn                                                                       |
-| ------------------------------------- | -------------------------------------------------------------------------------------- |
-| [Testing](testing.md)                 | The twelve test suites, what each one covers, and which ones CI runs.                  |
-| [Release signing](release-signing.md) | How a release gets built, signed, and notarized, and which secrets it needs.           |
-| [Licenses](licenses.md)               | Which licenses a dependency may have, how the check works, and where the notices live. |
+| Page                                  | Read it to learn                                                                                                       |
+| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| [Testing](testing.md)                 | The twelve test suites, what each one covers, and which ones CI runs.                                                  |
+| [Release signing](release-signing.md) | How a release gets built, signed, and notarized, which secrets it needs, and where the Linux packages put `libzpl.so`. |
+| [Licenses](licenses.md)               | Which licenses a dependency may have, how the check works, and where the notices live.                                 |
 
 ## Decisions
 
