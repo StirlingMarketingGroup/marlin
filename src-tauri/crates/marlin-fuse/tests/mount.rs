@@ -29,6 +29,8 @@ fn vfs<P: Provider + 'static>(provider: Arc<P>) -> Arc<Vfs> {
         marlin_vfs::POSIX,
         Options {
             max_listings: 0,
+            attributes_ttl: Duration::ZERO,
+            space_ttl: Duration::ZERO,
             ..Options::default()
         },
     ))
@@ -387,6 +389,40 @@ async fn a_big_folder_lists_every_name_once() {
 
 #[ignore = "mounts for real: run crates/marlin-fuse/test-in-docker.sh on Linux, crates/marlin-fuse/test-on-mac.sh on a Mac"]
 #[tokio::test(flavor = "multi_thread")]
+async fn opening_every_listed_file_asks_the_provider_for_no_file() {
+    let provider = Arc::new(MemoryProvider::new());
+    let folder = provider.add_folder(&provider.root(), "many");
+    for number in 0..100 {
+        provider.add_file(&folder, &format!("file-{number:03}.txt"), b"x");
+    }
+
+    // The core's default limits, not the ones in `vfs()`: this test is about what the core reuses.
+    let core: Arc<dyn Provider> = provider.clone();
+    let core = Arc::new(Vfs::new(core, marlin_vfs::POSIX, Options::default()));
+    let (_dir, point) = empty_dir();
+    let mut mount = marlin_fuse::mount(core, &point).await.unwrap();
+
+    let many = point.join("many");
+    let listed = names(&many).await.unwrap();
+    assert_eq!(listed.len(), 100);
+    let calls = provider.calls();
+    tokio::task::spawn_blocking(move || {
+        for name in listed {
+            let file = std::fs::File::open(many.join(name)).unwrap();
+            assert_eq!(file.metadata().unwrap().size(), 1);
+        }
+    })
+    .await
+    .unwrap();
+    // The stored attributes answer each open. On macOS each open also asks for the free space, and the stored answer covers that. The OS may ask about a folder again in that time, so a few calls are allowed.
+    let asked = provider.calls() - calls;
+    assert!(asked < 10, "provider calls: {asked}");
+
+    mount.unmount().await.unwrap();
+}
+
+#[ignore = "mounts for real: run crates/marlin-fuse/test-in-docker.sh on Linux, crates/marlin-fuse/test-on-mac.sh on a Mac"]
+#[tokio::test(flavor = "multi_thread")]
 async fn unmount_succeeds_after_an_unmount_from_outside() {
     let (_dir, point) = empty_dir();
     let mut mount = marlin_fuse::mount(vfs(Arc::new(MemoryProvider::new())), &point)
@@ -554,9 +590,10 @@ async fn a_second_open_reads_nothing_again_and_a_changed_file_is_read_again() {
     let original = pattern(10_000);
     let file = Arc::new(CountingFile::new(original.clone()));
     let (_dir, point) = empty_dir();
-    let mut mount = marlin_fuse::mount(vfs(Arc::clone(&file)), &point)
-        .await
-        .unwrap();
+    // The core's default limits, not the ones in `vfs()`: a reopened file passes the core's stored answers and the kernel's.
+    let provider: Arc<dyn Provider> = file.clone();
+    let core = Arc::new(Vfs::new(provider, marlin_vfs::POSIX, Options::default()));
+    let mut mount = marlin_fuse::mount(core, &point).await.unwrap();
 
     let path = point.join("file.bin");
     assert_eq!(read_file(&path).await.unwrap(), original);
@@ -570,8 +607,8 @@ async fn a_second_open_reads_nothing_again_and_a_changed_file_is_read_again() {
         changed.clone(),
         UNIX_EPOCH + Duration::from_secs(1_700_000_100),
     );
-    // The adapter tells the kernel it may cache names and attributes for one second.
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    // The core reuses a listing and a node's attributes for five seconds, and the adapter tells the kernel it may cache names and attributes for one more.
+    tokio::time::sleep(Duration::from_millis(6500)).await;
     assert_eq!(read_file(&path).await.unwrap(), changed);
 
     mount.unmount().await.unwrap();

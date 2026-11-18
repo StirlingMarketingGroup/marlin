@@ -5,7 +5,7 @@
 On Linux and macOS it can mount a Google account, read-only: see [Providers](#providers), the [Linux mount adapter](mount-linux.md), and the [macOS mount adapter](mount-macos.md). The helper does not run on Windows (#375). The app starts the helper on the first mount command: see [The app side](#the-app-side). No part of the UI sends one yet (#377). The app bundle holds the helper: see [Building and bundling](#building-and-bundling).
 
 **Covers:** `src-tauri/crates/marlin-mount/`, `src-tauri/crates/marlin-mount-client/`, `src-tauri/src/mount_helper.rs`, `src-tauri/build.rs`, `scripts/run-tauri.mjs`, `scripts/check-bundled-mount-helper.mjs`
-**Checked against the code:** 2026-11-16
+**Checked against the code:** 2026-11-17
 
 The design is in [decision 0001](decisions/0001-mount-architecture.md), choices 3 to 6. The helper builds each mount on the [mount core](mount-core.md).
 
@@ -287,7 +287,7 @@ A health state carries no `error`. The helper logs the text of a failure the pro
 
 A mount recovers by itself. In `auth-required`, the next call the remote answers after the user signs in again moves the mount back to `mounted`. No unmount is needed. An `unmount` and a `mount` also work. A `mount` of an unhealthy mount returns its status and mounts nothing.
 
-The state changes only at a provider call. A read that a cache answers makes none. The core reuses a folder listing for 5 seconds, and the OS caches too. After a sign-in, the state can stay `auth-required` until something reads the mount past those caches.
+The state changes only at a provider call. A read that a cache answers makes none. The core reuses a folder listing and a node's attributes for 5 seconds and the free space for 30 seconds, and the OS caches too. After a sign-in, the state can stay `auth-required` until something reads the mount past those caches.
 
 `degraded` covers the core's time limit. That limit includes the wait for a free call slot. A mount whose slots are all held by slow calls becomes `degraded` too.
 

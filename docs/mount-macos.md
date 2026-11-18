@@ -5,7 +5,7 @@
 The helper mounts a Google account through it: see [Providers](mount-helper.md#providers). No part of the UI asks for a mount yet (#377).
 
 **Covers:** `src-tauri/crates/marlin-fuse/src/lib.rs`, `src-tauri/crates/marlin-fuse/src/macos.rs`, `src-tauri/crates/marlin-fuse/src/macos/`, `src-tauri/crates/marlin-fuse/test-on-mac.sh`
-**Checked against the code:** 2026-11-16
+**Checked against the code:** 2026-11-17
 
 The design is in [decision 0001](decisions/0001-mount-architecture.md), choices 2 and 6.
 
@@ -47,7 +47,7 @@ The helper sends this text to the app as error -1006.
 - **A mount takes one to two seconds.** macFUSE starts the real mount when the session loop starts, and the volume appears a moment later. `mount` returns when the mount table lists the path.
 - **Reads answer through `fuse_reply_data`.** With `fuse_reply_buf`, an app that reads 64 KiB or more in one call gets "Input/output error" (macFUSE 5.5.0, macOS 27.2). libfuse reports success for that reply, and macFUSE's extension then fails the read. The test that reads a 300,000-byte file whole guards this.
 - **File bytes.** The adapter does not ask macOS to keep a file's bytes, as the Linux adapter does. macOS keeps them anyway: in the test with a fake Google, a second read of a whole file makes no call to Google. Not tested: when macOS drops the bytes after the file changes on the remote (#543).
-- **Free space.** `statfs` reports the provider's total and free bytes in 4,096-byte blocks. macOS counts blocks in 32 bits, so an account over 16 TiB, or one with no limit, shows 16 TiB. macOS asks when it mounts and answers later calls from that. In an 8-second test no later call reached the adapter. Not tested: when macOS asks again (#543).
+- **Free space.** `statfs` reports the provider's total and free bytes in 4,096-byte blocks. macOS counts blocks in 32 bits, so an account over 16 TiB, or one with no limit, shows 16 TiB. macOS asks when it mounts and answers a program's later `statfs` calls from that. In an 8-second test no such call reached the adapter. Not tested: when one does (#543). macOS itself asks the adapter again at every open of a file: in a test, 100 opens made over 100 requests. The core reuses the provider's answer for 30 seconds, so they cost at most one provider call in that time.
 - **Names.** A name is matched by its exact bytes, as on Linux. A file with a composed accent in its name (`é` as U+00E9) is listed and opens by that name. It does not open by the decomposed form of the name. macOS name rules are #542.
 - **macOS sends forget calls.** They go straight to the core ([decision 0002](decisions/0002-node-ids-follow-lookup-counts.md)).
 - **A slow call blocks nothing else.** One OS thread per mount runs libfuse's loop. Each request that may reach the provider becomes a tokio task, and the thread goes back for the next request at once. `forget`, `readdir`, and the two release calls only touch the core's own state, so they answer in place.
