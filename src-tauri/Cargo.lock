@@ -4155,6 +4155,7 @@ dependencies = [
  "lru",
  "marlin-gdrive",
  "marlin-mount-client",
+ "marlin-sftp",
  "marlin-test-keychain",
  "mime_guess",
  "notify",
@@ -4165,7 +4166,6 @@ dependencies = [
  "once_cell",
  "open",
  "psd",
- "rand 0.10.3",
  "rayon",
  "reqwest 0.13.5",
  "resvg",
@@ -4266,6 +4266,22 @@ dependencies = [
  "dirs",
  "serde",
  "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "marlin-sftp"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "keyring",
+ "marlin-test-keychain",
+ "rand 0.10.3",
+ "russh",
+ "russh-sftp",
+ "serde",
+ "serde_json",
+ "tempfile",
  "tokio",
 ]
 
