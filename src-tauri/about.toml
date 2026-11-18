@@ -1,0 +1,32 @@
+# The licenses a dependency of Marlin may have. `npm run check:licenses` reads
+# this list for the Rust crates (through cargo-about) and for the npm packages.
+# Read docs/licenses.md before you add a license here.
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "BSL-1.0",
+    "CC0-1.0",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+    "bzip2-1.0.6",
+    # Copyleft per file. Marlin uses MPL crates unmodified. If Marlin ships a
+    # patched one, it must offer the changed files to its users under the MPL.
+    "MPL-2.0",
+]
+
+# Every target a release builds, and Windows, which builds but has no release yet.
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+]
+
+# Only code that ends up in a shipped binary counts.
+ignore-build-dependencies = true
+ignore-dev-dependencies = true

@@ -25,11 +25,13 @@ Marlin has static checks and twelve test suites. CI runs the static checks, the 
 
 `npm run check` treats Rust warnings as errors. The pre-push hook runs it, so a push fails on a lint, format, type, or Rust warning.
 
+CI also runs `npm run check:licenses`, which is not part of `npm run check`: see [Licenses](licenses.md#the-check).
+
 CI skips a job's steps when the files they cover did not change (`check.yml` uses path filters). The Rust tests have a narrower filter than the static checks: see [Rust tests](#rust-tests).
 
 ## Unit tests
 
-- They live in `src/__tests__/unit/` (store, hooks, utils), in `src/components/__tests__/`, and beside the code as `*.test.ts`.
+- They live in `src/__tests__/unit/` (store, hooks, utils), in `src/components/__tests__/`, and beside the code as `*.test.ts` (`*.test.mjs` in `scripts/`).
 - `src/test-setup.ts` mocks `@tauri-apps/api/core` and `@tauri-apps/plugin-dialog`. A test sets what `invoke` returns.
 - Most of the weight is on `useAppStore`: navigation, per-folder preferences, the hidden-files toggle, and the filter.
 

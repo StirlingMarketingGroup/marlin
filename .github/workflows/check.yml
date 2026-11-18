@@ -118,6 +118,13 @@ jobs:
         timeout-minutes: 45
         run: npm run test:rust
 
+      - name: Check dependency licenses
+        if: steps.changes.outputs.check == 'true'
+        run: |
+          # Does nothing when the runner already has this version.
+          cargo install cargo-about --locked --version 0.9.3 --features cli
+          npm run check:licenses
+
   e2e-tests:
     runs-on: [self-hosted, medium]
     steps:

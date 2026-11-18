@@ -221,7 +221,7 @@ The working rules are in [`AGENTS.md`](AGENTS.md).
 
 ## License
 
-MIT
+Marlin's own source code is under the [MIT license](LICENSE). See [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) for third-party credits and license notices.
 
 ## Privacy and terms
 
