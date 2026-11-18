@@ -76,7 +76,6 @@ notify = { version = "8.2", default-features = false, features = ["macos_fsevent
 walkdir = "2.5"
 libc = "0.2"
 zip = { version = "9.0", default-features = false, features = ["deflate", "bzip2", "zstd"] }
-unrar = "0.5"
 tar = "0.4"
 flate2 = "1.1"
 bzip2 = "0.6"
@@ -105,6 +104,11 @@ open = "5"
 bytes = "1"
 mime_guess = "2.0.5"
 rustls = { version = "0.23.40", features = ["ring"] }
+
+# UnRAR's license is not open source, and WinFsp's license exception does not
+# cover software linked with it. A Windows build must not link it (#569).
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+unrar = "0.5"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"
