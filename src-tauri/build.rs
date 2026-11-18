@@ -49,11 +49,12 @@ fn create_missing_helper_placeholders() {
     }
 }
 
-/// Read the Linux deb install directory for libzpl from tauri.conf.json.
+/// Read the folder the Linux rpath uses for libzpl, from the deb package map.
 ///
-/// The `bundle.linux.deb.files` map uses destination-in-package as key and
-/// source-on-disk as value. We look for a key whose filename is `libzpl.so`
-/// and return its parent directory (e.g. `/usr/lib/marlin`).
+/// `bundle.linux.deb.files` maps a path inside the package to a path on disk.
+/// This returns the folder of the key named `libzpl.so`, for example
+/// `/usr/lib/marlin`. `bundle.linux.rpm.files` must name the same folder:
+/// `scripts/check-linux-package-libraries.mjs` fails in CI when it does not.
 fn libzpl_deb_install_dir() -> Option<PathBuf> {
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let conf_path = manifest_dir.join("tauri.conf.json");
@@ -105,10 +106,10 @@ fn setup_libzpl() {
         println!("cargo:warning=libzpl: copy failed: {}", e);
     }
 
-    // Also copy to CARGO_MANIFEST_DIR/lib/ so Tauri's bundler can
-    // find it: macOS uses `bundle.macOS.frameworks` to bundle into
-    // Contents/Frameworks/, Linux uses `bundle.linux.deb.files` to
-    // install into the configured directory.
+    // Also copy to CARGO_MANIFEST_DIR/lib/ so Tauri's bundler can find it.
+    // macOS uses `bundle.macOS.frameworks` to put it in Contents/Frameworks/.
+    // The `.deb` installs it through `bundle.linux.deb.files`. The `.rpm`
+    // installs it to the same folder through `bundle.linux.rpm.files`.
     if target_os == "macos" || target_os == "linux" {
         let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
         let fw_dir = manifest_dir.join("lib");
@@ -122,9 +123,8 @@ fn setup_libzpl() {
     if target_os == "macos" {
         println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path");
     } else if target_os == "linux" {
-        // $ORIGIN: finds libzpl.so next to the binary (dev builds + AppImage)
-        // deb install dir: finds libzpl.so installed by the .deb package
-        // (read from tauri.conf.json so the path isn't duplicated)
+        // $ORIGIN finds libzpl.so next to the binary in a dev build.
+        // The other entry is the folder the `.deb` and the `.rpm` install it into.
         let deb_rpath = libzpl_deb_install_dir()
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|| "/usr/lib/marlin".to_string());

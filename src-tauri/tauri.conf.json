@@ -50,7 +50,10 @@
         }
       },
       "rpm": {
-        "depends": ["fuse3"]
+        "depends": ["fuse3"],
+        "files": {
+          "/usr/lib/marlin/libzpl.so": "lib/libzpl.so"
+        }
       }
     },
     "macOS": {

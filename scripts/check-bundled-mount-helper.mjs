@@ -33,16 +33,11 @@ if (process.platform === 'darwin') {
     throw new Error(`${helper} is not signed with the hardened runtime:\n${signature}`);
   }
 } else {
-  // The package a user installs, not the folder Tauri built it from. A self-hosted
-  // runner keeps the packages of older versions in the same folder.
-  const { version } = JSON.parse(
-    fs.readFileSync(new URL('../src-tauri/tauri.conf.json', import.meta.url), 'utf8')
-  );
-  const debs = fs
-    .readdirSync(path.join(bundle, 'deb'))
-    .filter((name) => name.startsWith(`Marlin_${version}_`) && name.endsWith('.deb'));
+  // The package a user installs, not the folder Tauri built it from. The workflow
+  // empties the bundle folder before the build, so the one package is this build's.
+  const debs = fs.readdirSync(path.join(bundle, 'deb')).filter((name) => name.endsWith('.deb'));
   if (debs.length !== 1) {
-    throw new Error(`Expected one Marlin_${version}_*.deb in ${bundle}/deb, found ${debs.length}.`);
+    throw new Error(`Expected one .deb file in ${bundle}/deb, found ${debs.length}.`);
   }
   execFileSync('dpkg-deb', ['-x', path.join(bundle, 'deb', debs[0]), path.join(tmp, 'deb')]);
   helper = path.join(tmp, 'deb', 'usr', 'bin', 'marlin-mount');
