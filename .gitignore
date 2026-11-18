@@ -69,6 +69,10 @@ src-tauri/binaries/*
 # libzpl shared library (downloaded during cargo build by zpl-rs, copied for Tauri bundling)
 src-tauri/lib/
 
+# scripts/generate-license-texts.mjs makes these
+src-tauri/licenses/THIRD-PARTY-LICENSES.txt
+src-tauri/licenses/rust-standard-library.html
+
 # Google OAuth credentials (sensitive)
 src-tauri/google-credentials.json
 src-tauri/service-account.json

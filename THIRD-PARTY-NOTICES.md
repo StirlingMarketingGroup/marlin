@@ -2,7 +2,9 @@
 
 Marlin's own code is under the MIT license. See [`LICENSE`](LICENSE).
 
-Marlin also contains and uses work that other people made. This page names the parts whose licenses ask for more than a copy of their text, and the programs Marlin uses but does not ship. The rules for adding a dependency are in [`docs/licenses.md`](docs/licenses.md).
+Marlin also contains and uses work that other people made. This page names the parts whose licenses ask for more than a copy of their text, and the programs Marlin uses but does not ship. The rules for adding a dependency are in [`docs/licenses.md`](https://github.com/StirlingMarketingGroup/marlin/blob/master/docs/licenses.md).
+
+Every Marlin installer carries this page in a `licenses` folder, beside the full license texts. [`docs/licenses.md`](https://github.com/StirlingMarketingGroup/marlin/blob/master/docs/licenses.md#license-texts-in-the-installers) says where that folder is and what each file in it holds.
 
 The source of each Marlin release is [this repository](https://github.com/StirlingMarketingGroup/marlin) at the tag of that release.
 
@@ -60,6 +62,8 @@ Marlin draws label previews with `libzpl`, a library built from [go-zpl](https:/
 
   The last three are commercial fonts, and go-zpl states no license that lets it pass them on. [go-zpl #37](https://github.com/StirlingMarketingGroup/go-zpl/issues/37) tracks this.
 
+`libzpl.txt` in the `licenses` folder holds the license texts of the other parts.
+
 ### File-type icons
 
 The icons Marlin shows for file types are from [vscode-icons](https://github.com/vscode-icons/vscode-icons) by Roberto Huertas and contributors, through the `@iconify-json/vscode-icons` package. Marlin uses them unchanged. vscode-icons licenses its icons under the [Creative Commons Attribution-ShareAlike 4.0](https://creativecommons.org/licenses/by-sa/4.0/) license, except the icons that show a brand. Those keep the license of the brand's owner.
@@ -68,9 +72,9 @@ The icons Marlin shows for file types are from [vscode-icons](https://github.com
 
 `src-tauri/Cargo.lock` and `package-lock.json` name Marlin's dependencies from [crates.io](https://crates.io) and [npm](https://www.npmjs.com), and the version of each. The Rust toolchain also links its standard library (MIT or Apache-2.0) into each binary.
 
-- Each crate and package states a license on the accepted list in [`src-tauri/about.toml`](src-tauri/about.toml), except one npm package: `@crabnebula/tauri-plugin-drag` states no license in its package, and its [repository](https://github.com/crabnebula-dev/drag-rs) states Apache-2.0 or MIT. All of the licenses on the list are permissive, except the Mozilla Public License 2.0.
+- Each crate and package states a license on the accepted list in [`src-tauri/about.toml`](https://github.com/StirlingMarketingGroup/marlin/blob/master/src-tauri/about.toml), except one npm package: `@crabnebula/tauri-plugin-drag` states no license in its package, and its [repository](https://github.com/crabnebula-dev/drag-rs) states Apache-2.0 or MIT. All of the licenses on the list are permissive, except the Mozilla Public License 2.0.
 - These crates are under the Mozilla Public License 2.0: `cssparser`, `cssparser-macros`, `dtoa-short`, `freedesktop_entry_parser`, `linicon`, `linicon-theme`, `option-ext`, and `selectors`. Marlin uses them unmodified. Their source is on crates.io.
-- To see every crate and the full text of its license, run `cargo about generate --workspace --format json` in `src-tauri/`.
+- `THIRD-PARTY-LICENSES.txt` in the `licenses` folder holds the full text of each license, and names the crates and packages under it. `rust-standard-library.html` holds the texts for the standard library.
 
 ### System libraries in the AppImage
 
@@ -86,7 +90,7 @@ The Linux AppImage carries copies of the system libraries it needs, taken from t
 
 Marlin reaches SMB shares through a helper program, `marlin-smb`. Outside the AppImage, the helper loads `libsmbclient` from the Samba that you install.
 
-- The helper's source code is MIT, like the rest of Marlin. Because the built helper links a GPL library, you receive the built helper under the GPL, version 3 or later.
+- The helper's source code is MIT, like the rest of Marlin. Because the built helper links a GPL library, you receive the built helper under the GPL, version 3 or later. `GPL-3.0.txt` in the `licenses` folder holds that license.
 - The helper is a separate program. The Marlin app starts it and talks to it over a pipe. The app itself does not link Samba.
 
 ### FFmpeg
@@ -101,4 +105,4 @@ Marlin draws video thumbnails with [FFmpeg](https://ffmpeg.org). Marlin does not
 
 ### FUSE
 
-Mounts need FUSE on Linux and [macFUSE](https://macfuse.github.io) on macOS. You install them. Marlin does not ship either one. See the license table in [`docs/decisions/0001-mount-architecture.md`](docs/decisions/0001-mount-architecture.md#licenses).
+Mounts need FUSE on Linux and [macFUSE](https://macfuse.github.io) on macOS. You install them. Marlin does not ship either one. See the license table in [`docs/decisions/0001-mount-architecture.md`](https://github.com/StirlingMarketingGroup/marlin/blob/master/docs/decisions/0001-mount-architecture.md#licenses).
