@@ -27,12 +27,13 @@ Start here. Each line says what a page answers. The rules for keeping these page
 
 [`decisions/`](decisions/README.md) holds numbered decision records. A record says what we chose, why, and what we rejected, so later work does not reopen it.
 
-| Record                                                                                 | Read it to learn                                                                                                        |
-| -------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| [0001: Mount architecture](decisions/0001-mount-architecture.md)                       | How remotes become native mounts (epic #368): the portable core, the adapter per OS, the helper process, and the risks. |
-| [0002: Node IDs follow lookup counts](decisions/0002-node-ids-follow-lookup-counts.md) | How long a mount's node ID lasts, and why it is not the life of the mount.                                              |
-| [0003: Google Drive link files](decisions/0003-gdrive-link-files.md)                   | How a Google Drive mount shows Google Docs, Sheets, Slides, and shortcuts, which have no bytes to read.                 |
-| [0004: Real-app tests](decisions/0004-real-app-tests.md)                               | How a test drives the real app on macOS and Linux, and which other routes lost.                                         |
+| Record                                                                                 | Read it to learn                                                                                                                                   |
+| -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [0001: Mount architecture](decisions/0001-mount-architecture.md)                       | How remotes become native mounts (epic #368): the portable core, the adapter per OS, the helper process, and the risks.                            |
+| [0002: Node IDs follow lookup counts](decisions/0002-node-ids-follow-lookup-counts.md) | How long a mount's node ID lasts, and why it is not the life of the mount.                                                                         |
+| [0003: Google Drive link files](decisions/0003-gdrive-link-files.md)                   | How a Google Drive mount shows Google Docs, Sheets, Slides, and shortcuts, which have no bytes to read.                                            |
+| [0004: Real-app tests](decisions/0004-real-app-tests.md)                               | How a test drives the real app on macOS and Linux, and which other routes lost.                                                                    |
+| [0005: Mount writes](decisions/0005-mount-writes.md)                                   | How a mount takes writes: what goes to the remote at once, what waits in the local spool, and what `close`, `fsync`, a conflict, and a crash mean. |
 
 ## Frozen history
 

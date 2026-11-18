@@ -1,6 +1,6 @@
 # macOS mount adapter (`marlin-fuse`)
 
-`marlin-fuse` serves one [mount core](mount-core.md) `Vfs` to macOS through macFUSE. The [mount helper](mount-helper.md) uses it on macOS. The same crate serves Linux: see [Linux mount adapter](mount-linux.md). A mount is read-only, like the core, until #376.
+`marlin-fuse` serves one [mount core](mount-core.md) `Vfs` to macOS through macFUSE. The [mount helper](mount-helper.md) uses it on macOS. The same crate serves Linux: see [Linux mount adapter](mount-linux.md). A mount is read-only until the adapter serves writes (#599). [Decision 0005](decisions/0005-mount-writes.md) says how it will.
 
 The helper mounts a Google account through it: see [Providers](mount-helper.md#providers). No part of the UI asks for a mount yet (#377).
 
@@ -68,9 +68,10 @@ The table in [Linux mount adapter](mount-linux.md#errors) holds for macOS: both 
 ## Unmounting
 
 - `Mount::unmount` runs `umount <path>`. This is a plain unmount: it fails with "Resource busy" while any file or folder in the mount is open, and the mount stays served.
-- `unmount` returns when the session loop has ended, or 5 seconds after the unmount if the loop has not. It does not wait for provider calls that are still running.
+- `unmount` returns when the session loop has ended, or 5 seconds after the unmount if the loop has not. It does not wait for a provider call that the unmount itself causes. A request macOS sent before the unmount can hold it: see below.
 - **A mount removed from outside.** A user can run `umount` or eject the volume in Finder. The loop ends, and the next `unmount` succeeds without running anything. Until that `unmount`, the helper still lists the mount (#488).
 - **A forced unmount waits for a slow provider.** While a request is waiting on the provider, macOS holds `umount -f` until the request is answered. The core answers a provider call after 30 seconds at most (`call_timeout`), so that is the longest wait. This holds for a user's `umount -f` and for the one a dropped `Mount` runs.
+- **A request macOS sent itself can hold a plain unmount too.** macOS sends a new mount about ten requests in its first moments. While one of them waits on a slow provider, `umount` returns only when it is answered. A request that the unmount itself causes does not hold it.
 - Dropping a `Mount` whose session has not ended runs `umount -f`. Dropping one whose session has ended does nothing, so a later mount at the same path is safe. This differs from Linux, where a drop detaches whatever mount is at the path.
 - A helper that is killed leaves a dead mount. A listing of it fails with "Device not configured". `is_dead_mount` reports that, and `unmount_dead` runs `umount -f`. See [Dead mounts](mount-helper.md#dead-mounts).
 
@@ -109,4 +110,4 @@ Known limits:
 - After many mounts, macOS can stop finding macFUSE's extension until the user turns it on again (macFUSE issue 1232).
 - The library path is fixed: `/usr/local/lib/libfuse3.4.dylib`, where macFUSE 5 installs it.
 - The adapter does not handle libfuse's interrupt request. A call that an app gave up on still runs until the core's time limit ends it.
-- Read-only: every write fails with "Read-only file system" until #376.
+- Read-only: every write fails with "Read-only file system" until #599.

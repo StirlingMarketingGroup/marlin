@@ -6,7 +6,10 @@ use std::time::Duration;
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
 
-use crate::{unique_names, Attributes, Item, ItemId, Kind, NameRules, Provider, Space, VfsError};
+use crate::{
+    escape, unescape, unique_names, Attributes, Item, ItemId, Kind, NameRules, Provider, Space,
+    VfsError,
+};
 
 /// A file or folder, for as long as the OS holds a lookup on it or a handle is open on it. The number is never reused in a mount.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -33,8 +36,18 @@ pub enum Access {
     /// Read the file's bytes.
     Read,
 
-    /// Change the file. This core rejects it.
+    /// Change the file's bytes. This core rejects it.
     Write,
+}
+
+/// What a rename does when the new name is taken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IfExists {
+    /// The item that holds the name is removed, as POSIX `rename` does.
+    Replace,
+
+    /// The rename fails with [`VfsError::Conflict`] (Linux `RENAME_NOREPLACE`).
+    Refuse,
 }
 
 /// Limits and cache times for one mount.
@@ -101,8 +114,19 @@ struct Node {
 }
 
 enum Opened {
-    File { node: NodeId, item: ItemId },
+    File { node: NodeId },
     Folder { node: NodeId, entries: Vec<Entry> },
+}
+
+/// One folder's listing, as the provider last gave it and as the mount shows it.
+struct Listing {
+    asked: Asked,
+
+    /// The items with the names the remote uses. This mount's own changes edit this list.
+    remote: Vec<Item>,
+
+    /// `remote` after `unique_names`: what a lookup and an open folder read.
+    shown: Arc<Vec<Item>>,
 }
 
 struct State {
@@ -111,17 +135,24 @@ struct State {
     next_node: u64,
     handles: HashMap<HandleId, Opened>,
     next_handle: u64,
-    listings: HashMap<ItemId, (Asked, Arc<Vec<Item>>)>,
+    listings: HashMap<ItemId, Listing>,
     space: Option<(Asked, Space)>,
     generation: u64,
+
+    /// When this mount last changed what a folder holds, or tried to. A listing the core asked for at or before that time, and that answers after it, is not kept. Entries older than the call time limit are dropped: no listing still in flight can be older.
+    changed: HashMap<ItemId, Instant>,
 }
 
-/// The read-only mount core. Adapters share one value across tasks, and a provider call never runs while its lock is held.
+/// The mount core. It can make a folder, remove an item, and rename or move an item, and it cannot write a file's bytes. Adapters share one value across tasks. The state lock is never held across a provider call. A separate lock, `changes`, is held across the provider call of a change.
 pub struct Vfs {
     provider: Arc<dyn Provider>,
     rules: NameRules,
     options: Options,
     permits: Semaphore,
+
+    /// One change runs at a time in this mount. A rename names two folders, and one lock for all changes needs no lock order.
+    changes: tokio::sync::Mutex<()>,
+
     state: Mutex<State>,
     watcher: Option<Box<CallWatcher>>,
 }
@@ -153,6 +184,7 @@ impl Vfs {
             rules,
             permits: Semaphore::new(options.max_calls),
             options,
+            changes: tokio::sync::Mutex::new(()),
             state: Mutex::new(State {
                 nodes,
                 by_item,
@@ -162,6 +194,7 @@ impl Vfs {
                 listings: HashMap::new(),
                 space: None,
                 generation: 0,
+                changed: HashMap::new(),
             }),
             watcher: None,
         }
@@ -179,13 +212,8 @@ impl Vfs {
     /// Finds `name` in `parent` and adds one lookup to the item's node.
     pub async fn lookup(&self, parent: NodeId, name: &str) -> Result<Entry, VfsError> {
         let parent_item = self.item_of(parent)?;
-        let (asked, items) = self.listing(&parent_item).await?;
-        let wanted = (self.rules.key)(name);
-        let Some(found) = items
-            .iter()
-            .find(|item| (self.rules.key)(&item.name) == wanted)
-            .cloned()
-        else {
+        let (asked, found) = self.find(&parent_item, name).await?;
+        let Some(found) = found else {
             return Err(VfsError::NotFound);
         };
         let mut state = self.state.lock().unwrap();
@@ -291,8 +319,7 @@ impl Vfs {
             return Err(VfsError::StaleHandle);
         };
         opened.handles += 1;
-        let item = opened.item.clone();
-        Ok(insert_handle(&mut state, Opened::File { node, item }))
+        Ok(insert_handle(&mut state, Opened::File { node }))
     }
 
     /// Reads one byte range. The size a node holds never limits a read, so a file that grows can be read to its new end.
@@ -304,10 +331,10 @@ impl Vfs {
     ) -> Result<Vec<u8>, VfsError> {
         let item = {
             let state = self.state.lock().unwrap();
-            match state.handles.get(&handle) {
-                Some(Opened::File { item, .. }) => item.clone(),
-                _ => return Err(VfsError::StaleHandle),
-            }
+            let Some(Opened::File { node }) = state.handles.get(&handle) else {
+                return Err(VfsError::StaleHandle);
+            };
+            state.nodes.get(node).unwrap().item.clone()
         };
         self.call(self.provider.read(&item, offset, length)).await
     }
@@ -319,7 +346,7 @@ impl Vfs {
             return;
         };
         let nodes = match opened {
-            Opened::File { node, .. } => vec![node],
+            Opened::File { node } => vec![node],
             Opened::Folder { node, entries } => std::iter::once(node)
                 .chain(entries.into_iter().map(|entry| entry.node))
                 .collect(),
@@ -360,6 +387,160 @@ impl Vfs {
         state.generation += 1;
     }
 
+    /// Makes an empty folder named `name` in `parent` and returns it. `name` is the name the OS sent. A name the mount cannot show back is [`VfsError::NotSupported`], and a name already in the listing is [`VfsError::Conflict`].
+    pub async fn create_folder(&self, parent: NodeId, name: &str) -> Result<Entry, VfsError> {
+        let _changes = self.lock_changes().await?;
+        let parent_item = self.item_of(parent)?;
+        let remote_name = self.remote_name(name)?;
+        let (_asked, existing) = self.find(&parent_item, name).await?;
+        if existing.is_some() {
+            return Err(VfsError::Conflict);
+        }
+        let (at, generation) = {
+            let state = self.state.lock().unwrap();
+            (Instant::now(), state.generation)
+        };
+        let unsettled = Unsettled {
+            vfs: self,
+            folders: vec![parent_item.clone()],
+            settled: false,
+        };
+        let created = self
+            .call(self.provider.create_folder(&parent_item, &remote_name))
+            .await?;
+        let asked = Asked {
+            at,
+            generation,
+            answered: Instant::now(),
+        };
+        let mut state = unsettled.confirmed();
+        change_listing(&mut state, &self.rules, &parent_item, |remote| {
+            remote.retain(|item| item.id != created.id);
+            remote.push(created.clone());
+        });
+        let node = node_for(&mut state, created.id);
+        let found_node = state.nodes.get_mut(&node).unwrap();
+        found_node.lookups += 1;
+        let attributes = remember(&mut found_node.attributes, asked, created.attributes);
+        Ok(Entry {
+            node,
+            name: name.to_string(),
+            attributes,
+        })
+    }
+
+    /// Removes `name` from `parent`. `kind` is what the OS call removes: [`Kind::File`] for unlink, [`Kind::Folder`] for rmdir. The wrong kind is [`VfsError::IsAFolder`] or [`VfsError::NotAFolder`].
+    pub async fn remove(&self, parent: NodeId, name: &str, kind: Kind) -> Result<(), VfsError> {
+        let _changes = self.lock_changes().await?;
+        let parent_item = self.item_of(parent)?;
+        let (_asked, found) = self.find(&parent_item, name).await?;
+        let Some(found) = found else {
+            return Err(VfsError::NotFound);
+        };
+        if found.attributes.kind == Kind::Folder && kind == Kind::File {
+            return Err(VfsError::IsAFolder);
+        }
+        if found.attributes.kind == Kind::File && kind == Kind::Folder {
+            return Err(VfsError::NotAFolder);
+        }
+        let unsettled = Unsettled {
+            vfs: self,
+            folders: vec![parent_item.clone()],
+            settled: false,
+        };
+        self.call(self.provider.remove(&found.id, &parent_item))
+            .await?;
+        let mut state = unsettled.confirmed();
+        change_listing(&mut state, &self.rules, &parent_item, |remote| {
+            remote.retain(|item| item.id != found.id)
+        });
+        Ok(())
+    }
+
+    /// Renames `name` in `parent` to `new_name` in `new_parent`. The names are the names the OS sent. `if_exists` says what to do when `new_name` is taken.
+    pub async fn rename(
+        &self,
+        parent: NodeId,
+        name: &str,
+        new_parent: NodeId,
+        new_name: &str,
+        if_exists: IfExists,
+    ) -> Result<(), VfsError> {
+        let _changes = self.lock_changes().await?;
+        let from = self.item_of(parent)?;
+        let to = self.item_of(new_parent)?;
+        let remote_name = self.remote_name(new_name)?;
+        let (_asked, source) = self.find(&from, name).await?;
+        let Some(source) = source else {
+            return Err(VfsError::NotFound);
+        };
+        if from == to && new_name == source.name {
+            return match if_exists {
+                IfExists::Replace => Ok(()),
+                IfExists::Refuse => Err(VfsError::Conflict),
+            };
+        }
+        let (_asked, target) = self.find(&to, new_name).await?;
+        let replace = match &target {
+            Some(target) if target.id != source.id => {
+                if if_exists == IfExists::Refuse {
+                    return Err(VfsError::Conflict);
+                }
+                if source.attributes.kind == Kind::Folder && target.attributes.kind == Kind::File {
+                    return Err(VfsError::NotAFolder);
+                }
+                if source.attributes.kind == Kind::File && target.attributes.kind == Kind::Folder {
+                    return Err(VfsError::IsAFolder);
+                }
+                Some(target.id.clone())
+            }
+            _ => None,
+        };
+        let (at, generation) = {
+            let state = self.state.lock().unwrap();
+            (Instant::now(), state.generation)
+        };
+        let unsettled = Unsettled {
+            vfs: self,
+            folders: vec![from.clone(), to.clone()],
+            settled: false,
+        };
+        let moved = self
+            .call(
+                self.provider
+                    .rename(&source.id, &from, &to, &remote_name, replace.as_ref()),
+            )
+            .await?;
+        let asked = Asked {
+            at,
+            generation,
+            answered: Instant::now(),
+        };
+        let mut state = unsettled.confirmed();
+        if from != to {
+            change_listing(&mut state, &self.rules, &from, |remote| {
+                remote.retain(|item| item.id != source.id)
+            });
+        }
+        change_listing(&mut state, &self.rules, &to, |remote| {
+            remote.retain(|item| {
+                item.id != source.id && item.id != moved.id && replace.as_ref() != Some(&item.id)
+            });
+            remote.push(moved.clone());
+        });
+        if moved.id != source.id && !state.by_item.contains_key(&moved.id) {
+            if let Some(node) = state.by_item.remove(&source.id) {
+                state.nodes.get_mut(&node).unwrap().item = moved.id.clone();
+                state.by_item.insert(moved.id.clone(), node);
+            }
+        }
+        if let Some(node) = state.by_item.get(&moved.id).copied() {
+            let found = state.nodes.get_mut(&node).unwrap();
+            remember(&mut found.attributes, asked, moved.attributes);
+        }
+        Ok(())
+    }
+
     fn item_of(&self, node: NodeId) -> Result<ItemId, VfsError> {
         self.state
             .lock()
@@ -388,51 +569,151 @@ impl Vfs {
         result
     }
 
+    /// The three changes take this for the whole change. A wait that runs out is [`VfsError::TimedOut`].
+    async fn lock_changes(&self) -> Result<tokio::sync::MutexGuard<'_, ()>, VfsError> {
+        tokio::time::timeout(self.options.call_timeout, self.changes.lock())
+            .await
+            .map_err(|_| VfsError::TimedOut)
+    }
+
+    /// The remote name for a name the OS sent. A name that `escape` would not give back, such as `%41`, is [`VfsError::NotSupported`]: a lookup of the name the OS used would miss the item.
+    fn remote_name(&self, name: &str) -> Result<String, VfsError> {
+        let remote_name = unescape(name);
+        if escape(&remote_name, &self.rules) != name {
+            return Err(VfsError::NotSupported);
+        }
+        Ok(remote_name)
+    }
+
+    /// The item that holds `name` in `folder`, as the mount shows it. A lookup and every change resolve a name here, so they always agree on which item a name means.
+    async fn find(&self, folder: &ItemId, name: &str) -> Result<(Asked, Option<Item>), VfsError> {
+        let (asked, items) = self.listing(folder).await?;
+        let wanted = (self.rules.key)(name);
+        let found = items
+            .iter()
+            .find(|item| (self.rules.key)(&item.name) == wanted)
+            .cloned();
+        Ok((asked, found))
+    }
+
     async fn listing(&self, folder: &ItemId) -> Result<(Asked, Arc<Vec<Item>>), VfsError> {
         let ttl = self.options.listing_ttl;
         let (at, generation) = {
             let state = self.state.lock().unwrap();
-            if let Some((held, items)) = state.listings.get(folder) {
-                if held.is_fresh(state.generation, ttl) {
-                    return Ok((*held, Arc::clone(items)));
+            if let Some(held) = state.listings.get(folder) {
+                if held.asked.is_fresh(state.generation, ttl) {
+                    return Ok((held.asked, Arc::clone(&held.shown)));
                 }
             }
             (Instant::now(), state.generation)
         };
-        let mut items = self.call(self.provider.list(folder)).await?;
+        let remote = self.call(self.provider.list(folder)).await?;
         let asked = Asked {
             at,
             generation,
             answered: Instant::now(),
         };
-        unique_names(&mut items, &self.rules);
-        let items = Arc::new(items);
+        let shown = shown(&remote, &self.rules);
         let mut state = self.state.lock().unwrap();
-        let held = state.listings.get(folder);
-        if state.generation != generation || held.is_some_and(|(held, _)| held.at > at) {
-            return Ok((asked, items));
+        let later = state
+            .listings
+            .get(folder)
+            .is_some_and(|held| held.asked.at > at);
+        let changed = state
+            .changed
+            .get(folder)
+            .is_some_and(|changed| *changed >= at);
+        if state.generation != generation || later || changed {
+            return Ok((asked, shown));
         }
         if state.listings.len() >= self.options.max_listings {
             state
                 .listings
-                .retain(|_, (held, _)| held.answered.elapsed() < ttl);
+                .retain(|_, held| held.asked.answered.elapsed() < ttl);
         }
         if state.listings.len() >= self.options.max_listings {
             let oldest = state
                 .listings
                 .iter()
-                .min_by_key(|(_, (held, _))| held.answered);
+                .min_by_key(|(_, held)| held.asked.answered);
             if let Some(oldest) = oldest.map(|(id, _)| id.clone()) {
                 state.listings.remove(&oldest);
             }
         }
         if state.listings.len() < self.options.max_listings {
-            state
-                .listings
-                .insert(folder.clone(), (asked, Arc::clone(&items)));
+            state.listings.insert(
+                folder.clone(),
+                Listing {
+                    asked,
+                    remote,
+                    shown: Arc::clone(&shown),
+                },
+            );
         }
-        Ok((asked, items))
+        Ok((asked, shown))
     }
+}
+
+/// A change the provider was asked to make. It ends one of two ways: `confirmed`, or dropped. Dropped (an error, the time limit, or a cancelled call), the remote may or may not have changed, so the cached listing of each folder it names is forgotten.
+struct Unsettled<'a> {
+    vfs: &'a Vfs,
+    folders: Vec<ItemId>,
+    settled: bool,
+}
+
+impl<'a> Unsettled<'a> {
+    /// The provider confirmed the change. Stamps each folder and returns the state for the listing edits.
+    fn confirmed(mut self) -> std::sync::MutexGuard<'a, State> {
+        self.settled = true;
+        let mut state = self.vfs.state.lock().unwrap();
+        for folder in &self.folders {
+            note_changed(&mut state, self.vfs.options.call_timeout, folder);
+        }
+        state
+    }
+}
+
+impl Drop for Unsettled<'_> {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
+        let mut state = self.vfs.state.lock().unwrap();
+        for folder in &self.folders {
+            note_changed(&mut state, self.vfs.options.call_timeout, folder);
+            state.listings.remove(folder);
+        }
+    }
+}
+
+/// A listing as the mount shows it: the remote's items after `unique_names`.
+fn shown(remote: &[Item], rules: &NameRules) -> Arc<Vec<Item>> {
+    let mut shown = remote.to_vec();
+    unique_names(&mut shown, rules);
+    Arc::new(shown)
+}
+
+/// Stamps `State::changed` for `folder` and drops the stamps no listing in flight can be older than.
+fn note_changed(state: &mut State, call_timeout: Duration, folder: &ItemId) {
+    let now = Instant::now();
+    state
+        .changed
+        .retain(|_, at| now.saturating_duration_since(*at) < call_timeout);
+    state.changed.insert(folder.clone(), now);
+}
+
+/// Edits the cached listing of `folder`, if one is held, so this mount's own change shows without asking the provider.
+fn change_listing(
+    state: &mut State,
+    rules: &NameRules,
+    folder: &ItemId,
+    edit: impl FnOnce(&mut Vec<Item>),
+) {
+    let Some(listing) = state.listings.get_mut(folder) else {
+        return;
+    };
+    edit(&mut listing.remote);
+    listing.shown = shown(&listing.remote, rules);
 }
 
 fn node_for(state: &mut State, item: ItemId) -> NodeId {

@@ -1,8 +1,11 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, UNIX_EPOCH};
 
-use marlin_vfs::{Access, Kind, MemoryProvider, Options, Provider, Vfs, VfsError, POSIX};
+use marlin_vfs::{
+    Access, Attributes, IfExists, Item, ItemId, Kind, MemoryProvider, Options, Provider, Space,
+    Vfs, VfsError, POSIX,
+};
 
 fn mount(options: Options) -> (Arc<MemoryProvider>, Arc<Vfs>) {
     let provider = Arc::new(MemoryProvider::new());
@@ -137,7 +140,7 @@ async fn rename_keeps_the_node_and_the_open_handle() {
     let folder = vfs.lookup(Vfs::ROOT, "a").await.unwrap();
     let note = vfs.lookup(folder.node, "note.txt").await.unwrap();
     let handle = vfs.open(note.node, Access::Read).await.unwrap();
-    provider.rename(&file, &folder_b, "moved.txt");
+    provider.remote_rename(&file, &folder_b, "moved.txt");
     vfs.refresh();
     let destination = vfs.lookup(Vfs::ROOT, "b").await.unwrap();
     let moved = vfs.lookup(destination.node, "moved.txt").await.unwrap();
@@ -683,4 +686,588 @@ async fn a_slow_listing_does_not_replace_one_asked_for_later() {
     let calls = provider.calls();
     assert_eq!(vfs.lookup(Vfs::ROOT, "b.txt").await.unwrap().name, "b.txt");
     assert_eq!(provider.calls(), calls);
+}
+
+#[tokio::test]
+async fn a_new_folder_shows_at_once() {
+    let (provider, vfs) = mount(Options::default());
+    provider.add_file(&provider.root(), "a.txt", b"a");
+    vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    let calls = provider.calls();
+    let created = vfs.create_folder(Vfs::ROOT, "docs").await.unwrap();
+    assert_eq!(created.name, "docs");
+    assert_eq!(created.attributes.kind, Kind::Folder);
+    let found = vfs.lookup(Vfs::ROOT, "docs").await.unwrap();
+    assert_eq!(found.node, created.node);
+    assert_eq!(provider.calls(), calls + 1);
+}
+
+#[tokio::test]
+async fn create_folder_on_a_taken_name_conflicts() {
+    let (provider, vfs) = mount(Options::default());
+    provider.add_file(&provider.root(), "a.txt", b"a");
+    vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    let calls = provider.calls();
+    assert_eq!(
+        vfs.create_folder(Vfs::ROOT, "a.txt").await,
+        Err(VfsError::Conflict)
+    );
+    assert_eq!(provider.calls(), calls);
+}
+
+#[tokio::test]
+async fn a_created_name_reaches_the_provider_unescaped() {
+    let (provider, vfs) = mount(Options::default());
+    let created = vfs.create_folder(Vfs::ROOT, "a%2Fb").await.unwrap();
+    let remote = provider.list(&provider.root()).await.unwrap();
+    assert_eq!(remote.len(), 1);
+    assert_eq!(remote[0].name, "a/b");
+    let found = vfs.lookup(Vfs::ROOT, "a%2Fb").await.unwrap();
+    assert_eq!(found.node, created.node);
+    assert_eq!(found.name, "a%2Fb");
+}
+
+#[tokio::test]
+async fn a_name_the_mount_cannot_show_back_is_refused() {
+    let (provider, vfs) = mount(Options::default());
+    provider.add_file(&provider.root(), "a.txt", b"a");
+    vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    let calls = provider.calls();
+    assert_eq!(
+        vfs.create_folder(Vfs::ROOT, "%41").await,
+        Err(VfsError::NotSupported)
+    );
+    assert_eq!(
+        vfs.rename(Vfs::ROOT, "a.txt", Vfs::ROOT, "%41", IfExists::Replace)
+            .await,
+        Err(VfsError::NotSupported)
+    );
+    assert_eq!(provider.calls(), calls);
+    assert_eq!(vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap().name, "a.txt");
+}
+
+#[tokio::test]
+async fn remove_drops_a_file_and_an_empty_folder_at_once() {
+    let (provider, vfs) = mount(Options::default());
+    provider.add_file(&provider.root(), "a.txt", b"a");
+    provider.add_folder(&provider.root(), "empty");
+    vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    vfs.lookup(Vfs::ROOT, "empty").await.unwrap();
+    let calls = provider.calls();
+    vfs.remove(Vfs::ROOT, "a.txt", Kind::File).await.unwrap();
+    vfs.remove(Vfs::ROOT, "empty", Kind::Folder).await.unwrap();
+    assert_eq!(
+        vfs.lookup(Vfs::ROOT, "a.txt").await,
+        Err(VfsError::NotFound)
+    );
+    assert_eq!(
+        vfs.lookup(Vfs::ROOT, "empty").await,
+        Err(VfsError::NotFound)
+    );
+    assert_eq!(provider.calls(), calls + 2);
+}
+
+#[tokio::test]
+async fn remove_with_the_wrong_kind_leaves_the_item() {
+    let (provider, vfs) = mount(Options::default());
+    provider.add_file(&provider.root(), "a.txt", b"a");
+    provider.add_folder(&provider.root(), "docs");
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    let folder = vfs.lookup(Vfs::ROOT, "docs").await.unwrap();
+    assert_eq!(
+        vfs.remove(Vfs::ROOT, "docs", Kind::File).await,
+        Err(VfsError::IsAFolder)
+    );
+    assert_eq!(
+        vfs.remove(Vfs::ROOT, "a.txt", Kind::Folder).await,
+        Err(VfsError::NotAFolder)
+    );
+    assert_eq!(
+        vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap().node,
+        file.node
+    );
+    assert_eq!(
+        vfs.lookup(Vfs::ROOT, "docs").await.unwrap().node,
+        folder.node
+    );
+}
+
+#[tokio::test]
+async fn remove_of_a_folder_that_holds_a_file_is_not_empty() {
+    let (provider, vfs) = mount(Options::default());
+    let docs = provider.add_folder(&provider.root(), "docs");
+    provider.add_file(&docs, "a.txt", b"a");
+    let folder = vfs.lookup(Vfs::ROOT, "docs").await.unwrap();
+    assert_eq!(
+        vfs.remove(Vfs::ROOT, "docs", Kind::Folder).await,
+        Err(VfsError::NotEmpty)
+    );
+    assert_eq!(
+        vfs.lookup(Vfs::ROOT, "docs").await.unwrap().node,
+        folder.node
+    );
+    assert_eq!(
+        vfs.lookup(folder.node, "a.txt").await.unwrap().name,
+        "a.txt"
+    );
+}
+
+#[tokio::test]
+async fn remove_of_a_missing_name_is_not_found() {
+    let (provider, vfs) = mount(Options::default());
+    provider.add_file(&provider.root(), "a.txt", b"a");
+    vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    assert_eq!(
+        vfs.remove(Vfs::ROOT, "missing", Kind::File).await,
+        Err(VfsError::NotFound)
+    );
+}
+
+#[tokio::test]
+async fn remove_of_an_item_another_client_moved_is_not_found() {
+    let (provider, vfs) = mount(Options::default());
+    let root = provider.root();
+    let folder_a = provider.add_folder(&root, "a");
+    let folder_b = provider.add_folder(&root, "b");
+    let file = provider.add_file(&folder_a, "note.txt", b"body");
+    let source = vfs.lookup(Vfs::ROOT, "a").await.unwrap();
+    vfs.lookup(source.node, "note.txt").await.unwrap();
+    provider.remote_rename(&file, &folder_b, "moved.txt");
+    assert_eq!(
+        vfs.remove(source.node, "note.txt", Kind::File).await,
+        Err(VfsError::NotFound)
+    );
+    let destination = vfs.lookup(Vfs::ROOT, "b").await.unwrap();
+    assert_eq!(
+        vfs.lookup(destination.node, "moved.txt")
+            .await
+            .unwrap()
+            .name,
+        "moved.txt"
+    );
+}
+
+#[tokio::test]
+async fn a_rename_in_one_folder_keeps_the_node() {
+    let (provider, vfs) = mount(Options::default());
+    provider.add_file(&provider.root(), "note.txt", b"body");
+    let note = vfs.lookup(Vfs::ROOT, "note.txt").await.unwrap();
+    let calls = provider.calls();
+    vfs.rename(
+        Vfs::ROOT,
+        "note.txt",
+        Vfs::ROOT,
+        "moved.txt",
+        IfExists::Replace,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        vfs.lookup(Vfs::ROOT, "note.txt").await,
+        Err(VfsError::NotFound)
+    );
+    let moved = vfs.lookup(Vfs::ROOT, "moved.txt").await.unwrap();
+    assert_eq!(moved.node, note.node);
+    assert_eq!(provider.calls(), calls + 1);
+}
+
+#[tokio::test]
+async fn a_move_to_another_folder_keeps_the_node() {
+    let (provider, vfs) = mount(Options::default());
+    let root = provider.root();
+    let folder_a = provider.add_folder(&root, "a");
+    provider.add_folder(&root, "b");
+    provider.add_file(&folder_a, "note.txt", b"body");
+    let source = vfs.lookup(Vfs::ROOT, "a").await.unwrap();
+    let destination = vfs.lookup(Vfs::ROOT, "b").await.unwrap();
+    let note = vfs.lookup(source.node, "note.txt").await.unwrap();
+    vfs.lookup(destination.node, "missing").await.unwrap_err();
+    let calls = provider.calls();
+    vfs.rename(
+        source.node,
+        "note.txt",
+        destination.node,
+        "moved.txt",
+        IfExists::Replace,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        vfs.lookup(source.node, "note.txt").await,
+        Err(VfsError::NotFound)
+    );
+    let moved = vfs.lookup(destination.node, "moved.txt").await.unwrap();
+    assert_eq!(moved.node, note.node);
+    assert_eq!(provider.calls(), calls + 1);
+}
+
+#[tokio::test]
+async fn rename_replaces_the_item_that_holds_the_name() {
+    let (provider, vfs) = mount(Options::default());
+    provider.add_file(&provider.root(), "a.txt", b"aaa");
+    provider.add_file(&provider.root(), "b.txt", b"bbb");
+    let source = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    vfs.lookup(Vfs::ROOT, "b.txt").await.unwrap();
+    vfs.rename(Vfs::ROOT, "a.txt", Vfs::ROOT, "b.txt", IfExists::Replace)
+        .await
+        .unwrap();
+    assert_eq!(
+        vfs.lookup(Vfs::ROOT, "a.txt").await,
+        Err(VfsError::NotFound)
+    );
+    let moved = vfs.lookup(Vfs::ROOT, "b.txt").await.unwrap();
+    assert_eq!(moved.node, source.node);
+    let handle = vfs.open_folder(Vfs::ROOT).await.unwrap();
+    let entries = vfs.read_folder(handle, 0, 10).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].name, "b.txt");
+    assert_eq!(entries[0].node, source.node);
+}
+
+#[tokio::test]
+async fn rename_can_refuse_a_taken_name() {
+    let (provider, vfs) = mount(Options::default());
+    provider.add_file(&provider.root(), "a.txt", b"aaa");
+    provider.add_file(&provider.root(), "b.txt", b"bbb");
+    let source = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    let target = vfs.lookup(Vfs::ROOT, "b.txt").await.unwrap();
+    let calls = provider.calls();
+    assert_eq!(
+        vfs.rename(Vfs::ROOT, "a.txt", Vfs::ROOT, "b.txt", IfExists::Refuse)
+            .await,
+        Err(VfsError::Conflict)
+    );
+    assert_eq!(provider.calls(), calls);
+    assert_eq!(
+        vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap().node,
+        source.node
+    );
+    assert_eq!(
+        vfs.lookup(Vfs::ROOT, "b.txt").await.unwrap().node,
+        target.node
+    );
+}
+
+#[tokio::test]
+async fn a_folder_renamed_onto_a_file_is_not_a_folder() {
+    let (provider, vfs) = mount(Options::default());
+    provider.add_folder(&provider.root(), "docs");
+    provider.add_file(&provider.root(), "a.txt", b"a");
+    let folder = vfs.lookup(Vfs::ROOT, "docs").await.unwrap();
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    assert_eq!(
+        vfs.rename(Vfs::ROOT, "docs", Vfs::ROOT, "a.txt", IfExists::Replace)
+            .await,
+        Err(VfsError::NotAFolder)
+    );
+    assert_eq!(
+        vfs.lookup(Vfs::ROOT, "docs").await.unwrap().node,
+        folder.node
+    );
+    assert_eq!(
+        vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap().node,
+        file.node
+    );
+}
+
+#[tokio::test]
+async fn a_file_renamed_onto_a_folder_is_a_folder() {
+    let (provider, vfs) = mount(Options::default());
+    provider.add_folder(&provider.root(), "docs");
+    provider.add_file(&provider.root(), "a.txt", b"a");
+    let folder = vfs.lookup(Vfs::ROOT, "docs").await.unwrap();
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    assert_eq!(
+        vfs.rename(Vfs::ROOT, "a.txt", Vfs::ROOT, "docs", IfExists::Replace)
+            .await,
+        Err(VfsError::IsAFolder)
+    );
+    assert_eq!(
+        vfs.lookup(Vfs::ROOT, "docs").await.unwrap().node,
+        folder.node
+    );
+    assert_eq!(
+        vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap().node,
+        file.node
+    );
+}
+
+#[tokio::test]
+async fn a_folder_renamed_onto_a_full_folder_is_not_empty() {
+    let (provider, vfs) = mount(Options::default());
+    let full = provider.add_folder(&provider.root(), "full");
+    provider.add_file(&full, "inside.txt", b"x");
+    provider.add_folder(&provider.root(), "empty");
+    let full_node = vfs.lookup(Vfs::ROOT, "full").await.unwrap();
+    vfs.lookup(Vfs::ROOT, "empty").await.unwrap();
+    assert_eq!(
+        vfs.rename(Vfs::ROOT, "empty", Vfs::ROOT, "full", IfExists::Replace)
+            .await,
+        Err(VfsError::NotEmpty)
+    );
+    assert!(vfs.lookup(Vfs::ROOT, "empty").await.is_ok());
+    assert_eq!(
+        vfs.lookup(Vfs::ROOT, "full").await.unwrap().node,
+        full_node.node
+    );
+    assert_eq!(
+        vfs.lookup(full_node.node, "inside.txt").await.unwrap().name,
+        "inside.txt"
+    );
+}
+
+#[tokio::test]
+async fn a_folder_moved_into_itself_is_not_supported() {
+    let (provider, vfs) = mount(Options::default());
+    provider.add_folder(&provider.root(), "docs");
+    let folder = vfs.lookup(Vfs::ROOT, "docs").await.unwrap();
+    assert_eq!(
+        vfs.rename(Vfs::ROOT, "docs", folder.node, "inner", IfExists::Replace)
+            .await,
+        Err(VfsError::NotSupported)
+    );
+    assert_eq!(
+        vfs.lookup(Vfs::ROOT, "docs").await.unwrap().node,
+        folder.node
+    );
+    assert_eq!(
+        vfs.lookup(folder.node, "inner").await,
+        Err(VfsError::NotFound)
+    );
+}
+
+#[tokio::test]
+async fn a_rename_to_the_same_name_asks_the_provider_nothing() {
+    let (provider, vfs) = mount(Options::default());
+    provider.add_file(&provider.root(), "a.txt", b"a");
+    vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    let calls = provider.calls();
+    vfs.rename(Vfs::ROOT, "a.txt", Vfs::ROOT, "a.txt", IfExists::Replace)
+        .await
+        .unwrap();
+    assert_eq!(
+        vfs.rename(Vfs::ROOT, "a.txt", Vfs::ROOT, "a.txt", IfExists::Refuse)
+            .await,
+        Err(VfsError::Conflict)
+    );
+    assert_eq!(provider.calls(), calls);
+}
+
+#[tokio::test]
+async fn rename_does_not_replace_an_item_another_client_moved_away() {
+    let (provider, vfs) = mount(Options::default());
+    let root = provider.root();
+    let archive = provider.add_folder(&root, "archive");
+    provider.add_file(&root, "draft.txt", b"new");
+    let report = provider.add_file(&root, "report.txt", b"old");
+    vfs.lookup(Vfs::ROOT, "report.txt").await.unwrap();
+    provider.remote_rename(&report, &archive, "report.txt");
+    assert_eq!(
+        vfs.rename(
+            Vfs::ROOT,
+            "draft.txt",
+            Vfs::ROOT,
+            "report.txt",
+            IfExists::Replace
+        )
+        .await,
+        Err(VfsError::NotFound)
+    );
+    let kept = provider.list(&archive).await.unwrap();
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].id, report);
+    assert_eq!(
+        vfs.lookup(Vfs::ROOT, "draft.txt").await.unwrap().name,
+        "draft.txt"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_change_that_waits_too_long_for_another_times_out() {
+    let (provider, vfs) = mount(Options::default());
+    // The first change holds the lock for 40 seconds: its listing takes 20, and so does its create. Neither passes the 30-second limit of one call.
+    provider.set_delay(Duration::from_secs(20));
+    let vfs_for_first = Arc::clone(&vfs);
+    let first = tokio::spawn(async move { vfs_for_first.create_folder(Vfs::ROOT, "a").await });
+    until_in_flight(&provider, 1).await;
+    assert_eq!(
+        vfs.create_folder(Vfs::ROOT, "b").await,
+        Err(VfsError::TimedOut)
+    );
+    assert_eq!(first.await.unwrap().unwrap().name, "a");
+    provider.set_delay(Duration::ZERO);
+    let items = provider.list(&provider.root()).await.unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].name, "a");
+}
+
+#[tokio::test]
+async fn a_rename_that_changes_the_id_keeps_the_node_and_the_open_handle() {
+    let (provider, vfs) = mount(Options::default());
+    provider.rename_changes_ids(true);
+    provider.add_file(&provider.root(), "a.txt", b"hello");
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    let handle = vfs.open(file.node, Access::Read).await.unwrap();
+    vfs.rename(Vfs::ROOT, "a.txt", Vfs::ROOT, "b.txt", IfExists::Replace)
+        .await
+        .unwrap();
+    let moved = vfs.lookup(Vfs::ROOT, "b.txt").await.unwrap();
+    assert_eq!(moved.node, file.node);
+    assert_eq!(vfs.attributes(file.node).await.unwrap().size, 5);
+    assert_eq!(vfs.read(handle, 0, 5).await.unwrap(), b"hello");
+}
+
+#[tokio::test]
+async fn a_folder_whose_id_changes_still_lists_what_it_holds() {
+    let (provider, vfs) = mount(Options::default());
+    provider.rename_changes_ids(true);
+    let docs = provider.add_folder(&provider.root(), "docs");
+    provider.add_file(&docs, "a.txt", b"a");
+    let folder = vfs.lookup(Vfs::ROOT, "docs").await.unwrap();
+    vfs.rename(Vfs::ROOT, "docs", Vfs::ROOT, "papers", IfExists::Replace)
+        .await
+        .unwrap();
+    assert_eq!(
+        vfs.lookup(folder.node, "a.txt").await.unwrap().name,
+        "a.txt"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_change_drops_the_cached_listing() {
+    let (provider, vfs) = mount(Options::default());
+    provider.add_file(&provider.root(), "a.txt", b"a");
+    vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    let calls = provider.calls();
+    provider.fail_with(Some(VfsError::Offline));
+    assert_eq!(
+        vfs.create_folder(Vfs::ROOT, "docs").await,
+        Err(VfsError::Offline)
+    );
+    provider.fail_with(None);
+    assert_eq!(vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap().name, "a.txt");
+    assert_eq!(provider.calls(), calls + 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cancelled_create_is_found_on_the_next_lookup() {
+    let (provider, vfs) = mount(Options::default());
+    vfs.lookup(Vfs::ROOT, "missing").await.unwrap_err();
+    provider.set_delay(Duration::from_secs(60));
+    let vfs_for_create = Arc::clone(&vfs);
+    let task = tokio::spawn(async move { vfs_for_create.create_folder(Vfs::ROOT, "docs").await });
+    until_in_flight(&provider, 1).await;
+    task.abort();
+    let _ = task.await;
+    provider.set_delay(Duration::ZERO);
+    assert_eq!(vfs.lookup(Vfs::ROOT, "docs").await.unwrap().name, "docs");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_listing_in_flight_does_not_hide_a_new_folder() {
+    let (provider, vfs) = mount(Options::default());
+    provider.add_file(&provider.root(), "a.txt", b"a");
+    provider.set_delay(Duration::from_secs(3));
+    let vfs_for_lookup = Arc::clone(&vfs);
+    let first = tokio::spawn(async move { vfs_for_lookup.lookup(Vfs::ROOT, "a.txt").await });
+    until_in_flight(&provider, 1).await;
+    provider.set_delay(Duration::ZERO);
+    let created = vfs.create_folder(Vfs::ROOT, "docs").await.unwrap();
+    first.await.unwrap().unwrap();
+    let calls = provider.calls();
+    let found = vfs.lookup(Vfs::ROOT, "docs").await.unwrap();
+    assert_eq!(found.node, created.node);
+    assert_eq!(provider.calls(), calls);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_listing_that_already_holds_the_new_folder_shows_it_once() {
+    let (provider, vfs) = mount(Options::default());
+    provider.add_file(&provider.root(), "other.txt", b"o");
+    vfs.lookup(Vfs::ROOT, "other.txt").await.unwrap();
+    provider.set_delay(Duration::from_secs(1));
+    let vfs_for_create = Arc::clone(&vfs);
+    let task = tokio::spawn(async move { vfs_for_create.create_folder(Vfs::ROOT, "docs").await });
+    until_in_flight(&provider, 1).await;
+    vfs.refresh();
+    provider.set_delay(Duration::ZERO);
+    vfs.lookup(Vfs::ROOT, "other.txt").await.unwrap();
+    task.await.unwrap().unwrap();
+    let handle = vfs.open_folder(Vfs::ROOT).await.unwrap();
+    let entries = vfs.read_folder(handle, 0, 10).unwrap();
+    let docs: Vec<_> = entries
+        .iter()
+        .filter(|entry| entry.name == "docs" || entry.name.starts_with("docs "))
+        .map(|entry| entry.name.as_str())
+        .collect();
+    assert_eq!(docs, ["docs"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn two_creates_of_one_name_make_one_folder() {
+    let (provider, vfs) = mount(Options::default());
+    vfs.lookup(Vfs::ROOT, "missing").await.unwrap_err();
+    provider.set_delay(Duration::from_secs(1));
+    let vfs_for_first = Arc::clone(&vfs);
+    let first = tokio::spawn(async move { vfs_for_first.create_folder(Vfs::ROOT, "docs").await });
+    until_in_flight(&provider, 1).await;
+    let vfs_for_second = Arc::clone(&vfs);
+    let second = tokio::spawn(async move { vfs_for_second.create_folder(Vfs::ROOT, "docs").await });
+    assert!(first.await.unwrap().is_ok());
+    assert_eq!(second.await.unwrap(), Err(VfsError::Conflict));
+    provider.set_delay(Duration::ZERO);
+    let items = provider.list(&provider.root()).await.unwrap();
+    assert_eq!(items.iter().filter(|item| item.name == "docs").count(), 1);
+}
+
+/// A provider that leaves the three change calls out.
+struct ReadOnlyProvider;
+
+#[async_trait::async_trait]
+impl Provider for ReadOnlyProvider {
+    fn root(&self) -> ItemId {
+        ItemId("root".to_string())
+    }
+
+    async fn item(&self, _id: &ItemId) -> Result<Item, VfsError> {
+        Err(VfsError::NotFound)
+    }
+
+    async fn list(&self, _folder: &ItemId) -> Result<Vec<Item>, VfsError> {
+        Ok(vec![Item {
+            id: ItemId("file".to_string()),
+            name: "a.txt".to_string(),
+            attributes: Attributes {
+                kind: Kind::File,
+                size: 0,
+                modified: UNIX_EPOCH,
+            },
+        }])
+    }
+
+    async fn read(&self, _id: &ItemId, _offset: u64, _length: u32) -> Result<Vec<u8>, VfsError> {
+        Err(VfsError::NotFound)
+    }
+
+    async fn space(&self) -> Result<Space, VfsError> {
+        Ok(Space { total: 0, free: 0 })
+    }
+}
+
+#[tokio::test]
+async fn a_provider_without_changes_is_read_only() {
+    let vfs = Vfs::new(Arc::new(ReadOnlyProvider), POSIX, Options::default());
+    assert_eq!(
+        vfs.create_folder(Vfs::ROOT, "docs").await,
+        Err(VfsError::ReadOnly)
+    );
+    assert_eq!(
+        vfs.remove(Vfs::ROOT, "a.txt", Kind::File).await,
+        Err(VfsError::ReadOnly)
+    );
+    assert_eq!(
+        vfs.rename(Vfs::ROOT, "a.txt", Vfs::ROOT, "b.txt", IfExists::Replace)
+            .await,
+        Err(VfsError::ReadOnly)
+    );
 }

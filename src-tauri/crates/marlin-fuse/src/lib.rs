@@ -44,6 +44,7 @@ pub(crate) fn errno(error: &VfsError) -> libc::c_int {
         VfsError::Conflict => libc::EEXIST,
         VfsError::NotAFolder => libc::ENOTDIR,
         VfsError::IsAFolder => libc::EISDIR,
+        VfsError::NotEmpty => libc::ENOTEMPTY,
         VfsError::NoSpace => libc::ENOSPC,
         VfsError::SignInNeeded => libc::EACCES,
         VfsError::TimedOut => libc::ETIMEDOUT,

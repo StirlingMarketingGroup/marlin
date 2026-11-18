@@ -9,6 +9,7 @@ pub enum VfsError {
     Conflict,
     NotAFolder,
     IsAFolder,
+    NotEmpty,
     NoSpace,
     /// The sign-in is gone and the user must sign in again. One of these marks the whole mount.
     SignInNeeded,
@@ -31,6 +32,7 @@ impl fmt::Display for VfsError {
             Self::Conflict => "conflict",
             Self::NotAFolder => "not a folder",
             Self::IsAFolder => "is a folder",
+            Self::NotEmpty => "not empty",
             Self::NoSpace => "no space",
             Self::SignInNeeded => "sign-in needed",
             Self::TimedOut => "timed out",
