@@ -161,7 +161,11 @@ jobs:
 
       - name: Run e2e tests
         if: steps.changes.outputs.e2e == 'true'
-        run: npm run test:e2e
+        run: |
+          # Runners on one host share its ports, so two runs cannot both use 1420.
+          E2E_PORT=$(node -e "const s = require('net').createServer().listen(0, () => { console.log(s.address().port); s.close(); })")
+          export E2E_PORT
+          npm run test:e2e
 
       - name: Upload test results
         if: failure() && steps.changes.outputs.e2e == 'true'
