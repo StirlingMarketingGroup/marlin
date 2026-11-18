@@ -69,6 +69,13 @@ describe('unacceptedPackages', () => {
     expect(unacceptedPackages(lock, accepted)).toEqual(['@scope/mystery@0.1.0 states no license']);
   });
 
+  it('reports a build tool that adds its own code to the bundle', () => {
+    const lock = lockWith({
+      'node_modules/rolldown': { version: '1.2.19', license: 'GPL-3.0-only', dev: true },
+    });
+    expect(unacceptedPackages(lock, accepted)).toEqual(['rolldown@1.2.19 is under GPL-3.0-only']);
+  });
+
   it('skips a package that only the build or the tests use', () => {
     const lock = lockWith({
       'node_modules/eslint-thing': { version: '1.0.0', license: 'GPL-3.0-only', dev: true },

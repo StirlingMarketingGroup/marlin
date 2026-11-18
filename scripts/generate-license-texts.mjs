@@ -54,10 +54,6 @@ const TEXT_ELSEWHERE = {
   '@iconify-json/vscode-icons': { notice: 'File-type icons' },
 };
 
-// These are dev dependencies, and each adds a few lines of its own to the frontend
-// bundle: Vite's module preload helper and Rolldown's module helpers.
-const BUILD_TOOLS = ['vite', 'rolldown'];
-
 export const SECTIONS = {
   rust: 'Rust crates',
   crateFiles: 'More license texts from Rust crates',
@@ -121,15 +117,9 @@ export function crateFilesSection(packages) {
  * THIRD-PARTY-NOTICES.md. `crates` is the set of crate names cargo-about listed.
  */
 export function npmSection(lock, root, crates, notices) {
-  const packages = shippingPackages(lock);
-  for (const name of BUILD_TOOLS) {
-    const location = `node_modules/${name}`;
-    packages.push({ name, version: lock.packages[location]?.version, location });
-  }
-
   const problems = [];
   const blocks = [];
-  for (const pkg of packages) {
+  for (const pkg of shippingPackages(lock)) {
     const folder = path.join(root, pkg.location);
     const files = fs.existsSync(folder)
       ? fs
@@ -246,7 +236,7 @@ export function generateLicenseTexts(
     }));
 
   const sysroot = execFileSync('rustc', ['--print', 'sysroot'], { encoding: 'utf8' }).trim();
-  // The `rustc` component of every toolchain has this file.
+  // The `rustc` component of a rustup toolchain has this file.
   const rustHtml = fs.readFileSync(
     path.join(sysroot, 'share', 'doc', 'rust', 'COPYRIGHT-library.html')
   );

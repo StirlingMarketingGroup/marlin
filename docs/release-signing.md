@@ -58,7 +58,7 @@ The check does not look at the AppImage. It does not install a package on a clea
 
 ## The license texts in the installers
 
-Both jobs install cargo-about, because `npm run tauri build` writes the license texts with it before it makes a bundle. "Check the license texts in the installers" then opens each installer the job made: the app on macOS, the deb on arm64 Linux, and the deb, the rpm, and the AppImage on x86_64 Linux. [Licenses](licenses.md#license-texts-in-the-installers) says what the files are and where they sit.
+Both jobs install cargo-about, because `npm run tauri build` writes the license texts with it before it makes a bundle. "Check the license texts in the installers" then reads what the job made: the built app on macOS, the deb on arm64 Linux, and the deb, the rpm, and the AppImage on x86_64 Linux. [Licenses](licenses.md#license-texts-in-the-installers) says what the files are and where they sit.
 
 ## Secrets
 

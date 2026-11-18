@@ -19,13 +19,21 @@ const FILES = [
   'rust-standard-library.html',
 ];
 
-// How to unpack each kind of package into a folder.
+// How to unpack each kind of package into `root`. Each returns the folder that now holds the package's files.
 const EXTRACT = {
-  deb: (packed, root) => execFileSync('dpkg-deb', ['-x', packed, root]),
-  rpm: (packed, root) => execFileSync('bsdtar', ['-xf', packed, '-C', root]),
+  deb: (packed, root) => {
+    execFileSync('dpkg-deb', ['-x', packed, root]);
+    return root;
+  },
+  rpm: (packed, root) => {
+    execFileSync('bsdtar', ['-xf', packed, '-C', root]);
+    return root;
+  },
   // An AppImage unpacks itself, into `squashfs-root` in the working folder.
-  appimage: (packed, root) =>
-    execFileSync(packed, ['--appimage-extract', 'usr/lib/Marlin/licenses/*'], { cwd: root }),
+  appimage: (packed, root) => {
+    execFileSync(packed, ['--appimage-extract', 'usr/lib/Marlin/licenses/*'], { cwd: root });
+    return path.join(root, 'squashfs-root');
+  },
 };
 
 const bundle = path.resolve(process.argv[2]);
@@ -54,15 +62,8 @@ for (const kind of kinds) {
     }
     const root = path.join(tmp, kind);
     fs.mkdirSync(root);
-    EXTRACT[kind](path.join(bundle, kind, names[0]), root);
-    licenses = path.join(
-      root,
-      kind === 'appimage' ? 'squashfs-root' : '',
-      'usr',
-      'lib',
-      'Marlin',
-      'licenses'
-    );
+    const unpacked = EXTRACT[kind](path.join(bundle, kind, names[0]), root);
+    licenses = path.join(unpacked, 'usr', 'lib', 'Marlin', 'licenses');
   } else {
     throw new Error(`Unknown package kind "${kind}". Use app, deb, rpm, or appimage.`);
   }

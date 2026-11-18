@@ -25,7 +25,7 @@ A dependency is anything that ends up in a binary or bundle Marlin ships: a Rust
 
 `npm run check:licenses` runs `scripts/check-licenses.mjs`. It fails when:
 
-- an npm package that can ship in the frontend (anything but a dev dependency) states a license that is not on the list, or states none. It reads `package-lock.json`. When a package states none, find its license and add the package to `UNSTATED` in the script, with a comment that says where the license is. A license that is not an SPDX expression (`SEE LICENSE IN ...`) fails too: the script has no way past that yet.
+- an npm package that can ship in the frontend states a license that is not on the list, or states none. Every package but a dev dependency can ship. So can the dev dependencies in `BUILD_TOOLS` in the script: Vite and Rolldown each add a few lines of their own to the frontend bundle (the module preload helper, the module helpers). It reads `package-lock.json`. When a package states none, find its license and add the package to `UNSTATED` in the script, with a comment that says where the license is. A license that is not an SPDX expression (`SEE LICENSE IN ...`) fails too: the script has no way past that yet.
 - a Rust crate that ships in the app or a helper states a license that is not on the list. This part is [cargo-about](https://github.com/EmbarkStudios/cargo-about), which reads `about.toml` and looks at every target in its `targets` list. Build and dev dependencies do not count.
 - a Windows build would link a crate in `NOT_OPEN_SOURCE` (rule 3).
 - `src-tauri/licenses/libzpl.txt` was written for another libzpl than the one the build downloads. The first line of the file names a libzpl release, and it must match the version of `zpl-rs` in `Cargo.lock`. See [libzpl's texts](#libzpls-texts).
@@ -66,7 +66,7 @@ The folder holds six files:
 
 - **Rust crates.** cargo-about reads the license files of every crate in the workspace for the target, under the rules in `about.toml`.
 - **More license texts from Rust crates.** The `CRATE_FILES` table in the script names license files that cargo-about leaves out. One kind is a part a crate builds in (code, fonts, data) under a license its label does not name (rule 4). The other is a crate's own license file that cargo-about cannot match, because one file holds several licenses or has an unusual name: cargo-about then prints a text with no copyright line. A file goes in when the target's dependency graph has its crate.
-- **npm packages in the frontend.** Every package the check counts as shipping, and the `BUILD_TOOLS` in the script: Vite and Rolldown are dev dependencies, but each adds a few lines of its own to the bundle. The text is the package's own license file. A package that carries none needs an entry in `TEXT_ELSEWHERE` in the script, which says where its text is.
+- **npm packages in the frontend.** Every package [the check](#the-check) counts as shipping, Vite and Rolldown among them. The text is the package's own license file. A package that carries none needs an entry in `TEXT_ELSEWHERE` in the script, which says where its text is.
 
 cargo-about gives no warning when it leaves a file out. To find such files after a large dependency change, generate the texts, then search them for the copyright lines of each `LICENSE*`, `COPYING*`, and `NOTICE*` file in the crates that ship. A crate whose own license file has no line in the output, or a nested license file of code the crate builds, needs an entry.
 
@@ -84,7 +84,7 @@ A go-zpl release holds the library and no license text ([go-zpl #38](https://git
 
 ### The check on a built bundle
 
-`scripts/check-bundled-licenses.mjs` opens each installer a build made and fails when one of the six files is missing or empty, or when `THIRD-PARTY-LICENSES.txt` lacks a section. `release.yml` runs it in the dry run and in the release: see [Release signing](release-signing.md#the-license-texts-in-the-installers).
+`scripts/check-bundled-licenses.mjs` reads the license folder of what a build made, and fails when one of the six files is missing or empty, or when `THIRD-PARTY-LICENSES.txt` lacks a section. On macOS it reads the built `Marlin.app`: the DMG and the updater's archive are made from that app and are not opened. On Linux it extracts each package the job built. `release.yml` runs it in the dry run and in the release: see [Release signing](release-signing.md#the-license-texts-in-the-installers).
 
 ## Known gaps
 
@@ -93,4 +93,4 @@ A go-zpl release holds the library and no license text ([go-zpl #38](https://git
 - **The app has no screen that shows the licenses.** A user has to open the folder.
 - **`libzpl` carries three commercial fonts** ([go-zpl #37](https://github.com/StirlingMarketingGroup/go-zpl/issues/37)). With them inside, `libzpl` does not pass rule 3. `zpl-rs` is not in `NOT_OPEN_SOURCE`, because every build links it today and the check would fail on every change.
 - **The check trusts labels.** Rule 4 is a step a person does.
-- **The check skips build tools.** Vite and Rolldown are dev dependencies, and each adds a few lines of its own to the frontend bundle (the module preload helper, the module helpers). The installers do carry the license text of both.
+- **The check knows build tools by name only.** A new build tool that adds code of its own to the frontend bundle needs an entry in `BUILD_TOOLS`.

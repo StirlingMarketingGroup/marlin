@@ -8,6 +8,10 @@ const UNSTATED = {
   '@crabnebula/tauri-plugin-drag': 'Apache-2.0 OR MIT',
 };
 
+// These are dev dependencies, and each adds a few lines of its own to the frontend
+// bundle: Vite's module preload helper and Rolldown's module helpers.
+const BUILD_TOOLS = ['vite', 'rolldown'];
+
 // These crates carry code that is not open source. Each entry says where its license is.
 // WinFsp's license exception does not cover software linked with such code, so a Windows
 // build must link none of them (docs/decisions/0001-mount-architecture.md, risk 4).
@@ -71,13 +75,15 @@ export function isAccepted(expression, accepted) {
 
 /**
  * Every npm package that can ship in the frontend bundle: its name, version,
- * lockfile location, and license. A dev dependency is not one of them.
+ * lockfile location, and license. A dev dependency is one of them only when it
+ * is in BUILD_TOOLS.
  */
 export function shippingPackages(lock) {
   const packages = [];
   for (const [location, entry] of Object.entries(lock.packages)) {
-    if (location === '' || entry.dev) continue;
+    if (location === '') continue;
     const name = location.slice(location.lastIndexOf('node_modules/') + 'node_modules/'.length);
+    if (entry.dev && !BUILD_TOOLS.includes(name)) continue;
     packages.push({
       name,
       version: entry.version,

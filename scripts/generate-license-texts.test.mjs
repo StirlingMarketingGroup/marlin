@@ -114,26 +114,12 @@ describe('npmSection', () => {
     }
   }
 
-  // The section always appends the build tools, so a lock that omits one is a problem.
-  function withBuildTools(packages) {
-    addPackage('node_modules/vite', { 'LICENSE.md': 'vite license text' });
-    addPackage('node_modules/rolldown', {
-      LICENSE: 'rolldown license text',
-      'THIRD-PARTY-LICENSE': 'texts of what rolldown is built from',
-    });
-    return lockWith({
-      'node_modules/vite': { version: '8.3.8', license: 'MIT', dev: true },
-      'node_modules/rolldown': { version: '1.2.19', license: 'MIT', dev: true },
-      ...packages,
-    });
-  }
-
   it('includes a package license file and skips a dev package', () => {
     root = tempDir();
     addPackage('node_modules/left-pad', { LICENSE: 'left-pad license' });
     addPackage('node_modules/only-dev', { LICENSE: 'dev only license' });
     const text = npmSection(
-      withBuildTools({
+      lockWith({
         'node_modules/left-pad': { version: '1.0.0', license: 'MIT' },
         'node_modules/only-dev': { version: '2.0.0', license: 'GPL-3.0-only', dev: true },
       }),
@@ -153,7 +139,7 @@ describe('npmSection', () => {
     addPackage('node_modules/half', { 'LICENSE-APACHE': 'apache text', 'LICENSE-MIT': '\n' });
     expect(() =>
       npmSection(
-        withBuildTools({ 'node_modules/half': { version: '1.0.0', license: 'MIT OR Apache-2.0' } }),
+        lockWith({ 'node_modules/half': { version: '1.0.0', license: 'MIT OR Apache-2.0' } }),
         root,
         new Set(),
         ''
@@ -177,7 +163,7 @@ describe('npmSection', () => {
   it('points a package at its Rust crate, and throws when that crate is absent', () => {
     root = tempDir();
     addPackage('node_modules/@tauri-apps/plugin-fs', {});
-    const lock = withBuildTools({
+    const lock = lockWith({
       'node_modules/@tauri-apps/plugin-fs': { version: '2.7.1', license: 'MIT' },
     });
     const text = npmSection(lock, root, new Set(['tauri-plugin-fs']), '');
@@ -190,7 +176,7 @@ describe('npmSection', () => {
   it('points a package at a notice, and throws when that heading is absent', () => {
     root = tempDir();
     addPackage('node_modules/@iconify-json/vscode-icons', {});
-    const lock = withBuildTools({
+    const lock = lockWith({
       'node_modules/@iconify-json/vscode-icons': { version: '1.2.98' },
     });
     const text = npmSection(
@@ -205,11 +191,18 @@ describe('npmSection', () => {
     );
   });
 
-  it('includes the build tools though the lock marks them dev', () => {
+  it('takes each license file of a build tool that the lock marks dev', () => {
     root = tempDir();
-    const text = npmSection(withBuildTools({}), root, new Set(), '');
-    expect(text).toContain(`${rule}\nvite 8.3.8\n${rule}`);
-    expect(text).toContain('vite license text');
+    addPackage('node_modules/rolldown', {
+      LICENSE: 'rolldown license text',
+      'THIRD-PARTY-LICENSE': 'texts of what rolldown is built from',
+    });
+    const text = npmSection(
+      lockWith({ 'node_modules/rolldown': { version: '1.2.19', license: 'MIT', dev: true } }),
+      root,
+      new Set(),
+      ''
+    );
     expect(text).toContain(`${rule}\nrolldown 1.2.19\n${rule}`);
     expect(text).toContain('rolldown license text');
     expect(text).toContain('texts of what rolldown is built from');
