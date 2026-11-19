@@ -9,6 +9,7 @@
 //! the SMB mutex for minutes/hours on large video files (100+ GiB).
 
 use super::{is_video_extension, ThumbnailGenerationResult, ThumbnailRequest};
+use marlin_smb_client::protocol::methods;
 
 /// Maximum bytes to download for video thumbnail extraction.
 /// 10 MB is enough for FFmpeg to find a keyframe in most container formats
@@ -24,21 +25,12 @@ pub fn is_smb_path(path: &str) -> bool {
     path.starts_with("smb://")
 }
 
-/// Ensure sidecar is running, parse SMB URL, and get credentials.
+/// Parse the SMB URL and load the saved credentials for its host.
 /// Returns (hostname, share, file_path, credentials json).
 fn prepare_smb_request(
     smb_path: &str,
 ) -> Result<(String, String, String, serde_json::Value), String> {
-    use crate::locations::smb::{client, get_server_credentials, parse_smb_url, SidecarStatus};
-
-    if !client::is_available() {
-        let status = client::initialize();
-        if status != SidecarStatus::Available {
-            return Err(status
-                .error_message()
-                .unwrap_or_else(|| "SMB support is not available".to_string()));
-        }
-    }
+    use crate::locations::smb::{get_server_credentials, parse_smb_url};
 
     let (hostname, share, file_path) = parse_smb_url(smb_path)?;
     let creds = get_server_credentials(&hostname)?;
@@ -138,8 +130,12 @@ pub fn download_smb_file_sync(smb_path: &str) -> Result<std::path::PathBuf, Stri
         "dest_path": temp_path_str
     });
 
-    let _result: serde_json::Value =
-        client::call_method_with_timeout("download_file", params, client::DOWNLOAD_TIMEOUT_MS)?;
+    // A failed download can leave part of the file behind.
+    if let Err(error) = client::call_method::<_, serde_json::Value>(methods::DOWNLOAD_FILE, params)
+    {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error);
+    }
 
     log::debug!("Downloaded SMB file to {}", temp_path.display());
 
@@ -171,8 +167,14 @@ fn download_smb_file_partial_sync(
         "max_bytes": max_bytes
     });
 
-    let result: serde_json::Value =
-        client::call_method_with_timeout("download_partial", params, client::DOWNLOAD_TIMEOUT_MS)?;
+    // A failed download can leave part of the file behind.
+    let result: serde_json::Value = match client::call_method(methods::DOWNLOAD_PARTIAL, params) {
+        Ok(result) => result,
+        Err(error) => {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(error);
+        }
+    };
 
     let bytes_written = result
         .get("bytes_written")
@@ -207,7 +209,7 @@ pub fn get_smb_file_identity(smb_path: &str) -> Result<super::super::FileIdentit
         "path": file_path
     });
 
-    let result: serde_json::Value = client::call_method("get_file_metadata", params)?;
+    let result: serde_json::Value = client::call_method(methods::GET_FILE_METADATA, params)?;
 
     let modified_str = result
         .get("modified")

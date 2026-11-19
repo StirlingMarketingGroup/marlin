@@ -1,4 +1,3 @@
-mod auth;
 pub mod client;
 
 use crate::fs_utils::FileItem;
@@ -7,12 +6,18 @@ use crate::locations::{
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use marlin_smb_client::protocol::methods;
 
-pub use auth::get_server_credentials;
-pub use auth::{
-    add_smb_server, get_smb_servers, remove_smb_server, test_smb_connection, SmbServerInfo,
-};
-pub use client::SidecarStatus;
+/// The saved sign-in for `hostname`. It starts `marlin-smb` first, so a missing helper or a
+/// missing Samba is the error, not a missing password: the app answers a missing password
+/// with the sign-in dialog.
+pub fn get_server_credentials(
+    hostname: &str,
+) -> Result<marlin_smb_client::SmbServerCredentials, String> {
+    client::start().map_err(|err| err.to_string())?;
+    marlin_smb_client::server_credentials(&marlin_smb_client::servers_path()?, hostname)
+        .map_err(|err| err.to_string())
+}
 
 #[derive(Default)]
 pub struct SmbProvider;
@@ -31,16 +36,6 @@ impl LocationProvider for SmbProvider {
         &self,
         location: &Location,
     ) -> Result<ProviderDirectoryEntries, String> {
-        // Check sidecar availability
-        if !client::is_available() {
-            let status = client::initialize();
-            if status != SidecarStatus::Available {
-                return Err(status
-                    .error_message()
-                    .unwrap_or_else(|| "SMB support is not available".to_string()));
-            }
-        }
-
         let authority = location
             .authority()
             .ok_or_else(|| "SMB path requires server: smb://server/share/path".to_string())?
@@ -72,7 +67,10 @@ impl LocationProvider for SmbProvider {
 
         // Call sidecar
         let result: serde_json::Value = tokio::task::spawn_blocking(move || {
-            client::call_method::<serde_json::Value, serde_json::Value>("read_directory", params)
+            client::call_method::<serde_json::Value, serde_json::Value>(
+                methods::READ_DIRECTORY,
+                params,
+            )
         })
         .await
         .map_err(|e| format!("SMB task failed: {}", e))??;
@@ -151,16 +149,6 @@ impl LocationProvider for SmbProvider {
     }
 
     async fn get_file_metadata(&self, location: &Location) -> Result<FileItem, String> {
-        // Check sidecar availability
-        if !client::is_available() {
-            let status = client::initialize();
-            if status != SidecarStatus::Available {
-                return Err(status
-                    .error_message()
-                    .unwrap_or_else(|| "SMB support is not available".to_string()));
-            }
-        }
-
         let authority = location
             .authority()
             .ok_or_else(|| "SMB path requires server".to_string())?;
@@ -203,7 +191,10 @@ impl LocationProvider for SmbProvider {
         });
 
         let result: serde_json::Value = tokio::task::spawn_blocking(move || {
-            client::call_method::<serde_json::Value, serde_json::Value>("get_file_metadata", params)
+            client::call_method::<serde_json::Value, serde_json::Value>(
+                methods::GET_FILE_METADATA,
+                params,
+            )
         })
         .await
         .map_err(|e| format!("SMB task failed: {}", e))??;
@@ -253,15 +244,6 @@ impl LocationProvider for SmbProvider {
     }
 
     async fn create_directory(&self, location: &Location) -> Result<(), String> {
-        if !client::is_available() {
-            let status = client::initialize();
-            if status != SidecarStatus::Available {
-                return Err(status
-                    .error_message()
-                    .unwrap_or_else(|| "SMB support is not available".to_string()));
-            }
-        }
-
         let authority = location
             .authority()
             .ok_or_else(|| "SMB path requires server".to_string())?;
@@ -281,7 +263,10 @@ impl LocationProvider for SmbProvider {
         });
 
         tokio::task::spawn_blocking(move || {
-            client::call_method::<serde_json::Value, serde_json::Value>("create_directory", params)
+            client::call_method::<serde_json::Value, serde_json::Value>(
+                methods::CREATE_DIRECTORY,
+                params,
+            )
         })
         .await
         .map_err(|e| format!("SMB task failed: {}", e))??;
@@ -290,15 +275,6 @@ impl LocationProvider for SmbProvider {
     }
 
     async fn delete(&self, location: &Location) -> Result<(), String> {
-        if !client::is_available() {
-            let status = client::initialize();
-            if status != SidecarStatus::Available {
-                return Err(status
-                    .error_message()
-                    .unwrap_or_else(|| "SMB support is not available".to_string()));
-            }
-        }
-
         let authority = location
             .authority()
             .ok_or_else(|| "SMB path requires server".to_string())?;
@@ -318,7 +294,7 @@ impl LocationProvider for SmbProvider {
         });
 
         tokio::task::spawn_blocking(move || {
-            client::call_method::<serde_json::Value, serde_json::Value>("delete", params)
+            client::call_method::<serde_json::Value, serde_json::Value>(methods::DELETE, params)
         })
         .await
         .map_err(|e| format!("SMB task failed: {}", e))??;
@@ -327,15 +303,6 @@ impl LocationProvider for SmbProvider {
     }
 
     async fn rename(&self, from: &Location, to: &Location) -> Result<(), String> {
-        if !client::is_available() {
-            let status = client::initialize();
-            if status != SidecarStatus::Available {
-                return Err(status
-                    .error_message()
-                    .unwrap_or_else(|| "SMB support is not available".to_string()));
-            }
-        }
-
         let from_authority = from
             .authority()
             .ok_or_else(|| "SMB path requires server".to_string())?;
@@ -369,7 +336,7 @@ impl LocationProvider for SmbProvider {
         });
 
         tokio::task::spawn_blocking(move || {
-            client::call_method::<serde_json::Value, serde_json::Value>("rename", params)
+            client::call_method::<serde_json::Value, serde_json::Value>(methods::RENAME, params)
         })
         .await
         .map_err(|e| format!("SMB task failed: {}", e))??;
@@ -378,15 +345,6 @@ impl LocationProvider for SmbProvider {
     }
 
     async fn copy(&self, from: &Location, to: &Location) -> Result<(), String> {
-        if !client::is_available() {
-            let status = client::initialize();
-            if status != SidecarStatus::Available {
-                return Err(status
-                    .error_message()
-                    .unwrap_or_else(|| "SMB support is not available".to_string()));
-            }
-        }
-
         let from_authority = from
             .authority()
             .ok_or_else(|| "SMB path requires server".to_string())?;
@@ -420,7 +378,7 @@ impl LocationProvider for SmbProvider {
         });
 
         tokio::task::spawn_blocking(move || {
-            client::call_method::<serde_json::Value, serde_json::Value>("copy", params)
+            client::call_method::<serde_json::Value, serde_json::Value>(methods::COPY, params)
         })
         .await
         .map_err(|e| format!("SMB task failed: {}", e))??;
@@ -444,7 +402,10 @@ impl SmbProvider {
         });
 
         let result: serde_json::Value = tokio::task::spawn_blocking(move || {
-            client::call_method::<serde_json::Value, serde_json::Value>("list_shares", params)
+            client::call_method::<serde_json::Value, serde_json::Value>(
+                methods::LIST_SHARES,
+                params,
+            )
         })
         .await
         .map_err(|e| format!("SMB task failed: {}", e))??;
@@ -606,18 +567,7 @@ pub fn upload_file_to_smb(
     dest_dir: &str,
     preferred_name: &str,
 ) -> Result<String, String> {
-    use client::SidecarStatus;
     use std::path::Path;
-
-    // Ensure sidecar is running
-    if !client::is_available() {
-        let status = client::initialize();
-        if status != SidecarStatus::Available {
-            return Err(status
-                .error_message()
-                .unwrap_or_else(|| "SMB support is not available".to_string()));
-        }
-    }
 
     let creds = get_server_credentials(hostname)?;
 
@@ -660,11 +610,7 @@ pub fn upload_file_to_smb(
             "dest_path": dest_rel
         });
 
-        match client::call_method_with_timeout::<_, serde_json::Value>(
-            "upload_file",
-            params,
-            client::DOWNLOAD_TIMEOUT_MS,
-        ) {
+        match client::call_method::<_, serde_json::Value>(methods::UPLOAD_FILE, params) {
             Ok(_) => return Ok(candidate),
             Err(e) => {
                 // If the file already exists, try the next name
@@ -687,17 +633,6 @@ pub fn download_file_from_smb(
     file_path: &str,
     dest_path: &std::path::Path,
 ) -> Result<(), String> {
-    use client::SidecarStatus;
-
-    if !client::is_available() {
-        let status = client::initialize();
-        if status != SidecarStatus::Available {
-            return Err(status
-                .error_message()
-                .unwrap_or_else(|| "SMB support is not available".to_string()));
-        }
-    }
-
     let creds = get_server_credentials(hostname)?;
 
     let params = serde_json::json!({
@@ -712,8 +647,7 @@ pub fn download_file_from_smb(
         "dest_path": dest_path.to_string_lossy()
     });
 
-    let _result: serde_json::Value =
-        client::call_method_with_timeout("download_file", params, client::DOWNLOAD_TIMEOUT_MS)?;
+    let _result: serde_json::Value = client::call_method(methods::DOWNLOAD_FILE, params)?;
 
     Ok(())
 }

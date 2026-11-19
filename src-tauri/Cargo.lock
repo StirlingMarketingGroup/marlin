@@ -4156,6 +4156,7 @@ dependencies = [
  "marlin-gdrive",
  "marlin-mount-client",
  "marlin-sftp",
+ "marlin-smb-client",
  "marlin-test-keychain",
  "mime_guess",
  "notify",
@@ -4290,11 +4291,24 @@ name = "marlin-smb"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "marlin-smb-client",
  "once_cell",
  "pavao",
+ "serde_json",
+]
+
+[[package]]
+name = "marlin-smb-client"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "keyring",
+ "libc",
+ "log",
+ "marlin-test-keychain",
  "serde",
  "serde_json",
- "uuid",
+ "tempfile",
 ]
 
 [[package]]

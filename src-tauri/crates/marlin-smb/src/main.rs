@@ -11,9 +11,8 @@
 //! - Exits when stdin closes (prevents orphan processes)
 
 mod operations;
-mod protocol;
 
-use protocol::{
+use marlin_smb_client::protocol::{
     error_codes, methods, CopyParams, CreateDirectoryParams, DeleteParams, DownloadFileParams,
     DownloadPartialParams, GetFileMetadataParams, ListSharesParams, PingResult,
     ReadDirectoryParams, RenameParams, Request, Response, TestConnectionParams, UploadFileParams,
