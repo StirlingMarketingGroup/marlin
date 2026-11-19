@@ -118,6 +118,7 @@ fn made_up_folder(id: &ItemId, name: &str) -> Item {
             kind: Kind::Folder,
             size: 0,
             modified: UNIX_EPOCH,
+            revision: None,
         },
     }
 }
@@ -160,6 +161,7 @@ fn item_from(drive: Option<&str>, id: String, file: DriveFile) -> Item {
             kind,
             size,
             modified,
+            revision: None,
         },
     }
 }
@@ -187,6 +189,7 @@ fn shared_drive_item(drive: SharedDrive) -> Item {
             kind: Kind::Folder,
             size: 0,
             modified: modified(drive.created_time.as_deref()),
+            revision: None,
         },
     }
 }

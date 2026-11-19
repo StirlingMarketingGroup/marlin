@@ -5,7 +5,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use marlin_vfs::{
     finder_files, Access, Attributes, IfExists, Item, ItemId, Kind, MemoryProvider, Options,
-    Provider, Space, Spool, Vfs, VfsError, POSIX,
+    Provider, Space, Spool, UnsentState, Vfs, VfsError, POSIX,
 };
 
 fn never_local(_name: &str) -> bool {
@@ -50,6 +50,33 @@ async fn until_in_flight(provider: &MemoryProvider, count: usize) {
         tokio::task::yield_now().await;
     }
     panic!("provider calls in flight: {}", provider.in_flight());
+}
+
+/// Polls until `ready` without moving the clock, so a task woken at this instant gets a turn.
+async fn yield_until(what: &str, mut ready: impl FnMut() -> bool) {
+    for _ in 0..1_000 {
+        if ready() {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("{what}");
+}
+
+/// Moves the paused clock by `wait`, then lets tasks woken at that instant run.
+async fn advance(wait: Duration) {
+    tokio::time::sleep(wait).await;
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+}
+
+fn settle() -> Duration {
+    Options::default().settle
+}
+
+async fn root_items(provider: &MemoryProvider) -> Vec<Item> {
+    provider.list(&provider.root()).await.unwrap()
 }
 
 #[tokio::test]
@@ -1452,6 +1479,7 @@ impl Provider for ReadOnlyProvider {
                 kind: Kind::File,
                 size: 0,
                 modified: UNIX_EPOCH,
+                revision: None,
             },
         }])
     }
@@ -2076,4 +2104,1122 @@ async fn a_cancelled_first_write_leaves_the_file_clean() {
     assert_eq!(vfs.read(handle, 0, 5).await.unwrap(), b"hello");
     vfs.write(handle, 0, b"J").await.unwrap();
     assert_eq!(vfs.read(handle, 0, 5).await.unwrap(), b"Jello");
+}
+
+/// An adapter runs each core call in a spawned task, so a call's future must be `Send`.
+fn spawnable<F: std::future::Future + Send>(call: F) -> F {
+    call
+}
+
+fn start_uploads(vfs: &Arc<Vfs>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(vfs.clone().run_uploads())
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_new_file_uploads_after_the_settle_time() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    let (made, handle) = vfs.create(Vfs::ROOT, "a.txt", Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"hello").await.unwrap();
+    vfs.release(handle);
+    advance(settle() - Duration::from_millis(1)).await;
+    assert_eq!(provider.uploads(), 0);
+    assert!(root_items(&provider)
+        .await
+        .iter()
+        .all(|item| item.name != "a.txt"));
+    advance(Duration::from_millis(1)).await;
+    yield_until("the new file did not upload", || {
+        spool_files(&dir) == 0 && provider.uploads() >= 1
+    })
+    .await;
+    let items = root_items(&provider).await;
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].name, "a.txt");
+    assert_eq!(provider.contents(&items[0].id), b"hello");
+    let found = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    assert_eq!(found.node, made.node);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_edited_file_keeps_its_id_and_shows_the_new_revision() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    let id = provider.add_file(&provider.root(), "a.txt", b"old");
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    let old_revision = file.attributes.revision.clone();
+    let handle = vfs.open(file.node, Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"new").await.unwrap();
+    vfs.release(handle);
+    advance(settle() - Duration::from_millis(1)).await;
+    assert_eq!(provider.uploads(), 0);
+    assert_eq!(provider.contents(&id), b"old");
+    advance(Duration::from_millis(1)).await;
+    yield_until("the edit did not upload", || {
+        spool_files(&dir) == 0 && provider.uploads() == 1
+    })
+    .await;
+    assert_eq!(provider.contents(&id), b"new");
+    let items = root_items(&provider).await;
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].id, id);
+    assert_ne!(items[0].attributes.revision, old_revision);
+    let attrs = vfs.attributes(file.node).await.unwrap();
+    assert_eq!(attrs.size, 3);
+    assert_eq!(attrs.revision, items[0].attributes.revision);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_file_reopened_inside_the_settle_time_uploads_once() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    let id = provider.add_file(&provider.root(), "a.txt", b"old");
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    let handle = vfs.open(file.node, Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"one").await.unwrap();
+    vfs.release(handle);
+    advance(Duration::from_secs(1)).await;
+    let handle = vfs.open(file.node, Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"two!").await.unwrap();
+    vfs.release(handle);
+    advance(settle() - Duration::from_millis(1)).await;
+    assert_eq!(provider.uploads(), 0);
+    assert_eq!(provider.contents(&id), b"old");
+    advance(Duration::from_millis(1)).await;
+    yield_until("the later bytes did not upload", || {
+        spool_files(&dir) == 0 && provider.uploads() == 1
+    })
+    .await;
+    assert_eq!(provider.contents(&id), b"two!");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_remote_change_before_the_upload_keeps_a_conflict_copy() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    let id = provider.add_file(&provider.root(), "a.txt", b"remote");
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    let handle = vfs.open(file.node, Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"local!").await.unwrap();
+    vfs.release(handle);
+    provider.write(&id, b"changed");
+    advance(settle()).await;
+    // The copy's create and the item call after it both end before the spool file goes.
+    yield_until("the conflict copy did not land", || {
+        spool_files(&dir) == 0 && provider.in_flight() == 0
+    })
+    .await;
+    assert_eq!(provider.contents(&id), b"changed");
+    let items = root_items(&provider).await;
+    let copies: Vec<_> = items
+        .iter()
+        .filter(|item| item.name.starts_with("a (conflict ") && item.name.ends_with(").txt"))
+        .collect();
+    assert_eq!(copies.len(), 1);
+    assert_eq!(provider.contents(&copies[0].id), b"local!");
+    let read = vfs.open(file.node, Access::Read).await.unwrap();
+    assert_eq!(vfs.read(read, 0, 10).await.unwrap(), b"changed");
+    assert_eq!(vfs.attributes(file.node).await.unwrap().size, 7);
+    // The mount lists the copy from the listing it holds, with no new provider call.
+    let calls = provider.calls();
+    vfs.lookup(Vfs::ROOT, &copies[0].name).await.unwrap();
+    assert_eq!(provider.calls(), calls);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_remote_remove_before_the_upload_creates_the_file_again() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    let id = provider.add_file(&provider.root(), "a.txt", b"remote");
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    let handle = vfs.open(file.node, Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"local!").await.unwrap();
+    vfs.release(handle);
+    provider.remote_remove(&id);
+    advance(settle()).await;
+    yield_until("the file was not created again", || spool_files(&dir) == 0).await;
+    let items = root_items(&provider).await;
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].name, "a.txt");
+    assert_ne!(items[0].id, id);
+    assert_eq!(provider.contents(&items[0].id), b"local!");
+    let found = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    assert_eq!(found.node, file.node);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_upload_retries_after_five_seconds_then_ten() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    let (made, handle) = vfs.create(Vfs::ROOT, "a.txt", Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"hello").await.unwrap();
+    vfs.release(handle);
+    provider.fail_with(Some(VfsError::Offline));
+    advance(settle()).await;
+    yield_until("the first failure was not recorded", || {
+        matches!(
+            vfs.unsent().first().map(|unsent| unsent.state.clone()),
+            Some(UnsentState::Failed(VfsError::Offline))
+        )
+    })
+    .await;
+    let read = vfs.open(made.node, Access::Read).await.unwrap();
+    assert_eq!(vfs.read(read, 0, 10).await.unwrap(), b"hello");
+    assert_eq!(provider.uploads(), 1);
+    advance(Duration::from_secs(5) - Duration::from_millis(1)).await;
+    assert_eq!(provider.uploads(), 1);
+    advance(Duration::from_millis(1)).await;
+    yield_until("the second try did not start", || provider.uploads() == 2).await;
+    yield_until("the second failure was not recorded", || {
+        matches!(
+            vfs.unsent().first().map(|unsent| unsent.state.clone()),
+            Some(UnsentState::Failed(VfsError::Offline))
+        )
+    })
+    .await;
+    advance(Duration::from_secs(9)).await;
+    assert_eq!(provider.uploads(), 2);
+    assert!(matches!(
+        vfs.unsent().first().map(|unsent| unsent.state.clone()),
+        Some(UnsentState::Failed(VfsError::Offline))
+    ));
+    provider.fail_with(None);
+    let calls = provider.calls();
+    advance(Duration::from_secs(1)).await;
+    yield_until("the retry did not upload", || {
+        spool_files(&dir) == 0 && provider.uploads() == 3
+    })
+    .await;
+    assert_eq!(provider.calls(), calls + 1);
+    let items = root_items(&provider).await;
+    assert_eq!(items.len(), 1);
+    assert_eq!(provider.contents(&items[0].id), b"hello");
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_upload_does_not_take_a_provider_call_slot() {
+    let options = Options {
+        max_calls: 1,
+        ..Options::default()
+    };
+    let (provider, vfs, _dir) = spooled_mount(options, 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    provider.add_file(&provider.root(), "b.txt", b"other");
+    provider.set_upload_delay(Duration::from_secs(60 * 60));
+    let (_made, handle) = vfs.create(Vfs::ROOT, "a.txt", Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"hello").await.unwrap();
+    vfs.release(handle);
+    advance(settle()).await;
+    yield_until("the upload did not start", || {
+        provider.uploads() == 1 && provider.in_flight() >= 1
+    })
+    .await;
+    vfs.refresh();
+    let found = vfs.lookup(Vfs::ROOT, "b.txt").await.unwrap();
+    assert_eq!(found.name, "b.txt");
+    assert_eq!(provider.uploads(), 1);
+    assert!(provider.in_flight() >= 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_write_while_uploading_sends_the_later_bytes() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    provider.set_upload_delay(Duration::from_secs(30));
+    let id = provider.add_file(&provider.root(), "a.txt", b"old");
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    let handle = vfs.open(file.node, Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"one").await.unwrap();
+    vfs.release(handle);
+    advance(settle()).await;
+    yield_until("the first upload did not start", || {
+        provider.uploads() == 1 && provider.in_flight() >= 1
+    })
+    .await;
+    let handle = vfs.open(file.node, Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"two!").await.unwrap();
+    yield_until("the stopped upload is still in flight", || {
+        provider.in_flight() == 0
+    })
+    .await;
+    assert_eq!(provider.contents(&id), b"old");
+    assert_eq!(root_items(&provider).await.len(), 1);
+    vfs.release(handle);
+    advance(settle()).await;
+    yield_until("the second upload did not start", || {
+        provider.uploads() == 2
+    })
+    .await;
+    advance(Duration::from_secs(30)).await;
+    yield_until("the later bytes did not land", || spool_files(&dir) == 0).await;
+    assert_eq!(provider.uploads(), 2);
+    assert_eq!(provider.contents(&id), b"two!");
+    assert_eq!(root_items(&provider).await.len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_upload_that_does_not_move_times_out_and_retries() {
+    let options = Options {
+        upload_stall: Duration::from_secs(5),
+        ..Options::default()
+    };
+    let (provider, vfs, _dir) = spooled_mount(options, 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    provider.set_upload_delay(Duration::from_secs(60 * 60));
+    let (_made, handle) = vfs.create(Vfs::ROOT, "a.txt", Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"hello").await.unwrap();
+    vfs.release(handle);
+    advance(settle()).await;
+    yield_until("the stalled upload did not start", || {
+        provider.uploads() == 1
+    })
+    .await;
+    advance(Duration::from_secs(5)).await;
+    yield_until("the stall was not recorded", || {
+        matches!(
+            vfs.unsent().first().map(|unsent| unsent.state.clone()),
+            Some(UnsentState::Failed(VfsError::TimedOut))
+        )
+    })
+    .await;
+    advance(Duration::from_secs(5) - Duration::from_millis(1)).await;
+    assert_eq!(provider.uploads(), 1);
+    advance(Duration::from_millis(1)).await;
+    yield_until("the stalled upload was not retried", || {
+        provider.uploads() == 2
+    })
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn unsent_shows_open_waiting_and_uploading() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    provider.set_upload_delay(Duration::from_secs(10));
+    let (_made, handle) = vfs.create(Vfs::ROOT, "a.txt", Access::Write).await.unwrap();
+    assert_eq!(vfs.unsent()[0].state, UnsentState::Open);
+    vfs.write(handle, 0, b"hello").await.unwrap();
+    let unsent = &vfs.unsent()[0];
+    assert_eq!(unsent.state, UnsentState::Open);
+    assert_eq!(
+        (&unsent.folder, unsent.name.as_str(), unsent.size),
+        (&provider.root(), "a.txt", 5)
+    );
+    vfs.release(handle);
+    assert_eq!(vfs.unsent()[0].state, UnsentState::Waiting);
+    advance(settle()).await;
+    yield_until("the file did not show as uploading", || {
+        matches!(
+            vfs.unsent().first().map(|unsent| unsent.state.clone()),
+            Some(UnsentState::Uploading { sent: 0 })
+        )
+    })
+    .await;
+    advance(Duration::from_secs(10)).await;
+    yield_until("the uploaded file is still unsent", || {
+        vfs.unsent().is_empty() && spool_files(&dir) == 0
+    })
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn retry_now_sends_a_failed_file_at_once() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    let (_failed, handle) = vfs.create(Vfs::ROOT, "b.txt", Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"later").await.unwrap();
+    vfs.release(handle);
+    provider.fail_with(Some(VfsError::Offline));
+    advance(settle()).await;
+    yield_until("the failed file is not unsent", || {
+        matches!(
+            vfs.unsent().first().map(|unsent| unsent.state.clone()),
+            Some(UnsentState::Failed(VfsError::Offline))
+        )
+    })
+    .await;
+    let failed = vfs.unsent()[0].node;
+    provider.fail_with(None);
+    let calls = provider.calls();
+    let uploads = provider.uploads();
+    vfs.retry_now(failed).unwrap();
+    yield_until("retry_now did not upload", || {
+        provider.uploads() == uploads + 1 && spool_files(&dir) == 0
+    })
+    .await;
+    assert_eq!(provider.calls(), calls + 1);
+    assert!(vfs.unsent().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn discard_unsent_gives_an_item_back_its_remote_bytes() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    provider.set_upload_delay(Duration::from_secs(60 * 60));
+    let id = provider.add_file(&provider.root(), "c.txt", b"remote");
+    let file = vfs.lookup(Vfs::ROOT, "c.txt").await.unwrap();
+    let handle = vfs.open(file.node, Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"LOCAL!").await.unwrap();
+    vfs.release(handle);
+    advance(settle()).await;
+    yield_until("the item upload did not start", || {
+        provider.in_flight() >= 1
+    })
+    .await;
+    spawnable(vfs.discard_unsent(file.node)).await.unwrap();
+    yield_until("the discarded upload is still in flight", || {
+        provider.in_flight() == 0
+    })
+    .await;
+    assert_eq!(spool_files(&dir), 0);
+    let read = vfs.open(file.node, Access::Read).await.unwrap();
+    assert_eq!(vfs.read(read, 0, 10).await.unwrap(), b"remote");
+    assert_eq!(provider.contents(&id), b"remote");
+    assert_eq!(provider.uploads(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn discard_unsent_unnames_a_new_file_and_keeps_its_open_handle() {
+    let (provider, vfs, _dir) = spooled_mount(Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    let (made, handle) = vfs.create(Vfs::ROOT, "d.txt", Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"keep").await.unwrap();
+    vfs.discard_unsent(made.node).await.unwrap();
+    assert_eq!(
+        vfs.lookup(Vfs::ROOT, "d.txt").await,
+        Err(VfsError::NotFound)
+    );
+    assert_eq!(vfs.read(handle, 0, 10).await.unwrap(), b"keep");
+    vfs.release(handle);
+    advance(settle() + Duration::from_secs(1)).await;
+    assert!(root_items(&provider).await.is_empty());
+    assert_eq!(provider.uploads(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_new_file_removed_while_it_uploads_leaves_nothing() {
+    let (provider, vfs, _dir) = spooled_mount(Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    provider.set_upload_delay(Duration::from_secs(30));
+    let (_made, handle) = vfs.create(Vfs::ROOT, "a.txt", Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"hello").await.unwrap();
+    vfs.release(handle);
+    advance(settle()).await;
+    yield_until("the create did not start", || {
+        provider.uploads() == 1 && provider.in_flight() >= 1
+    })
+    .await;
+    vfs.remove(Vfs::ROOT, "a.txt", Kind::File).await.unwrap();
+    yield_until("the removed upload is still in flight", || {
+        provider.in_flight() == 0
+    })
+    .await;
+    advance(Duration::from_secs(30)).await;
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+    assert!(root_items(&provider).await.is_empty());
+    assert_eq!(provider.uploads(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn set_modified_goes_out_with_a_spooled_file_and_leaves_a_clean_file() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    let (made, handle) = vfs.create(Vfs::ROOT, "a.txt", Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"hello").await.unwrap();
+    let modified = UNIX_EPOCH + Duration::from_secs(50_000);
+    let attrs = spawnable(vfs.set_modified(made.node, modified))
+        .await
+        .unwrap();
+    assert_eq!(attrs.modified, modified);
+    vfs.release(handle);
+    advance(settle()).await;
+    yield_until("the modified time did not upload", || {
+        spool_files(&dir) == 0
+    })
+    .await;
+    let items = root_items(&provider).await;
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].attributes.modified, modified);
+
+    provider.add_file(&provider.root(), "b.txt", b"clean");
+    vfs.refresh();
+    let clean = vfs.lookup(Vfs::ROOT, "b.txt").await.unwrap();
+    let before = vfs.attributes(clean.node).await.unwrap();
+    let calls = provider.calls();
+    let uploads = provider.uploads();
+    let after = spawnable(vfs.set_modified(clean.node, UNIX_EPOCH + Duration::from_secs(9)))
+        .await
+        .unwrap();
+    assert_eq!(after, before);
+    assert_eq!(provider.uploads(), uploads);
+    assert_eq!(provider.calls(), calls);
+    let remote = root_items(&provider)
+        .await
+        .into_iter()
+        .find(|item| item.name == "b.txt")
+        .unwrap();
+    assert_eq!(remote.attributes.modified, before.modified);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_new_file_renamed_over_an_item_uploads_as_a_replace() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    let id = provider.add_file(&provider.root(), "a.txt", b"old");
+    let (made, handle) = vfs.create(Vfs::ROOT, "b.txt", Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"new").await.unwrap();
+    vfs.rename(Vfs::ROOT, "b.txt", Vfs::ROOT, "a.txt", IfExists::Replace)
+        .await
+        .unwrap();
+    vfs.release(handle);
+    advance(settle()).await;
+    yield_until("the replace did not upload", || {
+        spool_files(&dir) == 0 && provider.uploads() == 1
+    })
+    .await;
+    let items = root_items(&provider).await;
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].id, id);
+    assert_eq!(items[0].name, "a.txt");
+    assert_eq!(provider.contents(&id), b"new");
+    assert!(items.iter().all(|item| !item.name.contains("conflict")));
+    let found = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    assert_eq!(found.node, made.node);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_finder_file_never_uploads() {
+    let (provider, vfs, _dir) = spooled_mount(Options::default(), 1024, finder_files);
+    let _uploads = start_uploads(&vfs);
+    let (_made, handle) = vfs
+        .create(Vfs::ROOT, ".DS_Store", Access::Write)
+        .await
+        .unwrap();
+    vfs.write(handle, 0, b"finder").await.unwrap();
+    vfs.release(handle);
+    advance(settle() + Duration::from_secs(1)).await;
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+    assert!(root_items(&provider).await.is_empty());
+    assert!(vfs.unsent().is_empty());
+    assert_eq!(provider.uploads(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stale_answer_bases_the_upload_on_the_bytes_it_copied() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    let id = provider.add_file(&provider.root(), "a.txt", b"v1!!");
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    advance(Options::default().attributes_ttl).await;
+    provider.write(&id, b"v2!!");
+    let handle = vfs.open(file.node, Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"z").await.unwrap();
+    vfs.release(handle);
+    advance(settle()).await;
+    yield_until("the fresh revision did not upload", || {
+        spool_files(&dir) == 0
+    })
+    .await;
+    // The copy holds the other client's bytes, and the upload is not taken for a conflict.
+    assert_eq!(provider.contents(&id), b"z2!!");
+    assert_eq!(provider.uploads(), 1);
+    assert_eq!(root_items(&provider).await.len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_writer_held_past_a_retry_uploads_after_it_closes() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    let id = provider.add_file(&provider.root(), "a.txt", b"old");
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    let handle = vfs.open(file.node, Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"new").await.unwrap();
+    vfs.release(handle);
+    provider.fail_with(Some(VfsError::Offline));
+    advance(settle()).await;
+    yield_until("the failure was not recorded", || {
+        provider.uploads() == 1
+            && matches!(
+                vfs.unsent().first().map(|unsent| unsent.state.clone()),
+                Some(UnsentState::Failed(VfsError::Offline))
+            )
+    })
+    .await;
+    let handle = vfs.open(file.node, Access::Write).await.unwrap();
+    advance(Duration::from_secs(6)).await;
+    assert_eq!(provider.uploads(), 1);
+    assert_eq!(provider.contents(&id), b"old");
+    provider.fail_with(None);
+    advance(Duration::from_secs(1)).await;
+    assert_eq!(provider.uploads(), 1);
+    vfs.release(handle);
+    advance(settle() - Duration::from_millis(1)).await;
+    assert_eq!(provider.uploads(), 1);
+    advance(Duration::from_millis(1)).await;
+    yield_until("the file did not upload after the writer closed", || {
+        spool_files(&dir) == 0 && provider.uploads() == 2
+    })
+    .await;
+    assert_eq!(provider.contents(&id), b"new");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_listing_that_answers_after_the_confirm_keeps_the_new_size() {
+    let options = Options {
+        attributes_ttl: Duration::from_secs(60),
+        ..Options::default()
+    };
+    let (provider, vfs, _dir) = spooled_mount(options, 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    provider.add_file(&provider.root(), "a.txt", b"old");
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    let old_revision = file.attributes.revision.clone();
+    let handle = vfs.open(file.node, Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"new!").await.unwrap();
+    provider.set_upload_delay(Duration::from_secs(10));
+    provider.set_delay(Duration::from_secs(10));
+    vfs.release(handle);
+    advance(settle()).await;
+    yield_until("the upload did not start", || provider.uploads() == 1).await;
+    advance(Duration::from_secs(5)).await;
+    vfs.refresh();
+    let vfs_lookup = Arc::clone(&vfs);
+    let lookup = tokio::spawn(async move { vfs_lookup.lookup(Vfs::ROOT, "a.txt").await });
+    let found = lookup.await.unwrap().unwrap();
+    assert_eq!(found.attributes.size, 4);
+    assert_ne!(found.attributes.revision, old_revision);
+    assert!(found.attributes.revision.is_some());
+    let attrs = vfs.attributes(file.node).await.unwrap();
+    assert_eq!(attrs.size, 4);
+    assert_eq!(attrs.revision, found.attributes.revision);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_rename_that_changes_the_id_during_a_replace_keeps_one_item() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    provider.rename_changes_ids(true);
+    provider.set_upload_delay(Duration::from_secs(5));
+    let id = provider.add_file(&provider.root(), "a.txt", b"old");
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    let handle = vfs.open(file.node, Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"new").await.unwrap();
+    vfs.release(handle);
+    advance(settle()).await;
+    yield_until("the replace did not start", || {
+        provider.uploads() == 1 && provider.in_flight() >= 1
+    })
+    .await;
+    vfs.rename(Vfs::ROOT, "a.txt", Vfs::ROOT, "b.txt", IfExists::Replace)
+        .await
+        .unwrap();
+    advance(Duration::from_secs(5)).await;
+    yield_until("the replace was not tried again", || {
+        provider.uploads() >= 2
+    })
+    .await;
+    advance(Duration::from_secs(5)).await;
+    yield_until("the renamed item did not get the new bytes", || {
+        spool_files(&dir) == 0
+    })
+    .await;
+    let items = root_items(&provider).await;
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].name, "b.txt");
+    assert_ne!(items[0].id, id);
+    assert_eq!(provider.contents(&items[0].id), b"new");
+    assert!(items.iter().all(|item| item.name != "a.txt"));
+    assert_eq!(provider.uploads(), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_upload_limit_holds_a_third_file_until_one_ends() {
+    let options = Options {
+        max_uploads: 2,
+        ..Options::default()
+    };
+    let (provider, vfs, dir) = spooled_mount(options, 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    provider.set_upload_delay(Duration::from_secs(10));
+    for name in ["a.txt", "b.txt", "c.txt"] {
+        let (_made, handle) = vfs.create(Vfs::ROOT, name, Access::Write).await.unwrap();
+        vfs.write(handle, 0, name.as_bytes()).await.unwrap();
+        vfs.release(handle);
+    }
+    advance(settle()).await;
+    yield_until("two uploads did not start", || provider.uploads() == 2).await;
+    advance(Duration::from_secs(5)).await;
+    assert_eq!(provider.uploads(), 2);
+    advance(Duration::from_secs(5)).await;
+    yield_until("the third upload did not start", || provider.uploads() == 3).await;
+    advance(Duration::from_secs(10)).await;
+    yield_until("the third upload did not land", || spool_files(&dir) == 0).await;
+    assert_eq!(root_items(&provider).await.len(), 3);
+}
+
+#[tokio::test(start_paused = true)]
+async fn progress_keeps_an_upload_longer_than_the_stall_time_going() {
+    let options = Options {
+        upload_stall: Duration::from_secs(5),
+        ..Options::default()
+    };
+    let (provider, vfs, dir) = spooled_mount(options, 4096, never_local);
+    let _uploads = start_uploads(&vfs);
+    provider.set_upload_delay(Duration::from_secs(8));
+    let (_made, handle) = vfs.create(Vfs::ROOT, "a.txt", Access::Write).await.unwrap();
+    vfs.write(handle, 0, &[7u8; 1000]).await.unwrap();
+    vfs.release(handle);
+    advance(settle()).await;
+    yield_until("the upload did not start", || provider.uploads() == 1).await;
+    advance(Duration::from_secs(4)).await;
+    assert_eq!(vfs.unsent()[0].state, UnsentState::Uploading { sent: 500 });
+    // Past the stall time counted from the start, the progress at 4 s keeps the try going.
+    advance(Duration::from_secs(2)).await;
+    assert_eq!(vfs.unsent()[0].state, UnsentState::Uploading { sent: 500 });
+    assert_eq!(provider.uploads(), 1);
+    advance(Duration::from_secs(2)).await;
+    yield_until("the upload did not land", || spool_files(&dir) == 0).await;
+    assert_eq!(provider.uploads(), 1);
+    assert_eq!(root_items(&provider).await.len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_create_that_answers_after_its_file_was_removed_is_removed_again() {
+    let (provider, vfs, _dir) = spooled_mount(Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    let (_made, handle) = vfs.create(Vfs::ROOT, "a.txt", Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"hello").await.unwrap();
+    vfs.release(handle);
+    provider.set_upload_delay(Duration::from_secs(5));
+    provider.set_delay(Duration::from_secs(10));
+    advance(settle()).await;
+    yield_until("the create did not start", || provider.uploads() == 1).await;
+    // The remove lists the folder for 10 seconds while it holds the changes lock, so the create's answer at 5 seconds waits behind it.
+    vfs.refresh();
+    let remover = Arc::clone(&vfs);
+    let remove = tokio::spawn(async move { remover.remove(Vfs::ROOT, "a.txt", Kind::File).await });
+    remove.await.unwrap().unwrap();
+    // The stray's remove waits the 10-second delay too.
+    advance(Duration::from_secs(10)).await;
+    yield_until("the stray was not removed", || provider.in_flight() == 0).await;
+    provider.set_delay(Duration::ZERO);
+    assert!(root_items(&provider).await.is_empty());
+    assert_eq!(provider.uploads(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_write_while_a_create_is_confirmed_replaces_on_the_new_revision() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    let (made, handle) = vfs.create(Vfs::ROOT, "a.txt", Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"one").await.unwrap();
+    vfs.release(handle);
+    provider.set_upload_delay(Duration::from_secs(5));
+    provider.set_delay(Duration::from_secs(10));
+    advance(settle()).await;
+    yield_until("the create did not start", || provider.uploads() == 1).await;
+    // The new folder holds the changes lock for 20 seconds, so the create's answer at 5 seconds waits behind it.
+    vfs.refresh();
+    let maker = Arc::clone(&vfs);
+    let folder = tokio::spawn(async move { maker.create_folder(Vfs::ROOT, "hold").await });
+    advance(Duration::from_secs(7)).await;
+    // The create landed and its confirm waits behind the folder.
+    provider.set_delay(Duration::ZERO);
+    let landed = root_items(&provider).await;
+    provider.set_delay(Duration::from_secs(10));
+    assert_eq!(landed.len(), 1);
+    assert_eq!(provider.contents(&landed[0].id), b"one");
+    let handle = vfs.open(made.node, Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"two!").await.unwrap();
+    vfs.release(handle);
+    folder.await.unwrap().unwrap();
+    provider.set_delay(Duration::ZERO);
+    advance(settle() + Duration::from_secs(5)).await;
+    yield_until("the later bytes did not land", || spool_files(&dir) == 0).await;
+    let files: Vec<Item> = root_items(&provider)
+        .await
+        .into_iter()
+        .filter(|item| item.attributes.kind == Kind::File)
+        .collect();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].id, landed[0].id);
+    assert_eq!(provider.contents(&files[0].id), b"two!");
+    assert_eq!(provider.uploads(), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_writer_closed_during_a_failing_try_does_not_cut_the_retry_wait() {
+    let (provider, vfs, _dir) = spooled_mount(Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    let (made, handle) = vfs.create(Vfs::ROOT, "a.txt", Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"hello").await.unwrap();
+    vfs.release(handle);
+    provider.fail_with(Some(VfsError::Offline));
+    advance(settle()).await;
+    yield_until("the first try did not fail", || provider.uploads() == 1).await;
+    provider.set_upload_delay(Duration::from_secs(1));
+    advance(Duration::from_secs(5)).await;
+    yield_until("the second try did not start", || provider.uploads() == 2).await;
+    // An app opens the file for write and closes it without writing while the try runs.
+    let handle = vfs.open(made.node, Access::Write).await.unwrap();
+    vfs.release(handle);
+    advance(Duration::from_secs(1)).await;
+    advance(Duration::from_secs(10) - Duration::from_millis(1)).await;
+    assert_eq!(provider.uploads(), 2);
+    // A discard leaves nothing in the queue for the uploader to trip on.
+    vfs.discard_unsent(made.node).await.unwrap();
+    provider.fail_with(None);
+    provider.set_upload_delay(Duration::ZERO);
+    let (_other, handle) = vfs.create(Vfs::ROOT, "b.txt", Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"other").await.unwrap();
+    vfs.release(handle);
+    advance(settle()).await;
+    // The discarded file's spool file stays while the OS holds a lookup on it, so the provider is what tells.
+    yield_until("the uploader stopped", || provider.uploads() == 3).await;
+    let items = root_items(&provider).await;
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].name, "b.txt");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_truncate_with_no_open_handle_uploads_after_the_settle_time() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    let id = provider.add_file(&provider.root(), "a.txt", b"hello");
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    vfs.truncate(file.node, 2).await.unwrap();
+    advance(settle() - Duration::from_millis(1)).await;
+    assert_eq!(provider.uploads(), 0);
+    advance(Duration::from_millis(1)).await;
+    yield_until("the cut file did not upload", || spool_files(&dir) == 0).await;
+    assert_eq!(provider.contents(&id), b"he");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_new_file_renamed_while_it_uploads_goes_up_under_the_new_name() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    provider.set_upload_delay(Duration::from_secs(10));
+    let (_made, handle) = vfs.create(Vfs::ROOT, "a.txt", Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"hello").await.unwrap();
+    vfs.release(handle);
+    advance(settle()).await;
+    yield_until("the create did not start", || provider.uploads() == 1).await;
+    vfs.rename(Vfs::ROOT, "a.txt", Vfs::ROOT, "b.txt", IfExists::Refuse)
+        .await
+        .unwrap();
+    advance(settle()).await;
+    yield_until("the second create did not start", || {
+        provider.uploads() == 2
+    })
+    .await;
+    advance(Duration::from_secs(10)).await;
+    yield_until("the renamed file did not land", || spool_files(&dir) == 0).await;
+    let items = root_items(&provider).await;
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].name, "b.txt");
+    assert_eq!(provider.contents(&items[0].id), b"hello");
+}
+
+#[tokio::test(start_paused = true)]
+async fn aborting_the_uploader_keeps_the_spool_file_for_the_next_one() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    let uploads = start_uploads(&vfs);
+    provider.set_upload_delay(Duration::from_secs(10));
+    let (_made, handle) = vfs.create(Vfs::ROOT, "a.txt", Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"hello").await.unwrap();
+    vfs.release(handle);
+    advance(settle()).await;
+    yield_until("the create did not start", || provider.in_flight() == 1).await;
+    uploads.abort();
+    yield_until("the try was not stopped", || provider.in_flight() == 0).await;
+    assert_eq!(spool_files(&dir), 1);
+    assert!(root_items(&provider).await.is_empty());
+    provider.set_upload_delay(Duration::ZERO);
+    let _uploads = start_uploads(&vfs);
+    yield_until("the next uploader did not send it", || {
+        spool_files(&dir) == 0
+    })
+    .await;
+    assert_eq!(root_items(&provider).await.len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_item_with_no_revision_is_never_overwritten() {
+    let (provider, vfs, _dir) = spooled_mount(Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    let id = provider.add_file(&provider.root(), "a.txt", b"remote");
+    provider.hide_revisions(true);
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    let handle = vfs.open(file.node, Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"LOCAL!").await.unwrap();
+    vfs.release(handle);
+    advance(settle()).await;
+    yield_until("the try did not fail", || {
+        matches!(
+            vfs.unsent().first().map(|unsent| unsent.state.clone()),
+            Some(UnsentState::Failed(VfsError::NotSupported))
+        )
+    })
+    .await;
+    assert_eq!(provider.uploads(), 0);
+    assert_eq!(provider.contents(&id), b"remote");
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_item_renamed_out_of_a_local_name_uploads() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, finder_files);
+    let _uploads = start_uploads(&vfs);
+    provider.add_file(&provider.root(), "._a", b"old");
+    let file = vfs.lookup(Vfs::ROOT, "._a").await.unwrap();
+    let handle = vfs.open(file.node, Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"new").await.unwrap();
+    vfs.release(handle);
+    advance(settle() + Duration::from_secs(1)).await;
+    assert_eq!(provider.uploads(), 0);
+    vfs.rename(Vfs::ROOT, "._a", Vfs::ROOT, "a.txt", IfExists::Refuse)
+        .await
+        .unwrap();
+    advance(settle()).await;
+    yield_until("the renamed file did not upload", || spool_files(&dir) == 0).await;
+    let items = root_items(&provider).await;
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].name, "a.txt");
+    assert_eq!(provider.contents(&items[0].id), b"new");
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_retry_wait_doubles_up_to_five_minutes() {
+    let (provider, vfs, _dir) = spooled_mount(Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    let (_made, handle) = vfs.create(Vfs::ROOT, "a.txt", Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"hello").await.unwrap();
+    vfs.release(handle);
+    provider.fail_with(Some(VfsError::Offline));
+    advance(settle()).await;
+    yield_until("the first try did not start", || provider.uploads() == 1).await;
+    for (tries, wait) in [5, 10, 20, 40, 80, 160, 300, 300].into_iter().enumerate() {
+        advance(Duration::from_secs(wait) - Duration::from_millis(1)).await;
+        assert_eq!(provider.uploads(), tries + 1, "retried before {wait} s");
+        advance(Duration::from_millis(1)).await;
+        yield_until("the retry did not start", || {
+            provider.uploads() == tries + 2
+        })
+        .await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_edit_starts_the_retry_count_again() {
+    let (provider, vfs, _dir) = spooled_mount(Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    let (made, handle) = vfs.create(Vfs::ROOT, "a.txt", Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"hello").await.unwrap();
+    vfs.release(handle);
+    provider.fail_with(Some(VfsError::Offline));
+    advance(settle()).await;
+    yield_until("the first try did not start", || provider.uploads() == 1).await;
+    advance(Duration::from_secs(5)).await;
+    yield_until("the second try did not start", || provider.uploads() == 2).await;
+    // The next wait would be 10 seconds. An edit puts it back to 5.
+    let handle = vfs.open(made.node, Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"j").await.unwrap();
+    vfs.release(handle);
+    advance(settle()).await;
+    yield_until("the edited file was not tried", || provider.uploads() == 3).await;
+    advance(Duration::from_secs(5) - Duration::from_millis(1)).await;
+    assert_eq!(provider.uploads(), 3);
+    advance(Duration::from_millis(1)).await;
+    yield_until("the retry after the edit did not come at 5 s", || {
+        provider.uploads() == 4
+    })
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_discarded_save_over_a_file_can_be_written_again() {
+    let (provider, vfs, _dir) = spooled_mount(Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    let id = provider.add_file(&provider.root(), "a.txt", b"old");
+    vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    let (made, handle) = vfs.create(Vfs::ROOT, "a.tmp", Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"new").await.unwrap();
+    vfs.release(handle);
+    vfs.rename(Vfs::ROOT, "a.tmp", Vfs::ROOT, "a.txt", IfExists::Replace)
+        .await
+        .unwrap();
+    provider.fail_with(Some(VfsError::Offline));
+    advance(settle()).await;
+    yield_until("the save did not fail", || provider.uploads() == 1).await;
+    vfs.discard_unsent(made.node).await.unwrap();
+    provider.fail_with(None);
+    // The node holds the item's answer, so it opens for write with no lookup first.
+    let handle = vfs.open(made.node, Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"N").await.unwrap();
+    vfs.release(handle);
+    advance(settle()).await;
+    yield_until("the second save did not land", || {
+        provider.contents(&id) == b"Nld"
+    })
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_write_past_the_whole_spool_asks_the_provider_nothing() {
+    let (provider, vfs, _dir) = spooled_mount(Options::default(), 1024, never_local);
+    provider.add_file(&provider.root(), "a.txt", b"hello");
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    advance(Options::default().attributes_ttl).await;
+    provider.fail_with(Some(VfsError::Offline));
+    let calls = provider.calls();
+    let handle = vfs.open(file.node, Access::Write).await.unwrap();
+    assert_eq!(vfs.write(handle, 2000, b"x").await, Err(VfsError::NoSpace));
+    assert_eq!(provider.calls(), calls);
+}
+
+#[tokio::test(start_paused = true)]
+async fn removing_an_item_while_it_uploads_starts_no_second_upload() {
+    let (provider, vfs, _dir) = spooled_mount(Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    provider.add_file(&provider.root(), "a.txt", b"old");
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    let handle = vfs.open(file.node, Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"new").await.unwrap();
+    vfs.release(handle);
+    // The replace would answer inside the remove's 5 seconds, find the item gone, and make it again, unless the remove stopped it first.
+    provider.set_upload_delay(Duration::from_secs(2));
+    advance(settle()).await;
+    yield_until("the replace did not start", || provider.uploads() == 1).await;
+    provider.set_delay(Duration::from_secs(5));
+    vfs.remove(Vfs::ROOT, "a.txt", Kind::File).await.unwrap();
+    advance(Duration::from_secs(60)).await;
+    provider.set_delay(Duration::ZERO);
+    assert_eq!(provider.uploads(), 1);
+    assert!(root_items(&provider).await.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn first_writes_after_the_answer_went_stale_ask_for_the_item_once() {
+    let (provider, vfs, _dir) = spooled_mount(Options::default(), 1024, never_local);
+    provider.add_file(&provider.root(), "a.txt", b"0123456789");
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    let handle = vfs.open(file.node, Access::Write).await.unwrap();
+    advance(Options::default().attributes_ttl).await;
+    provider.set_delay(Duration::from_secs(1));
+    let calls = provider.calls();
+    let first = tokio::spawn({
+        let vfs = Arc::clone(&vfs);
+        async move { vfs.write(handle, 0, b"A").await }
+    });
+    let second = tokio::spawn({
+        let vfs = Arc::clone(&vfs);
+        async move { vfs.write(handle, 9, b"Z").await }
+    });
+    first.await.unwrap().unwrap();
+    second.await.unwrap().unwrap();
+    // One `item` call and one read.
+    assert_eq!(provider.calls(), calls + 2);
+    assert_eq!(vfs.read(handle, 0, 10).await.unwrap(), b"A12345678Z");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_save_over_a_file_bases_on_the_newest_answer_the_core_holds() {
+    let options = Options {
+        listing_ttl: Duration::from_secs(60),
+        ..Options::default()
+    };
+    let (provider, vfs, dir) = spooled_mount(options, 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    let id = provider.add_file(&provider.root(), "a.txt", b"v1");
+    let target = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    // The listing stays cached with the old revision. The node learns the new one.
+    provider.write(&id, b"v2");
+    advance(Options::default().attributes_ttl).await;
+    vfs.attributes(target.node).await.unwrap();
+    let (_made, handle) = vfs.create(Vfs::ROOT, "a.tmp", Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"v3").await.unwrap();
+    vfs.release(handle);
+    vfs.rename(Vfs::ROOT, "a.tmp", Vfs::ROOT, "a.txt", IfExists::Replace)
+        .await
+        .unwrap();
+    advance(settle()).await;
+    yield_until("the save did not land", || spool_files(&dir) == 0).await;
+    let items = root_items(&provider).await;
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].id, id);
+    assert_eq!(provider.contents(&id), b"v3");
+    assert_eq!(provider.uploads(), 1);
+}
+
+#[tokio::test]
+async fn the_owner_calls_refuse_a_file_with_nothing_unsent() {
+    let (provider, vfs, _dir) = spooled_mount(Options::default(), 1024, never_local);
+    provider.add_file(&provider.root(), "a.txt", b"clean");
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    assert_eq!(vfs.retry_now(file.node), Err(VfsError::NotFound));
+    assert_eq!(vfs.discard_unsent(file.node).await, Err(VfsError::NotFound));
+}
+
+#[tokio::test(start_paused = true)]
+async fn retry_now_leaves_a_waiting_file_its_settle_time() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    let (made, handle) = vfs.create(Vfs::ROOT, "a.txt", Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"hello").await.unwrap();
+    vfs.release(handle);
+    assert_eq!(vfs.retry_now(made.node), Ok(()));
+    advance(settle() - Duration::from_millis(1)).await;
+    assert_eq!(provider.uploads(), 0);
+    advance(Duration::from_millis(1)).await;
+    yield_until("the file did not upload", || spool_files(&dir) == 0).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_remove_sends_the_file_after_the_call_time_limit() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    let id = provider.add_file(&provider.root(), "a.txt", b"old");
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    let handle = vfs.open(file.node, Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"new").await.unwrap();
+    vfs.release(handle);
+    provider.set_upload_delay(Duration::from_secs(10));
+    advance(settle()).await;
+    yield_until("the replace did not start", || provider.uploads() == 1).await;
+    provider.fail_with(Some(VfsError::Offline));
+    assert_eq!(
+        vfs.remove(Vfs::ROOT, "a.txt", Kind::File).await,
+        Err(VfsError::Offline)
+    );
+    provider.fail_with(None);
+    provider.set_upload_delay(Duration::ZERO);
+    let call_timeout = Options::default().call_timeout;
+    advance(call_timeout - Duration::from_millis(1)).await;
+    assert_eq!(provider.uploads(), 1);
+    advance(Duration::from_millis(1)).await;
+    yield_until("the file was not sent after the remove failed", || {
+        spool_files(&dir) == 0
+    })
+    .await;
+    assert_eq!(provider.contents(&id), b"new");
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_upload_that_keeps_moving_outlives_the_call_time_limit() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    // Progress at 40 s is inside the 60-second stall time, and the whole upload takes far longer than the 30-second call time limit.
+    provider.set_upload_delay(Duration::from_secs(80));
+    let (_made, handle) = vfs.create(Vfs::ROOT, "a.txt", Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"hello").await.unwrap();
+    vfs.release(handle);
+    advance(settle()).await;
+    yield_until("the upload did not start", || provider.uploads() == 1).await;
+    advance(Duration::from_secs(80)).await;
+    yield_until("the long upload did not land", || spool_files(&dir) == 0).await;
+    assert_eq!(provider.uploads(), 1);
 }

@@ -1,7 +1,8 @@
+use std::path::Path;
 use std::sync::Mutex;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::{Attributes, Item, ItemId, Kind, Provider, Space, VfsError};
+use crate::{Attributes, Item, ItemId, Kind, Progress, Provider, Revision, Space, VfsError};
 
 struct Stored {
     item: Item,
@@ -12,18 +13,23 @@ struct Stored {
 struct Inner {
     stored: Vec<Stored>,
     added: u64,
+    /// Goes up on every byte change, and becomes `rev-{n}`.
+    revisions: u64,
     delay: Duration,
+    upload_delay: Duration,
     error: Option<VfsError>,
     in_flight: usize,
     peak: usize,
     calls: usize,
+    uploads: usize,
     rename_changes_ids: bool,
+    hide_revisions: bool,
     largest_read: u32,
 }
 
 /// A provider that keeps its tree in memory, for tests. Like Google Drive, it allows two items with one name in a folder and any character in a name.
 ///
-/// A call works out its answer when it starts and returns it after the delay. So a change made while a call waits shows up on the next call, as it would with a real remote.
+/// A metadata or read call works out its answer when it starts and returns it after the delay. So a change made while a call waits shows up on the next call, as it would with a real remote. A byte call checks for a failure and changes the tree only when its upload delay ends.
 pub struct MemoryProvider {
     inner: Mutex<Inner>,
 }
@@ -48,6 +54,7 @@ impl MemoryProvider {
                     kind: Kind::Folder,
                     size: 0,
                     modified: UNIX_EPOCH,
+                    revision: None,
                 },
             },
             parent: None,
@@ -57,12 +64,16 @@ impl MemoryProvider {
             inner: Mutex::new(Inner {
                 stored: vec![root],
                 added: 0,
+                revisions: 0,
                 delay: Duration::ZERO,
+                upload_delay: Duration::ZERO,
                 error: None,
                 in_flight: 0,
                 peak: 0,
                 calls: 0,
+                uploads: 0,
                 rename_changes_ids: false,
+                hide_revisions: false,
                 largest_read: 0,
             }),
         }
@@ -78,14 +89,16 @@ impl MemoryProvider {
         self.add(parent, name, Kind::File, contents)
     }
 
-    /// Replaces a file's bytes. Its size follows, and its modified time moves forward.
+    /// Replaces a file's bytes. Its size follows, its modified time moves forward, and it gets a new revision.
     pub fn write(&self, id: &ItemId, contents: &[u8]) {
         let mut inner = self.inner.lock().unwrap();
+        let revision = next_revision(&mut inner);
         let stored = inner.stored.iter_mut().find(|stored| stored.item.id == *id);
         let stored = stored.expect("no item has this ID");
         stored.contents = contents.to_vec();
         stored.item.attributes.size = contents.len() as u64;
         stored.item.attributes.modified += Duration::from_secs(1);
+        stored.item.attributes.revision = Some(revision);
     }
 
     /// Moves an item and gives it a new name behind the mount's back. No provider call is counted, and its id stays the same.
@@ -108,9 +121,24 @@ impl MemoryProvider {
         self.inner.lock().unwrap().rename_changes_ids = on;
     }
 
-    /// Makes every later provider call wait this long before it answers.
+    /// While on, `item` and `list` give no revision, as a provider without revisions would. Off by default.
+    pub fn hide_revisions(&self, on: bool) {
+        self.inner.lock().unwrap().hide_revisions = on;
+    }
+
+    /// Makes every later provider call wait this long before it answers. The two byte calls wait for [`Self::set_upload_delay`] instead.
     pub fn set_delay(&self, delay: Duration) {
         self.inner.lock().unwrap().delay = delay;
+    }
+
+    /// Makes [`Provider::create_file`] and [`Provider::replace_bytes`] wait this long before they change the tree. [`Self::set_delay`] does not apply to them.
+    pub fn set_upload_delay(&self, delay: Duration) {
+        self.inner.lock().unwrap().upload_delay = delay;
+    }
+
+    /// How many byte calls have started.
+    pub fn uploads(&self) -> usize {
+        self.inner.lock().unwrap().uploads
     }
 
     /// While set, every provider call fails with this error.
@@ -173,6 +201,32 @@ impl MemoryProvider {
         tokio::time::sleep(delay).await;
         result
     }
+
+    /// Counts the call now, waits the upload delay, then checks `fail_with` and changes the tree. An upload changes the remote only when its last byte lands, so a call dropped while it waits changes nothing. Halfway through the delay it reports half of `from` as sent, as a real upload reports progress on its way.
+    async fn upload<T>(
+        &self,
+        from: &Path,
+        progress: &Progress,
+        op: impl FnOnce(&mut Inner) -> Result<T, VfsError>,
+    ) -> Result<T, VfsError> {
+        let delay = {
+            let mut inner = self.inner.lock().unwrap();
+            inner.in_flight += 1;
+            inner.calls += 1;
+            inner.uploads += 1;
+            inner.peak = inner.peak.max(inner.in_flight);
+            inner.upload_delay
+        };
+        let _in_flight = InFlight(&self.inner);
+        tokio::time::sleep(delay / 2).await;
+        progress(std::fs::metadata(from).map_or(0, |metadata| metadata.len()) / 2);
+        tokio::time::sleep(delay - delay / 2).await;
+        let mut inner = self.inner.lock().unwrap();
+        match inner.error.clone() {
+            Some(error) => Err(error),
+            None => op(&mut inner),
+        }
+    }
 }
 
 /// Stores a new item and returns it. Its id and its modified time come from `added`.
@@ -192,6 +246,7 @@ fn allocate(
             kind,
             size: contents.len() as u64,
             modified: UNIX_EPOCH + Duration::from_secs(number),
+            revision: (kind == Kind::File).then(|| next_revision(inner)),
         },
     };
     inner.stored.push(Stored {
@@ -222,7 +277,7 @@ impl Provider for MemoryProvider {
     }
 
     async fn item(&self, id: &ItemId) -> Result<Item, VfsError> {
-        self.answer(|inner| Ok(find(&inner.stored, id)?.item.clone()))
+        self.answer(|inner| Ok(shown(inner, &find(&inner.stored, id)?.item)))
             .await
     }
 
@@ -235,7 +290,7 @@ impl Provider for MemoryProvider {
                 .stored
                 .iter()
                 .filter(|stored| stored.parent.as_ref() == Some(folder))
-                .map(|stored| stored.item.clone())
+                .map(|stored| shown(inner, &stored.item))
                 .collect())
         })
         .await
@@ -358,4 +413,74 @@ impl Provider for MemoryProvider {
         })
         .await
     }
+
+    async fn create_file(
+        &self,
+        parent: &ItemId,
+        name: &str,
+        from: &Path,
+        modified: SystemTime,
+        progress: &Progress,
+    ) -> Result<Item, VfsError> {
+        self.upload(from, progress, |inner| {
+            if find(&inner.stored, parent)?.item.attributes.kind != Kind::Folder {
+                return Err(VfsError::NotAFolder);
+            }
+            let bytes = std::fs::read(from).map_err(|error| VfsError::Other(error.to_string()))?;
+            allocate(inner, Some(parent.clone()), name, Kind::File, &bytes);
+            let stored = inner.stored.last_mut().expect("the file was just added");
+            stored.item.attributes.modified = modified;
+            progress(bytes.len() as u64);
+            Ok(stored.item.clone())
+        })
+        .await
+    }
+
+    async fn replace_bytes(
+        &self,
+        id: &ItemId,
+        from: &Path,
+        base: &Revision,
+        modified: SystemTime,
+        progress: &Progress,
+    ) -> Result<Item, VfsError> {
+        self.upload(from, progress, |inner| {
+            let bytes = std::fs::read(from).map_err(|error| VfsError::Other(error.to_string()))?;
+            let stored = find(&inner.stored, id)?;
+            if stored.item.attributes.kind != Kind::File {
+                return Err(VfsError::IsAFolder);
+            }
+            if stored.item.attributes.revision.as_ref() != Some(base) {
+                return Err(VfsError::Conflict);
+            }
+            let revision = next_revision(inner);
+            let stored = inner
+                .stored
+                .iter_mut()
+                .find(|stored| stored.item.id == *id)
+                .expect("the file was found before the revision changed");
+            stored.contents = bytes.clone();
+            stored.item.attributes.size = bytes.len() as u64;
+            stored.item.attributes.modified = modified;
+            stored.item.attributes.revision = Some(revision);
+            progress(bytes.len() as u64);
+            Ok(stored.item.clone())
+        })
+        .await
+    }
+}
+
+/// An item as `item` and `list` give it.
+fn shown(inner: &Inner, item: &Item) -> Item {
+    let mut item = item.clone();
+    if inner.hide_revisions {
+        item.attributes.revision = None;
+    }
+    item
+}
+
+/// The next revision a byte change gives a file.
+fn next_revision(inner: &mut Inner) -> Revision {
+    inner.revisions += 1;
+    Revision(format!("rev-{}", inner.revisions))
 }

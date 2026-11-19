@@ -540,6 +540,7 @@ impl CountingFile {
                 kind: Kind::File,
                 size: inner.0.len() as u64,
                 modified: inner.1,
+                revision: None,
             },
         }
     }
@@ -561,6 +562,7 @@ impl Provider for CountingFile {
                     kind: Kind::Folder,
                     size: 0,
                     modified: UNIX_EPOCH,
+                    revision: None,
                 },
             });
         }
@@ -687,6 +689,7 @@ impl Provider for HeldRead {
                     kind: Kind::Folder,
                     size: 0,
                     modified: std::time::UNIX_EPOCH,
+                    revision: None,
                 },
             });
         }
@@ -698,6 +701,7 @@ impl Provider for HeldRead {
                     kind: Kind::File,
                     size: self.bytes.len() as u64,
                     modified: std::time::UNIX_EPOCH,
+                    revision: None,
                 },
             });
         }
