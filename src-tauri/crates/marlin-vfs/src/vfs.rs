@@ -1,17 +1,19 @@
 use std::collections::HashMap;
 use std::future::Future;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
-use tokio::sync::Semaphore;
+use tokio::sync::{Notify, Semaphore};
 use tokio::time::Instant;
 
+use crate::spool::{self, Spool};
 use crate::{
     escape, unescape, unique_names, Attributes, Item, ItemId, Kind, NameRules, Provider, Space,
     VfsError,
 };
 
-/// A file or folder, for as long as the OS holds a lookup on it or a handle is open on it. The number is never reused in a mount.
+/// A file or folder. It lives while the OS holds a lookup on it or a handle is open on it, and while it owns a spool file as an item or a new file. The number is never reused in a mount.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NodeId(pub u64);
 
@@ -36,7 +38,7 @@ pub enum Access {
     /// Read the file's bytes.
     Read,
 
-    /// Change the file's bytes. This core rejects it.
+    /// Change the file's bytes. A mount with no spool rejects it.
     Write,
 }
 
@@ -53,7 +55,7 @@ pub enum IfExists {
 /// Limits and cache times for one mount.
 #[derive(Debug, Clone, Copy)]
 pub struct Options {
-    /// How long one provider call may take, including the wait for a free slot.
+    /// How long one provider call may take, including the wait for a free slot. A name change waits this long for its turn, and a write waits this long for room in the spool.
     pub call_timeout: Duration,
 
     /// How many provider calls may run at once.
@@ -104,18 +106,123 @@ impl Asked {
     }
 }
 
+/// A folder, and a remote name in it.
+struct Place {
+    folder: ItemId,
+
+    /// `unescape` of the name the mount shows, so a duplicate shown as `a (2).txt` is `a (2).txt` here.
+    name: String,
+}
+
+/// What a node is.
+enum Identity {
+    /// An item the provider has. `place` is where this mount last showed it: `None` only for the root.
+    Item { id: ItemId, place: Option<Place> },
+
+    /// An item this mount removed, or replaced by a rename. Calls on it get what the provider answers for the id, and its bytes never go anywhere.
+    Removed(ItemId),
+
+    /// A file that is only in the spool.
+    New(Place),
+
+    /// A new file that was removed, or replaced by a rename. It has no name. Its open handles still work.
+    Unnamed,
+}
+
+impl Identity {
+    /// Whether this node's spooled bytes are to reach the remote: it is an item or a new file, under a name the spool does not keep on this computer (decision 0005, choice 14).
+    fn uploads(&self, stays_local: fn(&str) -> bool) -> bool {
+        match self {
+            Identity::Item {
+                place: Some(place), ..
+            }
+            | Identity::New(place) => !stays_local(&place.name),
+            Identity::Item { place: None, .. } => true,
+            Identity::Removed(_) | Identity::Unnamed => false,
+        }
+    }
+
+    /// The id the provider knows this node by. A file that is only in the spool has none.
+    fn remote_id(&self) -> Option<&ItemId> {
+        match self {
+            Identity::Item { id, .. } | Identity::Removed(id) => Some(id),
+            Identity::New(_) | Identity::Unnamed => None,
+        }
+    }
+}
+
+/// Where a file's bytes are. Decision 0005 calls `Clean` "Clean"; every other state in its table is `Spooled`.
+#[derive(Clone)]
+enum Bytes {
+    /// The remote has them. Reads ask the provider.
+    Clean,
+
+    /// A first write or a truncate is making the spool file. Reads still ask the provider. The fetch holds the lock; another write or truncate waits on it, then looks again.
+    Fetching(Arc<tokio::sync::Mutex<()>>),
+
+    /// The spool file is the file: every read, the size, and the modified time come from it.
+    Spooled(SpoolId),
+}
+
+/// One spool file, by the number that names it in the spool folder.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct SpoolId(u64);
+
+/// One file in the spool folder.
+struct SpoolFile {
+    path: PathBuf,
+
+    /// The file's length on the disk, which the mount shows.
+    size: u64,
+
+    /// Room that the edit in flight counted beyond `size`. [`State::spool_used`] counts both.
+    reserved: u64,
+
+    modified: SystemTime,
+
+    /// Held by each write and truncate from its room check to the end of its disk call, so two edits never interleave their size and room accounting, whichever handle they come through.
+    edits: Arc<tokio::sync::Mutex<()>>,
+}
+
 struct Node {
-    item: ItemId,
+    identity: Identity,
     lookups: u64,
     handles: u64,
 
     /// What the provider last said about the item.
     attributes: Option<(Asked, Attributes)>,
+
+    bytes: Bytes,
 }
 
 enum Opened {
-    File { node: NodeId },
+    File { node: NodeId, access: Access },
     Folder { node: NodeId, entries: Vec<Entry> },
+}
+
+/// What holds one name in a folder, as the mount shows it.
+enum Holder {
+    /// An item in the provider's listing, with its shown name.
+    Item(Item),
+
+    /// A file that is only in the spool, and its shown name (`escape` of its remote name).
+    New { node: NodeId, name: String },
+}
+
+impl Holder {
+    fn name(&self) -> &str {
+        match self {
+            Holder::Item(item) => &item.name,
+            Holder::New { name, .. } => name,
+        }
+    }
+
+    fn kind(&self) -> Kind {
+        match self {
+            Holder::Item(item) => item.attributes.kind,
+            Holder::New { .. } => Kind::File,
+        }
+    }
 }
 
 /// One folder's listing, as the provider last gave it and as the mount shows it.
@@ -126,8 +233,30 @@ struct Listing {
     /// The items with the names the remote uses. This mount's own changes edit this list.
     remote: Arc<Vec<Item>>,
 
-    /// `remote` after `unique_names`: what a lookup and an open folder read.
+    /// `remote` after `unique_names`: what a lookup and an open folder read, before new files are laid over it.
     shown: Arc<Vec<Item>>,
+
+    /// Where each name in `shown` is, by its key, so a lookup does not walk the folder.
+    index: Arc<HashMap<String, usize>>,
+}
+
+impl Listing {
+    /// A listing of `remote`, with the names the mount shows and the index that finds them.
+    fn new(asked: Asked, remote: Arc<Vec<Item>>, rules: &NameRules) -> Self {
+        let mut shown = remote.to_vec();
+        unique_names(&mut shown, rules, &[]);
+        let index = shown
+            .iter()
+            .enumerate()
+            .map(|(at, item)| ((rules.key)(&item.name), at))
+            .collect();
+        Self {
+            asked,
+            remote,
+            shown: Arc::new(shown),
+            index: Arc::new(index),
+        }
+    }
 }
 
 struct State {
@@ -142,9 +271,20 @@ struct State {
 
     /// When this mount last changed what a folder holds, or tried to. A listing the core asked for at or before that time, and that answers after it, is not kept. Entries older than the call time limit are dropped: no listing still in flight can be older.
     changed: HashMap<ItemId, Instant>,
+
+    spools: HashMap<SpoolId, SpoolFile>,
+
+    /// For each folder, its new files by the key of the name they show under. A folder with none has no entry.
+    new_files: HashMap<ItemId, HashMap<String, NodeId>>,
+
+    /// The sum of `size` and `reserved` over every [`SpoolFile`].
+    spool_used: u64,
 }
 
-/// The mount core. It can make a folder, remove an item, and rename or move an item, and it cannot write a file's bytes. Adapters share one value across tasks. The state lock is never held across a provider call. A separate lock, `changes`, is held across the provider call of a change.
+/// How much of a remote file one fetch reads at a time. A stored size never limits a read, so the piece size is the only cap.
+const PIECE: u32 = 4 * 1024 * 1024;
+
+/// The mount core. With a spool it can create, write, cut, rename, and remove a file locally. Nothing is uploaded. Adapters share one value across tasks. The state lock is never held across a provider call. The only spool file call made under it is the delete of a spool file. A separate lock, `changes`, is held across the provider call of a name change.
 pub struct Vfs {
     provider: Arc<dyn Provider>,
     rules: NameRules,
@@ -154,7 +294,17 @@ pub struct Vfs {
     /// One change runs at a time in this mount. A rename names two folders, and one lock for all changes needs no lock order.
     changes: tokio::sync::Mutex<()>,
 
-    state: Mutex<State>,
+    /// Shared with a disk call, which accounts for the edit before it lets the next one in.
+    state: Arc<Mutex<State>>,
+
+    /// Wakes a write that is waiting for the spool to shrink.
+    room: Arc<Notify>,
+
+    spool: Option<Spool>,
+
+    /// The next spool file's number, which is also its name in the spool folder. A file already there keeps its number.
+    next_spool: std::sync::atomic::AtomicU64,
+
     watcher: Option<Box<CallWatcher>>,
 }
 
@@ -165,7 +315,7 @@ impl Vfs {
     /// The node id of the folder at the top of the mount.
     pub const ROOT: NodeId = NodeId(1);
 
-    /// Starts a mount on `provider` using these name rules and limits.
+    /// Starts a mount on `provider` using these name rules and limits. It takes no writes until [`Self::take_writes`].
     pub fn new(provider: Arc<dyn Provider>, rules: NameRules, options: Options) -> Self {
         let root = provider.root();
         let mut nodes = HashMap::new();
@@ -173,10 +323,14 @@ impl Vfs {
         nodes.insert(
             Self::ROOT,
             Node {
-                item: root.clone(),
+                identity: Identity::Item {
+                    id: root.clone(),
+                    place: None,
+                },
                 lookups: 0,
                 handles: 0,
                 attributes: None,
+                bytes: Bytes::Clean,
             },
         );
         by_item.insert(root, Self::ROOT);
@@ -186,7 +340,7 @@ impl Vfs {
             permits: Semaphore::new(options.max_calls),
             options,
             changes: tokio::sync::Mutex::new(()),
-            state: Mutex::new(State {
+            state: Arc::new(Mutex::new(State {
                 nodes,
                 by_item,
                 next_node: 2,
@@ -196,7 +350,13 @@ impl Vfs {
                 space: None,
                 generation: 0,
                 changed: HashMap::new(),
-            }),
+                spools: HashMap::new(),
+                new_files: HashMap::new(),
+                spool_used: 0,
+            })),
+            room: Arc::new(Notify::new()),
+            spool: None,
+            next_spool: std::sync::atomic::AtomicU64::new(1),
             watcher: None,
         }
     }
@@ -210,48 +370,60 @@ impl Vfs {
         self
     }
 
-    /// Finds `name` in `parent` and adds one lookup to the item's node.
-    pub async fn lookup(&self, parent: NodeId, name: &str) -> Result<Entry, VfsError> {
-        let parent_item = self.item_of(parent)?;
-        let (listing, found) = self.find(&parent_item, name).await?;
-        let Some(found) = found else {
-            return Err(VfsError::NotFound);
-        };
-        let mut state = self.state.lock().unwrap();
-        let node = node_for(&mut state, found.id);
-        let found_node = state.nodes.get_mut(&node).unwrap();
-        found_node.lookups += 1;
-        let attributes = remember(&mut found_node.attributes, listing.asked, found.attributes);
-        Ok(Entry {
-            node,
-            name: found.name,
-            attributes,
-        })
+    /// The mount's spool. A mount with none takes no writes: [`VfsError::ReadOnly`].
+    fn spool(&self) -> Result<&Spool, VfsError> {
+        self.spool.as_ref().ok_or(VfsError::ReadOnly)
     }
 
-    /// Gives `lookups` lookups back. The node goes away when it has no lookup and no open handle left.
+    /// Lets the mount take writes into `spool`. Without one, opening a file for writing, [`Self::create`], and [`Self::truncate`] are [`VfsError::ReadOnly`].
+    pub fn take_writes(mut self, spool: Spool) -> Self {
+        self.spool = Some(spool);
+        self
+    }
+
+    /// Finds `name` in `parent` and adds one lookup to the item's node.
+    pub async fn lookup(&self, parent: NodeId, name: &str) -> Result<Entry, VfsError> {
+        let parent_item = self.folder_of(parent)?;
+        let listing = self.listing(&parent_item).await?;
+        let mut state = self.state.lock().unwrap();
+        // The holder and the lookup share this lock, so a remove cannot drop a new file between them.
+        let Some(holder) = resolve(&state, &self.rules, &parent_item, &listing, name) else {
+            return Err(VfsError::NotFound);
+        };
+        let entry = entry_for(&mut state, &self.rules, &parent_item, &listing, holder);
+        state.nodes.get_mut(&entry.node).unwrap().lookups += 1;
+        Ok(entry)
+    }
+
+    /// Gives `lookups` lookups back. The node goes away when nothing holds it: no lookup, no open handle, and no spool file it owns as an item or a new file.
     pub fn forget(&self, node: NodeId, lookups: u64) {
         let mut state = self.state.lock().unwrap();
         let Some(found) = state.nodes.get_mut(&node) else {
             return;
         };
         found.lookups = found.lookups.saturating_sub(lookups);
-        drop_unreferenced(&mut state, node);
+        drop_unreferenced(&mut state, &self.room, node);
     }
 
-    /// This node's attributes: the answer the node holds while it is fresh, or a new one from the provider.
+    /// This node's attributes. A spooled file answers from the spool. Anything else is the answer the node holds while it is fresh, or a new one from the provider.
     pub async fn attributes(&self, node: NodeId) -> Result<Attributes, VfsError> {
         let (item, at, generation) = {
             let state = self.state.lock().unwrap();
             let Some(found) = state.nodes.get(&node) else {
                 return Err(VfsError::StaleHandle);
             };
+            if let Some(attributes) = spool_attributes(&state, node) {
+                return Ok(attributes);
+            }
             if let Some((held, attributes)) = found.attributes {
                 if held.is_fresh(state.generation, self.options.attributes_ttl) {
                     return Ok(attributes);
                 }
             }
-            (found.item.clone(), Instant::now(), state.generation)
+            let Some(item) = found.identity.remote_id() else {
+                return Err(VfsError::StaleHandle);
+            };
+            (item.clone(), Instant::now(), state.generation)
         };
         let attributes = self.call(self.provider.item(&item)).await?.attributes;
         let asked = Asked {
@@ -260,32 +432,40 @@ impl Vfs {
             answered: Instant::now(),
         };
         let mut state = self.state.lock().unwrap();
+        if let Some(spooled) = spool_attributes(&state, node) {
+            return Ok(spooled);
+        }
         let Some(found) = state.nodes.get_mut(&node) else {
             return Ok(attributes);
         };
         Ok(remember(&mut found.attributes, asked, attributes))
     }
 
-    /// Opens a folder and freezes that listing. The folder and each item in it keep a handle reference until `release`.
+    /// Opens a folder and freezes that listing. The folder and each item in it keep a handle reference until `release`. New files are part of the frozen copy.
     pub async fn open_folder(&self, node: NodeId) -> Result<HandleId, VfsError> {
-        let item = self.item_of(node)?;
+        let item = self.folder_of(node)?;
         let listing = self.listing(&item).await?;
         let mut state = self.state.lock().unwrap();
         let Some(opened) = state.nodes.get_mut(&node) else {
             return Err(VfsError::StaleHandle);
         };
         opened.handles += 1;
-        let mut entries = Vec::with_capacity(listing.shown.len());
-        for item in listing.shown.iter() {
-            let child = node_for(&mut state, item.id.clone());
-            let child_node = state.nodes.get_mut(&child).unwrap();
-            child_node.handles += 1;
-            let attributes = remember(&mut child_node.attributes, listing.asked, item.attributes);
-            entries.push(Entry {
-                node: child,
-                name: item.name.clone(),
-                attributes,
-            });
+        let items = renamed_items(&state, &self.rules, &item, &listing)
+            .map_or_else(|| Arc::clone(&listing.shown), Arc::new);
+        let new_files: Vec<Holder> = state.new_files.get(&item).map_or(Vec::new(), |held| {
+            held.values()
+                .map(|node| Holder::New {
+                    node: *node,
+                    name: new_file_name(&state, &self.rules, *node),
+                })
+                .collect()
+        });
+        let mut entries = Vec::with_capacity(items.len() + new_files.len());
+        let holders = items.iter().cloned().map(Holder::Item).chain(new_files);
+        for holder in holders {
+            let entry = entry_for(&mut state, &self.rules, &item, &listing, holder);
+            state.nodes.get_mut(&entry.node).unwrap().handles += 1;
+            entries.push(entry);
         }
         Ok(insert_handle(&mut state, Opened::Folder { node, entries }))
     }
@@ -306,38 +486,127 @@ impl Vfs {
         Ok(entries[start..end].to_vec())
     }
 
-    /// Opens a file for `access`. A folder is [`VfsError::IsAFolder`], and a write is [`VfsError::ReadOnly`].
+    /// Opens a file for `access`. A folder is [`VfsError::IsAFolder`]. A write on a mount with no spool is [`VfsError::ReadOnly`]. Opening for write asks the provider nothing: it decides the kind from what the node holds.
     pub async fn open(&self, node: NodeId, access: Access) -> Result<HandleId, VfsError> {
         if access == Access::Write {
-            return Err(VfsError::ReadOnly);
-        }
-        let attributes = self.attributes(node).await?;
-        if attributes.kind == Kind::Folder {
-            return Err(VfsError::IsAFolder);
+            self.check_writable(node)?;
+        } else {
+            let attributes = self.attributes(node).await?;
+            if attributes.kind == Kind::Folder {
+                return Err(VfsError::IsAFolder);
+            }
         }
         let mut state = self.state.lock().unwrap();
         let Some(opened) = state.nodes.get_mut(&node) else {
             return Err(VfsError::StaleHandle);
         };
         opened.handles += 1;
-        Ok(insert_handle(&mut state, Opened::File { node }))
+        Ok(insert_handle(&mut state, Opened::File { node, access }))
     }
 
-    /// Reads one byte range. The size a node holds never limits a read, so a file that grows can be read to its new end.
+    /// Reads one byte range. A spooled file is read from the spool, for every handle on it. The size a node holds never limits a read, so a file that grows can be read to its new end.
     pub async fn read(
         &self,
         handle: HandleId,
         offset: u64,
         length: u32,
     ) -> Result<Vec<u8>, VfsError> {
-        let item = {
+        let source = {
             let state = self.state.lock().unwrap();
-            let Some(Opened::File { node }) = state.handles.get(&handle) else {
+            let Some(Opened::File { node, .. }) = state.handles.get(&handle) else {
                 return Err(VfsError::StaleHandle);
             };
-            state.nodes.get(node).unwrap().item.clone()
+            let found = state.nodes.get(node).unwrap();
+            match &found.bytes {
+                Bytes::Spooled(id) => ReadSource::Spool(state.spools[id].path.clone()),
+                Bytes::Clean | Bytes::Fetching(_) => match found.identity.remote_id() {
+                    Some(id) => ReadSource::Remote(id.clone()),
+                    None => return Err(VfsError::StaleHandle),
+                },
+            }
         };
-        self.call(self.provider.read(&item, offset, length)).await
+        match source {
+            ReadSource::Spool(path) => {
+                match tokio::task::spawn_blocking(move || spool::read_at(&path, offset, length))
+                    .await
+                {
+                    Ok(read) => read.map_err(spool::map_io),
+                    Err(error) => Err(VfsError::Other(error.to_string())),
+                }
+            }
+            ReadSource::Remote(id) => self.call(self.provider.read(&id, offset, length)).await,
+        }
+    }
+
+    /// Writes `data` at `offset`. A handle that is not open for write is [`VfsError::AccessDenied`]: a mount with no spool has none. An empty write changes nothing.
+    pub async fn write(&self, handle: HandleId, offset: u64, data: &[u8]) -> Result<(), VfsError> {
+        let node = {
+            let state = self.state.lock().unwrap();
+            match state.handles.get(&handle) {
+                Some(Opened::File { node, access }) => {
+                    if *access != Access::Write {
+                        return Err(VfsError::AccessDenied);
+                    }
+                    *node
+                }
+                _ => return Err(VfsError::StaleHandle),
+            }
+        };
+        if data.is_empty() {
+            return Ok(());
+        }
+        let data = data.to_vec();
+        self.edit(node, Edit::Write { offset, data }).await
+    }
+
+    /// Cuts or grows a file. A mount with no spool answers [`VfsError::ReadOnly`], and a folder is [`VfsError::IsAFolder`]. Cutting a clean file to zero reads nothing from the provider.
+    pub async fn truncate(&self, node: NodeId, size: u64) -> Result<Attributes, VfsError> {
+        self.check_writable(node)?;
+        self.edit(node, Edit::SetLen(size)).await?;
+        let state = self.state.lock().unwrap();
+        spool_attributes(&state, node).ok_or(VfsError::StaleHandle)
+    }
+
+    /// Makes a new empty file named `name` in `parent`, opens it, and counts one lookup and one handle. `name` is the name the OS sent. A mount with no spool answers [`VfsError::ReadOnly`], and a name that is taken is [`VfsError::Conflict`].
+    pub async fn create(
+        &self,
+        parent: NodeId,
+        name: &str,
+        access: Access,
+    ) -> Result<(Entry, HandleId), VfsError> {
+        self.spool()?;
+        let _changes = self.lock_changes().await?;
+        let parent_item = self.folder_of(parent)?;
+        let (_, existing) = self.find(&parent_item, name).await?;
+        if existing.is_some() {
+            return Err(VfsError::Conflict);
+        }
+        let spool_id = self.create_spool_file().await?;
+        let mut state = self.state.lock().unwrap();
+        let node = NodeId(state.next_node);
+        state.next_node += 1;
+        state.nodes.insert(
+            node,
+            Node {
+                // `list` names it below, with the index that finds it.
+                identity: Identity::Unnamed,
+                lookups: 1,
+                handles: 1,
+                attributes: None,
+                bytes: Bytes::Spooled(spool_id),
+            },
+        );
+        list(&mut state, &self.rules, node, &parent_item, name);
+        let attributes = spool_attributes(&state, node).unwrap();
+        let handle = insert_handle(&mut state, Opened::File { node, access });
+        Ok((
+            Entry {
+                node,
+                name: name.to_string(),
+                attributes,
+            },
+            handle,
+        ))
     }
 
     /// Closes a handle and drops the handle references it held. An unknown handle does nothing.
@@ -347,7 +616,7 @@ impl Vfs {
             return;
         };
         let nodes = match opened {
-            Opened::File { node } => vec![node],
+            Opened::File { node, .. } => vec![node],
             Opened::Folder { node, entries } => std::iter::once(node)
                 .chain(entries.into_iter().map(|entry| entry.node))
                 .collect(),
@@ -356,7 +625,7 @@ impl Vfs {
             if let Some(found) = state.nodes.get_mut(&node) {
                 found.handles -= 1;
             }
-            drop_unreferenced(&mut state, node);
+            drop_unreferenced(&mut state, &self.room, node);
         }
     }
 
@@ -388,10 +657,10 @@ impl Vfs {
         state.generation += 1;
     }
 
-    /// Makes an empty folder named `name` in `parent` and returns it. `name` is the name the OS sent. A name already in the listing is [`VfsError::Conflict`].
+    /// Makes an empty folder named `name` in `parent` and returns it. `name` is the name the OS sent. A name already in the listing, including a new file, is [`VfsError::Conflict`].
     pub async fn create_folder(&self, parent: NodeId, name: &str) -> Result<Entry, VfsError> {
         let _changes = self.lock_changes().await?;
-        let parent_item = self.item_of(parent)?;
+        let parent_item = self.folder_of(parent)?;
         let remote_name = unescape(name, &self.rules);
         let (_, existing) = self.find(&parent_item, name).await?;
         if existing.is_some() {
@@ -422,6 +691,7 @@ impl Vfs {
         let node = node_for(&mut state, created.id);
         let found_node = state.nodes.get_mut(&node).unwrap();
         found_node.lookups += 1;
+        set_place(found_node, &parent_item, remote_name);
         let attributes = remember(&mut found_node.attributes, asked, created.attributes);
         Ok(Entry {
             node,
@@ -430,35 +700,52 @@ impl Vfs {
         })
     }
 
-    /// Removes `name` from `parent`. `kind` is what the OS call removes: [`Kind::File`] for unlink, [`Kind::Folder`] for rmdir. The wrong kind is [`VfsError::IsAFolder`] or [`VfsError::NotAFolder`].
+    /// Removes `name` from `parent`. `kind` is what the OS call removes: [`Kind::File`] for unlink, [`Kind::Folder`] for rmdir. The wrong kind is [`VfsError::IsAFolder`] or [`VfsError::NotAFolder`]. A new file is found in the folder listing and removed from the spool, with no change call. A folder that holds a new file is [`VfsError::NotEmpty`].
     pub async fn remove(&self, parent: NodeId, name: &str, kind: Kind) -> Result<(), VfsError> {
         let _changes = self.lock_changes().await?;
-        let parent_item = self.item_of(parent)?;
+        let parent_item = self.folder_of(parent)?;
         let (_, found) = self.find(&parent_item, name).await?;
         let Some(found) = found else {
             return Err(VfsError::NotFound);
         };
-        if found.attributes.kind == Kind::Folder && kind == Kind::File {
+        if found.kind() == Kind::Folder && kind == Kind::File {
             return Err(VfsError::IsAFolder);
         }
-        if found.attributes.kind == Kind::File && kind == Kind::Folder {
+        if found.kind() == Kind::File && kind == Kind::Folder {
             return Err(VfsError::NotAFolder);
+        }
+        let item = match found {
+            Holder::New { node, .. } => {
+                unname(
+                    &mut self.state.lock().unwrap(),
+                    &self.rules,
+                    &self.room,
+                    node,
+                );
+                return Ok(());
+            }
+            Holder::Item(item) => item,
+        };
+        // The remote does not know the new files in a folder, so it would remove the folder and lose them.
+        if self.state.lock().unwrap().new_files.contains_key(&item.id) {
+            return Err(VfsError::NotEmpty);
         }
         let unsettled = Unsettled {
             vfs: self,
             folders: vec![parent_item.clone()],
             settled: false,
         };
-        self.call(self.provider.remove(&found.id, &parent_item))
+        self.call(self.provider.remove(&item.id, &parent_item))
             .await?;
         let mut state = unsettled.confirmed();
         change_listing(&mut state, &self.rules, &parent_item, |remote| {
-            remote.retain(|item| item.id != found.id)
+            remote.retain(|listed| listed.id != item.id)
         });
+        mark_removed(&mut state, &self.room, item.id);
         Ok(())
     }
 
-    /// Renames `name` in `parent` to `new_name` in `new_parent`. The names are the names the OS sent, and the provider gets `new_name` unescaped: moving a duplicate shown as `a (2).txt` names the remote item `a (2).txt`. `if_exists` says what to do when `new_name` is taken. A rename onto a name that another item in the destination also holds on the remote is [`VfsError::Conflict`].
+    /// Renames `name` in `parent` to `new_name` in `new_parent`. The names are the names the OS sent, and the provider gets `new_name` unescaped: moving a duplicate shown as `a (2).txt` names the remote item `a (2).txt`. `if_exists` says what to do when `new_name` is taken. A rename of an item onto a name that another item in the destination also holds on the remote is [`VfsError::Conflict`]. A new file renamed over an item keeps its own node and bytes and takes that item's id. Replacing a folder that holds a new file is [`VfsError::NotEmpty`].
     pub async fn rename(
         &self,
         parent: NodeId,
@@ -468,35 +755,54 @@ impl Vfs {
         if_exists: IfExists,
     ) -> Result<(), VfsError> {
         let _changes = self.lock_changes().await?;
-        let from = self.item_of(parent)?;
-        let to = self.item_of(new_parent)?;
-        let remote_name = unescape(new_name, &self.rules);
+        let from = self.folder_of(parent)?;
+        let to = self.folder_of(new_parent)?;
         let (_, source) = self.find(&from, name).await?;
         let Some(source) = source else {
             return Err(VfsError::NotFound);
         };
-        if from == to && new_name == source.name {
+        if from == to && new_name == source.name() {
             return match if_exists {
                 IfExists::Replace => Ok(()),
                 IfExists::Refuse => Err(VfsError::Conflict),
             };
         }
         let (destination, target) = self.find(&to, new_name).await?;
-        let replace = match &target {
-            Some(target) if target.id != source.id => {
-                if if_exists == IfExists::Refuse {
-                    return Err(VfsError::Conflict);
-                }
-                if source.attributes.kind == Kind::Folder && target.attributes.kind == Kind::File {
-                    return Err(VfsError::NotAFolder);
-                }
-                if source.attributes.kind == Kind::File && target.attributes.kind == Kind::Folder {
-                    return Err(VfsError::IsAFolder);
-                }
-                Some(target.id.clone())
+        // A holder that is the source itself, as in a case-only rename under a key that folds case, is no target.
+        let target = target.filter(|target| match (&source, target) {
+            (Holder::New { node: left, .. }, Holder::New { node: right, .. }) => left != right,
+            (Holder::Item(left), Holder::Item(right)) => left.id != right.id,
+            _ => true,
+        });
+        if let Some(target) = &target {
+            if if_exists == IfExists::Refuse {
+                return Err(VfsError::Conflict);
             }
+            if source.kind() == Kind::Folder && target.kind() == Kind::File {
+                return Err(VfsError::NotAFolder);
+            }
+            if source.kind() == Kind::File && target.kind() == Kind::Folder {
+                return Err(VfsError::IsAFolder);
+            }
+        }
+        let source = match source {
+            Holder::New { node, .. } => {
+                self.rename_new(node, &to, new_name, target);
+                return Ok(());
+            }
+            Holder::Item(item) => item,
+        };
+        let remote_name = unescape(new_name, &self.rules);
+        let replace = match &target {
+            Some(Holder::Item(item)) => Some(item.id.clone()),
             _ => None,
         };
+        // The remote does not know the new files in a folder, so it would replace the folder and lose them.
+        if let Some(replace) = &replace {
+            if self.state.lock().unwrap().new_files.contains_key(replace) {
+                return Err(VfsError::NotEmpty);
+            }
+        }
         // Google Drive can hold one name twice in a folder, and `unique_names` gives the name to the one with the lower ID. With another holder left, the moved item would get `new_name` only by the luck of its ID.
         let new_key = (self.rules.key)(new_name);
         let held_by_another = destination.remote.iter().any(|item| {
@@ -541,27 +847,50 @@ impl Vfs {
             });
             remote.push(moved.clone());
         });
+        // The replaced item goes first: a provider whose ids are paths gives the moved item the replaced item's id.
+        match target {
+            Some(Holder::Item(item)) => mark_removed(&mut state, &self.room, item.id),
+            Some(Holder::New { node, .. }) => unname(&mut state, &self.rules, &self.room, node),
+            None => {}
+        }
         if moved.id != source.id && !state.by_item.contains_key(&moved.id) {
             if let Some(node) = state.by_item.remove(&source.id) {
-                state.nodes.get_mut(&node).unwrap().item = moved.id.clone();
+                if let Identity::Item { id, .. } = &mut state.nodes.get_mut(&node).unwrap().identity
+                {
+                    *id = moved.id.clone();
+                }
                 state.by_item.insert(moved.id.clone(), node);
+            }
+            // The new files in a moved folder follow it to its new id.
+            if let Some(children) = state.new_files.remove(&source.id) {
+                for child in children.values() {
+                    if let Identity::New(place) = &mut state.nodes.get_mut(child).unwrap().identity
+                    {
+                        place.folder = moved.id.clone();
+                    }
+                }
+                state.new_files.insert(moved.id.clone(), children);
             }
         }
         if let Some(node) = state.by_item.get(&moved.id).copied() {
             let found = state.nodes.get_mut(&node).unwrap();
             remember(&mut found.attributes, asked, moved.attributes);
+            set_place(found, &to, remote_name);
         }
         Ok(())
     }
 
-    fn item_of(&self, node: NodeId) -> Result<ItemId, VfsError> {
-        self.state
-            .lock()
-            .unwrap()
-            .nodes
-            .get(&node)
-            .map(|found| found.item.clone())
-            .ok_or(VfsError::StaleHandle)
+    /// The folder's item id. A new file is not a folder. A node that is gone is [`VfsError::StaleHandle`].
+    fn folder_of(&self, node: NodeId) -> Result<ItemId, VfsError> {
+        let state = self.state.lock().unwrap();
+        let Some(found) = state.nodes.get(&node) else {
+            return Err(VfsError::StaleHandle);
+        };
+        found
+            .identity
+            .remote_id()
+            .cloned()
+            .ok_or(VfsError::NotAFolder)
     }
 
     /// Runs one provider call inside the mount's limits. Dropping the returned future cancels the call.
@@ -582,23 +911,23 @@ impl Vfs {
         result
     }
 
-    /// The three changes take this for the whole change. A wait that runs out is [`VfsError::TimedOut`].
+    /// `create`, `create_folder`, `remove`, and `rename` take this for the whole name change. A wait that runs out is [`VfsError::TimedOut`].
     async fn lock_changes(&self) -> Result<tokio::sync::MutexGuard<'_, ()>, VfsError> {
         tokio::time::timeout(self.options.call_timeout, self.changes.lock())
             .await
             .map_err(|_| VfsError::TimedOut)
     }
 
-    /// The item that holds `name` in `folder`, as the mount shows it, and the listing it was found in. A lookup and every change resolve a name here, so they always agree on which item a name means.
-    async fn find(&self, folder: &ItemId, name: &str) -> Result<(Listing, Option<Item>), VfsError> {
+    /// The holder of `name` in `folder`, as the mount shows it, and the listing it was found in. A lookup and every change resolve a name here, so they always agree on which item a name means.
+    async fn find(
+        &self,
+        folder: &ItemId,
+        name: &str,
+    ) -> Result<(Listing, Option<Holder>), VfsError> {
         let listing = self.listing(folder).await?;
-        let wanted = (self.rules.key)(name);
-        let found = listing
-            .shown
-            .iter()
-            .find(|item| (self.rules.key)(&item.name) == wanted)
-            .cloned();
-        Ok((listing, found))
+        let state = self.state.lock().unwrap();
+        let holder = resolve(&state, &self.rules, folder, &listing, name);
+        Ok((listing, holder))
     }
 
     async fn listing(&self, folder: &ItemId) -> Result<Listing, VfsError> {
@@ -618,11 +947,7 @@ impl Vfs {
             generation,
             answered: Instant::now(),
         };
-        let listing = Listing {
-            asked,
-            shown: shown(&remote, &self.rules),
-            remote: Arc::new(remote),
-        };
+        let listing = Listing::new(asked, Arc::new(remote), &self.rules);
         let mut state = self.state.lock().unwrap();
         let later = state
             .listings
@@ -654,6 +979,513 @@ impl Vfs {
         }
         Ok(listing)
     }
+
+    /// Whether `node` may be opened for write or cut: the mount has a spool, and the node is a file. A spooled node is a file, and a new file is always spooled. An item uses the kind it already holds, however old that answer is. A node with no answer is [`VfsError::StaleHandle`]: this asks the provider nothing.
+    fn check_writable(&self, node: NodeId) -> Result<(), VfsError> {
+        self.spool()?;
+        if node == Self::ROOT {
+            return Err(VfsError::IsAFolder);
+        }
+        let state = self.state.lock().unwrap();
+        let Some(found) = state.nodes.get(&node) else {
+            return Err(VfsError::StaleHandle);
+        };
+        if matches!(found.bytes, Bytes::Spooled(_)) {
+            return Ok(());
+        }
+        // Every other node came from a listing, a lookup, or a change, which each store an answer.
+        let Some((_, attributes)) = found.attributes else {
+            return Err(VfsError::StaleHandle);
+        };
+        match attributes.kind {
+            Kind::File => Ok(()),
+            Kind::Folder => Err(VfsError::IsAFolder),
+        }
+    }
+
+    /// One write or truncate.
+    async fn edit(&self, node: NodeId, edit: Edit) -> Result<(), VfsError> {
+        loop {
+            let bytes = {
+                let state = self.state.lock().unwrap();
+                let Some(found) = state.nodes.get(&node) else {
+                    return Err(VfsError::StaleHandle);
+                };
+                found.bytes.clone()
+            };
+            match bytes {
+                Bytes::Spooled(id) => return self.apply(id, edit).await,
+                Bytes::Fetching(lock) => {
+                    // Held until this arm ends, so the next look runs after the fetch publishes or gives up.
+                    let _guard = lock.lock().await;
+                }
+                Bytes::Clean => {
+                    if let Fetched::Published = self.fetch(node, &edit).await? {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Copies the remote bytes `edit` needs into a new spool file, applies `edit`, and publishes the file. [`Fetched::Replaced`] means this fetch did not publish, and the caller looks at the node again.
+    async fn fetch(&self, node: NodeId, edit: &Edit) -> Result<Fetched, VfsError> {
+        // A write needs the whole remote file. A truncate needs only the bytes it keeps, so a cut to zero fetches nothing.
+        let needed = match edit {
+            Edit::Write { .. } => u64::MAX,
+            Edit::SetLen(size) => *size,
+        };
+        let limit = self.spool()?.limit;
+        let (held, item) = {
+            let mut state = self.state.lock().unwrap();
+            let generation = state.generation;
+            let Some(found) = state.nodes.get_mut(&node) else {
+                return Err(VfsError::StaleHandle);
+            };
+            if !matches!(found.bytes, Bytes::Clean) {
+                return Ok(Fetched::Replaced);
+            }
+            let Some(item) = found.identity.remote_id().cloned() else {
+                return Err(VfsError::StaleHandle);
+            };
+            // An edit the spool could never hold fails before the download, not after. A size counts only while fresh: the remote file may have shrunk.
+            let stored = found
+                .attributes
+                .filter(|(held, _)| held.is_fresh(generation, self.options.attributes_ttl))
+                .map_or(0, |(_, attributes)| attributes.size);
+            if stored.min(needed).max(edit.end()) > limit {
+                return Err(VfsError::NoSpace);
+            }
+            let fetch_lock = Arc::new(tokio::sync::Mutex::new(()));
+            let held = fetch_lock.clone().try_lock_owned().unwrap();
+            found.bytes = Bytes::Fetching(fetch_lock);
+            (held, item)
+        };
+        let mut attempt = FetchAttempt {
+            vfs: self,
+            node,
+            spool: None,
+            _held: held,
+        };
+        let spool_id = self.create_spool_file().await?;
+        attempt.spool = Some(spool_id);
+        let mut offset = 0;
+        while offset < needed {
+            let length = u64::from(PIECE).min(needed - offset) as u32;
+            let data = self.call(self.provider.read(&item, offset, length)).await?;
+            let read = data.len() as u64;
+            self.apply(spool_id, Edit::Write { offset, data }).await?;
+            offset += read;
+            if read < u64::from(length) {
+                break;
+            }
+        }
+        self.apply(spool_id, edit.clone()).await?;
+        let mut state = self.state.lock().unwrap();
+        let published = matches!(
+            state.nodes.get(&node).map(|found| &found.bytes),
+            Some(Bytes::Fetching(_))
+        );
+        attempt.spool = None;
+        if !published {
+            discard(&mut state, &self.room, spool_id);
+            return Ok(Fetched::Replaced);
+        }
+        state.nodes.get_mut(&node).unwrap().bytes = Bytes::Spooled(spool_id);
+        Ok(Fetched::Published)
+    }
+
+    /// Reserves room, then runs the edit on the spool file. The edit lock is not held while this waits for room, and one edit waits at most the call time limit. A spool file that is gone, because its node went away, is [`VfsError::StaleHandle`].
+    async fn apply(&self, id: SpoolId, edit: Edit) -> Result<(), VfsError> {
+        let deadline = Instant::now() + self.options.call_timeout;
+        let Some(edits) = self
+            .state
+            .lock()
+            .unwrap()
+            .spools
+            .get(&id)
+            .map(|spool| Arc::clone(&spool.edits))
+        else {
+            return Err(VfsError::StaleHandle);
+        };
+        let limit = self.spool()?.limit;
+        let end = edit.end();
+        // No wait makes room for a file larger than the whole spool.
+        if end > limit {
+            return Err(VfsError::NoSpace);
+        }
+        let (path, before, guard) = loop {
+            // Enabled before the room check, so a wake-up that lands between the check and the wait is not lost.
+            let notified = self.room.notified();
+            let mut notified = std::pin::pin!(notified);
+            notified.as_mut().enable();
+            let guard = Arc::clone(&edits).lock_owned().await;
+            {
+                let mut state = self.state.lock().unwrap();
+                let State {
+                    spools, spool_used, ..
+                } = &mut *state;
+                let Some(spool) = spools.get_mut(&id) else {
+                    return Err(VfsError::StaleHandle);
+                };
+                let growth = end.saturating_sub(spool.size);
+                if *spool_used + growth <= limit {
+                    *spool_used += growth;
+                    spool.reserved = growth;
+                    break (spool.path.clone(), spool.size, guard);
+                }
+            }
+            drop(guard);
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                return Err(VfsError::NoSpace);
+            }
+        };
+        let state = Arc::clone(&self.state);
+        let room = Arc::clone(&self.room);
+        // The disk call owns the edit lock and does its own accounting, so a caller that is cancelled does not end the edit before the disk does.
+        let joined = tokio::task::spawn_blocking(move || {
+            let _guard = guard;
+            let result = match &edit {
+                Edit::Write { offset, data } => spool::write_all_at(&path, data, *offset),
+                Edit::SetLen(size) => spool::set_len(&path, *size),
+            };
+            let length = match (&result, &edit) {
+                (Ok(()), Edit::Write { .. }) => before.max(end),
+                (Ok(()), Edit::SetLen(size)) => *size,
+                (Err(_), _) => std::fs::metadata(&path).map_or(before, |metadata| metadata.len()),
+            };
+            account(&state, &room, id, length);
+            result.map_err(spool::map_io)
+        })
+        .await;
+        match joined {
+            Ok(result) => result,
+            Err(error) => Err(VfsError::Other(error.to_string())),
+        }
+    }
+
+    /// A new empty file in the spool folder, recorded in the state, and its number. A number a file from an earlier mount holds is skipped.
+    async fn create_spool_file(&self) -> Result<SpoolId, VfsError> {
+        let spool = self.spool()?;
+        loop {
+            let number = self
+                .next_spool
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let path = spool.folder.join(number.to_string());
+            let opened = path.clone();
+            match tokio::task::spawn_blocking(move || spool::create_named(&opened)).await {
+                Ok(Ok(())) => {
+                    let id = SpoolId(number);
+                    let file = SpoolFile {
+                        path,
+                        size: 0,
+                        reserved: 0,
+                        modified: SystemTime::now(),
+                        edits: Arc::new(tokio::sync::Mutex::new(())),
+                    };
+                    self.state.lock().unwrap().spools.insert(id, file);
+                    return Ok(id);
+                }
+                Ok(Err(error)) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Ok(Err(error)) => return Err(spool::map_io(error)),
+                Err(error) => return Err(VfsError::Other(error.to_string())),
+            }
+        }
+    }
+
+    /// Renames a new file. Nothing reaches the provider. A new file renamed over an item takes that item's id, so its bytes become the item's next bytes and the item keeps its id (decision 0005, choice 9). The node the item had is retired, and its open handles keep the old bytes, as with a POSIX rename.
+    fn rename_new(&self, node: NodeId, to: &ItemId, new_name: &str, target: Option<Holder>) {
+        let mut state = self.state.lock().unwrap();
+        match target {
+            Some(Holder::Item(item)) => {
+                mark_removed(&mut state, &self.room, item.id.clone());
+                unlist(&mut state, &self.rules, node);
+                state.nodes.get_mut(&node).unwrap().identity = Identity::Item {
+                    id: item.id.clone(),
+                    place: Some(Place {
+                        folder: to.clone(),
+                        name: unescape(&item.name, &self.rules),
+                    }),
+                };
+                state.by_item.insert(item.id, node);
+            }
+            replaced => {
+                if let Some(Holder::New { node: other, .. }) = replaced {
+                    unname(&mut state, &self.rules, &self.room, other);
+                }
+                unlist(&mut state, &self.rules, node);
+                list(&mut state, &self.rules, node, to, new_name);
+            }
+        }
+    }
+}
+
+impl Drop for Vfs {
+    fn drop(&mut self) {
+        let Some(spool) = &self.spool else {
+            return;
+        };
+        let mut state = self.state.lock().unwrap();
+        let staying: Vec<SpoolId> = state
+            .nodes
+            .values()
+            .filter_map(|node| match node.bytes {
+                Bytes::Spooled(id) if !node.identity.uploads(spool.stays_local) => Some(id),
+                _ => None,
+            })
+            .collect();
+        for id in staying {
+            discard(&mut state, &self.room, id);
+        }
+    }
+}
+
+/// How a fetch ended when it did not fail.
+enum Fetched {
+    /// The node's bytes are the new spool file, with the edit in it.
+    Published,
+
+    /// Another fetch got there first, or the node is gone. The edit is not in the node's bytes yet.
+    Replaced,
+}
+
+#[derive(Clone)]
+enum Edit {
+    Write { offset: u64, data: Vec<u8> },
+    SetLen(u64),
+}
+
+impl Edit {
+    /// How long the file is at least once the edit is done.
+    fn end(&self) -> u64 {
+        match self {
+            Edit::Write { offset, data } => offset.saturating_add(data.len() as u64),
+            Edit::SetLen(size) => *size,
+        }
+    }
+}
+
+enum ReadSource {
+    Spool(PathBuf),
+    Remote(ItemId),
+}
+
+/// A first edit that fails or is cancelled leaves the file as the remote has it. The next read asks the provider.
+struct FetchAttempt<'a> {
+    vfs: &'a Vfs,
+    node: NodeId,
+
+    /// The spool file this attempt made, until it is published or discarded.
+    spool: Option<SpoolId>,
+
+    /// The fetch lock. A field is dropped after `drop` runs, so a writer waiting on the lock sees the node clean again, never mid-fetch.
+    _held: tokio::sync::OwnedMutexGuard<()>,
+}
+
+impl Drop for FetchAttempt<'_> {
+    fn drop(&mut self) {
+        let mut state = self.vfs.state.lock().unwrap();
+        // While the attempt lives, its node is fetching or gone: nothing else moves a node out of `Fetching`.
+        if let Some(found) = state.nodes.get_mut(&self.node) {
+            if matches!(found.bytes, Bytes::Fetching(_)) {
+                found.bytes = Bytes::Clean;
+            }
+        }
+        if let Some(id) = self.spool.take() {
+            discard(&mut state, &self.vfs.room, id);
+        }
+    }
+}
+
+/// Settles a disk call: the spool file is `length` bytes long now, in place of its size and the room the call reserved. Its modified time moves even when the call failed, because a write that fails partway may still have changed bytes.
+fn account(state: &Mutex<State>, room: &Notify, id: SpoolId, length: u64) {
+    let mut state = state.lock().unwrap();
+    let State {
+        spools, spool_used, ..
+    } = &mut *state;
+    let Some(spool) = spools.get_mut(&id) else {
+        return;
+    };
+    let charged = spool.size + spool.reserved;
+    *spool_used = *spool_used - charged + length;
+    if length < charged {
+        room.notify_waiters();
+    }
+    spool.size = length;
+    spool.reserved = 0;
+    spool.modified = SystemTime::now();
+}
+
+/// A spooled node's size and modified time, when it has a spool file.
+fn spool_attributes(state: &State, node: NodeId) -> Option<Attributes> {
+    let found = state.nodes.get(&node)?;
+    let Bytes::Spooled(id) = &found.bytes else {
+        return None;
+    };
+    let spool = state.spools.get(id)?;
+    Some(Attributes {
+        kind: Kind::File,
+        size: spool.size,
+        modified: spool.modified,
+    })
+}
+
+/// The name a new file shows under.
+fn new_file_name(state: &State, rules: &NameRules, node: NodeId) -> String {
+    let Identity::New(place) = &state.nodes[&node].identity else {
+        unreachable!("only new files are listed as new files");
+    };
+    escape(&place.name, rules)
+}
+
+/// The remote items of `folder` as the mount shows them when a new file holds a name one of them shows under: the new file keeps the name, and the remote item gets a suffix. `None` when no name collides, so `listing.shown` stands.
+fn renamed_items(
+    state: &State,
+    rules: &NameRules,
+    folder: &ItemId,
+    listing: &Listing,
+) -> Option<Vec<Item>> {
+    let held = state.new_files.get(folder)?;
+    // Walk the smaller side: a copy of many files into an empty folder must not check each new name against every earlier one.
+    let collides = if held.len() <= listing.index.len() {
+        held.keys().any(|key| listing.index.contains_key(key))
+    } else {
+        listing.index.keys().any(|key| held.contains_key(key))
+    };
+    if !collides {
+        return None;
+    }
+    let names: Vec<String> = held
+        .values()
+        .map(|node| new_file_name(state, rules, *node))
+        .collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let mut remote = listing.remote.to_vec();
+    unique_names(&mut remote, rules, &names);
+    Some(remote)
+}
+
+fn resolve(
+    state: &State,
+    rules: &NameRules,
+    folder: &ItemId,
+    listing: &Listing,
+    name: &str,
+) -> Option<Holder> {
+    let wanted = (rules.key)(name);
+    if let Some(node) = state
+        .new_files
+        .get(folder)
+        .and_then(|held| held.get(&wanted))
+    {
+        return Some(Holder::New {
+            node: *node,
+            name: new_file_name(state, rules, *node),
+        });
+    }
+    let item = match renamed_items(state, rules, folder, listing) {
+        None => listing
+            .index
+            .get(&wanted)
+            .map(|at| listing.shown[*at].clone()),
+        Some(items) => items
+            .into_iter()
+            .find(|item| (rules.key)(&item.name) == wanted),
+    };
+    item.map(Holder::Item)
+}
+
+/// The entry a holder shows as. An item gets its node, and the node keeps what the listing said about it and where it was shown. Counts nothing.
+fn entry_for(
+    state: &mut State,
+    rules: &NameRules,
+    folder: &ItemId,
+    listing: &Listing,
+    holder: Holder,
+) -> Entry {
+    match holder {
+        Holder::New { node, name } => Entry {
+            node,
+            name,
+            attributes: spool_attributes(state, node).unwrap(),
+        },
+        Holder::Item(item) => {
+            let node = node_for(state, item.id);
+            let found = state.nodes.get_mut(&node).unwrap();
+            set_place(found, folder, unescape(&item.name, rules));
+            let held = remember(&mut found.attributes, listing.asked, item.attributes);
+            Entry {
+                node,
+                name: item.name,
+                attributes: spool_attributes(state, node).unwrap_or(held),
+            }
+        }
+    }
+}
+
+fn set_place(node: &mut Node, folder: &ItemId, remote_name: String) {
+    if let Identity::Item { place, .. } = &mut node.identity {
+        *place = Some(Place {
+            folder: folder.clone(),
+            name: remote_name,
+        });
+    }
+}
+
+/// This mount removed `id`, or replaced it by a rename. Its node keeps the id for the handles still open on it, and its bytes go nowhere.
+fn mark_removed(state: &mut State, room: &Notify, id: ItemId) {
+    let Some(node) = state.by_item.remove(&id) else {
+        return;
+    };
+    state.nodes.get_mut(&node).unwrap().identity = Identity::Removed(id);
+    drop_unreferenced(state, room, node);
+}
+
+/// Gives a new file the name `name`, as the OS sent it, in `folder`.
+fn list(state: &mut State, rules: &NameRules, node: NodeId, folder: &ItemId, name: &str) {
+    let remote_name = unescape(name, rules);
+    // The same key `unlist` takes it out by.
+    let key = (rules.key)(&escape(&remote_name, rules));
+    state.nodes.get_mut(&node).unwrap().identity = Identity::New(Place {
+        folder: folder.clone(),
+        name: remote_name,
+    });
+    state
+        .new_files
+        .entry(folder.clone())
+        .or_default()
+        .insert(key, node);
+}
+
+/// Takes a new file out of its folder's new files.
+fn unlist(state: &mut State, rules: &NameRules, node: NodeId) {
+    let Identity::New(place) = &state.nodes[&node].identity else {
+        return;
+    };
+    let folder = place.folder.clone();
+    let key = (rules.key)(&escape(&place.name, rules));
+    let held = state.new_files.get_mut(&folder).unwrap();
+    held.remove(&key);
+    if held.is_empty() {
+        state.new_files.remove(&folder);
+    }
+}
+
+/// A new file loses its name, as a remove or a rename over it does. Its open handles still work, and its node goes once nothing holds it.
+fn unname(state: &mut State, rules: &NameRules, room: &Notify, node: NodeId) {
+    unlist(state, rules, node);
+    state.nodes.get_mut(&node).unwrap().identity = Identity::Unnamed;
+    drop_unreferenced(state, room, node);
+}
+
+fn discard(state: &mut State, room: &Notify, id: SpoolId) {
+    let Some(spool) = state.spools.remove(&id) else {
+        return;
+    };
+    state.spool_used -= spool.size + spool.reserved;
+    room.notify_waiters();
+    // Unlinking is one quick call, and the sync callers (`release`, `forget`) cannot wait. When any caller returns, the bytes are gone.
+    let _ = std::fs::remove_file(&spool.path);
 }
 
 /// A change the provider was asked to make. It ends one of two ways: `confirmed`, or dropped. Dropped (an error, the time limit, or a cancelled call), the remote may or may not have changed, so the cached listing of each folder it names is forgotten.
@@ -688,13 +1520,6 @@ impl Drop for Unsettled<'_> {
     }
 }
 
-/// A listing as the mount shows it: the remote's items after `unique_names`.
-fn shown(remote: &[Item], rules: &NameRules) -> Arc<Vec<Item>> {
-    let mut shown = remote.to_vec();
-    unique_names(&mut shown, rules);
-    Arc::new(shown)
-}
-
 /// Stamps `State::changed` for `folder` and drops the stamps no listing in flight can be older than.
 fn note_changed(state: &mut State, call_timeout: Duration, folder: &ItemId) {
     let now = Instant::now();
@@ -715,7 +1540,7 @@ fn change_listing(
         return;
     };
     edit(Arc::make_mut(&mut listing.remote));
-    listing.shown = shown(&listing.remote, rules);
+    *listing = Listing::new(listing.asked, Arc::clone(&listing.remote), rules);
 }
 
 fn node_for(state: &mut State, item: ItemId) -> NodeId {
@@ -728,10 +1553,14 @@ fn node_for(state: &mut State, item: ItemId) -> NodeId {
     state.nodes.insert(
         id,
         Node {
-            item,
+            identity: Identity::Item {
+                id: item,
+                place: None,
+            },
             lookups: 0,
             handles: 0,
             attributes: None,
+            bytes: Bytes::Clean,
         },
     );
     id
@@ -748,7 +1577,7 @@ fn remember<T: Copy>(held: &mut Option<(Asked, T)>, asked: Asked, answer: T) -> 
     }
 }
 
-fn drop_unreferenced(state: &mut State, node: NodeId) {
+fn drop_unreferenced(state: &mut State, room: &Notify, node: NodeId) {
     if node == Vfs::ROOT {
         return;
     }
@@ -758,9 +1587,21 @@ fn drop_unreferenced(state: &mut State, node: NodeId) {
     if found.lookups != 0 || found.handles != 0 {
         return;
     }
-    let item = found.item.clone();
-    state.nodes.remove(&node);
-    state.by_item.remove(&item);
+    // A spooled item or new file is where its bytes go, so it stays after the OS forgets it.
+    if matches!(found.bytes, Bytes::Spooled(_))
+        && matches!(found.identity, Identity::Item { .. } | Identity::New(_))
+    {
+        return;
+    }
+    let found = state.nodes.remove(&node).unwrap();
+    if let Some(id) = found.identity.remote_id() {
+        if state.by_item.get(id) == Some(&node) {
+            state.by_item.remove(id);
+        }
+    }
+    if let Bytes::Spooled(id) = found.bytes {
+        discard(state, room, id);
+    }
 }
 
 fn insert_handle(state: &mut State, opened: Opened) -> HandleId {

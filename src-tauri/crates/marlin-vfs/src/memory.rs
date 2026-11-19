@@ -18,6 +18,7 @@ struct Inner {
     peak: usize,
     calls: usize,
     rename_changes_ids: bool,
+    largest_read: u32,
 }
 
 /// A provider that keeps its tree in memory, for tests. Like Google Drive, it allows two items with one name in a folder and any character in a name.
@@ -62,6 +63,7 @@ impl MemoryProvider {
                 peak: 0,
                 calls: 0,
                 rename_changes_ids: false,
+                largest_read: 0,
             }),
         }
     }
@@ -101,7 +103,7 @@ impl MemoryProvider {
         inner.stored.retain(|stored| stored.item.id != *id);
     }
 
-    /// While on, [`Provider::rename`] gives the moved item a fresh id, as a remote whose ids are paths would. Off by default.
+    /// While on, [`Provider::rename`] gives the moved item a new id, as a remote whose ids are paths would: the replaced item's id when it replaces one, and a fresh id otherwise. Off by default.
     pub fn rename_changes_ids(&self, on: bool) {
         self.inner.lock().unwrap().rename_changes_ids = on;
     }
@@ -129,6 +131,20 @@ impl MemoryProvider {
     /// How many provider calls have started.
     pub fn calls(&self) -> usize {
         self.inner.lock().unwrap().calls
+    }
+
+    /// The largest `length` any [`Provider::read`] call asked for.
+    pub fn largest_read(&self) -> u32 {
+        self.inner.lock().unwrap().largest_read
+    }
+
+    /// The stored bytes of an item, so a test can check the remote was not changed.
+    pub fn contents(&self, id: &ItemId) -> Vec<u8> {
+        let inner = self.inner.lock().unwrap();
+        find(&inner.stored, id)
+            .expect("no item has this ID")
+            .contents
+            .clone()
     }
 
     fn add(&self, parent: &ItemId, name: &str, kind: Kind, contents: &[u8]) -> ItemId {
@@ -227,6 +243,7 @@ impl Provider for MemoryProvider {
 
     async fn read(&self, id: &ItemId, offset: u64, length: u32) -> Result<Vec<u8>, VfsError> {
         self.answer(|inner| {
+            inner.largest_read = inner.largest_read.max(length);
             let file = find(&inner.stored, id)?;
             if file.item.attributes.kind != Kind::File {
                 return Err(VfsError::IsAFolder);
@@ -316,8 +333,10 @@ impl Provider for MemoryProvider {
                 inner.stored.retain(|stored| stored.item.id != *replace);
             }
             let fresh_id = inner.rename_changes_ids.then(|| {
-                inner.added += 1;
-                ItemId(format!("item-{}", inner.added))
+                replace.cloned().unwrap_or_else(|| {
+                    inner.added += 1;
+                    ItemId(format!("item-{}", inner.added))
+                })
             });
             let stored = inner.stored.iter_mut().find(|stored| stored.item.id == *id);
             let stored = stored.expect("the item was found before anything changed");
