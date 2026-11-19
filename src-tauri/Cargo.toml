@@ -10,7 +10,7 @@ rust-version = "1.92"
 default-run = "marlin"
 
 [workspace]
-members = ["crates/marlin-smb", "crates/marlin-vfs", "crates/marlin-mount", "crates/marlin-mount-client", "crates/marlin-fuse", "crates/marlin-gdrive", "crates/marlin-sftp", "crates/marlin-test-keychain"]
+members = ["crates/marlin-smb", "crates/marlin-smb-client", "crates/marlin-vfs", "crates/marlin-mount", "crates/marlin-mount-client", "crates/marlin-fuse", "crates/marlin-gdrive", "crates/marlin-sftp", "crates/marlin-test-keychain"]
 
 [features]
 default = []
@@ -110,6 +110,8 @@ rustls = { version = "0.23.40", features = ["ring"] }
 # cover software linked with it. A Windows build must not link it (#569).
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 unrar = "0.5"
+# SMB is not compiled on Windows.
+marlin-smb-client = { path = "crates/marlin-smb-client" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"

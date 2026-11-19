@@ -5081,16 +5081,8 @@ pub async fn compress_to_zip(
                     return Err(err);
                 }
 
-                use crate::locations::smb::{client, get_server_credentials, SidecarStatus};
-
-                if !client::is_available() {
-                    let status = client::initialize();
-                    if status != SidecarStatus::Available {
-                        return Err(status
-                            .error_message()
-                            .unwrap_or_else(|| "SMB support is not available".to_string()));
-                    }
-                }
+                use crate::locations::smb::{client, get_server_credentials};
+                use marlin_smb_client::protocol::methods;
 
                 let creds = get_server_credentials(&hostname_for_task)?;
                 let params = serde_json::json!({
@@ -5106,7 +5098,7 @@ pub async fn compress_to_zip(
                 });
 
                 let upload_result: Result<serde_json::Value, String> =
-                    client::call_method("upload_file", params);
+                    client::call_method(methods::UPLOAD_FILE, params);
                 if let Err(err) = upload_result {
                     let _ = fs::remove_file(&temp_zip_for_task);
                     return Err(err);
@@ -7687,8 +7679,8 @@ pub async fn resolve_gdrive_folder_url(
 /// Get all connected SMB servers
 #[cfg(not(target_os = "windows"))]
 #[command]
-pub fn get_smb_servers() -> Result<Vec<crate::locations::smb::SmbServerInfo>, String> {
-    crate::locations::smb::get_smb_servers()
+pub fn get_smb_servers() -> Result<Vec<marlin_smb_client::SmbServerInfo>, String> {
+    marlin_smb_client::saved_servers(&marlin_smb_client::servers_path()?)
 }
 
 /// Get all connected SMB servers (Windows stub - SMB uses native UNC paths)
@@ -7706,8 +7698,14 @@ pub fn add_smb_server(
     username: String,
     password: String,
     domain: Option<String>,
-) -> Result<crate::locations::smb::SmbServerInfo, String> {
-    crate::locations::smb::add_smb_server(hostname, username, password, domain)
+) -> Result<marlin_smb_client::SmbServerInfo, String> {
+    marlin_smb_client::add_server(
+        &marlin_smb_client::servers_path()?,
+        hostname,
+        username,
+        password,
+        domain,
+    )
 }
 
 /// Add a new SMB server (Windows stub)
@@ -7726,7 +7724,7 @@ pub fn add_smb_server(
 #[cfg(not(target_os = "windows"))]
 #[command]
 pub fn remove_smb_server(hostname: String) -> Result<(), String> {
-    crate::locations::smb::remove_smb_server(&hostname)
+    marlin_smb_client::remove_server(&marlin_smb_client::servers_path()?, &hostname)
 }
 
 /// Remove an SMB server (Windows stub)
@@ -7734,69 +7732,6 @@ pub fn remove_smb_server(hostname: String) -> Result<(), String> {
 #[command]
 pub fn remove_smb_server(_hostname: String) -> Result<(), String> {
     Ok(())
-}
-
-/// Test connection to an SMB server
-#[cfg(not(target_os = "windows"))]
-#[command]
-pub fn test_smb_connection(
-    hostname: String,
-    username: String,
-    password: String,
-    domain: Option<String>,
-) -> Result<bool, String> {
-    crate::locations::smb::test_smb_connection(&hostname, &username, &password, domain.as_deref())
-}
-
-/// Test connection to an SMB server (Windows stub)
-#[cfg(target_os = "windows")]
-#[command]
-pub fn test_smb_connection(
-    _hostname: String,
-    _username: String,
-    _password: String,
-    _domain: Option<String>,
-) -> Result<bool, String> {
-    Ok(true)
-}
-
-/// SMB sidecar status response
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SmbStatusResponse {
-    pub available: bool,
-    pub reason: Option<String>,
-}
-
-/// Get SMB sidecar status
-#[cfg(not(target_os = "windows"))]
-#[command]
-pub fn get_smb_status() -> SmbStatusResponse {
-    use crate::locations::smb::client::{self, SidecarStatus};
-
-    let status = client::initialize();
-    match status {
-        SidecarStatus::Available => SmbStatusResponse {
-            available: true,
-            reason: None,
-        },
-        _ => SmbStatusResponse {
-            available: false,
-            reason: status.error_message(),
-        },
-    }
-}
-
-/// Get SMB sidecar status (Windows stub - SMB uses native UNC paths)
-#[cfg(target_os = "windows")]
-#[command]
-pub fn get_smb_status() -> SmbStatusResponse {
-    SmbStatusResponse {
-        available: true,
-        reason: Some(
-            "Windows uses native UNC paths. Navigate to \\\\server\\share directly.".to_string(),
-        ),
-    }
 }
 
 /// Download an SMB file to a temporary location (for drag-out/open-in-external-app).

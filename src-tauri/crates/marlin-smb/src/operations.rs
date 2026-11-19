@@ -2,7 +2,7 @@
 //!
 //! All operations receive credentials as parameters (no keychain access).
 
-use crate::protocol::{
+use marlin_smb_client::protocol::{
     error_codes, CopyParams, CreateDirectoryParams, DeleteParams, DirectoryEntry,
     DownloadFileParams, DownloadFileResult, DownloadPartialParams, DownloadPartialResult,
     FileMetadataResult, GetFileMetadataParams, ListSharesParams, ListSharesResult,
@@ -298,8 +298,7 @@ pub fn copy(params: CopyParams) -> Result<(), (i32, String)> {
 
 /// List available shares on a server.
 pub fn list_shares(params: ListSharesParams) -> Result<ListSharesResult, (i32, String)> {
-    use std::process::Command;
-    use uuid::Uuid;
+    use std::process::{Command, Stdio};
 
     // Use smbclient -L to enumerate shares (pavao doesn't support this well)
     let (smbclient_program, augmented_path) = resolve_smbclient_command();
@@ -309,13 +308,16 @@ pub fn list_shares(params: ListSharesParams) -> Result<ListSharesResult, (i32, S
     }
     cmd.arg("-L")
         .arg(format!("//{}", params.credentials.hostname))
-        .arg("-g"); // Machine-readable output
+        .arg("-g") // Machine-readable output
+        .arg("-A")
+        .arg("/dev/stdin")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
-    // Avoid putting credentials on the process command line.
-    // smbclient supports reading auth data from an authfile via -A.
-    let auth_file_path =
-        std::env::temp_dir().join(format!("marlin-smb-auth-{}.conf", Uuid::new_v4()));
-    let auth_file_contents = {
+    // smbclient reads its auth text from stdin (-A /dev/stdin), so the credentials reach
+    // neither the command line nor a file.
+    let auth_text = {
         let mut s = format!(
             "username = {}\npassword = {}\n",
             params.credentials.username, params.credentials.password
@@ -326,34 +328,29 @@ pub fn list_shares(params: ListSharesParams) -> Result<ListSharesResult, (i32, S
         s
     };
 
-    std::fs::write(&auth_file_path, auth_file_contents).map_err(|e| {
-        (
-            error_codes::INTERNAL_ERROR,
-            format!("Failed to create smbclient auth file: {}", e),
-        )
-    })?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Ok(metadata) = std::fs::metadata(&auth_file_path) {
-            let mut perms = metadata.permissions();
-            perms.set_mode(0o600);
-            let _ = std::fs::set_permissions(&auth_file_path, perms);
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err((error_codes::SMB_LIBRARY_MISSING, "smbclient not found. Install Samba (macOS: `brew install samba`, Linux: `sudo apt-get install smbclient`).".to_string()));
         }
+        Err(e) => {
+            return Err((
+                error_codes::SMB_ERROR,
+                format!("Failed to run smbclient: {}", e),
+            ));
+        }
+    };
+
+    if let Some(mut stdin) = child.stdin.take() {
+        // A smbclient that exited before it read this fails below, with its own stderr.
+        let _ = stdin.write_all(auth_text.as_bytes());
     }
 
-    cmd.arg("-A").arg(&auth_file_path);
-
-    let output = cmd.output();
-    let _ = std::fs::remove_file(&auth_file_path);
-
-    let output = output.map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            (error_codes::SMB_LIBRARY_MISSING, "smbclient not found. Install Samba (macOS: `brew install samba`, Linux: `sudo apt-get install smbclient`).".to_string())
-        } else {
-            (error_codes::SMB_ERROR, format!("Failed to run smbclient: {}", e))
-        }
+    let output = child.wait_with_output().map_err(|e| {
+        (
+            error_codes::SMB_ERROR,
+            format!("Failed to run smbclient: {}", e),
+        )
     })?;
 
     if !output.status.success() {

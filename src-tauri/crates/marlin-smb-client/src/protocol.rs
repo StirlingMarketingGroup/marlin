@@ -32,7 +32,8 @@ pub mod error_codes {
 }
 
 /// JSON-RPC 2.0 request.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+// No `Debug`: `params` holds the password as plain JSON.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Request {
     pub jsonrpc: String,
     pub id: u64,
@@ -86,7 +87,7 @@ pub struct RpcError {
 }
 
 /// SMB credentials passed with each request.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SmbCredentials {
     pub hostname: String,
     pub username: String,
@@ -94,6 +95,18 @@ pub struct SmbCredentials {
     pub password: String,
     #[serde(default)]
     pub domain: Option<String>,
+}
+
+// Written by hand: a derived `Debug` would print the password, and every `*Params` type prints its credentials.
+impl std::fmt::Debug for SmbCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SmbCredentials")
+            .field("hostname", &self.hostname)
+            .field("username", &self.username)
+            .field("password", &"<hidden>")
+            .field("domain", &self.domain)
+            .finish()
+    }
 }
 
 /// Parameters for read_directory method.

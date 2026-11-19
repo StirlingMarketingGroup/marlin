@@ -218,9 +218,7 @@ pub fn run() {
             commands::get_smb_servers,
             commands::add_smb_server,
             commands::remove_smb_server,
-            commands::test_smb_connection,
             commands::download_smb_file,
-            commands::get_smb_status,
             // SFTP server integration
             commands::get_sftp_servers,
             commands::add_sftp_server,
@@ -268,6 +266,14 @@ pub fn run() {
 
             if let Err(err) = locations::archive::prune_archive_cache_on_startup() {
                 log::warn!("Failed to prune archive cache on startup: {err}");
+            }
+
+            // Before any window can ask for an SMB server.
+            #[cfg(not(target_os = "windows"))]
+            if let Err(err) = marlin_smb_client::servers_path()
+                .and_then(|path| marlin_smb_client::migrate_plaintext_passwords(&path))
+            {
+                log::warn!("Failed to move saved SMB passwords to the keychain: {err}");
             }
 
             // Position traffic lights similar to Finder's sidebar style
