@@ -7822,36 +7822,40 @@ pub async fn download_smb_file(_path: String) -> Result<String, String> {
 // SFTP Server Commands
 // ============================================================================
 
-/// Get all connected SFTP servers
+/// List the saved SFTP servers.
 #[command]
-pub fn get_sftp_servers() -> Result<Vec<crate::locations::sftp::SftpServerInfo>, String> {
-    crate::locations::sftp::get_sftp_servers()
+pub fn get_sftp_servers() -> Result<Vec<marlin_sftp::SftpServerInfo>, String> {
+    marlin_sftp::saved_servers(&marlin_sftp::servers_path()?)
 }
 
 /// Add a new SFTP server
 #[command]
-pub fn add_sftp_server(
+pub async fn add_sftp_server(
     hostname: String,
     port: u16,
     username: String,
     password: Option<String>,
     auth_method: String,
     key_path: Option<String>,
-) -> Result<crate::locations::sftp::SftpServerInfo, String> {
-    crate::locations::sftp::add_sftp_server(
+) -> Result<marlin_sftp::SftpServerInfo, String> {
+    let server = marlin_sftp::add_server(
+        &marlin_sftp::servers_path()?,
         hostname,
         port,
         username,
         password,
         auth_method,
         key_path,
-    )
+    )?;
+    // A pooled session is signed in as the server's old user.
+    crate::locations::sftp::pool::drop_connections(&server.hostname, server.port).await;
+    Ok(server)
 }
 
 /// Remove an SFTP server
 #[command]
 pub async fn remove_sftp_server(hostname: String, port: u16) -> Result<(), String> {
-    crate::locations::sftp::remove_sftp_server(&hostname, port)?;
+    marlin_sftp::remove_server(&marlin_sftp::servers_path()?, &hostname, port)?;
     // Drop any cached SFTP sessions for this server
     crate::locations::sftp::pool::drop_connections(&hostname, port).await;
     Ok(())
@@ -7890,7 +7894,7 @@ pub fn get_sftp_unknown_host_key(
 /// Save that key in `~/.ssh/known_hosts`, when `fingerprint` is the one the user was shown.
 #[command]
 pub fn trust_sftp_host_key(hostname: String, port: u16, fingerprint: String) -> Result<(), String> {
-    let known_hosts = crate::locations::sftp::host_key::known_hosts_path()?;
+    let known_hosts = marlin_sftp::known_hosts_path()?;
     crate::locations::sftp::host_key::trust_unknown_host_key(
         &hostname,
         port,

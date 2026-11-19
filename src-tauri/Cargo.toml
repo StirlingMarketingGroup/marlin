@@ -10,7 +10,7 @@ rust-version = "1.92"
 default-run = "marlin"
 
 [workspace]
-members = ["crates/marlin-smb", "crates/marlin-vfs", "crates/marlin-mount", "crates/marlin-mount-client", "crates/marlin-fuse", "crates/marlin-gdrive", "crates/marlin-test-keychain"]
+members = ["crates/marlin-smb", "crates/marlin-vfs", "crates/marlin-mount", "crates/marlin-mount-client", "crates/marlin-fuse", "crates/marlin-gdrive", "crates/marlin-sftp", "crates/marlin-test-keychain"]
 
 [features]
 default = []
@@ -36,6 +36,7 @@ serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 marlin-mount-client = { path = "crates/marlin-mount-client" }
 marlin-gdrive = { path = "crates/marlin-gdrive" }
+marlin-sftp = { path = "crates/marlin-sftp" }
 marlin-test-keychain = { path = "crates/marlin-test-keychain", optional = true }
 log = "0.4"
 tauri = { version = "2.11.2", features = [] }
@@ -124,6 +125,5 @@ clipboard-win = "5"
 gtk = { version = "0.18", package = "gtk" }
 
 [dev-dependencies]
-rand = "0.10"
 tempfile = "3.27"
 marlin-test-keychain = { path = "crates/marlin-test-keychain" }

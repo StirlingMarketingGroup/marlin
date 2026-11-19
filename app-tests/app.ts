@@ -6,13 +6,43 @@ import { remote, type Browser } from 'webdriverio';
 
 const appBinary = path.join(import.meta.dirname, '../src-tauri/target/app-test/debug/marlin');
 
+/** A local TCP port that nothing listens on right now. */
+export function freePort(): Promise<number> {
+  return new Promise<number>((resolve, reject) => {
+    const server = net
+      .createServer()
+      .once('error', reject)
+      .listen(0, '127.0.0.1', () => {
+        const { port } = server.address() as net.AddressInfo;
+        server.close(() => resolve(port));
+      });
+  });
+}
+
+// A rejection in the page is a thrown WebDriver error. Return the value, or the error text, so the test asserts it.
+export function runCommand(
+  browser: Browser,
+  command: string,
+  args: Record<string, unknown> = {}
+): Promise<unknown> {
+  return browser.execute(
+    `return window.__TAURI_INTERNALS__
+      .invoke(arguments[0], arguments[1])
+      .then((value) => value ?? null, (error) => String(error))`,
+    command,
+    args
+  );
+}
+
 /**
  * Starts the test build of the app with its own home folder and WebDriver port.
  * `files` is an empty folder for the files a test wants the app to show.
+ * `home` is the app's temporary home folder.
  */
 export async function startApp(): Promise<{
   browser: Browser;
   files: string;
+  home: string;
   stop: () => Promise<void>;
 }> {
   // Not os.tmpdir(): the mount helper's socket lives under the home folder, and macOS
@@ -49,15 +79,7 @@ export async function startApp(): Promise<{
     await fs.mkdir(run, { mode: 0o700 });
     await fs.mkdir(tmp);
 
-    const port = await new Promise<number>((resolve, reject) => {
-      const server = net
-        .createServer()
-        .once('error', reject)
-        .listen(0, '127.0.0.1', () => {
-          const { port } = server.address() as net.AddressInfo;
-          server.close(() => resolve(port));
-        });
-    });
+    const port = await freePort();
 
     // Everything the app may see. The developer's other variables stay out, so the app
     // cannot reach their settings, Google key file, or SSH agent. The `app-test` feature
@@ -122,7 +144,7 @@ export async function startApp(): Promise<{
       timeoutMsg: 'The test app never opened its first folder',
     });
 
-    return { browser, files, stop };
+    return { browser, files, home, stop };
   } catch (error) {
     await stop().catch((cleanupError) => console.error(cleanupError));
     throw error;

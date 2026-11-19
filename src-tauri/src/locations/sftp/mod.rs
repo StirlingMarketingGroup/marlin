@@ -1,4 +1,3 @@
-pub mod auth;
 pub mod host_key;
 pub mod pool;
 
@@ -8,8 +7,6 @@ use crate::locations::{
 };
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
-
-pub use auth::{add_sftp_server, get_sftp_servers, remove_sftp_server, SftpServerInfo};
 
 #[derive(Default)]
 pub struct SftpProvider;
