@@ -3,7 +3,7 @@
 What license Marlin has, which licenses a dependency may have, how the check works, and which license texts each installer carries. Read this before you add a dependency or upgrade one across a major version.
 
 **Covers:** `LICENSE`, `THIRD-PARTY-NOTICES.md`, `src-tauri/about.toml`, `src-tauri/licenses/`, `bundle.resources` in `src-tauri/tauri.conf.json`, `scripts/check-licenses.mjs`, `scripts/generate-license-texts.mjs`, `scripts/check-bundled-licenses.mjs`, the "Check dependency licenses" step in `.github/workflows/check.yml`
-**Checked against the code:** 2026-11-18
+**Checked against the code:** 2026-11-19
 
 ## Marlin's license
 

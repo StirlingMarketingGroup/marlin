@@ -29,12 +29,13 @@ The workspace has seven library-only crates under `src-tauri/crates/`. `marlin-v
 
 | Module                   | Job                                                                                                       |
 | ------------------------ | --------------------------------------------------------------------------------------------------------- |
-| `lib.rs`                 | Entry point. Registers plugins, commands, and shared state.                                               |
+| `lib.rs`                 | Entry point. Raises the open-file limit. Registers plugins, commands, and shared state.                   |
 | `commands.rs`            | Nearly every command: listing, file operations, paste, archives, windows, preferences, remote setup.      |
 | `locations/`             | Storage backends behind one trait. See [Location providers](location-providers.md).                       |
 | `thumbnails/`            | Thumbnail service, cache, and per-format generators. See [Thumbnails](thumbnails.md).                     |
 | `clipboard.rs`           | File copy, cut, and paste through the OS clipboard, with one implementation per OS.                       |
 | `fs_utils.rs`            | Local path expansion, `FileItem` building, local copy helpers.                                            |
+| `delete_entry.rs`        | Deletes a local file, link, or folder. See [decision 0007](decisions/0007-permanent-delete.md).           |
 | `fs_watcher.rs`          | Watches local folders and emits `directory-changed`.                                                      |
 | `mount_helper.rs`        | The five mount commands, and the request to stop the helper at quit. See [Mount helper](mount-helper.md). |
 | `state.rs`               | Shared state types: directory streams, folder-size jobs, menu state, trash undo.                          |

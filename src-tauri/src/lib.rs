@@ -1,5 +1,6 @@
 mod clipboard;
 mod commands;
+mod delete_entry;
 mod fs_utils;
 mod fs_watcher;
 pub mod locations;
@@ -79,6 +80,32 @@ use tauri::Manager;
 
 #[cfg(all(feature = "app-test", not(debug_assertions)))]
 compile_error!("The `app-test` feature opens a control port. Build it in debug only.");
+
+/// A permanent delete holds one open folder per level in progress on each of its threads,
+/// and macOS starts an app with room for 256 open files.
+#[cfg(not(target_os = "windows"))]
+fn raise_open_file_limit() {
+    use rustix::process::{getrlimit, setrlimit, Resource, Rlimit};
+
+    // Well below the usual hard limit, because the apps Marlin opens inherit it.
+    const OPEN_FILES: u64 = 4096;
+    let limit = getrlimit(Resource::Nofile);
+    let wanted = limit
+        .maximum
+        .map_or(OPEN_FILES, |maximum| maximum.min(OPEN_FILES));
+    if limit.current.is_none_or(|current| current >= wanted) {
+        return;
+    }
+    if let Err(err) = setrlimit(
+        Resource::Nofile,
+        Rlimit {
+            current: Some(wanted),
+            maximum: limit.maximum,
+        },
+    ) {
+        log::warn!("Failed to raise the open file limit: {err}");
+    }
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -260,6 +287,10 @@ pub fn run() {
                         .build(),
                 )?;
             }
+
+            // After the log plugin, so a failure is logged; before any command can delete.
+            #[cfg(not(target_os = "windows"))]
+            raise_open_file_limit();
 
             // Initialize the file system watcher
             fs_watcher::init_watcher(app.handle().clone());
