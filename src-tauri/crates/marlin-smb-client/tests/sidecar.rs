@@ -3,9 +3,8 @@
 use marlin_smb_client::{CallError, Sidecar, StartError};
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 fn script(body: &str) -> (tempfile::TempDir, PathBuf) {
@@ -250,13 +249,22 @@ sleep 600
     wait_until_exited(&wait_for_file(&child_pid));
 }
 
+/// A `sh` child writes the script, so this test process never holds it open for writing.
+/// On Linux a process that another test is starting at that moment would inherit the
+/// handle, and running the script would then fail with "Text file busy".
 fn write_script(path: &Path, body: &str) {
-    let mut file = fs::File::create(path).unwrap();
-    write!(file, "#!/bin/sh\n{body}").unwrap();
-    drop(file);
-    let mut perms = fs::metadata(path).unwrap().permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(path, perms).unwrap();
+    let mut writer = Command::new("/bin/sh")
+        .args(["-c", r#"cat > "$1" && chmod 755 "$1""#, "sh"])
+        .arg(path)
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    write!(writer.stdin.take().unwrap(), "#!/bin/sh\n{body}").unwrap();
+    assert!(
+        writer.wait().unwrap().success(),
+        "could not write {}",
+        path.display()
+    );
 }
 
 fn shell_quote(path: &Path) -> String {
