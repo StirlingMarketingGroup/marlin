@@ -117,8 +117,13 @@ pub fn unescape(name: &str, rules: &NameRules) -> String {
     out
 }
 
-/// Rewrites `item.name` so one folder can be shown on this OS. The result depends only on the set of ids and names. Nothing is stored, so adding or removing a duplicate can change another item's suffix.
-pub fn unique_names(items: &mut [Item], rules: &NameRules) {
+/// Finder's own files, which a macOS mount keeps on this computer: `.DS_Store`, and the `._name` files that hold extended attributes on a filesystem that has none.
+pub fn finder_files(name: &str) -> bool {
+    name == ".DS_Store" || name.starts_with("._")
+}
+
+/// Rewrites `item.name` so one folder can be shown on this OS. `held` are names, as the OS shows them, that other entries in the folder hold: an item with one of them gets a suffix. The result depends only on the set of ids and names, and on `held`. Nothing is stored, so adding or removing a duplicate can change another item's suffix.
+pub fn unique_names(items: &mut [Item], rules: &NameRules, held: &[&str]) {
     for item in items.iter_mut() {
         item.name = escape(&item.name, rules);
     }
@@ -126,11 +131,12 @@ pub fn unique_names(items: &mut [Item], rules: &NameRules) {
     for item in items.iter() {
         *counts.entry((rules.key)(&item.name)).or_default() += 1;
     }
-    let mut taken = HashSet::new();
+    let held: HashSet<String> = held.iter().map(|name| (rules.key)(name)).collect();
+    let mut taken = held.clone();
     let mut pending = Vec::new();
     for (index, item) in items.iter().enumerate() {
         let key = (rules.key)(&item.name);
-        if counts[&key] == 1 {
+        if counts[&key] == 1 && !held.contains(&key) {
             taken.insert(key);
         } else {
             pending.push(index);
@@ -194,7 +200,7 @@ mod tests {
 
     fn mapped(pairs: &[(&str, &str)], rules: &NameRules) -> Vec<(String, String)> {
         let mut items = sample(pairs);
-        unique_names(&mut items, rules);
+        unique_names(&mut items, rules, &[]);
         let mut names: Vec<_> = items
             .into_iter()
             .map(|item| (item.id.0, item.name))
@@ -340,6 +346,29 @@ mod tests {
             assert_eq!(mapped(&order, &POSIX), expected);
             order.rotate_left(1);
         }
+    }
+
+    #[test]
+    fn an_item_with_a_held_name_gets_a_suffix() {
+        let mut items = sample(&[
+            ("item-1", "a.txt"),
+            ("item-2", "b.txt"),
+            ("item-3", "b.txt"),
+        ]);
+        unique_names(&mut items, &POSIX, &["a.txt", "b (2).txt"]);
+        let mut names: Vec<_> = items
+            .into_iter()
+            .map(|item| (item.id.0, item.name))
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            expect(&[
+                ("item-1", "a (2).txt"),
+                ("item-2", "b.txt"),
+                ("item-3", "b (3).txt")
+            ])
+        );
     }
 
     #[test]

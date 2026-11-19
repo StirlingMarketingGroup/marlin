@@ -8,7 +8,14 @@ description = "Marlin's virtual filesystem core: what every mount adapter and ev
 
 [dependencies]
 async-trait = "0.1"
-tokio = { version = "1.50", features = ["sync", "time"] }
+tokio = { version = "1.50", features = ["rt", "sync", "time"] }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", features = ["fs"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
+tempfile = "3.27"
 tokio = { version = "1.50", features = ["macros", "rt-multi-thread", "sync", "time", "test-util"] }
