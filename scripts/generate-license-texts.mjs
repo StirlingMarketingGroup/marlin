@@ -40,6 +40,11 @@ const CRATE_FILES = [
   { crate: 'exr', name: 'exr', file: 'LICENSE.md' },
   { crate: 'libm', name: 'libm', file: 'LICENSE.txt' },
   { crate: 'md5', name: 'md5', file: 'LICENSE.md' },
+  {
+    crate: 'normpath',
+    name: 'Rust standard library code in normpath',
+    file: 'LICENSE-THIRD-PARTY',
+  },
   { crate: 'siphasher', name: 'siphasher', file: 'COPYING' },
 ];
 

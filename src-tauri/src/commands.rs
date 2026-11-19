@@ -2259,7 +2259,7 @@ pub async fn delete_paths_permanently(
     let mut expanded: Vec<PathBuf> = Vec::with_capacity(paths.len());
     for original in paths {
         let path_buf = expand_path(&original)?;
-        if !path_buf.exists() {
+        if fs::symlink_metadata(&path_buf).is_err() {
             return Err(format!("Path does not exist: {}", original));
         }
         expanded.push(path_buf);

@@ -117,14 +117,9 @@ impl LocationProvider for FileSystemProvider {
     async fn delete(&self, location: &Location) -> Result<(), String> {
         let path = self.resolve_path_only(location)?;
 
-        spawn_blocking(move || {
-            if !path.exists() {
-                return Err("Path does not exist".to_string());
-            }
-            delete_file_or_directory(&path)
-        })
-        .await
-        .map_err(|e| format!("Task join error: {}", e))?
+        spawn_blocking(move || delete_file_or_directory(&path))
+            .await
+            .map_err(|e| format!("Task join error: {}", e))?
     }
 
     async fn rename(&self, from: &Location, to: &Location) -> Result<(), String> {

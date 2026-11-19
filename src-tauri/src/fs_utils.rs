@@ -548,11 +548,10 @@ pub fn delete_file_or_directory(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let _scope_guard = macos_security::retain_access(path)?;
 
-    if path.is_dir() {
-        fs::remove_dir_all(path).map_err(|e| format!("Failed to delete directory: {}", e))
-    } else {
-        fs::remove_file(path).map_err(|e| format!("Failed to delete file: {}", e))
-    }
+    crate::delete_entry::delete_entry(path).map_err(|e| {
+        let name = path.file_name().unwrap_or(path.as_os_str());
+        format!("Failed to delete {}: {}", name.to_string_lossy(), e)
+    })
 }
 
 pub fn rename_file_or_directory(from: &Path, to: &Path) -> Result<(), String> {
@@ -833,4 +832,18 @@ pub fn allocate_unique_path(dir: &Path, desired_name: &str) -> Result<PathBuf, S
     }
 
     Err("Unable to allocate unique destination name".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::delete_file_or_directory;
+
+    #[test]
+    fn a_failed_delete_names_the_selected_entry() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let err = delete_file_or_directory(&temp.path().join("missing")).unwrap_err();
+
+        assert!(err.starts_with("Failed to delete missing: "), "{err}");
+    }
 }

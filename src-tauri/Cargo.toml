@@ -112,6 +112,7 @@ rustls = { version = "0.23.40", features = ["ring"] }
 unrar = "0.5"
 # SMB is not compiled on Windows.
 marlin-smb-client = { path = "crates/marlin-smb-client" }
+rustix = { version = "1.1", features = ["fs", "process"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"
@@ -122,6 +123,7 @@ tauri-plugin-macos-permissions = "2.3.0"
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62", features = ["Win32_Storage_FileSystem", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_Foundation", "Win32_UI_Shell"] }
 clipboard-win = "5"
+remove_dir_all = { version = "1.0", features = ["parallel"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = { version = "0.18", package = "gtk" }
