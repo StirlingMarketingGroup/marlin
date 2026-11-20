@@ -19,21 +19,46 @@ fn spooled_mount(
 ) -> (Arc<MemoryProvider>, Arc<Vfs>, tempfile::TempDir) {
     let provider = Arc::new(MemoryProvider::new());
     let dir = tempfile::tempdir().unwrap();
-    let vfs = Arc::new(
-        Vfs::new(provider.clone(), POSIX, options).take_writes(Spool {
-            folder: dir.path().to_path_buf(),
-            limit,
-            stays_local,
-        }),
-    );
+    let vfs = mount_on(&provider, &dir, options, limit, stays_local);
     (provider, vfs, dir)
+}
+
+/// A second mount on a provider and a spool folder a test already has.
+fn mount_on(
+    provider: &Arc<MemoryProvider>,
+    dir: &tempfile::TempDir,
+    options: Options,
+    limit: u64,
+    stays_local: fn(&str) -> bool,
+) -> Arc<Vfs> {
+    Arc::new(
+        Vfs::new(provider.clone(), POSIX, options)
+            .take_writes(Spool {
+                folder: dir.path().to_path_buf(),
+                limit,
+                stays_local,
+            })
+            .unwrap(),
+    )
 }
 
 fn spool_files(dir: &tempfile::TempDir) -> usize {
     std::fs::read_dir(dir.path())
         .unwrap()
-        .filter(|entry| entry.as_ref().unwrap().path().is_file())
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .unwrap()
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.parse::<u64>().is_ok())
+        })
         .count()
+}
+
+/// Every name in the spool folder, records included.
+fn spool_entries(dir: &tempfile::TempDir) -> usize {
+    std::fs::read_dir(dir.path()).unwrap().count()
 }
 
 fn mount(options: Options) -> (Arc<MemoryProvider>, Arc<Vfs>) {
@@ -53,12 +78,15 @@ async fn until_in_flight(provider: &MemoryProvider, count: usize) {
 }
 
 /// Polls until `ready` without moving the clock, so a task woken at this instant gets a turn.
+///
+/// A try syncs the spool file on a blocking thread before its byte call. Each miss waits a millisecond of wall time for that thread. The paused clock stays where it is.
 async fn yield_until(what: &str, mut ready: impl FnMut() -> bool) {
     for _ in 0..1_000 {
         if ready() {
             return;
         }
         tokio::task::yield_now().await;
+        std::thread::sleep(Duration::from_millis(1));
     }
     panic!("{what}");
 }
@@ -1728,11 +1756,18 @@ async fn finder_files_stay_on_this_computer_and_a_real_file_stays_in_the_spool()
     vfs.write(photo_handle, 0, b"local").await.unwrap();
     assert_eq!(provider.contents(&photo), b"remote-bytes");
     drop(vfs);
-    let kept: Vec<Vec<u8>> = std::fs::read_dir(dir.path())
+    let mut names: Vec<String> = std::fs::read_dir(dir.path())
         .unwrap()
-        .map(|entry| std::fs::read(entry.unwrap().path()).unwrap())
+        .map(|entry| entry.unwrap().file_name().to_str().unwrap().to_string())
         .collect();
-    assert_eq!(kept, [b"keep".to_vec()]);
+    names.sort();
+    let kept = names
+        .iter()
+        .find(|name| name.parse::<u64>().is_ok())
+        .unwrap();
+    assert_eq!(std::fs::read(dir.path().join(kept)).unwrap(), b"keep");
+    assert_eq!(names.len(), 2);
+    assert!(names.contains(&format!("{kept}.record")));
 }
 
 #[tokio::test]
@@ -2113,6 +2148,11 @@ fn spawnable<F: std::future::Future + Send>(call: F) -> F {
 
 fn start_uploads(vfs: &Arc<Vfs>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(vfs.clone().run_uploads())
+}
+
+/// Ends the mount the way a crash does: `Drop for Vfs` never runs, so the spool folder stays as it was. A test that runs uploads aborts them first.
+fn crash(vfs: Arc<Vfs>) {
+    std::mem::forget(vfs);
 }
 
 #[tokio::test(start_paused = true)]
@@ -3222,4 +3262,510 @@ async fn an_upload_that_keeps_moving_outlives_the_call_time_limit() {
     advance(Duration::from_secs(80)).await;
     yield_until("the long upload did not land", || spool_files(&dir) == 0).await;
     assert_eq!(provider.uploads(), 1);
+}
+
+fn recovered(name: &str) -> bool {
+    name.starts_with("a (recovered ") && name.ends_with(").txt")
+}
+
+async fn folder_names(vfs: &Vfs) -> Vec<String> {
+    let handle = vfs.open_folder(Vfs::ROOT).await.unwrap();
+    let names = vfs
+        .read_folder(handle, 0, 20)
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.name)
+        .collect();
+    vfs.release(handle);
+    names
+}
+
+async fn until_spool_empty(dir: &tempfile::TempDir) {
+    yield_until("the spool folder was not emptied", || {
+        spool_entries(dir) == 0
+    })
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_crash_with_a_writer_open_uploads_a_recovered_copy() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    let id = provider.add_file(&provider.root(), "a.txt", b"old");
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    let handle = vfs.open(file.node, Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"new").await.unwrap();
+    crash(vfs);
+    let vfs = mount_on(&provider, &dir, Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    until_spool_empty(&dir).await;
+    assert_eq!(provider.contents(&id), b"old");
+    let items = root_items(&provider).await;
+    assert_eq!(items.len(), 2);
+    let original = items.iter().find(|item| item.id == id).unwrap();
+    assert_eq!(original.name, "a.txt");
+    let copy = items.iter().find(|item| item.id != id).unwrap();
+    assert!(recovered(&copy.name));
+    assert_eq!(provider.contents(&copy.id), b"new");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_crash_after_fsync_uploads_the_synced_bytes_as_a_recovered_copy() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    let id = provider.add_file(&provider.root(), "a.txt", b"old");
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    let handle = vfs.open(file.node, Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"synced").await.unwrap();
+    vfs.fsync(file.node).await.unwrap();
+    crash(vfs);
+    let vfs = mount_on(&provider, &dir, Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    until_spool_empty(&dir).await;
+    assert_eq!(provider.contents(&id), b"old");
+    let items = root_items(&provider).await;
+    let copy = items.iter().find(|item| recovered(&item.name)).unwrap();
+    assert_eq!(provider.contents(&copy.id), b"synced");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_crash_after_the_last_close_replaces_the_item() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    let id = provider.add_file(&provider.root(), "a.txt", b"old");
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    let handle = vfs.open(file.node, Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"new").await.unwrap();
+    let modified = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    vfs.set_modified(file.node, modified).await.unwrap();
+    vfs.release(handle);
+    crash(vfs);
+    let vfs = mount_on(&provider, &dir, Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    until_spool_empty(&dir).await;
+    assert_eq!(provider.uploads(), 1);
+    assert_eq!(provider.contents(&id), b"new");
+    let items = root_items(&provider).await;
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].id, id);
+    assert_eq!(items[0].attributes.modified, modified);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_crash_after_the_last_close_creates_a_new_file_once() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    let (_made, handle) = vfs.create(Vfs::ROOT, "a.txt", Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"hello").await.unwrap();
+    vfs.release(handle);
+    crash(vfs);
+    let vfs = mount_on(&provider, &dir, Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    until_spool_empty(&dir).await;
+    assert_eq!(provider.uploads(), 1);
+    let items = root_items(&provider).await;
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].name, "a.txt");
+    assert_eq!(provider.contents(&items[0].id), b"hello");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_crash_after_a_save_through_a_temporary_file_replaces_the_item() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    let id = provider.add_file(&provider.root(), "a.txt", b"old");
+    let (_made, handle) = vfs
+        .create(Vfs::ROOT, "a.txt.tmp", Access::Write)
+        .await
+        .unwrap();
+    vfs.write(handle, 0, b"new").await.unwrap();
+    vfs.release(handle);
+    vfs.rename(
+        Vfs::ROOT,
+        "a.txt.tmp",
+        Vfs::ROOT,
+        "a.txt",
+        IfExists::Replace,
+    )
+    .await
+    .unwrap();
+    crash(vfs);
+    let vfs = mount_on(&provider, &dir, Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    until_spool_empty(&dir).await;
+    assert_eq!(provider.contents(&id), b"new");
+    let items = root_items(&provider).await;
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].id, id);
+    assert_eq!(items[0].name, "a.txt");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_crash_mid_upload_sends_the_file_once() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    let uploads = start_uploads(&vfs);
+    provider.set_upload_delay(Duration::from_secs(60));
+    let (_made, handle) = vfs.create(Vfs::ROOT, "a.txt", Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"hello").await.unwrap();
+    vfs.release(handle);
+    advance(settle()).await;
+    yield_until("the upload did not start", || provider.uploads() == 1).await;
+    uploads.abort();
+    crash(vfs);
+    assert!(root_items(&provider).await.is_empty());
+    provider.set_upload_delay(Duration::ZERO);
+    let vfs = mount_on(&provider, &dir, Options::default(), 1024, never_local);
+    let started = provider.uploads();
+    let _uploads = start_uploads(&vfs);
+    until_spool_empty(&dir).await;
+    assert_eq!(provider.uploads(), started + 1);
+    let items = root_items(&provider).await;
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].name, "a.txt");
+    assert_eq!(provider.contents(&items[0].id), b"hello");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_crash_after_a_replace_lands_does_not_send_it_again() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    let uploads = start_uploads(&vfs);
+    provider.lose_upload_answers(true);
+    let id = provider.add_file(&provider.root(), "a.txt", b"old");
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    let handle = vfs.open(file.node, Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"new").await.unwrap();
+    vfs.release(handle);
+    advance(settle()).await;
+    yield_until("the replace did not land", || {
+        provider.contents(&id) == b"new"
+    })
+    .await;
+    uploads.abort();
+    crash(vfs);
+    provider.lose_upload_answers(false);
+    let started = provider.uploads();
+    let vfs = mount_on(&provider, &dir, Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    until_spool_empty(&dir).await;
+    assert_eq!(provider.uploads(), started);
+    let items = root_items(&provider).await;
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].id, id);
+    assert_eq!(provider.contents(&id), b"new");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_crash_after_a_create_lands_does_not_create_it_again() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    let uploads = start_uploads(&vfs);
+    provider.lose_upload_answers(true);
+    let (_made, handle) = vfs.create(Vfs::ROOT, "a.txt", Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"hello").await.unwrap();
+    vfs.release(handle);
+    advance(settle()).await;
+    for _ in 0..1_000 {
+        if provider.uploads() >= 1 && root_items(&provider).await.len() == 1 {
+            break;
+        }
+        tokio::task::yield_now().await;
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(root_items(&provider).await.len(), 1);
+    uploads.abort();
+    crash(vfs);
+    provider.lose_upload_answers(false);
+    let started = provider.uploads();
+    let vfs = mount_on(&provider, &dir, Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    until_spool_empty(&dir).await;
+    assert_eq!(provider.uploads(), started);
+    let items = root_items(&provider).await;
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].name, "a.txt");
+    assert_eq!(provider.contents(&items[0].id), b"hello");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_crash_after_a_conflict_copy_lands_leaves_one_copy() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    let uploads = start_uploads(&vfs);
+    let id = provider.add_file(&provider.root(), "a.txt", b"remote");
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    let handle = vfs.open(file.node, Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"local!").await.unwrap();
+    vfs.release(handle);
+    provider.write(&id, b"changed");
+    provider.lose_upload_answers(true);
+    advance(settle()).await;
+    for _ in 0..1_000 {
+        let copies = root_items(&provider)
+            .await
+            .into_iter()
+            .filter(|item| item.name.starts_with("a (conflict ") && item.name.ends_with(").txt"))
+            .count();
+        if copies == 1 {
+            break;
+        }
+        tokio::task::yield_now().await;
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(provider.uploads(), 2, "the replace and the conflict copy");
+    uploads.abort();
+    crash(vfs);
+    provider.lose_upload_answers(false);
+    let started = provider.uploads();
+    let vfs = mount_on(&provider, &dir, Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    until_spool_empty(&dir).await;
+    assert_eq!(provider.uploads(), started);
+    assert_eq!(provider.contents(&id), b"changed");
+    let copies: Vec<_> = root_items(&provider)
+        .await
+        .into_iter()
+        .filter(|item| item.name.starts_with("a (conflict ") && item.name.ends_with(").txt"))
+        .collect();
+    assert_eq!(copies.len(), 1);
+    assert_eq!(provider.contents(&copies[0].id), b"local!");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_crash_after_the_upload_confirms_finds_nothing_to_send() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    let uploads = start_uploads(&vfs);
+    let (_made, handle) = vfs.create(Vfs::ROOT, "a.txt", Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"hello").await.unwrap();
+    vfs.release(handle);
+    advance(settle()).await;
+    until_spool_empty(&dir).await;
+    let started = provider.uploads();
+    uploads.abort();
+    crash(vfs);
+    let vfs = mount_on(&provider, &dir, Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    advance(settle()).await;
+    assert_eq!(provider.uploads(), started);
+    assert_eq!(spool_entries(&dir), 0);
+    drop(vfs);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_crash_cleans_local_removed_and_half_written_records() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024 * 1024, finder_files);
+    let (_good, good) = vfs.create(Vfs::ROOT, "a.txt", Access::Write).await.unwrap();
+    vfs.write(good, 0, b"keep").await.unwrap();
+    vfs.release(good);
+    let (_local, local) = vfs
+        .create(Vfs::ROOT, ".DS_Store", Access::Write)
+        .await
+        .unwrap();
+    vfs.write(local, 0, b"junk").await.unwrap();
+    vfs.release(local);
+    let (_gone, gone) = vfs
+        .create(Vfs::ROOT, "gone.txt", Access::Write)
+        .await
+        .unwrap();
+    vfs.write(gone, 0, b"gone").await.unwrap();
+    vfs.remove(Vfs::ROOT, "gone.txt", Kind::File).await.unwrap();
+    std::fs::write(dir.path().join("1.record.new"), b"partial").unwrap();
+    crash(vfs);
+    let vfs = mount_on(
+        &provider,
+        &dir,
+        Options::default(),
+        1024 * 1024,
+        finder_files,
+    );
+    let _uploads = start_uploads(&vfs);
+    until_spool_empty(&dir).await;
+    let items = root_items(&provider).await;
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].name, "a.txt");
+    assert_eq!(provider.contents(&items[0].id), b"keep");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_spool_file_with_no_record_is_kept_and_a_record_with_no_file_is_deleted() {
+    let provider = Arc::new(MemoryProvider::new());
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("5"), b"bytes").unwrap();
+    std::fs::write(dir.path().join("6"), b"").unwrap();
+    std::fs::write(dir.path().join("7.record"), b"not a record").unwrap();
+    let vfs = mount_on(&provider, &dir, Options::default(), 1024, never_local);
+    let unplaced: Vec<_> = vfs
+        .unplaced_spool_files()
+        .iter()
+        .map(|path| path.file_name().unwrap().to_str().unwrap().to_string())
+        .collect();
+    assert_eq!(unplaced, ["5", "6"]);
+    let _uploads = start_uploads(&vfs);
+    advance(settle()).await;
+    assert_eq!(provider.uploads(), 0);
+    assert_eq!(spool_files(&dir), 2);
+    assert!(!dir.path().join("7.record").exists());
+    assert!(dir.path().join("5").exists());
+    assert!(dir.path().join("6").exists());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_recovered_file_is_listed_before_it_uploads() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    provider.add_file(&provider.root(), "a.txt", b"old");
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    let handle = vfs.open(file.node, Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"new").await.unwrap();
+    crash(vfs);
+    let vfs = mount_on(&provider, &dir, Options::default(), 1024, never_local);
+    let copy = folder_names(&vfs)
+        .await
+        .into_iter()
+        .find(|name| recovered(name))
+        .unwrap();
+    vfs.lookup(Vfs::ROOT, &copy).await.unwrap();
+    assert_eq!(provider.uploads(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn fsync_of_a_clean_file_and_a_mount_without_a_spool_does_nothing() {
+    let (provider, vfs) = mount(Options::default());
+    provider.add_file(&provider.root(), "a.txt", b"hello");
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    assert_eq!(vfs.fsync(file.node).await, Ok(()));
+    let (provider, vfs, _dir) = spooled_mount(Options::default(), 1024, never_local);
+    provider.add_file(&provider.root(), "a.txt", b"hello");
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    assert_eq!(vfs.fsync(file.node).await, Ok(()));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stale_closed_record_uploads_a_recovered_copy() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    let id = provider.add_file(&provider.root(), "a.txt", b"old");
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    let handle = vfs.open(file.node, Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"new").await.unwrap();
+    vfs.release(handle);
+    let saved = std::fs::read(dir.path().join("1.record")).unwrap();
+    let handle = vfs.open(file.node, Access::Write).await.unwrap();
+    std::fs::write(dir.path().join("1.record"), &saved).unwrap();
+    // Linux stamps a file's modified time from a clock that moves every few milliseconds. The same-length write must land on a later stamp.
+    std::thread::sleep(Duration::from_millis(20));
+    vfs.write(handle, 0, b"NEW").await.unwrap();
+    crash(vfs);
+    let vfs = mount_on(&provider, &dir, Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    until_spool_empty(&dir).await;
+    assert_eq!(provider.contents(&id), b"old");
+    let copy = root_items(&provider)
+        .await
+        .into_iter()
+        .find(|item| recovered(&item.name))
+        .unwrap();
+    assert_eq!(provider.contents(&copy.id), b"NEW");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_closed_file_that_never_started_a_try_does_not_take_another_clients_file() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    let (made, handle) = vfs.create(Vfs::ROOT, "a.txt", Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"same").await.unwrap();
+    // `add_file` stamps the other file one second after the epoch. The same stamp here means a check that ignored `tried` would take it.
+    vfs.set_modified(made.node, UNIX_EPOCH + Duration::from_secs(1))
+        .await
+        .unwrap();
+    vfs.release(handle);
+    crash(vfs);
+    provider.add_file(&provider.root(), "a.txt", b"same");
+    let vfs = mount_on(&provider, &dir, Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    until_spool_empty(&dir).await;
+    let items = root_items(&provider).await;
+    assert_eq!(items.len(), 2);
+    assert!(items.iter().all(|item| item.name == "a.txt"));
+    assert!(items
+        .iter()
+        .all(|item| provider.contents(&item.id) == b"same"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_remote_name_holding_an_escaped_slash_is_placed_again() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    let (_made, handle) = vfs
+        .create(Vfs::ROOT, "a%2Fb.txt", Access::Write)
+        .await
+        .unwrap();
+    vfs.write(handle, 0, b"hello").await.unwrap();
+    vfs.release(handle);
+    crash(vfs);
+    let vfs = mount_on(&provider, &dir, Options::default(), 1024, never_local);
+    vfs.lookup(Vfs::ROOT, "a%2Fb.txt").await.unwrap();
+    let _uploads = start_uploads(&vfs);
+    until_spool_empty(&dir).await;
+    let items = root_items(&provider).await;
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].name, "a/b.txt");
+    assert_eq!(provider.contents(&items[0].id), b"hello");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_create_whose_record_cannot_be_written_leaves_no_file() {
+    let (_provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    std::fs::create_dir(dir.path().join("1.record.new")).unwrap();
+    assert!(vfs.create(Vfs::ROOT, "a.txt", Access::Write).await.is_err());
+    assert_eq!(spool_files(&dir), 0);
+    assert_eq!(
+        vfs.lookup(Vfs::ROOT, "a.txt").await,
+        Err(VfsError::NotFound)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_crash_after_a_gone_item_is_created_again_does_not_create_it_twice() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    let uploads = start_uploads(&vfs);
+    let id = provider.add_file(&provider.root(), "a.txt", b"old");
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    let handle = vfs.open(file.node, Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"new").await.unwrap();
+    vfs.release(handle);
+    provider.remote_remove(&id);
+    provider.lose_upload_answers(true);
+    advance(settle()).await;
+    yield_until("the file was not created again", || provider.uploads() == 2).await;
+    uploads.abort();
+    crash(vfs);
+    provider.lose_upload_answers(false);
+    let vfs = mount_on(&provider, &dir, Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    until_spool_empty(&dir).await;
+    assert_eq!(provider.uploads(), 2);
+    let items = root_items(&provider).await;
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].name, "a.txt");
+    assert_eq!(provider.contents(&items[0].id), b"new");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cut_frees_room_when_a_remount_lowers_the_limit_below_the_adopted_files() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    let (_made, handle) = vfs.create(Vfs::ROOT, "a.txt", Access::Write).await.unwrap();
+    vfs.write(handle, 0, &[7; 600]).await.unwrap();
+    vfs.release(handle);
+    crash(vfs);
+    let vfs = mount_on(&provider, &dir, Options::default(), 100, never_local);
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    assert_eq!(vfs.truncate(file.node, 500).await.unwrap().size, 500);
+    let handle = vfs.open(file.node, Access::Write).await.unwrap();
+    vfs.write(handle, 200, b"x").await.unwrap();
+    assert_eq!(vfs.read(handle, 199, 3).await.unwrap(), [7, b'x', 7]);
+    assert_eq!(
+        vfs.write(handle, 500, b"grow").await,
+        Err(VfsError::NoSpace)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_first_write_whose_record_cannot_be_written_leaves_the_file_clean() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    provider.add_file(&provider.root(), "a.txt", b"old");
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    let handle = vfs.open(file.node, Access::Write).await.unwrap();
+    std::fs::create_dir(dir.path().join("1.record.new")).unwrap();
+    assert!(vfs.write(handle, 0, b"new").await.is_err());
+    assert_eq!(spool_files(&dir), 0);
+    assert_eq!(vfs.read(handle, 0, 3).await.unwrap(), b"old");
 }
