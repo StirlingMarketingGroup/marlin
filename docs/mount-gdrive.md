@@ -1,23 +1,24 @@
 # Google Drive mount provider (`marlin-gdrive`)
 
-`marlin-gdrive` shows one Google account to the [mount core](mount-core.md) as a `Provider`. It reads the Drive API and never changes anything. It also holds the code that turns a saved Google sign-in into an access token, for the mount and for the app. The app links the crate for that sign-in code. The [mount helper](mount-helper.md) links it as the provider `gdrive`: see [Providers](mount-helper.md#providers).
+`marlin-gdrive` shows one Google account to the [mount core](mount-core.md) as a `Provider`. It reads the Drive API, and it can make a folder, rename or move an item, and trash one. A mount stays read-only until #601, because `can_write` stays false until the provider can also write bytes. It also holds the code that turns a saved Google sign-in into an access token, for the mount and for the app. The app links the crate for that sign-in code. The [mount helper](mount-helper.md) links it as the provider `gdrive`: see [Providers](mount-helper.md#providers).
 
-This is not the code behind `gdrive://` paths. That is the older provider in the app, described in [Location providers](location-providers.md), and it stays as it is until #377.
+This is not the code behind `gdrive://` paths. The app handles those through its own location provider: see [Location providers](location-providers.md).
 
 **Covers:** `src-tauri/crates/marlin-gdrive/`
-**Checked against the code:** 2026-11-17
+**Checked against the code:** 2026-11-20
 
 ## The parts
 
-| File               | Holds                                                                                                    |
-| ------------------ | -------------------------------------------------------------------------------------------------------- |
-| `src/provider.rs`  | `DriveProvider`, its five `Provider` calls, the item IDs, and the two things a caller supplies.          |
-| `src/api.rs`       | `get`, the one path every request takes: the token, the retries, and the error table. Google's JSON.     |
-| `src/sign_in.rs`   | `OAuthClient`, `SavedSignIn`, and the keychain entry: see [The saved sign-in](#the-saved-sign-in).       |
-| `build.rs`         | Passes the OAuth client ID and secret to the compiler.                                                   |
-| `tests/drive.rs`   | The provider's tests. They run against a fake Drive server in the test process.                          |
-| `tests/sign_in.rs` | The sign-in's tests. They run against a fake token endpoint and an in-memory keychain.                   |
-| `tests/live.rs`    | One manual test against a real account: see [Checked against real Google](#checked-against-real-google). |
+| File                    | Holds                                                                                                            |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `src/provider.rs`       | `DriveProvider`, its five read calls and three change calls, the item IDs, and the two things a caller supplies. |
+| `src/api.rs`            | `request`, the one path every request takes: the token, the retries, and the error table. Google's JSON.         |
+| `src/sign_in.rs`        | `OAuthClient`, `SavedSignIn`, and the keychain entry: see [The saved sign-in](#the-saved-sign-in).               |
+| `build.rs`              | Passes the OAuth client ID and secret to the compiler.                                                           |
+| `tests/drive.rs`        | The provider's tests. They run against a fake Drive server in the test process.                                  |
+| `tests/sign_in.rs`      | The sign-in's tests. They run against a fake token endpoint and an in-memory keychain.                           |
+| `tests/live.rs`         | One manual test against a real account: see [Checked against real Google](#checked-against-real-google).         |
+| `tests/live_changes.rs` | One manual test of the three change calls against a real account. It changes the account.                        |
 
 The provider does not sign in, read a keychain, or know about the helper. A caller gives it two things:
 
@@ -66,6 +67,8 @@ Some Drive items have no bytes to read: Google Docs, Sheets, Slides, Forms, and 
 - **The modified time** is the item's own, as for any file.
 - **A shortcut is never followed.** The provider does not ask Google about the target. A shortcut whose target is gone, or is not shared with the account, lists like any other, and its page leads to Google's error page. A shortcut to a folder is a file, so no folder is reachable through two parents.
 - **A link file is a file.** Listing one returns `NotAFolder` and sends no request.
+- **Remove trashes the Drive file the link is.** A Google Doc is trashed. A shortcut is trashed. The shortcut's target is a different file, and it is left as it is.
+- **Rename keeps the ending.** `Notes.document.html` can become `Plan.document.html`, and Drive stores `Plan`. A name that drops the ending, such as `Notes.txt`, is `NotSupported`, and no change is sent. The provider does not turn a Google Doc into another kind of file. A duplicate link file is a known limit: see [The three change calls](#the-three-change-calls).
 
 Not handled:
 
@@ -94,9 +97,9 @@ A Drive ID never holds `/` or `#`, so the two made-up IDs cannot be real ones, a
 
 What follows from that:
 
-- A file keeps its ID when Google renames or moves it, so the core keeps its node and its open handles.
+- A file keeps its ID when it is renamed, or moved inside one drive, so the core keeps its node and its open handles.
 - A listing gives each child the drive of the folder listed. A folder's children are always in the folder's own drive.
-- A file moved between My Drive and a shared drive gets a new ID. The core sees one item removed and one added.
+- A file moved between My Drive and a shared drive gets a new ID, with the drive of the folder it moved to. A move this mount makes returns that id, and the core keeps the node. A move that only shows up in a later listing still looks like one item removed and one added.
 
 ## The five calls
 
@@ -114,23 +117,61 @@ What follows from that:
 - **Free space with no limit.** Google gives some Workspace accounts no storage limit. The provider then reports 1 PiB free, because a mount that reports 0 free makes file managers refuse to copy.
 - **A shared drive's top folder is asked from the drive, not from `files.get`.** On a real account `files.get` gives that folder another name than the drive's. So `item` asks `drives.get`, and its answer equals the drive's line in the `Shared drives` listing.
 - **A shared drive's modified time** is the time the drive was made. Google gives a shared drive no other time.
-- Every Drive API request is a GET. A token refresh sends a POST to Google's token endpoint. The crate sends nothing else.
+- The five read calls send only GET. The change calls also send POST and PATCH. A token refresh sends a POST to Google's token endpoint.
+
+## The three change calls
+
+`create_folder`, `remove`, and `rename`. A mount does not call them yet: `can_write` stays false until the byte calls exist (#601). A direct caller can.
+
+| Call            | Requests                                                                                                                                                                                                                                                                                                                                              |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `create_folder` | `files.generateIds` for one id, then `files.create` (`POST /files`) with that id, the folder type, and the parent's Drive id.                                                                                                                                                                                                                         |
+| `remove`        | `files.get` to check the item is still in the folder. `files.list`, one item a page, when it is a folder. Then `files.update` (`PATCH`) with `trashed: true`.                                                                                                                                                                                         |
+| `rename`        | `files.get` of the item. When a folder moves to another folder, `files.get` of each folder above the destination, up to the folder it leaves or the top. Then one `PATCH` with the name, plus `addParents` and `removeParents` when the folder changes. A `replace` adds the same checks as `remove` before the `PATCH`, and its trash `PATCH` after. |
+
+These ids are not ordinary Drive files. The provider answers `AccessDenied` for them before it sends anything. An `Allowed` entry sends the usual requests:
+
+| Call                                | `/`            | `/shared-drives` | `root` (My Drive)       | `{d}/{d}` (a shared drive's top folder) |
+| ----------------------------------- | -------------- | ---------------- | ----------------------- | --------------------------------------- |
+| `create_folder` with it as `parent` | `AccessDenied` | `AccessDenied`   | Allowed. Parent `root`. | Allowed. Parent `{d}`.                  |
+| `remove` of it                      | `AccessDenied` | `AccessDenied`   | `AccessDenied`          | `AccessDenied`                          |
+| `rename` of it                      | `AccessDenied` | `AccessDenied`   | `AccessDenied`          | `AccessDenied`                          |
+| `rename` with it as `to`            | `AccessDenied` | `AccessDenied`   | Allowed.                | Allowed.                                |
+
+A link file as the parent of `create_folder`, or as `to`, is `NotAFolder`.
+
+**The item is still in the folder.** Before a remove or a rename, the provider reads the file with `parents` and `driveId`. The item is `NotFound` when it is trashed, when `driveId` is not the drive in the id (none in My Drive), when the answer would build a different id, or when `parents` does not hold the folder. `parents` holds My Drive's real id, never `root`, so a check against the top of My Drive also reads `files.get` of `root` at the same time. Nothing is kept between calls.
+
+**A folder that holds anything is `NotEmpty`.** Drive would trash the folder and everything in it, and the core asked for one item. The check lists children that are not trashed, one a page, and follows a next page even when a page is empty. An empty first page is not an empty folder. The check and the trash are two requests. Another client can add a child between them, and Drive then trashes it with the folder. It stays in Drive's trash.
+
+**Remove trashes. It never deletes.** The request is `PATCH` with `{"trashed": true}`. A link file trashes its own Drive file. An item the account may not trash, such as another user's file in My Drive, gets Google's 403, so the call is `AccessDenied`.
+
+**Rename with `replace` moves first, then trashes.** Drive allows two items with one name, so the name is never left with none. If the trash fails, both items are left and the call returns that error. A `replace` that is not in the destination is `NotFound`. A folder to replace that holds anything is `NotEmpty`. In both cases the call changes nothing.
+
+**A file can move between My Drive and a shared drive.** The id the call returns carries the drive of the destination folder, as a listing of that folder would. A folder cannot. Google refuses to move a folder into a shared drive, and the items inside it would keep ids that still name the old drive. That move is `NotSupported`, and no change is sent.
+
+**A folder cannot move into itself, or into a folder inside it.** Google answers that with a 400 that looks like any other 400, so the provider walks the parents from the destination until it reaches the folder, reaches the folder it is leaving, or runs out of parents.
+
+**Retries.** `create_folder` gets one id from `generateIds` per call and sends it on every try of the POST, so a retry after a 5xx cannot make a second folder: if the first try made it, Google answers 409, and the provider reads the folder by that id. A dropped connection is `Offline`, and a new call gets a new id. The core lists the parent before a new `mkdir`, so it finds a folder an earlier call made. A move whose answer was lost is read back. Google may refuse a resent move, because the item already has that parent ("duplicate parent", a 400). So a failed move counts as done when the item is already in the destination under the name that was sent. A plain rename is read back the same way. Only `Other` and `Offline` are read back: a server error, a rate limit that outlasted the retries, a status the table does not name, a dropped connection, or an answer that cannot be read.
+
+**A duplicate link file cannot be moved under its shown name.** The core shows the second `Notes` Doc as `Notes.document (2).html`, with ` (2)` before `.html`. That name does not keep the `.document.html` ending, so the rename is `NotSupported`, and no change is sent.
 
 ## Errors and retries
 
-| Google answers                                                     | The call returns                                               |
-| ------------------------------------------------------------------ | -------------------------------------------------------------- |
-| Nothing, or the connection drops                                   | `Offline`                                                      |
-| 401                                                                | One more try with a new token. A second 401 is `SignInNeeded`. |
-| 403 with the reason `rateLimitExceeded` or `userRateLimitExceeded` | Retries, then `Other("Google Drive is limiting requests")`.    |
-| 429                                                                | The same.                                                      |
-| 403 with any other reason                                          | `AccessDenied`                                                 |
-| 404                                                                | `NotFound`                                                     |
-| 500 to 599                                                         | Retries, then `Other("Google Drive answered <status>")`.       |
-| Any other status                                                   | `Other("Google Drive answered <status>")`, with no retry.      |
-| A body that is not the expected JSON                               | `Other("Google Drive sent an answer Marlin could not read")`   |
+| Google answers                                                     | The call returns                                                                                                                                      |
+| ------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Nothing, or the connection drops                                   | `Offline`                                                                                                                                             |
+| 401                                                                | One more try with a new token. A second 401 is `SignInNeeded`.                                                                                        |
+| 403 with the reason `rateLimitExceeded` or `userRateLimitExceeded` | Retries, then `Other("Google Drive is limiting requests")`.                                                                                           |
+| 429                                                                | The same.                                                                                                                                             |
+| 403 with any other reason                                          | `AccessDenied`                                                                                                                                        |
+| 404                                                                | `NotFound`                                                                                                                                            |
+| 409                                                                | `Conflict`, with no retry. Google sends it only when a create's pre-made id is already in use. `create_folder` then returns the folder that id names. |
+| 500 to 599                                                         | Retries, then `Other("Google Drive answered <status>")`.                                                                                              |
+| Any other status                                                   | `Other("Google Drive answered <status>")`, with no retry.                                                                                             |
+| A body that is not the expected JSON                               | `Other("Google Drive sent an answer Marlin could not read")`                                                                                          |
 
-- **Retries.** A call is sent again at most 3 times. The waits are 0.5, 1, and 2 seconds, each with up to half as much again added at random, so calls that failed together do not come back together. A failed connection is not retried: the helper counts those toward `offline` ([Health](mount-helper.md#health)).
+- **Retries.** A request is sent again at most 3 times. A change call sends several requests, and each has its own retries. The waits are 0.5, 1, and 2 seconds, each with up to half as much again added at random, so calls that failed together do not come back together. A failed connection is not retried: the helper counts those toward `offline` ([Health](mount-helper.md#health)).
 - **The core's time limit covers the retries.** The core cancels a call after 30 seconds by dropping it, and that stops a wait or a request in flight.
 - **Every failure to reach Google is `Offline`.** The only time limit on the HTTP client is 10 seconds to connect, so a timeout there also means Google could not be reached. `TimedOut` comes from the core alone.
 - **The text of an `Other` is one of the three in this table, or the one from the sign-in:** "Marlin could not use the saved Google sign-in". No file name, ID, address, token, or message from Google is in it, so the helper logs it ([Logs and secrets](mount-helper.md#logs-and-secrets)).
@@ -202,6 +243,8 @@ A build with its own OAuth client from a newer project gets these limits.
 | `space`       | `about.get`                                                  | 5                                                                                |
 | A new token   | A POST to Google's token endpoint                            | None. It is not a Drive API request.                                             |
 
+Google's quota units for the change calls are not checked.
+
 | Limit                         | Units       |
 | ----------------------------- | ----------- |
 | One user, one minute          | 325,000     |
@@ -219,14 +262,14 @@ A build with its own OAuth client from a newer project gets these limits.
 The [mount core](mount-core.md) runs at most 16 provider calls at once and ends a call after 30 seconds. Both defaults fit Drive.
 
 - **16 calls at once is not a rate.** It stays under the request limit of Marlin's own project at the measured speed (above). It does not hold a limit in units: sixteen reads that each take half a second are 32 reads a second, over a newer project's 27. A lower number would slow every mount and still not hold a rate. The fix is fewer, bigger reads (#538).
-- **30 seconds covers the retries.** The three waits add up to 5.25 seconds at most. A listing is the long call: every page of a folder, one request after another, inside one call. How long a page of 1,000 items takes is not measured.
+- **30 seconds covers the retries of one request.** The three waits add up to 5.25 seconds at most. A change call sends several requests one after another, so a rate limit that lasts can end one as `TimedOut` partway: see [The three change calls](#the-three-change-calls). A listing is the long call: every page of a folder, one request after another, inside one call. How long a page of 1,000 items takes is not measured.
 - **A listing kept for 5 seconds** costs at most 12 listings a minute for a folder that stays open.
 - **Attributes kept for 5 seconds** cost at most 12 `files.get` a minute for a file that a program keeps asking about. After a listing, the attributes of its items cost nothing for those 5 seconds.
 - **Free space kept for 30 seconds** costs at most 2 `about.get` a minute.
 
 ## Checked against real Google
 
-`tests/live.rs` is a manual test on a real account, with the five `Provider` calls only. It reads the real keychain, it never changes anything, and it prints counts, sizes, times, and the type words of link files, but no name. Its header has the command. It ran on 2026-11-16 against one Google Workspace account with two shared drives:
+`tests/live.rs` is a manual test on a real account, with the five read calls only. It reads the real keychain, it never changes anything, and it prints counts, sizes, times, and the type words of link files, but no name. Its header has the command. It ran on 2026-11-16 against one Google Workspace account with two shared drives:
 
 - **A read at the end of a file, and past it, returns no bytes.**
 - **A read at an offset returns the same bytes as that part of a read from the start.**
@@ -235,6 +278,17 @@ The [mount core](mount-core.md) runs at most 16 provider calls at once and ends 
 - **A real shortcut carries its target, in a listing and in `files.get`.** The ID of a shortcut held a target that is not the shortcut itself. `item` of a Google Sheet and of that shortcut each returned the line from the listing.
 - **A link file opens its item in the browser.** The helper mounted the account on macOS through macFUSE. The top of My Drive showed the same 150 entries, 88 of them link files. One Google Doc's link file had the same size from `stat` as the bytes read, and Firefox showed the Doc within two seconds of opening it. The page for a public Google Sheet, in a normal folder, opened the Sheet the same way.
 - **One request takes a quarter to half a second.** In six runs, a listing of 150 items took 287 to 512 ms, and a read of 14 KiB took 254 to 528 ms.
+
+`tests/live_changes.rs` is a manual test of the three change calls. It changes the account: it makes a folder `Marlin live test {time}` at the top of My Drive, works inside it, moves one folder to the top of My Drive and back, and trashes the test folder at the end. It never touches a shared drive. Its header has the command. It ran on 2026-11-20 against the same account:
+
+- **A listing right after a change holds the change.** Five folders were made one after another, and the listing sent right after each one held it, 5 of 5. A listing right after a rename, a remove, and a move each showed the change. So the core needs no list of its own recent changes to lay over a new listing (risk 3 of [decision 0005](decisions/0005-mount-writes.md)). One run on one account is not a promise from Google.
+- **Google answers 409 to a second create with the same pre-made ID,** and the first create gets 200. That is the answer `create_folder` relies on to never make a folder twice.
+- **`root` works in `addParents` and `removeParents`.** A folder moved to the top of My Drive and back.
+- **A link file renames and trashes.** An empty Google Doc made in the test folder listed as `….document.html`, renamed with its ending kept, and went to the trash.
+- **The refusals the provider makes itself held:** a folder into its own subfolder, a folder with a child, and a link file renamed to another ending. A `replace` left one folder under the name, with the moved folder's ID.
+- **A change and the listing after it took about one second.** Five creates, each with its listing, took 4.8 s. A rename and its listing took 1.0 s, a move and two listings 1.7 s. The first call of the run, which read the keychain and got a token, took 13 s.
+
+Not checked live: a change in a shared drive, a file moved between drives, and what Google answers a folder moved into its own subtree (the provider refuses it before Google sees it).
 
 Every automated test runs against the fake server, so these still rest on Google's documentation:
 
@@ -255,8 +309,9 @@ Every automated test runs against the fake server, so these still rest on Google
 - Each test starts a `wiremock` server on a free local port. A provider test points `Config::api` at it, and a sign-in test points `OAuthClient::token_uri` at it.
 - The sign-in tests use the in-memory keychain from the `marlin-test-keychain` crate (see [Testing](testing.md)), and one email per test. They cover a refused refresh token, a missing entry, recovery after each with the same `SavedSignIn`, a failed connection, an answer that repeats the secrets, and eight calls at once.
 - The test token source hands out `token-1`, then `token-2` after `token-1` is rejected. One test holds eight calls until all have `token-1`, and checks that they cause one new token, not eight.
-- Three tests put the provider under a real `Vfs`: one for duplicate names and a `/` in a name, one for a rename seen on the remote, and one for link files that share a name.
+- Five tests put the provider under a real `Vfs`: one for duplicate names and a `/` in a name, one for a rename seen on the remote, one for link files that share a name, one for a file moved into a shared drive (it keeps its node), and one for a duplicate link file moved under its shown name.
 - The link file tests cover the name and the ID of each kind, the size in a listing against the bytes a read returns, `item` of a shortcut, a read in parts, a shared drive, a shortcut whose target is gone or missing from the answer, and a read that sends the server nothing.
-- One test checks that every request the server got was a GET.
+- The change-call tests cover creating a folder, trashing, renaming, moving, the refusals, a resent create, and a move whose answer was lost. They check the request, not only the result.
+- One test checks that the five read calls send only GET.
 - The helper's tests mount this provider through FUSE against a fake Google: see [Mount helper](mount-helper.md#testing).
-- `tests/live.rs` is marked `#[ignore]`. Never run this crate's tests with `--ignored` or `--include-ignored` unless you mean to read a real account.
+- `tests/live.rs` and `tests/live_changes.rs` are marked `#[ignore]`. Never run this crate's tests with `--ignored` or `--include-ignored`: that runs both, and `live_changes.rs` changes the account. To run one, use the command in its header.

@@ -4,12 +4,21 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use marlin_gdrive::{AccessTokens, Config, DriveProvider};
-use marlin_vfs::{Access, ItemId, Kind, Options, Provider, Space, Vfs, VfsError, POSIX};
+use marlin_vfs::{
+    Access, IfExists, Item, ItemId, Kind, Options, Provider, Space, Vfs, VfsError, POSIX,
+};
 use serde_json::{json, Value};
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 const MODIFIED: &str = "2020-01-02T03:04:05.678Z";
+
+const ITEM_FIELDS: &str =
+    "id,name,mimeType,size,modifiedTime,trashed,driveId,shortcutDetails(targetId)";
+
+const FOLDER: &str = "application/vnd.google-apps.folder";
+const DOC: &str = "application/vnd.google-apps.document";
+const PLAIN: &str = "text/plain";
 
 fn modified() -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(1_577_934_245) + Duration::from_millis(678)
@@ -91,7 +100,7 @@ fn folder_json(id: &str, name: &str) -> Value {
     json!({
         "id": id,
         "name": name,
-        "mimeType": "application/vnd.google-apps.folder",
+        "mimeType": FOLDER,
         "modifiedTime": MODIFIED,
         "trashed": false,
     })
@@ -151,6 +160,82 @@ fn query_of(request: &Request) -> HashMap<String, String> {
         .url
         .query_pairs()
         .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect()
+}
+
+fn body_of(request: &Request) -> Value {
+    serde_json::from_slice(&request.body).unwrap()
+}
+
+fn held_json(id: &str, name: &str, mime: &str, parents: &[&str], drive_id: Option<&str>) -> Value {
+    let mut file = if mime == FOLDER {
+        folder_json(id, name)
+    } else {
+        file_json(id, name, mime, "4")
+    };
+    file["parents"] = json!(parents);
+    if let Some(drive_id) = drive_id {
+        file["driveId"] = json!(drive_id);
+    }
+    file
+}
+
+async fn mount_method(
+    server: &MockServer,
+    http_method: &str,
+    path_str: &str,
+    template: ResponseTemplate,
+) {
+    Mock::given(method(http_method))
+        .and(path(path_str))
+        .respond_with(template)
+        .mount(server)
+        .await;
+}
+
+async fn mount_answers(
+    server: &MockServer,
+    http_method: &str,
+    path_str: &str,
+    responses: Vec<ResponseTemplate>,
+) {
+    Mock::given(method(http_method))
+        .and(path(path_str))
+        .respond_with(Script {
+            hits: AtomicUsize::new(0),
+            responses,
+        })
+        .mount(server)
+        .await;
+}
+
+async fn mount_held(
+    server: &MockServer,
+    id: &str,
+    name: &str,
+    mime: &str,
+    parents: &[&str],
+    drive_id: Option<&str>,
+) {
+    mount_path(
+        server,
+        &format!("/files/{id}"),
+        ok_json(held_json(id, name, mime, parents, drive_id)),
+    )
+    .await;
+}
+
+fn id(value: &str) -> ItemId {
+    ItemId(value.to_string())
+}
+
+async fn sent(server: &MockServer, http_method: &str) -> Vec<Request> {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|request| request.method.as_str() == http_method)
         .collect()
 }
 
@@ -1181,7 +1266,7 @@ async fn eight_calls_share_one_token_refresh() {
 }
 
 #[tokio::test]
-async fn every_request_is_a_get() {
+async fn the_five_read_calls_send_only_get() {
     let server = MockServer::start().await;
     mount_path(
         &server,
@@ -1222,4 +1307,895 @@ async fn every_request_is_a_get() {
     assert!(requests
         .iter()
         .all(|request| request.method.as_str() == "GET"));
+}
+
+#[tokio::test]
+async fn create_folder_in_my_drive_sends_the_generated_id() {
+    let server = MockServer::start().await;
+    let body = ok_json(json!({ "ids": ["new-1"] }));
+    mount_path(&server, "/files/generateIds", body).await;
+    let made = ok_json(folder_json("new-1", "Plans"));
+    mount_method(&server, "POST", "/files", made).await;
+    let provider = drive(&server);
+    let made = provider.create_folder(&id("root"), "Plans").await.unwrap();
+    assert_eq!(made.id, id("new-1"));
+    assert_eq!(made.name, "Plans");
+    assert_eq!(made.attributes.kind, Kind::Folder);
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].method.as_str(), "GET");
+    assert_eq!(requests[0].url.path(), "/files/generateIds");
+    let query = query_of(&requests[0]);
+    assert_eq!(query.get("count").unwrap(), "1");
+    assert_eq!(query.get("space").unwrap(), "drive");
+    assert_eq!(query.get("type").unwrap(), "files");
+    assert_eq!(requests[1].method.as_str(), "POST");
+    assert_eq!(requests[1].url.path(), "/files");
+    let query = query_of(&requests[1]);
+    assert_eq!(query.get("supportsAllDrives").unwrap(), "true");
+    assert_eq!(query.get("fields").unwrap(), ITEM_FIELDS);
+    assert_eq!(
+        body_of(&requests[1]),
+        json!({ "id": "new-1", "name": "Plans", "mimeType": FOLDER, "parents": ["root"] })
+    );
+}
+
+#[tokio::test]
+async fn create_folder_in_a_shared_drive_uses_that_drives_id_as_the_parent() {
+    let server = MockServer::start().await;
+    let answers = vec![
+        ok_json(json!({ "ids": ["new-a"] })),
+        ok_json(json!({ "ids": ["new-b"] })),
+    ];
+    mount_answers(&server, "GET", "/files/generateIds", answers).await;
+    let mut top = folder_json("new-a", "Top");
+    top["driveId"] = json!("d");
+    let mut nested = folder_json("new-b", "Nested");
+    nested["driveId"] = json!("d");
+    let answers = vec![ok_json(top), ok_json(nested)];
+    mount_answers(&server, "POST", "/files", answers).await;
+    let provider = drive(&server);
+    let at_top = provider.create_folder(&id("d/d"), "Top").await.unwrap();
+    let inside = provider.create_folder(&id("d/f"), "Nested").await.unwrap();
+    assert_eq!(at_top.id, id("d/new-a"));
+    assert_eq!(inside.id, id("d/new-b"));
+    assert_eq!(at_top.attributes.kind, Kind::Folder);
+    let posts = sent(&server, "POST").await;
+    assert_eq!(body_of(&posts[0])["parents"], json!(["d"]));
+    assert_eq!(body_of(&posts[1])["parents"], json!(["f"]));
+}
+
+#[tokio::test]
+async fn a_create_answered_500_then_409_returns_the_folder_the_first_try_made() {
+    let server = MockServer::start().await;
+    let body = ok_json(json!({ "ids": ["made-1"] }));
+    mount_path(&server, "/files/generateIds", body).await;
+    let answers = vec![ResponseTemplate::new(500), ResponseTemplate::new(409)];
+    mount_answers(&server, "POST", "/files", answers).await;
+    let body = ok_json(folder_json("made-1", "Plans"));
+    mount_path(&server, "/files/made-1", body).await;
+    let provider = drive(&server);
+    let made = provider.create_folder(&id("root"), "Plans").await.unwrap();
+    assert_eq!(made.id, id("made-1"));
+    assert_eq!(made.attributes.kind, Kind::Folder);
+    let posts = sent(&server, "POST").await;
+    assert_eq!(posts.len(), 2);
+    assert_eq!(body_of(&posts[0])["id"], "made-1");
+    assert_eq!(body_of(&posts[1])["id"], "made-1");
+    assert!(sent(&server, "GET")
+        .await
+        .iter()
+        .any(|request| request.url.path() == "/files/made-1"));
+}
+
+#[tokio::test]
+async fn a_rate_limit_on_a_change_is_sent_again() {
+    let server = MockServer::start().await;
+    mount_held(&server, "file-1", "a.txt", PLAIN, &["folder"], None).await;
+    let answers = vec![ResponseTemplate::new(429), ResponseTemplate::new(200)];
+    mount_answers(&server, "PATCH", "/files/file-1", answers).await;
+    let provider = drive(&server);
+    provider.remove(&id("file-1"), &id("folder")).await.unwrap();
+    let patches = sent(&server, "PATCH").await;
+    assert_eq!(patches.len(), 2);
+    assert_eq!(body_of(&patches[0]), json!({ "trashed": true }));
+    assert_eq!(body_of(&patches[1]), json!({ "trashed": true }));
+}
+
+#[tokio::test]
+async fn remove_trashes_a_file_and_never_deletes_it() {
+    let server = MockServer::start().await;
+    mount_held(&server, "file-1", "a.txt", PLAIN, &["folder"], None).await;
+    let status = ResponseTemplate::new(200);
+    mount_method(&server, "PATCH", "/files/file-1", status).await;
+    let provider = drive(&server);
+    provider.remove(&id("file-1"), &id("folder")).await.unwrap();
+    assert!(sent(&server, "DELETE").await.is_empty());
+    let patches = sent(&server, "PATCH").await;
+    let patch = &patches[0];
+    assert_eq!(patch.url.path(), "/files/file-1");
+    assert_eq!(body_of(patch), json!({ "trashed": true }));
+    let query = query_of(patch);
+    assert_eq!(query.get("supportsAllDrives").unwrap(), "true");
+    assert_eq!(query.get("fields").unwrap(), "id");
+    let gets = sent(&server, "GET").await;
+    let fields = query_of(&gets[0]).get("fields").unwrap().clone();
+    assert!(fields.contains("parents"));
+    assert!(fields.contains("driveId"));
+}
+
+#[tokio::test]
+async fn remove_of_a_folder_refuses_one_that_has_a_child_and_trashes_an_empty_one() {
+    let with_child = MockServer::start().await;
+    mount_held(&with_child, "folder-1", "Docs", FOLDER, &["parent"], None).await;
+    let body = ok_json(file_page(vec![plain("child", "a.txt")], None));
+    mount_path(&with_child, "/files", body).await;
+    let provider = drive(&with_child);
+    assert_eq!(
+        provider.remove(&id("folder-1"), &id("parent")).await,
+        Err(VfsError::NotEmpty)
+    );
+    assert!(sent(&with_child, "PATCH").await.is_empty());
+
+    let paged = MockServer::start().await;
+    mount_held(&paged, "folder-1", "Docs", FOLDER, &["parent"], None).await;
+    let answers = vec![
+        ok_json(json!({ "files": [], "nextPageToken": "next" })),
+        ok_json(json!({ "files": [{ "id": "child" }] })),
+    ];
+    mount_answers(&paged, "GET", "/files", answers).await;
+    let provider = drive(&paged);
+    assert_eq!(
+        provider.remove(&id("folder-1"), &id("parent")).await,
+        Err(VfsError::NotEmpty)
+    );
+    assert!(sent(&paged, "PATCH").await.is_empty());
+    let requests = paged.received_requests().await.unwrap();
+    let lists: Vec<_> = requests
+        .iter()
+        .filter(|request| request.url.path() == "/files")
+        .collect();
+    assert_eq!(lists.len(), 2);
+    let first = query_of(lists[0]);
+    assert_eq!(first.get("pageSize").unwrap(), "1");
+    assert_eq!(
+        first.get("q").unwrap(),
+        "'folder-1' in parents and trashed = false"
+    );
+    assert_eq!(first.get("pageToken"), None);
+    assert_eq!(query_of(lists[1]).get("pageToken").unwrap(), "next");
+    assert_eq!(first.get("corpora"), None);
+
+    let empty = MockServer::start().await;
+    mount_held(&empty, "folder-1", "Docs", FOLDER, &["parent"], None).await;
+    mount_path(&empty, "/files", ok_json(file_page(vec![], None))).await;
+    let status = ResponseTemplate::new(200);
+    mount_method(&empty, "PATCH", "/files/folder-1", status).await;
+    let provider = drive(&empty);
+    provider
+        .remove(&id("folder-1"), &id("parent"))
+        .await
+        .unwrap();
+    let patches = sent(&empty, "PATCH").await;
+    assert_eq!(patches.len(), 1);
+    assert_eq!(body_of(&patches[0]), json!({ "trashed": true }));
+}
+
+#[tokio::test]
+async fn remove_in_a_shared_drive_names_the_drive_when_it_checks_for_children() {
+    let empty = MockServer::start().await;
+    mount_held(&empty, "folder-1", "Docs", FOLDER, &["d"], Some("d")).await;
+    mount_path(&empty, "/files", ok_json(file_page(vec![], None))).await;
+    mount_method(
+        &empty,
+        "PATCH",
+        "/files/folder-1",
+        ResponseTemplate::new(200),
+    )
+    .await;
+    let provider = drive(&empty);
+    provider
+        .remove(&id("d/folder-1"), &id("d/d"))
+        .await
+        .unwrap();
+    let lists: Vec<_> = sent(&empty, "GET")
+        .await
+        .into_iter()
+        .filter(|request| request.url.path() == "/files")
+        .collect();
+    let query = query_of(&lists[0]);
+    assert_eq!(query.get("corpora").unwrap(), "drive");
+    assert_eq!(query.get("driveId").unwrap(), "d");
+    assert_eq!(query.get("includeItemsFromAllDrives").unwrap(), "true");
+    assert_eq!(
+        query.get("q").unwrap(),
+        "'folder-1' in parents and trashed = false"
+    );
+    let patches = sent(&empty, "PATCH").await;
+    assert_eq!(patches.len(), 1);
+    assert_eq!(body_of(&patches[0]), json!({ "trashed": true }));
+    assert_eq!(
+        query_of(&patches[0]).get("supportsAllDrives").unwrap(),
+        "true"
+    );
+
+    let with_child = MockServer::start().await;
+    mount_held(&with_child, "folder-1", "Docs", FOLDER, &["d"], Some("d")).await;
+    let body = ok_json(file_page(vec![plain("child", "a.txt")], None));
+    mount_path(&with_child, "/files", body).await;
+    let provider = drive(&with_child);
+    assert_eq!(
+        provider.remove(&id("d/folder-1"), &id("d/d")).await,
+        Err(VfsError::NotEmpty)
+    );
+    assert!(sent(&with_child, "PATCH").await.is_empty());
+}
+
+#[tokio::test]
+async fn remove_of_an_item_that_is_not_in_the_folder_is_not_found() {
+    let elsewhere = MockServer::start().await;
+    mount_held(&elsewhere, "file-1", "a.txt", PLAIN, &["other"], None).await;
+    let provider = drive(&elsewhere);
+    assert_eq!(
+        provider.remove(&id("file-1"), &id("folder")).await,
+        Err(VfsError::NotFound)
+    );
+    assert!(sent(&elsewhere, "PATCH").await.is_empty());
+
+    let trashed = MockServer::start().await;
+    let mut file = held_json("file-1", "a.txt", PLAIN, &["folder"], None);
+    file["trashed"] = json!(true);
+    mount_path(&trashed, "/files/file-1", ok_json(file)).await;
+    let provider = drive(&trashed);
+    assert_eq!(
+        provider.remove(&id("file-1"), &id("folder")).await,
+        Err(VfsError::NotFound)
+    );
+    assert!(trashed.received_requests().await.unwrap().len() == 1);
+
+    for drive_id in [Some("other"), None] {
+        let server = MockServer::start().await;
+        mount_held(&server, "f", "a.txt", PLAIN, &["folder"], drive_id).await;
+        let provider = drive(&server);
+        assert_eq!(
+            provider.remove(&id("d/f"), &id("d/folder")).await,
+            Err(VfsError::NotFound)
+        );
+        assert!(sent(&server, "PATCH").await.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn remove_at_the_top_of_my_drive_checks_the_real_root_id() {
+    let server = MockServer::start().await;
+    let root = ok_json(folder_json("real-root", "Mine"));
+    mount_path(&server, "/files/root", root).await;
+    mount_held(&server, "file-1", "a.txt", PLAIN, &["real-root"], None).await;
+    let status = ResponseTemplate::new(200);
+    mount_method(&server, "PATCH", "/files/file-1", status).await;
+    let provider = drive(&server);
+    provider.remove(&id("file-1"), &id("root")).await.unwrap();
+    assert!(sent(&server, "GET")
+        .await
+        .iter()
+        .any(|request| request.url.path() == "/files/root"));
+    assert_eq!(sent(&server, "PATCH").await.len(), 1);
+
+    let missing = MockServer::start().await;
+    let body = ok_json(folder_json("real-root", "Mine"));
+    mount_path(&missing, "/files/root", body).await;
+    mount_held(&missing, "file-1", "a.txt", PLAIN, &["other"], None).await;
+    let provider = drive(&missing);
+    assert_eq!(
+        provider.remove(&id("file-1"), &id("root")).await,
+        Err(VfsError::NotFound)
+    );
+    let requests = missing.received_requests().await.unwrap();
+    assert!(requests
+        .iter()
+        .any(|request| request.url.path() == "/files/root"));
+    assert!(sent(&missing, "PATCH").await.is_empty());
+}
+
+#[tokio::test]
+async fn remove_of_a_link_file_trashes_its_drive_file() {
+    let server = MockServer::start().await;
+    mount_held(&server, "abc", "Notes", DOC, &["folder"], None).await;
+    mount_method(&server, "PATCH", "/files/abc", ResponseTemplate::new(200)).await;
+    let provider = drive(&server);
+    provider
+        .remove(&id("abc#abc"), &id("folder"))
+        .await
+        .unwrap();
+    let patches = sent(&server, "PATCH").await;
+    let patch = &patches[0];
+    assert_eq!(patch.url.path(), "/files/abc");
+    assert_eq!(body_of(patch), json!({ "trashed": true }));
+}
+
+#[tokio::test]
+async fn a_rename_in_one_folder_sends_the_name_and_keeps_the_id() {
+    let server = MockServer::start().await;
+    mount_held(&server, "file-1", "old.txt", PLAIN, &["folder"], None).await;
+    let body = ok_json(held_json("file-1", "new.txt", PLAIN, &["folder"], None));
+    mount_method(&server, "PATCH", "/files/file-1", body).await;
+    let provider = drive(&server);
+    let renamed = provider
+        .rename(&id("file-1"), &id("folder"), &id("folder"), "new.txt", None)
+        .await
+        .unwrap();
+    assert_eq!(renamed.id, id("file-1"));
+    assert_eq!(renamed.name, "new.txt");
+    let patches = sent(&server, "PATCH").await;
+    let patch = &patches[0];
+    assert_eq!(body_of(patch), json!({ "name": "new.txt" }));
+    let query = query_of(patch);
+    assert_eq!(query.get("addParents"), None);
+    assert_eq!(query.get("removeParents"), None);
+    assert_eq!(query.get("fields").unwrap(), ITEM_FIELDS);
+}
+
+#[tokio::test]
+async fn a_move_sends_the_drive_ids_of_the_two_folders() {
+    let server = MockServer::start().await;
+    mount_held(&server, "m", "a.txt", PLAIN, &["a"], None).await;
+    let body = ok_json(held_json("m", "a.txt", PLAIN, &["b"], None));
+    mount_method(&server, "PATCH", "/files/m", body).await;
+    mount_held(&server, "s", "a.txt", PLAIN, &["d"], Some("d")).await;
+    let body = ok_json(held_json("s", "a.txt", PLAIN, &["f"], Some("d")));
+    mount_method(&server, "PATCH", "/files/s", body).await;
+    mount_held(&server, "t", "a.txt", PLAIN, &["f"], Some("d")).await;
+    let body = ok_json(held_json("t", "a.txt", PLAIN, &["d"], Some("d")));
+    mount_method(&server, "PATCH", "/files/t", body).await;
+    let provider = drive(&server);
+    let mine = provider
+        .rename(&id("m"), &id("a"), &id("b"), "a.txt", None)
+        .await
+        .unwrap();
+    assert_eq!(mine.id, id("m"));
+    let into_folder = provider
+        .rename(&id("d/s"), &id("d/d"), &id("d/f"), "a.txt", None)
+        .await
+        .unwrap();
+    assert_eq!(into_folder.id, id("d/s"));
+    let into_top = provider
+        .rename(&id("d/t"), &id("d/f"), &id("d/d"), "a.txt", None)
+        .await
+        .unwrap();
+    assert_eq!(into_top.id, id("d/t"));
+    let patches = sent(&server, "PATCH").await;
+    let query = |path_str: &str| {
+        query_of(
+            patches
+                .iter()
+                .find(|request| request.url.path() == path_str)
+                .unwrap(),
+        )
+    };
+    let mine = query("/files/m");
+    assert_eq!(mine.get("addParents").unwrap(), "b");
+    assert_eq!(mine.get("removeParents").unwrap(), "a");
+    let into_folder = query("/files/s");
+    assert_eq!(into_folder.get("addParents").unwrap(), "f");
+    assert_eq!(into_folder.get("removeParents").unwrap(), "d");
+    let into_top = query("/files/t");
+    assert_eq!(into_top.get("addParents").unwrap(), "d");
+    assert_eq!(into_top.get("removeParents").unwrap(), "f");
+}
+
+#[tokio::test]
+async fn a_file_moved_between_drives_gets_the_drives_id() {
+    let server = MockServer::start().await;
+    mount_held(&server, "file-1", "a.txt", PLAIN, &["src"], None).await;
+    let body = ok_json(held_json("file-1", "a.txt", PLAIN, &["dest"], Some("d")));
+    mount_method(&server, "PATCH", "/files/file-1", body).await;
+    mount_held(&server, "file-2", "b.txt", PLAIN, &["drive-src"], Some("d")).await;
+    let body = ok_json(held_json("file-2", "b.txt", PLAIN, &["my-dest"], None));
+    mount_method(&server, "PATCH", "/files/file-2", body).await;
+    let provider = drive(&server);
+    let into_shared = provider
+        .rename(&id("file-1"), &id("src"), &id("d/dest"), "a.txt", None)
+        .await
+        .unwrap();
+    assert_eq!(into_shared.id, id("d/file-1"));
+    let into_mine = provider
+        .rename(
+            &id("d/file-2"),
+            &id("d/drive-src"),
+            &id("my-dest"),
+            "b.txt",
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(into_mine.id, id("file-2"));
+    let patches = sent(&server, "PATCH").await;
+    let shared = query_of(
+        patches
+            .iter()
+            .find(|request| request.url.path() == "/files/file-1")
+            .unwrap(),
+    );
+    assert_eq!(shared.get("addParents").unwrap(), "dest");
+    assert_eq!(shared.get("removeParents").unwrap(), "src");
+    let mine = query_of(
+        patches
+            .iter()
+            .find(|request| request.url.path() == "/files/file-2")
+            .unwrap(),
+    );
+    assert_eq!(mine.get("addParents").unwrap(), "my-dest");
+    assert_eq!(mine.get("removeParents").unwrap(), "drive-src");
+}
+
+#[tokio::test]
+async fn a_folder_moved_between_drives_is_not_supported() {
+    let server = MockServer::start().await;
+    mount_held(&server, "folder-1", "Docs", FOLDER, &["src"], None).await;
+    let provider = drive(&server);
+    let moved = provider
+        .rename(&id("folder-1"), &id("src"), &id("d/dest"), "Docs", None)
+        .await;
+    assert_eq!(moved, Err(VfsError::NotSupported));
+    assert!(sent(&server, "PATCH").await.is_empty());
+}
+
+#[tokio::test]
+async fn a_folder_moved_into_itself_or_into_its_own_subtree_is_not_supported() {
+    let itself = MockServer::start().await;
+    mount_held(&itself, "folder", "Docs", FOLDER, &["p"], None).await;
+    let provider = drive(&itself);
+    let moved = provider
+        .rename(&id("folder"), &id("p"), &id("folder"), "Docs", None)
+        .await;
+    assert_eq!(moved, Err(VfsError::NotSupported));
+    let requests = itself.received_requests().await.unwrap();
+    assert!(sent(&itself, "PATCH").await.is_empty());
+    assert_eq!(requests.len(), 1);
+
+    let inside = MockServer::start().await;
+    mount_held(&inside, "folder", "Docs", FOLDER, &["p"], None).await;
+    let body = ok_json(json!({ "id": "grand", "parents": ["child"] }));
+    mount_path(&inside, "/files/grand", body).await;
+    let body = ok_json(json!({ "id": "child", "parents": ["folder"] }));
+    mount_path(&inside, "/files/child", body).await;
+    let provider = drive(&inside);
+    let moved = provider
+        .rename(&id("folder"), &id("p"), &id("grand"), "Docs", None)
+        .await;
+    assert_eq!(moved, Err(VfsError::NotSupported));
+    assert!(sent(&inside, "PATCH").await.is_empty());
+    let requests = inside.received_requests().await.unwrap();
+    let paths: Vec<_> = requests.iter().map(|request| request.url.path()).collect();
+    assert_eq!(paths, ["/files/folder", "/files/grand", "/files/child"]);
+
+    // A move to the top of My Drive walks up to a folder with no parents and goes on.
+    let up = MockServer::start().await;
+    mount_held(&up, "folder", "Docs", FOLDER, &["p"], None).await;
+    mount_path(&up, "/files/root", ok_json(json!({ "id": "real-root" }))).await;
+    let body = ok_json(held_json("folder", "Docs", FOLDER, &["real-root"], None));
+    mount_method(&up, "PATCH", "/files/folder", body).await;
+    let provider = drive(&up);
+    provider
+        .rename(&id("folder"), &id("p"), &id("root"), "Docs", None)
+        .await
+        .unwrap();
+    let patches = sent(&up, "PATCH").await;
+    let query = query_of(&patches[0]);
+    assert_eq!(query.get("addParents").unwrap(), "root");
+    assert_eq!(query.get("removeParents").unwrap(), "p");
+
+    let sibling = MockServer::start().await;
+    mount_held(&sibling, "folder", "Docs", FOLDER, &["p"], None).await;
+    let body = ok_json(json!({ "id": "sib", "parents": ["p"] }));
+    mount_path(&sibling, "/files/sib", body).await;
+    let body = ok_json(held_json("folder", "Docs", FOLDER, &["sib"], None));
+    mount_method(&sibling, "PATCH", "/files/folder", body).await;
+    let provider = drive(&sibling);
+    let moved = provider
+        .rename(&id("folder"), &id("p"), &id("sib"), "Docs", None)
+        .await
+        .unwrap();
+    assert_eq!(moved.id, id("folder"));
+    let patches = sent(&sibling, "PATCH").await;
+    let query = query_of(&patches[0]);
+    assert_eq!(query.get("addParents").unwrap(), "sib");
+    assert_eq!(query.get("removeParents").unwrap(), "p");
+}
+
+#[tokio::test]
+async fn a_link_file_keeps_its_ending_when_it_is_renamed() {
+    let server = MockServer::start().await;
+    mount_held(&server, "doc", "Notes", DOC, &["folder"], None).await;
+    let body = ok_json(held_json("doc", "Plan", DOC, &["folder"], None));
+    mount_method(&server, "PATCH", "/files/doc", body).await;
+    let provider = drive(&server);
+    let renamed = provider
+        .rename(
+            &id("doc#doc"),
+            &id("folder"),
+            &id("folder"),
+            "Plan.document.html",
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(renamed.id, id("doc#doc"));
+    assert_eq!(renamed.name, "Plan.document.html");
+    let renamed = provider
+        .rename(
+            &id("doc#doc"),
+            &id("folder"),
+            &id("folder"),
+            "Notes.txt",
+            None,
+        )
+        .await;
+    assert_eq!(renamed, Err(VfsError::NotSupported));
+    let patches = sent(&server, "PATCH").await;
+    assert_eq!(patches.len(), 1);
+    assert_eq!(body_of(&patches[0]), json!({ "name": "Plan" }));
+    assert_eq!(query_of(&patches[0]).get("addParents"), None);
+}
+
+#[tokio::test]
+async fn a_move_whose_answer_was_lost_is_read_back() {
+    let applied = MockServer::start().await;
+    let answers = vec![
+        ok_json(held_json("file-1", "old.txt", PLAIN, &["from-1"], None)),
+        ok_json(held_json("file-1", "new.txt", PLAIN, &["to-1"], None)),
+    ];
+    mount_answers(&applied, "GET", "/files/file-1", answers).await;
+    mount_held(&applied, "old-1", "new.txt", PLAIN, &["to-1"], None).await;
+    let failed = ResponseTemplate::new(500);
+    mount_method(&applied, "PATCH", "/files/file-1", failed).await;
+    let status = ResponseTemplate::new(200);
+    mount_method(&applied, "PATCH", "/files/old-1", status).await;
+    let provider = drive(&applied);
+    let moved = provider
+        .rename(
+            &id("file-1"),
+            &id("from-1"),
+            &id("to-1"),
+            "new.txt",
+            Some(&id("old-1")),
+        )
+        .await
+        .unwrap();
+    assert_eq!(moved.id, id("file-1"));
+    assert_eq!(moved.name, "new.txt");
+    let patches = sent(&applied, "PATCH").await;
+    assert!(patches.len() > 1);
+    assert_eq!(patches[0].url.path(), "/files/file-1");
+    assert_eq!(body_of(&patches[0])["name"], "new.txt");
+    assert_eq!(query_of(&patches[0]).get("addParents").unwrap(), "to-1");
+    assert_eq!(
+        query_of(&patches[0]).get("removeParents").unwrap(),
+        "from-1"
+    );
+    // The move is sent again after each 500, and the trash follows the last of those.
+    let trash = patches
+        .iter()
+        .position(|request| request.url.path() == "/files/old-1")
+        .unwrap();
+    assert!(trash > 0);
+    assert!(patches[..trash]
+        .iter()
+        .all(|request| request.url.path() == "/files/file-1"));
+    assert_eq!(body_of(&patches[trash]), json!({ "trashed": true }));
+
+    // A Google Doc in a shared drive: the read-back asks for the id with the drive and the id the page opens.
+    let link = MockServer::start().await;
+    let answers = vec![
+        ok_json(held_json("doc", "Notes", DOC, &["from-1"], Some("d"))),
+        ok_json(held_json("doc", "Notes", DOC, &["f"], Some("d"))),
+    ];
+    mount_answers(&link, "GET", "/files/doc", answers).await;
+    mount_method(&link, "PATCH", "/files/doc", ResponseTemplate::new(500)).await;
+    let provider = drive(&link);
+    let moved = provider
+        .rename(
+            &id("d/doc#doc"),
+            &id("d/from-1"),
+            &id("d/f"),
+            "Notes.document.html",
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(moved.id, id("d/doc#doc"));
+    assert_eq!(moved.name, "Notes.document.html");
+
+    // An answer whose body cannot be read is read back too: the move may have happened.
+    let unread = MockServer::start().await;
+    let answers = vec![
+        ok_json(held_json("file-1", "old.txt", PLAIN, &["from-1"], None)),
+        ok_json(held_json("file-1", "new.txt", PLAIN, &["to-1"], None)),
+    ];
+    mount_answers(&unread, "GET", "/files/file-1", answers).await;
+    let cut = ResponseTemplate::new(200).set_body_raw("{", "application/json");
+    mount_method(&unread, "PATCH", "/files/file-1", cut).await;
+    let provider = drive(&unread);
+    let moved = provider
+        .rename(&id("file-1"), &id("from-1"), &id("to-1"), "new.txt", None)
+        .await
+        .unwrap();
+    assert_eq!(moved.name, "new.txt");
+    assert_eq!(sent(&unread, "PATCH").await.len(), 1);
+
+    // A plain rename whose answer was lost is read back too.
+    let renamed = MockServer::start().await;
+    let answers = vec![
+        ok_json(held_json("file-1", "old.txt", PLAIN, &["folder"], None)),
+        ok_json(held_json("file-1", "new.txt", PLAIN, &["folder"], None)),
+    ];
+    mount_answers(&renamed, "GET", "/files/file-1", answers).await;
+    mount_method(
+        &renamed,
+        "PATCH",
+        "/files/file-1",
+        ResponseTemplate::new(500),
+    )
+    .await;
+    let provider = drive(&renamed);
+    let moved = provider
+        .rename(&id("file-1"), &id("folder"), &id("folder"), "new.txt", None)
+        .await
+        .unwrap();
+    assert_eq!(moved.name, "new.txt");
+    assert_eq!(
+        query_of(&sent(&renamed, "PATCH").await[0]).get("addParents"),
+        None
+    );
+
+    let still = MockServer::start().await;
+    mount_held(&still, "file-1", "old.txt", PLAIN, &["from-1"], None).await;
+    mount_method(&still, "PATCH", "/files/file-1", ResponseTemplate::new(500)).await;
+    let provider = drive(&still);
+    let moved = provider
+        .rename(&id("file-1"), &id("from-1"), &id("to-1"), "new.txt", None)
+        .await;
+    assert_eq!(
+        moved,
+        Err(VfsError::Other(
+            "Google Drive answered 500 Internal Server Error".into()
+        ))
+    );
+    assert!(sent(&still, "PATCH")
+        .await
+        .iter()
+        .all(|request| request.url.path() == "/files/file-1"));
+}
+
+#[tokio::test]
+async fn replace_moves_first_and_trashes_second() {
+    let server = MockServer::start().await;
+    mount_held(&server, "file-1", "old.txt", PLAIN, &["from-1"], None).await;
+    mount_held(&server, "old-1", "new.txt", PLAIN, &["to-1"], None).await;
+    let body = ok_json(held_json("file-1", "new.txt", PLAIN, &["to-1"], None));
+    mount_method(&server, "PATCH", "/files/file-1", body).await;
+    mount_method(&server, "PATCH", "/files/old-1", ResponseTemplate::new(500)).await;
+    let provider = drive(&server);
+    let moved = provider
+        .rename(
+            &id("file-1"),
+            &id("from-1"),
+            &id("to-1"),
+            "new.txt",
+            Some(&id("old-1")),
+        )
+        .await;
+    assert_eq!(
+        moved,
+        Err(VfsError::Other(
+            "Google Drive answered 500 Internal Server Error".into()
+        ))
+    );
+    let patches = sent(&server, "PATCH").await;
+    assert_eq!(patches[0].url.path(), "/files/file-1");
+    assert_eq!(body_of(&patches[0])["name"], "new.txt");
+    assert!(patches.len() > 1);
+    assert!(
+        patches[1..]
+            .iter()
+            .all(|request| request.url.path() == "/files/old-1"
+                && body_of(request)["trashed"] == true)
+    );
+
+    let full = MockServer::start().await;
+    mount_held(&full, "file-1", "old.txt", PLAIN, &["folder"], None).await;
+    mount_held(&full, "full", "Docs", FOLDER, &["folder"], None).await;
+    let body = ok_json(file_page(vec![plain("child", "a.txt")], None));
+    mount_path(&full, "/files", body).await;
+    let provider = drive(&full);
+    let moved = provider
+        .rename(
+            &id("file-1"),
+            &id("folder"),
+            &id("folder"),
+            "Docs",
+            Some(&id("full")),
+        )
+        .await;
+    assert_eq!(moved, Err(VfsError::NotEmpty));
+    assert!(sent(&full, "PATCH").await.is_empty());
+
+    let missing = MockServer::start().await;
+    mount_held(&missing, "file-1", "old.txt", PLAIN, &["folder"], None).await;
+    mount_held(&missing, "old-1", "new.txt", PLAIN, &["elsewhere"], None).await;
+    let provider = drive(&missing);
+    let moved = provider
+        .rename(
+            &id("file-1"),
+            &id("folder"),
+            &id("folder"),
+            "new.txt",
+            Some(&id("old-1")),
+        )
+        .await;
+    assert_eq!(moved, Err(VfsError::NotFound));
+    assert!(sent(&missing, "PATCH").await.is_empty());
+}
+
+#[tokio::test]
+async fn the_folders_a_mount_makes_up_cannot_be_changed() {
+    let server = MockServer::start().await;
+    let provider = drive(&server);
+    let top = id("/");
+    let shared = id("/shared-drives");
+    let root = id("root");
+    let drive_top = id("d/d");
+    let file = id("file-1");
+    let link = id("doc#doc");
+    let folder = id("folder");
+    let denied = Err::<Item, _>(VfsError::AccessDenied);
+    let removed = Err::<(), _>(VfsError::AccessDenied);
+    let not_folder = Err::<Item, _>(VfsError::NotAFolder);
+    let missing = Err::<(), _>(VfsError::NotFound);
+    let not_found = Err::<Item, _>(VfsError::NotFound);
+    assert_eq!(provider.create_folder(&top, "a").await, denied);
+    assert_eq!(provider.create_folder(&shared, "a").await, denied);
+    assert_eq!(provider.create_folder(&link, "a").await, not_folder);
+    assert_eq!(provider.remove(&top, &folder).await, removed);
+    assert_eq!(provider.remove(&shared, &folder).await, removed);
+    assert_eq!(provider.remove(&root, &folder).await, removed);
+    assert_eq!(provider.remove(&drive_top, &folder).await, removed);
+    assert_eq!(provider.remove(&file, &link).await, missing);
+    assert_eq!(
+        provider.rename(&top, &folder, &folder, "a", None).await,
+        denied
+    );
+    assert_eq!(
+        provider.rename(&shared, &folder, &folder, "a", None).await,
+        denied
+    );
+    assert_eq!(
+        provider.rename(&root, &folder, &folder, "a", None).await,
+        denied
+    );
+    assert_eq!(
+        provider
+            .rename(&drive_top, &folder, &folder, "a", None)
+            .await,
+        denied
+    );
+    assert_eq!(
+        provider.rename(&file, &folder, &top, "a", None).await,
+        denied
+    );
+    assert_eq!(
+        provider.rename(&file, &folder, &shared, "a", None).await,
+        denied
+    );
+    assert_eq!(
+        provider.rename(&file, &folder, &link, "a", None).await,
+        not_folder
+    );
+    assert_eq!(
+        provider.rename(&file, &link, &folder, "a", None).await,
+        not_found
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn moving_a_duplicate_link_file_under_its_shown_name_is_not_supported() {
+    let server = MockServer::start().await;
+    let body = ok_json(folder_json("alias-root", "My Drive"));
+    mount_path(&server, "/files/root", body).await;
+    Mock::given(method("GET"))
+        .and(query_param("q", "'root' in parents and trashed = false"))
+        .respond_with(ok_json(file_page(
+            vec![folder_json("src", "Source"), folder_json("dst", "Dest")],
+            None,
+        )))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(query_param("q", "'src' in parents and trashed = false"))
+        .respond_with(ok_json(file_page(
+            vec![
+                file_json("doc-1", "Notes", DOC, "0"),
+                file_json("doc-2", "Notes", DOC, "0"),
+            ],
+            None,
+        )))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(query_param("q", "'dst' in parents and trashed = false"))
+        .respond_with(ok_json(file_page(vec![], None)))
+        .mount(&server)
+        .await;
+    // An empty listing is checked with `item`, which asks for the folder itself.
+    let dest = ok_json(folder_json("dst", "Dest"));
+    mount_path(&server, "/files/dst", dest).await;
+    mount_held(&server, "doc-2", "Notes", DOC, &["src"], None).await;
+    let drive = Arc::new(drive(&server));
+    let vfs = Vfs::new(drive, POSIX, Options::default());
+    let my_drive = vfs.lookup(Vfs::ROOT, "My Drive").await.unwrap();
+    let source = vfs.lookup(my_drive.node, "Source").await.unwrap();
+    let dest = vfs.lookup(my_drive.node, "Dest").await.unwrap();
+    assert_eq!(
+        vfs.rename(
+            source.node,
+            "Notes.document (2).html",
+            dest.node,
+            "Notes.document (2).html",
+            IfExists::Refuse,
+        )
+        .await,
+        Err(VfsError::NotSupported)
+    );
+    assert!(sent(&server, "PATCH").await.is_empty());
+}
+
+#[tokio::test]
+async fn a_file_moved_into_a_shared_drive_keeps_its_node() {
+    let server = MockServer::start().await;
+    let body = ok_json(folder_json("alias-root", "My Drive"));
+    mount_path(&server, "/files/root", body).await;
+    let drives = json!({
+        "drives": [{ "id": "team", "name": "Team", "createdTime": MODIFIED }]
+    });
+    mount_path(&server, "/drives", ok_json(drives)).await;
+    Mock::given(method("GET"))
+        .and(query_param("q", "'root' in parents and trashed = false"))
+        .respond_with(ok_json(file_page(vec![plain("file-1", "notes.txt")], None)))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(query_param("q", "'team' in parents and trashed = false"))
+        .respond_with(ok_json(file_page(vec![], None)))
+        .mount(&server)
+        .await;
+    // An empty listing of a shared drive's top folder is checked with `drives.get`.
+    let body = ok_json(json!({ "id": "team", "name": "Team", "createdTime": MODIFIED }));
+    mount_path(&server, "/drives/team", body).await;
+    mount_held(&server, "file-1", "notes.txt", PLAIN, &["alias-root"], None).await;
+    let file = held_json("file-1", "moved.txt", PLAIN, &["team"], Some("team"));
+    let body = ok_json(file);
+    mount_method(&server, "PATCH", "/files/file-1", body).await;
+    let drive = Arc::new(drive(&server));
+    let vfs = Vfs::new(drive, POSIX, Options::default());
+    let my_drive = vfs.lookup(Vfs::ROOT, "My Drive").await.unwrap();
+    let file = vfs.lookup(my_drive.node, "notes.txt").await.unwrap();
+    let shared = vfs.lookup(Vfs::ROOT, "Shared drives").await.unwrap();
+    let team = vfs.lookup(shared.node, "Team").await.unwrap();
+    vfs.rename(
+        my_drive.node,
+        "notes.txt",
+        team.node,
+        "moved.txt",
+        IfExists::Refuse,
+    )
+    .await
+    .unwrap();
+    let moved = vfs.lookup(team.node, "moved.txt").await.unwrap();
+    assert_eq!(moved.node, file.node);
+    let patches = sent(&server, "PATCH").await;
+    let query = query_of(&patches[0]);
+    assert_eq!(query.get("addParents").unwrap(), "team");
+    assert_eq!(query.get("removeParents").unwrap(), "root");
+    assert_eq!(body_of(&patches[0])["name"], "moved.txt");
 }

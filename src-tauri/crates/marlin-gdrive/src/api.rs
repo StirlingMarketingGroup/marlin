@@ -18,6 +18,11 @@ pub(crate) struct DriveFile {
     #[serde(default)]
     pub(crate) trashed: bool,
     pub(crate) shortcut_details: Option<ShortcutDetails>,
+    /// My Drive's real id is in here, never `root`. Empty when the request did not ask for parents.
+    #[serde(default)]
+    pub(crate) parents: Vec<String>,
+    /// Set for a file in a shared drive. My Drive leaves it out.
+    pub(crate) drive_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -32,6 +37,29 @@ pub(crate) struct FilePage {
     pub(crate) next_page_token: Option<String>,
     #[serde(default)]
     pub(crate) files: Vec<DriveFile>,
+}
+
+/// A file's id and parents, for the checks that need nothing else. `parents` is empty at the top of My Drive and of a shared drive, and when the request did not ask for it.
+#[derive(Deserialize)]
+pub(crate) struct FileParents {
+    pub(crate) id: String,
+    #[serde(default)]
+    pub(crate) parents: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct GeneratedIds {
+    /// The request asks for one. Any other count is an answer Marlin could not read.
+    pub(crate) ids: [String; 1],
+}
+
+/// A page of children when only their presence matters. Google can send an empty page that still has a next page.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ChildPage {
+    pub(crate) next_page_token: Option<String>,
+    #[serde(default)]
+    pub(crate) files: Vec<serde::de::IgnoredAny>,
 }
 
 #[derive(Deserialize)]
@@ -64,13 +92,17 @@ pub(crate) struct StorageQuota {
 }
 
 impl DriveProvider {
-    /// Sends one GET until Google answers it, the token is rejected twice, or the retries run out. A 416 is an answer: only a read can get one.
+    /// Sends one request until Google answers it, the token is rejected twice, or the retries run out.
+    ///
+    /// A 416 is an answer only when a range was sent: only a ranged read can get one. A 409 is not sent again: Google sends it only when a create's pre-made id is already in use.
     ///
     /// A request that gets no answer is `Offline`, and so is a body that stops arriving. The only time limit here is on connecting, so a timeout also means Google could not be reached.
-    pub(crate) async fn get(
+    pub(crate) async fn request(
         &self,
+        method: reqwest::Method,
         path: &str,
         query: &[(&str, &str)],
+        body: Option<&serde_json::Value>,
         range: Option<&str>,
     ) -> Result<reqwest::Response, VfsError> {
         let mut rejected = false;
@@ -79,9 +111,12 @@ impl DriveProvider {
             let token = self.tokens.access_token().await?;
             let mut request = self
                 .client
-                .get(format!("{}{path}", self.config.api))
+                .request(method.clone(), format!("{}{path}", self.config.api))
                 .query(query)
                 .bearer_auth(&token);
+            if let Some(body) = body {
+                request = request.json(body);
+            }
             if let Some(range) = range {
                 request = request.header(reqwest::header::RANGE, range);
             }
@@ -89,7 +124,7 @@ impl DriveProvider {
             let status = response.status();
             let gave_up = match status {
                 _ if status.is_success() => return Ok(response),
-                StatusCode::RANGE_NOT_SATISFIABLE => return Ok(response),
+                StatusCode::RANGE_NOT_SATISFIABLE if range.is_some() => return Ok(response),
                 StatusCode::UNAUTHORIZED => {
                     self.tokens.rejected(&token);
                     if rejected {
@@ -99,6 +134,7 @@ impl DriveProvider {
                     continue;
                 }
                 StatusCode::NOT_FOUND => return Err(VfsError::NotFound),
+                StatusCode::CONFLICT => return Err(VfsError::Conflict),
                 StatusCode::TOO_MANY_REQUESTS => {
                     VfsError::Other("Google Drive is limiting requests".into())
                 }
