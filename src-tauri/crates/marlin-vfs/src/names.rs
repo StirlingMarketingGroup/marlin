@@ -122,6 +122,14 @@ pub fn finder_files(name: &str) -> bool {
     name == ".DS_Store" || name.starts_with("._")
 }
 
+/// The stem and the extension of `name`. The extension starts at the last `.` that is not the first character, and it includes the dot. A name with no such dot has an empty extension.
+pub(crate) fn split_extension(name: &str) -> (&str, &str) {
+    match name.rfind('.') {
+        Some(dot) if dot > 0 => name.split_at(dot),
+        _ => (name, ""),
+    }
+}
+
 /// Rewrites `item.name` so one folder can be shown on this OS. `held` are names, as the OS shows them, that other entries in the folder hold: an item with one of them gets a suffix. The result depends only on the set of ids and names, and on `held`. Nothing is stored, so adding or removing a duplicate can change another item's suffix.
 pub fn unique_names(items: &mut [Item], rules: &NameRules, held: &[&str]) {
     for item in items.iter_mut() {
@@ -145,10 +153,7 @@ pub fn unique_names(items: &mut [Item], rules: &NameRules, held: &[&str]) {
     pending.sort_by(|&left, &right| items[left].id.cmp(&items[right].id));
     for index in pending {
         let original = items[index].name.clone();
-        let (stem, extension) = match original.rfind('.') {
-            Some(dot) if dot > 0 => original.split_at(dot),
-            _ => (original.as_str(), ""),
-        };
+        let (stem, extension) = split_extension(&original);
         let mut candidate = original.clone();
         let mut number = 2u64;
         while !taken.insert((rules.key)(&candidate)) {
@@ -193,6 +198,7 @@ mod tests {
                     kind: Kind::File,
                     size: 0,
                     modified: UNIX_EPOCH,
+                    revision: None,
                 },
             })
             .collect()

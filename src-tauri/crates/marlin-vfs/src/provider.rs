@@ -1,3 +1,6 @@
+use std::path::Path;
+use std::time::SystemTime;
+
 use crate::VfsError;
 
 /// The provider's own id for one item.
@@ -16,8 +19,14 @@ pub enum Kind {
     Folder,
 }
 
-/// Kind, size, and modified time for one item.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A value the provider changes whenever the item's bytes change.
+///
+/// A provider that has the two byte calls gives every file one.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Revision(pub String);
+
+/// Kind, size, modified time, and revision for one item.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attributes {
     pub kind: Kind,
 
@@ -25,8 +34,14 @@ pub struct Attributes {
     pub size: u64,
 
     /// When the remote last changed the item. When a file's bytes change, this time or the size must change too, because an adapter may keep bytes it already read until one of the two changes.
-    pub modified: std::time::SystemTime,
+    pub modified: SystemTime,
+
+    /// The revision of a file's bytes. `None` for a folder, and for a provider without the byte calls.
+    pub revision: Option<Revision>,
 }
+
+/// Hears how many bytes of an upload the provider has sent so far.
+pub type Progress = dyn Fn(u64) + Send + Sync;
 
 /// One item as the provider lists it, before the core maps the name.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,7 +62,7 @@ pub struct Space {
     pub free: u64,
 }
 
-/// A storage account the core can read. A provider that cannot change the remote leaves [`Provider::create_folder`], [`Provider::remove`], and [`Provider::rename`] out, and each then answers [`VfsError::ReadOnly`]. There is no call that writes a file's bytes yet.
+/// A storage account the core can read. A provider that cannot change the remote leaves out the change calls and the two byte calls, and each then answers [`VfsError::ReadOnly`].
 #[async_trait::async_trait]
 pub trait Provider: Send + Sync + 'static {
     /// The folder a mount shows at its top.
@@ -91,6 +106,36 @@ pub trait Provider: Send + Sync + 'static {
         replace: Option<&ItemId>,
     ) -> Result<Item, VfsError> {
         let _ = (id, from, to, name, replace);
+        Err(VfsError::ReadOnly)
+    }
+
+    /// Makes a new file named `name` in `parent` with the bytes of the local file `from`, gives it the modified time `modified`, and returns it. `name` is a remote name. A remote that keeps one name per folder answers [`VfsError::Conflict`] when the name is taken; it never overwrites another item.
+    ///
+    /// Call `progress` with the bytes sent so far as they go out, at least every few seconds while bytes move, because the core stops an upload whose byte count has not grown for [`crate::Options::upload_stall`]. Each call reports its own bytes from zero. This call has no time limit of its own. The local file can change while the call reads it; the core then does not count the upload as sending the file's current bytes, and sends them again.
+    async fn create_file(
+        &self,
+        parent: &ItemId,
+        name: &str,
+        from: &Path,
+        modified: SystemTime,
+        progress: &Progress,
+    ) -> Result<Item, VfsError> {
+        let _ = (parent, name, from, modified, progress);
+        Err(VfsError::ReadOnly)
+    }
+
+    /// Replaces the bytes of the file `id` with the bytes of the local file `from`, gives it the modified time `modified`, and returns the item as the remote now has it. The id stays the same. When the item's revision is not `base`, it answers [`VfsError::Conflict`] and changes nothing. A file that is gone is [`VfsError::NotFound`].
+    ///
+    /// Call `progress` with the bytes sent so far as they go out, at least every few seconds while bytes move, because the core stops an upload whose byte count has not grown for [`crate::Options::upload_stall`]. Each call reports its own bytes from zero. This call has no time limit of its own. The local file can change while the call reads it; the core then does not count the upload as sending the file's current bytes, and sends them again.
+    async fn replace_bytes(
+        &self,
+        id: &ItemId,
+        from: &Path,
+        base: &Revision,
+        modified: SystemTime,
+        progress: &Progress,
+    ) -> Result<Item, VfsError> {
+        let _ = (id, from, base, modified, progress);
         Err(VfsError::ReadOnly)
     }
 }

@@ -12,6 +12,6 @@ mod vfs;
 pub use error::VfsError;
 pub use memory::MemoryProvider;
 pub use names::{escape, finder_files, unescape, unique_names, NameRules, POSIX};
-pub use provider::{Attributes, Item, ItemId, Kind, Provider, Space};
+pub use provider::{Attributes, Item, ItemId, Kind, Progress, Provider, Revision, Space};
 pub use spool::Spool;
-pub use vfs::{Access, Entry, HandleId, IfExists, NodeId, Options, Vfs};
+pub use vfs::{Access, Entry, HandleId, IfExists, NodeId, Options, Unsent, UnsentState, Vfs};

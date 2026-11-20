@@ -257,6 +257,7 @@ mod tests {
             kind,
             size,
             modified: UNIX_EPOCH + Duration::from_secs(9),
+            revision: None,
         }
     }
 
