@@ -1,11 +1,11 @@
 # Linux mount adapter (`marlin-fuse`)
 
-`marlin-fuse` serves one [mount core](mount-core.md) `Vfs` to Linux as a FUSE mount. The [mount helper](mount-helper.md) uses it on Linux. The same crate serves macOS through macFUSE: see [macOS mount adapter](mount-macos.md). A mount is read-only until the adapter serves writes (#598). [Decision 0005](decisions/0005-mount-writes.md) says how it will.
+`marlin-fuse` serves one [mount core](mount-core.md) `Vfs` to Linux as a FUSE mount. The [mount helper](mount-helper.md) uses it on Linux. The same crate serves macOS through macFUSE: see [macOS mount adapter](mount-macos.md). The adapter serves writes when `Vfs::writable()` is true, and mounts read-only otherwise. [Decision 0005](decisions/0005-mount-writes.md) says how a write works. No mount the helper makes takes writes yet: the helper gives no mount a spool (#602), and the Google Drive provider has no write calls (#600, #601).
 
 The helper mounts a Google account through it: see [Providers](mount-helper.md#providers). No part of the UI asks for a mount yet (#377).
 
 **Covers:** `src-tauri/crates/marlin-fuse/` except its macOS half (`src/macos.rs`, `src/macos/`, `test-on-mac.sh`), and the adapter wiring in `src-tauri/crates/marlin-mount/src/adapter.rs`
-**Checked against the code:** 2026-11-17
+**Checked against the code:** 2026-11-20
 
 The design is in [decision 0001](decisions/0001-mount-architecture.md), choices 2 and 6.
 
@@ -36,17 +36,31 @@ The `.deb` and `.rpm` packages depend on `fuse3` (`src-tauri/tauri.conf.json`). 
 
 ## How a mount behaves
 
-- **Mount options:** `ro`, `default_permissions`, file system name `marlin`, subtype `marlin`. The mount shows in `/proc/self/mountinfo` with the type `fuse.marlin`.
+- **Mount options:** `rw` when the mount takes writes, and `ro` when it does not. Also `default_permissions`, file system name `marlin`, subtype `marlin`. The mount shows in `/proc/self/mountinfo` with the type `fuse.marlin`.
 - **Only the mounting user can open it.** The adapter never passes `allow_other`, so the kernel refuses every other user, root included.
-- **Made-up permissions.** The mounting user owns everything. A folder has mode 0500 and a file has mode 0400. `default_permissions` makes the kernel enforce them, so the adapter has no access callback.
-- **Times.** Access, change, and creation times repeat the modified time.
+- **Made-up permissions.** The mounting user owns everything. A mount that takes writes shows a folder as mode 0700 and a file as mode 0600. A read-only mount shows 0500 and 0400. `default_permissions` makes the kernel enforce them, so the adapter has no access callback.
+- **Times.** Access and change times repeat the modified time. A Linux FUSE reply has no creation time.
 - **Caching.** The kernel may reuse a name and its attributes for 1 second.
 - **File bytes stay cached across opens.** The adapter answers each open with `FOPEN_KEEP_CACHE`, so a preview and a thumbnailer that open the same file fetch it once. It also asks the kernel for `FUSE_AUTO_INVAL_DATA` when the mount starts. With that flag the kernel checks a file's size and modified time before it serves cached bytes, and drops them when either changed. `fuser` 0.18.0 does not ask for that flag by itself. On a kernel without it, the adapter does not keep the bytes. An open within about 6 seconds of a change on the remote can still get the old bytes: the core reuses a listing and a node's attributes for up to 5 seconds, and the kernel keeps its answer for 1 second. The kernel asks for the attributes of a file that is being read at most once a second. The core asks the provider for them at most once in 5 seconds ([Rules the core keeps](mount-core.md#rules-the-core-keeps)).
 - **Node IDs.** An inode number is the core's node ID, and a file handle is the core's handle ID. The kernel's forget calls go straight to the core ([decision 0002](decisions/0002-node-ids-follow-lookup-counts.md)).
 - **Listings.** A folder lists `.` and `..` first. `..` carries the inode number `0xffffffff`, which is libfuse's value for "not known": the core keeps no parent for a node.
 - **Free space.** `statfs` reports the provider's total and free bytes in 4,096-byte blocks. The core reuses the provider's answer for 30 seconds.
-- **Names.** A name longer than 255 bytes is not listed and cannot be opened (`ENAMETOOLONG`). The core sets no length limit, so each adapter sets its own.
-- **A slow call blocks nothing else.** Each kernel request that may reach the provider becomes a tokio task, and the `fuser` thread goes back for the next request at once. `forget`, `readdir`, and the two release calls only touch the core's own state, so they answer in place.
+- **Names.** A name longer than 255 bytes is not listed and cannot be opened (`ENAMETOOLONG`). A name that is not UTF-8 cannot be opened (`ENOENT`). A new name that is not UTF-8 is refused (`EINVAL`), because the remote cannot hold it. The core sets no length limit, so each adapter sets its own.
+- **A slow call blocks nothing else.** Each kernel request that may reach the provider becomes a tokio task, and the `fuser` thread goes back for the next request at once. `forget`, `readdir`, and the two release calls answer in place. They touch the core's own state, and the last writer's release also writes the file's small spool record, with no sync.
+
+## Writes
+
+- `create` calls `Vfs::create` and opens the new file. The mode and the umask are ignored. The open uses the same keep-cache flag as `open`.
+- `write` calls `Vfs::write`. An `O_APPEND` write uses the size the kernel holds. The kernel puts the offset at the end of the file before the call.
+- `setattr` calls `Vfs::truncate` when the size is set, then `Vfs::set_modified` when the modified time is set. It answers with `Vfs::attributes` after them. An owner or a mode change succeeds and changes nothing. No access time is kept.
+- An `open` with `O_TRUNC` arrives as `setattr` with size 0. The adapter does not ask for `FUSE_ATOMIC_O_TRUNC`. The core cuts a clean file to zero without reading it.
+- `mkdir` calls `Vfs::create_folder`. `unlink` calls `Vfs::remove` for a file. `rmdir` calls `Vfs::remove` for a folder.
+- `rename` calls `Vfs::rename`. `RENAME_NOREPLACE` refuses a name that is taken. Any other rename replaces it. `RENAME_EXCHANGE` and `RENAME_WHITEOUT` fail with `EINVAL`.
+- `fsync` calls `Vfs::fsync`. `release` calls `Vfs::release`. The settle time starts at `release`, not at `flush`.
+
+`flush` is left out. Every write is in the spool before it answers, so a close has nothing to flush. After the first `ENOSYS` the kernel stops sending `flush`. `mknod` is left out: the kernel uses `create` for a regular file. `fsyncdir`, `fallocate`, `copy_file_range`, `lseek`, `ioctl`, the xattr calls, and `getlk`/`setlk` are left out. For `copy_file_range` the kernel then copies with reads and writes. For `SEEK_DATA` and `SEEK_HOLE` it treats the whole file as data, up to the size it holds. `link` and `symlink` stay at `fuser`'s `EPERM`.
+
+The adapter does not ask for `FUSE_WRITEBACK_CACHE`. A `write` call goes through the kernel's page cache and reaches the adapter before it returns. A store through a shared writable memory map reaches the adapter later, when the kernel writes the page back. A failed write clears the pages it touched. A size or time change drops pages through `FUSE_AUTO_INVAL_DATA`. The pages kept across opens stay the bytes this mount last wrote.
 
 ## Errors
 
@@ -69,6 +83,18 @@ The `.deb` and `.rpm` packages depend on `fuse3` (`src-tauri/tauri.conf.json`). 
 
 **Never map a provider error to `ENOSYS`.** The kernel reads it as "this filesystem has no such call" and stops sending that call for the life of the mount. Only the callbacks the adapter leaves out answer it, through `fuser`'s defaults.
 
+These errors reach an app without a core error:
+
+| Case                                   | Linux error    | Linux error text        |
+| -------------------------------------- | -------------- | ----------------------- |
+| `RENAME_EXCHANGE` or `RENAME_WHITEOUT` | `EINVAL`       | Invalid argument        |
+| A new name that is not UTF-8           | `EINVAL`       | Invalid argument        |
+| A name over 255 bytes                  | `ENAMETOOLONG` | File name too long      |
+| A hard link or a symbolic link         | `EPERM`        | Operation not permitted |
+| A write on a read-only mount           | `EROFS`        | Read-only file system   |
+
+`EINVAL` for those rename flags is what Linux file systems give for a rename flag they do not support. [Decision 0005](decisions/0005-mount-writes.md)'s "not supported" for an exchange is this `EINVAL`, not the core's `NotSupported`. `fuser` answers `EPERM` for the links. The kernel answers `EROFS` when the mount is read-only, before the call reaches the adapter.
+
 ## Unmounting
 
 - `Mount::unmount` runs `fusermount3 -u`. This is a plain unmount: it fails while any file or folder in the mount is open, and the mount stays served. That is what the helper's `Session` trait asks for.
@@ -88,14 +114,23 @@ Run `src-tauri/crates/marlin-fuse/test-in-docker.sh`. It needs Docker.
 - The first run downloads and builds everything. Two Docker volumes keep the registry and the build folder for later runs.
 - The unit tests cover the attribute rules, the two "missing" messages, and what is not a dead mount: a folder, a missing path, a symbolic link. They need no kernel support.
 - The mount tests mount a `MemoryProvider` and use ordinary file calls: list, read at an offset, free space, a 1,000-file folder, a listed folder whose files open with no provider call, a name that is too long, every row of the error table, four slow reads at once, an unmount while a file is open, an unmount after one from outside, an unmount while the provider is slow, two mounts at once (one at a path with a space), a dropped mount, an unmount from outside and a drop while a read is waiting, a name with an accent, a live mount that must not count as dead, and the cached bytes: a second open makes no provider read, and a file with a new modified time is read again.
+- The write tests run on Linux only. They are `a_provider_that_cannot_write_mounts_read_only`, `copies_reach_the_provider`, `editor_saves_keep_one_file`, `dd_into_the_middle_changes_only_those_bytes`, `a_write_is_read_back_at_once_also_by_another_process`, `names_change_through_the_mount`, `preserved_times_reach_the_provider`, and `a_copy_bigger_than_the_spool_waits_for_uploads`. The container installs `rsync` and `vim-tiny`. `copies_reach_the_provider` and `preserved_times_reach_the_provider` need `rsync`. `editor_saves_keep_one_file` needs `vim-tiny`.
 - On a Linux machine, `cargo test -p marlin-fuse` runs the unit tests only. Add `-- --include-ignored --test-threads=1` to run the mount tests there.
 - The mount tests run one at a time. In parallel they fail now and then: a test that starts a program forks, and the child briefly holds a copy of a file that another test has open on its mount, so that test's unmount is refused as busy.
+
+**Measured** in the container on 2026-11-20, with the default 2-second settle time (risk 5 of [decision 0005](decisions/0005-mount-writes.md)):
+
+- Copies of 9 files with `cp` and `rsync`, one of them from the mount into the mount, made 9 uploads.
+- A `sed -i` save and a `vim.tiny` save each made one upload and kept the item's ID. Debian 12's `vim-tiny` writes over the file in place, so it does not hit risk 6.
+- A `cp -r` of four 16 MiB files through a 32 MiB spool took 2.1 seconds: the copy waited one settle time for room.
+
+These runs use `MemoryProvider`, which uploads at once. They say nothing about the 10 GiB default limit or about a real provider's upload speed. #543 and #486 repeat them on real desktops.
 
 ## Tested, and not
 
 | What                                                                           | State                                                     |
 | ------------------------------------------------------------------------------ | --------------------------------------------------------- |
-| Debian 12 container (`fuse3` 3.14), a user who is not root                     | Tested by `test-in-docker.sh`, 2026-11-16                 |
+| Debian 12 container (`fuse3` 3.14), a user who is not root                     | Tested by `test-in-docker.sh`, 2026-11-20                 |
 | A CI runner                                                                    | Not tested. Risk 9 in decision 0001 is still open (#485). |
 | A bare Linux desktop: file managers, drag and drop, file dialogs, thumbnailers | Not tested (#486).                                        |
 | Flatpak, Snap, AppImage                                                        | Not tested (#486).                                        |
@@ -105,5 +140,8 @@ Known limits:
 - A file or folder whose name is longer than 255 bytes is hidden.
 - A file whose bytes change while its size and its modified time stay the same keeps its old cached bytes until the kernel drops them. A provider must change one of the two: see [Mount core](mount-core.md).
 - The adapter does not handle the kernel's interrupt request. A call that an app gave up on still runs until the core's time limit ends it.
-- Read-only: every write fails with `EROFS` until #598.
+- An append uses the size the kernel holds. When another client grows the file, an append through a descriptor that has not seen the new size lands at the old end, over the other client's bytes. An open descriptor that does not stat keeps the old size. A new open can be up to about 6 seconds behind. NFS has the same limit.
+- `mknod` answers `ENOSYS`, so no FIFO, socket, or device can be made. An app that makes a file with `open` reaches `create`.
+- No item shows as read-only on its own. No provider reports that yet.
+- A modified time set on a folder, or on a file that is not in the spool, succeeds and changes nothing. So `touch` on a file that has uploaded keeps its old time: see `set_modified` in [Mount core](mount-core.md#what-an-adapter-calls).
 - Run as root, `fuser` mounts without `fusermount3`, and the mount's type is `fuse` with no subtype. The helper is a per-user process and is not meant to run as root.

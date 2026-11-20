@@ -19,7 +19,8 @@ set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 # procps: a marlin-mount test finds the helper with pgrep and ps.
-apt-get install -y -qq fuse3 procps
+# rsync: copies_reach_the_provider and preserved_times_reach_the_provider. vim-tiny: editor_saves_keep_one_file.
+apt-get install -y -qq fuse3 procps rsync vim-tiny
 useradd -m tester
 chown tester /usr/local/cargo/registry /target
 cat > /tmp/as-tester.sh << 'TEST'

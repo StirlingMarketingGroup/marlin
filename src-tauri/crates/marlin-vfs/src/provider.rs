@@ -62,7 +62,7 @@ pub struct Space {
     pub free: u64,
 }
 
-/// A storage account the core can read. A provider that cannot change the remote leaves out the change calls and the two byte calls, and each then answers [`VfsError::ReadOnly`].
+/// A storage account the core can read. A provider that cannot change the remote leaves out the change calls and the two byte calls, leaves [`Self::can_write`] at its default, and each of those calls then answers [`VfsError::ReadOnly`].
 #[async_trait::async_trait]
 pub trait Provider: Send + Sync + 'static {
     /// The folder a mount shows at its top.
@@ -79,6 +79,11 @@ pub trait Provider: Send + Sync + 'static {
 
     /// The account's total and free space, in bytes.
     async fn space(&self) -> Result<Space, VfsError>;
+
+    /// Whether this provider has the three change calls and the two byte calls. A mount of a provider that answers `false` is read-only (decision 0005, choice 13).
+    fn can_write(&self) -> bool {
+        false
+    }
 
     /// Makes an empty folder named `name` in `parent`, and returns it. The core has checked that its own listing of `parent` holds no such name. A remote that keeps one name per folder answers [`VfsError::Conflict`] when the name is taken.
     async fn create_folder(&self, parent: &ItemId, name: &str) -> Result<Item, VfsError> {

@@ -474,6 +474,11 @@ impl Vfs {
         &self.unplaced
     }
 
+    /// Whether this core can serve a read-write mount: the provider can write, and [`Self::take_writes`] gave the mount a spool. The Linux adapter asks before it mounts, and mounts read-only when this is `false`. The core does not check it on each call: a provider without the write calls answers [`VfsError::ReadOnly`] for them.
+    pub fn writable(&self) -> bool {
+        self.spool.is_some() && self.provider.can_write()
+    }
+
     /// Finds `name` in `parent` and adds one lookup to the item's node.
     pub async fn lookup(&self, parent: NodeId, name: &str) -> Result<Entry, VfsError> {
         let parent_item = self.folder_of(parent)?;
@@ -652,8 +657,13 @@ impl Vfs {
         }
     }
 
-    /// Writes `data` at `offset`. A handle that is not open for write is [`VfsError::AccessDenied`]: a mount with no spool has none. An empty write changes nothing.
-    pub async fn write(&self, handle: HandleId, offset: u64, data: &[u8]) -> Result<(), VfsError> {
+    /// Writes `data` at `offset`. A handle that is not open for write is [`VfsError::AccessDenied`]: a mount with no spool has none. An empty write changes nothing. An adapter that already owns the bytes passes a `Vec`, which is not copied again.
+    pub async fn write(
+        &self,
+        handle: HandleId,
+        offset: u64,
+        data: impl Into<Vec<u8>>,
+    ) -> Result<(), VfsError> {
         let node = {
             let state = self.state.lock().unwrap();
             match state.handles.get(&handle) {
@@ -666,10 +676,11 @@ impl Vfs {
                 _ => return Err(VfsError::StaleHandle),
             }
         };
+        let data: Vec<u8> = data.into();
         if data.is_empty() {
             return Ok(());
         }
-        let data = Arc::new(data.to_vec());
+        let data = Arc::new(data);
         self.edit(node, Edit::Write { offset, data }).await
     }
 
