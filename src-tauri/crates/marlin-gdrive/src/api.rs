@@ -5,7 +5,7 @@ use serde::Deserialize;
 use crate::DriveProvider;
 
 /// How many times one call is sent again after a rate limit or a server error.
-const RETRIES: u32 = 3;
+pub(crate) const RETRIES: u32 = 3;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -15,6 +15,8 @@ pub(crate) struct DriveFile {
     pub(crate) mime_type: String,
     pub(crate) size: Option<String>,
     pub(crate) modified_time: Option<String>,
+    /// Set when the request asked for it. Drive changes it only when the bytes change.
+    pub(crate) head_revision_id: Option<String>,
     #[serde(default)]
     pub(crate) trashed: bool,
     pub(crate) shortcut_details: Option<ShortcutDetails>,
@@ -92,15 +94,34 @@ pub(crate) struct StorageQuota {
 }
 
 impl DriveProvider {
-    /// Sends one request until Google answers it, the token is rejected twice, or the retries run out.
-    ///
-    /// A 416 is an answer only when a range was sent: only a ranged read can get one. A 409 is not sent again: Google sends it only when a create's pre-made id is already in use.
-    ///
-    /// A request that gets no answer is `Offline`, and so is a body that stops arriving. The only time limit here is on connecting, so a timeout also means Google could not be reached.
+    /// How long to wait before try `retries`. Each later wait is twice the one before, plus up to half again at random, so calls that failed together do not come back together.
+    pub(crate) fn retry_wait(&self, retries: u32) -> std::time::Duration {
+        let wait = self.config.retry_delay * 2u32.pow(retries);
+        wait + wait.mul_f64(fastrand::f64() / 2.0)
+    }
+
+    /// [`Self::request_url`] for a path under `config.api`.
     pub(crate) async fn request(
         &self,
         method: reqwest::Method,
         path: &str,
+        query: &[(&str, &str)],
+        body: Option<&serde_json::Value>,
+        range: Option<&str>,
+    ) -> Result<reqwest::Response, VfsError> {
+        let url = format!("{}{path}", self.config.api);
+        self.request_url(method, &url, query, body, range).await
+    }
+
+    /// Sends one request until Google answers it, the token is rejected twice, or the retries run out. Every request takes this path but an upload's `PUT`s, which have their own rules in `upload.rs`.
+    ///
+    /// A 416 is an answer only when a range was sent: only a ranged read can get one. A 409 is not sent again: Google sends it only when a create's pre-made id is already in use.
+    ///
+    /// A request that gets no answer is `Offline`, and so is a body that stops arriving. The only time limit here is on connecting, so a timeout also means Google could not be reached.
+    pub(crate) async fn request_url(
+        &self,
+        method: reqwest::Method,
+        url: &str,
         query: &[(&str, &str)],
         body: Option<&serde_json::Value>,
         range: Option<&str>,
@@ -111,7 +132,7 @@ impl DriveProvider {
             let token = self.tokens.access_token().await?;
             let mut request = self
                 .client
-                .request(method.clone(), format!("{}{path}", self.config.api))
+                .request(method.clone(), url)
                 .query(query)
                 .bearer_auth(&token);
             if let Some(body) = body {
@@ -135,35 +156,66 @@ impl DriveProvider {
                 }
                 StatusCode::NOT_FOUND => return Err(VfsError::NotFound),
                 StatusCode::CONFLICT => return Err(VfsError::Conflict),
-                StatusCode::TOO_MANY_REQUESTS => {
-                    VfsError::Other("Google Drive is limiting requests".into())
-                }
-                // Google sends 403 for a rate limit and for a file the account may not read. Only the reason tells them apart.
-                StatusCode::FORBIDDEN => {
-                    let body = response.bytes().await.map_err(|_| VfsError::Offline)?;
-                    let body: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
-                    let reason = body
-                        .pointer("/error/errors/0/reason")
-                        .and_then(|reason| reason.as_str());
-                    if !matches!(reason, Some("rateLimitExceeded" | "userRateLimitExceeded")) {
-                        return Err(VfsError::AccessDenied);
-                    }
-                    VfsError::Other("Google Drive is limiting requests".into())
-                }
-                _ if status.is_server_error() => {
-                    VfsError::Other(format!("Google Drive answered {status}"))
-                }
-                _ => return Err(VfsError::Other(format!("Google Drive answered {status}"))),
+                _ => match failure(response).await {
+                    Failure::Limited => limiting(),
+                    Failure::Server(status) => answered(status),
+                    Failure::Unread => return Err(VfsError::Offline),
+                    Failure::Final(error) => return Err(error),
+                },
             };
             if retries == RETRIES {
                 return Err(gave_up);
             }
-            // The random part keeps calls that failed together from coming back together.
-            let wait = self.config.retry_delay * 2u32.pow(retries);
-            tokio::time::sleep(wait + wait.mul_f64(fastrand::f64() / 2.0)).await;
+            tokio::time::sleep(self.retry_wait(retries)).await;
             retries += 1;
         }
     }
+}
+
+/// What a status that is neither an answer nor a 401 means. Each caller decides how it tries again.
+pub(crate) enum Failure {
+    /// A 429, or a 403 for a rate limit.
+    Limited,
+    /// A 500 to 599.
+    Server(StatusCode),
+    /// A 403 whose body did not arrive, so its reason is not known.
+    Unread,
+    /// An answer that ends the call: a full drive, a refusal, or a status the table does not name.
+    Final(VfsError),
+}
+
+pub(crate) async fn failure(response: reqwest::Response) -> Failure {
+    let status = response.status();
+    match status {
+        StatusCode::TOO_MANY_REQUESTS => Failure::Limited,
+        // Google sends 403 for a rate limit, a full drive, and a file the account may not change. Only the reason tells them apart.
+        StatusCode::FORBIDDEN => {
+            let Ok(body) = response.bytes().await else {
+                return Failure::Unread;
+            };
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+            match body
+                .pointer("/error/errors/0/reason")
+                .and_then(|reason| reason.as_str())
+            {
+                Some("rateLimitExceeded" | "userRateLimitExceeded") => Failure::Limited,
+                Some("storageQuotaExceeded") => Failure::Final(VfsError::NoSpace),
+                _ => Failure::Final(VfsError::AccessDenied),
+            }
+        }
+        _ if status.is_server_error() => Failure::Server(status),
+        _ => Failure::Final(answered(status)),
+    }
+}
+
+/// The error for a rate limit that outlasts the retries.
+pub(crate) fn limiting() -> VfsError {
+    VfsError::Other("Google Drive is limiting requests".into())
+}
+
+/// The error for a status that has no error of its own. It names only the status, so the helper can log it.
+pub(crate) fn answered(status: StatusCode) -> VfsError {
+    VfsError::Other(format!("Google Drive answered {status}"))
 }
 
 /// The JSON body of an answer.

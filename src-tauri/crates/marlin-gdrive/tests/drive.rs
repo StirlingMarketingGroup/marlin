@@ -1,11 +1,13 @@
 use std::collections::HashMap;
+use std::io::Write;
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use marlin_gdrive::{AccessTokens, Config, DriveProvider};
 use marlin_vfs::{
-    Access, IfExists, Item, ItemId, Kind, Options, Provider, Space, Vfs, VfsError, POSIX,
+    Access, IfExists, Item, ItemId, Kind, Options, Provider, Revision, Space, Vfs, VfsError, POSIX,
 };
 use serde_json::{json, Value};
 use wiremock::matchers::{header, method, path, query_param};
@@ -14,7 +16,7 @@ use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 const MODIFIED: &str = "2020-01-02T03:04:05.678Z";
 
 const ITEM_FIELDS: &str =
-    "id,name,mimeType,size,modifiedTime,trashed,driveId,shortcutDetails(targetId)";
+    "id,name,mimeType,size,modifiedTime,headRevisionId,trashed,driveId,shortcutDetails(targetId)";
 
 const FOLDER: &str = "application/vnd.google-apps.folder";
 const DOC: &str = "application/vnd.google-apps.document";
@@ -73,6 +75,7 @@ impl AccessTokens for TestTokens {
 fn config(server: &MockServer) -> Config {
     Config {
         api: server.uri(),
+        upload: format!("{}/upload", server.uri()),
         retry_delay: Duration::from_millis(1),
     }
 }
@@ -1041,6 +1044,7 @@ async fn a_server_that_is_not_listening_is_offline() {
         Arc::new(TestTokens::new()),
         Config {
             api: format!("http://{address}"),
+            upload: format!("http://{address}/upload"),
             retry_delay: Duration::from_millis(1),
         },
     );
@@ -2199,4 +2203,1341 @@ async fn a_file_moved_into_a_shared_drive_keeps_its_node() {
     assert_eq!(query.get("addParents").unwrap(), "team");
     assert_eq!(query.get("removeParents").unwrap(), "root");
     assert_eq!(body_of(&patches[0])["name"], "moved.txt");
+}
+
+const K: u64 = 1024;
+const PIECE: u64 = 256 * K;
+const CHUNK: u64 = 16 * K * K;
+const STAMP: &str = "2021-02-03T04:05:06.789Z";
+const ANSWERED: &str = "2024-05-06T07:08:09.123Z";
+
+fn stamp() -> SystemTime {
+    SystemTime::from(chrono::DateTime::parse_from_rfc3339(STAMP).unwrap())
+}
+
+/// Bytes that repeat every 251, so no two 256 KiB pieces or 16 MiB chunks of a file are alike, and a piece sent from the wrong offset shows.
+fn pattern(len: usize) -> Vec<u8> {
+    (0..len).map(|i| (i % 251) as u8).collect()
+}
+
+fn local_file(bytes: &[u8]) -> tempfile::NamedTempFile {
+    let mut file = tempfile::NamedTempFile::new().unwrap();
+    file.write_all(bytes).unwrap();
+    file
+}
+
+fn upload_json(id: &str, name: &str, size: u64, revision: &str) -> Value {
+    json!({
+        "id": id,
+        "name": name,
+        "mimeType": PLAIN,
+        "size": size.to_string(),
+        "modifiedTime": ANSWERED,
+        "headRevisionId": revision,
+        "trashed": false,
+    })
+}
+
+fn with_revision(mut file: Value, revision: &str) -> Value {
+    file["headRevisionId"] = json!(revision);
+    file
+}
+
+fn resume_at(held: u64) -> ResponseTemplate {
+    ResponseTemplate::new(308).insert_header("range", format!("bytes=0-{}", held - 1))
+}
+
+fn located(server: &MockServer) -> ResponseTemplate {
+    ResponseTemplate::new(200)
+        .insert_header("location", format!("{}/upload/session/s1", server.uri()))
+}
+
+async fn mount_new_id(server: &MockServer, new_id: &str) {
+    mount_path(
+        server,
+        "/files/generateIds",
+        ok_json(json!({ "ids": [new_id] })),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_plain_file_carries_its_revision_and_a_folder_and_a_link_do_not() {
+    let server = MockServer::start().await;
+    let mut notes = file_json("notes", "notes.txt", PLAIN, "4");
+    notes["headRevisionId"] = json!("rev-notes");
+    let mut docs = folder_json("docs", "Docs");
+    docs["headRevisionId"] = json!("rev-docs");
+    let mut doc = file_json("doc", "Notes", DOC, "0");
+    doc["headRevisionId"] = json!("rev-doc");
+    mount_path(
+        &server,
+        "/files",
+        ok_json(file_page(vec![notes, docs, doc], None)),
+    )
+    .await;
+    mount_path(
+        &server,
+        "/files/notes",
+        ok_json(with_revision(
+            file_json("notes", "notes.txt", PLAIN, "4"),
+            "rev-notes",
+        )),
+    )
+    .await;
+    let drive = drive(&server);
+    let listed = drive.list(&id("folder")).await.unwrap();
+    assert_eq!(
+        listed[0].attributes.revision,
+        Some(Revision("rev-notes".to_string()))
+    );
+    assert_eq!(listed[1].attributes.revision, None);
+    assert_eq!(listed[2].attributes.revision, None);
+    let item = drive.item(&id("notes")).await.unwrap();
+    assert_eq!(
+        item.attributes.revision,
+        Some(Revision("rev-notes".to_string()))
+    );
+    let requests = server.received_requests().await.unwrap();
+    assert!(query_of(&requests[0])
+        .get("fields")
+        .unwrap()
+        .contains("headRevisionId"));
+    let got = requests
+        .iter()
+        .find(|request| request.url.path() == "/files/notes");
+    assert!(query_of(got.unwrap())
+        .get("fields")
+        .unwrap()
+        .contains("headRevisionId"));
+}
+
+#[tokio::test]
+async fn create_file_sends_a_file_of_up_to_one_chunk_in_one_request() {
+    let server = MockServer::start().await;
+    mount_new_id(&server, "gen-1").await;
+    mount_method(&server, "POST", "/upload/files", located(&server)).await;
+    let size = 600 * K;
+    let answers = vec![ok_json(upload_json("gen-1", "notes.txt", size, "rev-2"))];
+    mount_answers(&server, "PUT", "/upload/session/s1", answers).await;
+    let bytes = pattern(size as usize);
+    let file = local_file(&bytes);
+    // `Progress` is a `'static` callback, so the list it fills is shared.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let heard = Arc::clone(&seen);
+    let progress = move |sent| heard.lock().unwrap().push(sent);
+    let made = drive(&server)
+        .create_file(&id("folder"), "notes.txt", file.path(), stamp(), &progress)
+        .await
+        .unwrap();
+    assert_eq!(made.id, id("gen-1"));
+    assert_eq!(made.attributes.size, size);
+    assert_eq!(
+        made.attributes.revision,
+        Some(Revision("rev-2".to_string()))
+    );
+    assert_eq!(
+        made.attributes.modified,
+        SystemTime::from(chrono::DateTime::parse_from_rfc3339(ANSWERED).unwrap())
+    );
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.last().copied(), Some(size));
+    assert!(seen.windows(2).all(|pair| pair[1] >= pair[0]));
+    let posts = sent(&server, "POST").await;
+    assert_eq!(posts.len(), 1);
+    assert_eq!(posts[0].url.path(), "/upload/files");
+    let query = query_of(&posts[0]);
+    assert_eq!(query.get("uploadType").unwrap(), "resumable");
+    assert_eq!(query.get("supportsAllDrives").unwrap(), "true");
+    assert_eq!(query.get("fields").unwrap(), ITEM_FIELDS);
+    assert_eq!(
+        body_of(&posts[0]),
+        json!({
+            "id": "gen-1",
+            "name": "notes.txt",
+            "parents": ["folder"],
+            "modifiedTime": STAMP,
+        })
+    );
+    let puts = sent(&server, "PUT").await;
+    assert_eq!(puts.len(), 1);
+    assert_eq!(
+        sent_header(&puts[0], "content-range"),
+        format!("bytes 0-{}/{size}", size - 1)
+    );
+    assert_eq!(&puts[0].body[..], &bytes[..]);
+}
+
+#[tokio::test]
+async fn create_file_sends_a_file_longer_than_one_chunk_in_chunks() {
+    let server = MockServer::start().await;
+    mount_new_id(&server, "gen-1").await;
+    mount_method(&server, "POST", "/upload/files", located(&server)).await;
+    let size = CHUNK + 600 * K;
+    let answers = vec![
+        resume_at(CHUNK),
+        ok_json(upload_json("gen-1", "big.bin", size, "rev-1")),
+    ];
+    mount_answers(&server, "PUT", "/upload/session/s1", answers).await;
+    let bytes = pattern(size as usize);
+    let file = local_file(&bytes);
+    drive(&server)
+        .create_file(&id("folder"), "big.bin", file.path(), stamp(), &|_| {})
+        .await
+        .unwrap();
+    let puts = sent(&server, "PUT").await;
+    assert_eq!(puts.len(), 2);
+    assert_eq!(
+        sent_header(&puts[0], "content-range"),
+        format!("bytes 0-{}/{size}", CHUNK - 1)
+    );
+    assert!(puts[0].body[..] == bytes[..CHUNK as usize]);
+    assert_eq!(
+        sent_header(&puts[1], "content-range"),
+        format!("bytes {CHUNK}-{}/{size}", size - 1)
+    );
+    assert!(puts[1].body[..] == bytes[CHUNK as usize..]);
+}
+
+#[tokio::test]
+async fn create_file_in_a_shared_drive_keeps_the_drive_in_the_id() {
+    let server = MockServer::start().await;
+    mount_new_id(&server, "gen-1").await;
+    mount_method(&server, "POST", "/upload/files", located(&server)).await;
+    let size = 100 * K;
+    mount_answers(
+        &server,
+        "PUT",
+        "/upload/session/s1",
+        vec![ok_json(upload_json("gen-1", "notes.txt", size, "rev-1"))],
+    )
+    .await;
+    let file = local_file(&pattern(size as usize));
+    let made = drive(&server)
+        .create_file(&id("d/folder"), "notes.txt", file.path(), stamp(), &|_| {})
+        .await
+        .unwrap();
+    assert_eq!(made.id, id("d/gen-1"));
+    let posts = sent(&server, "POST").await;
+    assert_eq!(body_of(&posts[0])["parents"], json!(["folder"]));
+}
+
+#[tokio::test]
+async fn create_file_refuses_a_parent_that_cannot_hold_a_file() {
+    let server = MockServer::start().await;
+    let drive = drive(&server);
+    let from = Path::new("/no/such/file");
+    assert_eq!(
+        drive
+            .create_file(&id("/"), "a", from, stamp(), &|_| {})
+            .await,
+        Err(VfsError::AccessDenied)
+    );
+    assert_eq!(
+        drive
+            .create_file(&id("/shared-drives"), "a", from, stamp(), &|_| {})
+            .await,
+        Err(VfsError::AccessDenied)
+    );
+    assert_eq!(
+        drive
+            .create_file(&id("abc#abc"), "a", from, stamp(), &|_| {})
+            .await,
+        Err(VfsError::NotAFolder)
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn create_file_of_an_empty_file_sends_one_empty_put() {
+    let server = MockServer::start().await;
+    mount_new_id(&server, "gen-1").await;
+    mount_method(&server, "POST", "/upload/files", located(&server)).await;
+    mount_answers(
+        &server,
+        "PUT",
+        "/upload/session/s1",
+        vec![ok_json(upload_json("gen-1", "empty.txt", 0, "rev-0"))],
+    )
+    .await;
+    let file = local_file(b"");
+    let made = drive(&server)
+        .create_file(&id("folder"), "empty.txt", file.path(), stamp(), &|_| {})
+        .await
+        .unwrap();
+    assert_eq!(made.attributes.size, 0);
+    assert_eq!(
+        made.attributes.revision,
+        Some(Revision("rev-0".to_string()))
+    );
+    let puts = sent(&server, "PUT").await;
+    assert_eq!(puts.len(), 1);
+    assert!(puts[0].body.is_empty());
+    assert_eq!(sent_header(&puts[0], "content-range"), "");
+    assert_eq!(sent_header(&puts[0], "content-length"), "0");
+}
+
+#[tokio::test]
+async fn replace_bytes_checks_the_revision_then_uploads() {
+    let server = MockServer::start().await;
+    let current = with_revision(file_json("f", "notes.txt", PLAIN, "1"), "rev-1");
+    mount_answers(&server, "GET", "/files/f", vec![ok_json(current); 2]).await;
+    mount_method(&server, "PATCH", "/upload/files/f", located(&server)).await;
+    let size = 600 * K;
+    let answers = vec![
+        resume_at(2 * PIECE),
+        ok_json(upload_json("f", "notes.txt", size, "rev-2")),
+    ];
+    mount_answers(&server, "PUT", "/upload/session/s1", answers).await;
+    let bytes = pattern(size as usize);
+    let file = local_file(&bytes);
+    let replaced = drive(&server)
+        .replace_bytes(
+            &id("f"),
+            file.path(),
+            &Revision("rev-1".to_string()),
+            stamp(),
+            &|_| {},
+        )
+        .await
+        .unwrap();
+    assert_eq!(replaced.id, id("f"));
+    assert_eq!(
+        replaced.attributes.revision,
+        Some(Revision("rev-2".to_string()))
+    );
+    let patches = sent(&server, "PATCH").await;
+    assert_eq!(patches.len(), 1);
+    assert_eq!(patches[0].url.path(), "/upload/files/f");
+    assert_eq!(
+        query_of(&patches[0]).get("uploadType").unwrap(),
+        "resumable"
+    );
+    // The file's type goes with the new bytes, or Drive guesses it again from them.
+    assert_eq!(
+        body_of(&patches[0]),
+        json!({ "mimeType": PLAIN, "modifiedTime": STAMP })
+    );
+    let puts = sent(&server, "PUT").await;
+    assert_eq!(
+        sent_header(&puts[0], "content-range"),
+        format!("bytes 0-{}/{size}", 2 * PIECE - 1)
+    );
+    assert_eq!(&puts[0].body[..], &bytes[..2 * PIECE as usize]);
+    let gets = sent(&server, "GET").await;
+    assert_eq!(gets.len(), 2);
+    assert!(gets.iter().all(|request| request.url.path() == "/files/f"));
+    assert_eq!(
+        sent_header(&puts[1], "content-range"),
+        format!("bytes {}-{}/{size}", 2 * PIECE, size - 1)
+    );
+}
+
+#[tokio::test]
+async fn replace_bytes_with_a_stale_revision_uploads_nothing() {
+    let server = MockServer::start().await;
+    let current = with_revision(file_json("f", "notes.txt", PLAIN, "1"), "rev-2");
+    mount_path(&server, "/files/f", ok_json(current)).await;
+    let replaced = drive(&server)
+        .replace_bytes(
+            &id("f"),
+            Path::new("/no/such/file"),
+            &Revision("rev-1".to_string()),
+            stamp(),
+            &|_| {},
+        )
+        .await;
+    assert_eq!(replaced, Err(VfsError::Conflict));
+    assert!(sent(&server, "PATCH").await.is_empty());
+    assert!(sent(&server, "PUT").await.is_empty());
+}
+
+#[tokio::test]
+async fn replace_bytes_stops_when_the_revision_changes_before_the_last_piece() {
+    let server = MockServer::start().await;
+    let first = with_revision(file_json("f", "notes.txt", PLAIN, "1"), "rev-1");
+    let second = with_revision(file_json("f", "notes.txt", PLAIN, "1"), "rev-2");
+    mount_answers(
+        &server,
+        "GET",
+        "/files/f",
+        vec![ok_json(first), ok_json(second)],
+    )
+    .await;
+    mount_method(&server, "PATCH", "/upload/files/f", located(&server)).await;
+    let size = 600 * K;
+    mount_answers(
+        &server,
+        "PUT",
+        "/upload/session/s1",
+        vec![resume_at(2 * PIECE)],
+    )
+    .await;
+    let file = local_file(&pattern(size as usize));
+    let replaced = drive(&server)
+        .replace_bytes(
+            &id("f"),
+            file.path(),
+            &Revision("rev-1".to_string()),
+            stamp(),
+            &|_| {},
+        )
+        .await;
+    assert_eq!(replaced, Err(VfsError::Conflict));
+    let puts = sent(&server, "PUT").await;
+    assert_eq!(puts.len(), 1);
+    assert_eq!(
+        sent_header(&puts[0], "content-range"),
+        format!("bytes 0-{}/{size}", 2 * PIECE - 1)
+    );
+}
+
+#[tokio::test]
+async fn replace_bytes_stops_when_the_revision_changes_before_a_resend_of_the_tail() {
+    let server = MockServer::start().await;
+    let same = with_revision(file_json("f", "notes.txt", PLAIN, "1"), "rev-1");
+    let changed = with_revision(file_json("f", "notes.txt", PLAIN, "1"), "rev-2");
+    mount_answers(
+        &server,
+        "GET",
+        "/files/f",
+        vec![ok_json(same.clone()), ok_json(same), ok_json(changed)],
+    )
+    .await;
+    mount_method(&server, "PATCH", "/upload/files/f", located(&server)).await;
+    let size = 600 * K;
+    // The last request fails, and the question says Google still waits for it, so it would go out again.
+    let answers = vec![
+        resume_at(2 * PIECE),
+        ResponseTemplate::new(503),
+        resume_at(2 * PIECE),
+    ];
+    mount_answers(&server, "PUT", "/upload/session/s1", answers).await;
+    let file = local_file(&pattern(size as usize));
+    let replaced = drive(&server)
+        .replace_bytes(
+            &id("f"),
+            file.path(),
+            &Revision("rev-1".to_string()),
+            stamp(),
+            &|_| {},
+        )
+        .await;
+    assert_eq!(replaced, Err(VfsError::Conflict));
+    let puts = sent(&server, "PUT").await;
+    let ending = format!("bytes {}-{}/{size}", 2 * PIECE, size - 1);
+    assert_eq!(
+        puts.iter()
+            .filter(|request| sent_header(request, "content-range") == ending)
+            .count(),
+        1
+    );
+    assert_eq!(sent(&server, "GET").await.len(), 3);
+}
+
+#[tokio::test]
+async fn replace_bytes_of_a_missing_file_uploads_nothing() {
+    let server = MockServer::start().await;
+    let mut trashed = file_json("gone", "gone.txt", PLAIN, "1");
+    trashed["trashed"] = json!(true);
+    trashed["headRevisionId"] = json!("rev-1");
+    mount_path(&server, "/files/gone", ok_json(trashed)).await;
+    mount_path(&server, "/files/missing", ResponseTemplate::new(404)).await;
+    let drive = drive(&server);
+    let base = Revision("rev-1".to_string());
+    assert_eq!(
+        drive
+            .replace_bytes(
+                &id("gone"),
+                Path::new("/no/such/file"),
+                &base,
+                stamp(),
+                &|_| {}
+            )
+            .await,
+        Err(VfsError::NotFound)
+    );
+    assert_eq!(
+        drive
+            .replace_bytes(
+                &id("missing"),
+                Path::new("/no/such/file"),
+                &base,
+                stamp(),
+                &|_| {}
+            )
+            .await,
+        Err(VfsError::NotFound)
+    );
+    assert!(sent(&server, "PATCH").await.is_empty());
+    assert!(sent(&server, "PUT").await.is_empty());
+}
+
+#[tokio::test]
+async fn replace_bytes_refuses_a_link_file_a_folder_and_a_file_with_no_revision() {
+    let server = MockServer::start().await;
+    mount_path(
+        &server,
+        "/files/plain",
+        ok_json(file_json("plain", "notes.txt", PLAIN, "4")),
+    )
+    .await;
+    mount_path(&server, "/files/docs", ok_json(folder_json("docs", "Docs"))).await;
+    let drive = drive(&server);
+    let base = Revision("rev-1".to_string());
+    assert_eq!(
+        drive
+            .replace_bytes(
+                &id("abc#abc"),
+                Path::new("/no/such/file"),
+                &base,
+                stamp(),
+                &|_| {}
+            )
+            .await,
+        Err(VfsError::NotSupported)
+    );
+    assert_eq!(
+        drive
+            .replace_bytes(
+                &id("plain"),
+                Path::new("/no/such/file"),
+                &base,
+                stamp(),
+                &|_| {}
+            )
+            .await,
+        Err(VfsError::NotSupported)
+    );
+    assert_eq!(
+        drive
+            .replace_bytes(
+                &id("docs"),
+                Path::new("/no/such/file"),
+                &base,
+                stamp(),
+                &|_| {}
+            )
+            .await,
+        Err(VfsError::IsAFolder)
+    );
+    let requests = server.received_requests().await.unwrap();
+    assert!(requests
+        .iter()
+        .all(|request| request.method.as_str() == "GET"));
+    assert!(sent(&server, "PUT").await.is_empty());
+}
+
+#[tokio::test]
+async fn an_upload_resumes_from_the_bytes_google_held() {
+    let server = MockServer::start().await;
+    mount_new_id(&server, "gen-1").await;
+    mount_method(&server, "POST", "/upload/files", located(&server)).await;
+    let size = 600 * K;
+    let answers = vec![
+        ResponseTemplate::new(503),
+        resume_at(PIECE),
+        ok_json(upload_json("gen-1", "notes.txt", size, "rev-1")),
+    ];
+    mount_answers(&server, "PUT", "/upload/session/s1", answers).await;
+    let bytes = pattern(size as usize);
+    let file = local_file(&bytes);
+    drive(&server)
+        .create_file(&id("folder"), "notes.txt", file.path(), stamp(), &|_| {})
+        .await
+        .unwrap();
+    let puts = sent(&server, "PUT").await;
+    assert_eq!(puts.len(), 3);
+    assert_eq!(
+        sent_header(&puts[1], "content-range"),
+        format!("bytes */{size}")
+    );
+    assert!(puts[1].body.is_empty());
+    assert_eq!(
+        sent_header(&puts[2], "content-range"),
+        format!("bytes {PIECE}-{}/{size}", size - 1)
+    );
+    assert_eq!(&puts[2].body[..], &bytes[PIECE as usize..]);
+}
+
+#[tokio::test]
+async fn an_upload_resumes_from_an_uneven_offset_on_piece_boundaries() {
+    let server = MockServer::start().await;
+    mount_new_id(&server, "gen-1").await;
+    mount_method(&server, "POST", "/upload/files", located(&server)).await;
+    // More than one chunk is left after the resume, so the next request does not end the file.
+    let size = CHUNK + 600 * K;
+    let held = 43u64;
+    let answers = vec![
+        ResponseTemplate::new(503),
+        ResponseTemplate::new(308).insert_header("range", "bytes=0-42"),
+        resume_at(held + CHUNK),
+        ok_json(upload_json("gen-1", "big.bin", size, "rev-1")),
+    ];
+    mount_answers(&server, "PUT", "/upload/session/s1", answers).await;
+    let bytes = pattern(size as usize);
+    let file = local_file(&bytes);
+    drive(&server)
+        .create_file(&id("folder"), "big.bin", file.path(), stamp(), &|_| {})
+        .await
+        .unwrap();
+    let puts = sent(&server, "PUT").await;
+    assert_eq!(
+        sent_header(&puts[2], "content-range"),
+        format!("bytes {held}-{}/{size}", held + CHUNK - 1)
+    );
+    assert!(puts[2].body[..] == bytes[held as usize..(held + CHUNK) as usize]);
+    assert_eq!(
+        sent_header(&puts[3], "content-range"),
+        format!("bytes {}-{}/{size}", held + CHUNK, size - 1)
+    );
+    assert!(puts[3].body[..] == bytes[(held + CHUNK) as usize..]);
+}
+
+#[tokio::test]
+async fn a_resume_with_no_range_starts_again_at_the_first_byte() {
+    let server = MockServer::start().await;
+    mount_new_id(&server, "gen-1").await;
+    mount_method(&server, "POST", "/upload/files", located(&server)).await;
+    let size = 600 * K;
+    let answers = vec![
+        ResponseTemplate::new(503),
+        ResponseTemplate::new(308),
+        ok_json(upload_json("gen-1", "notes.txt", size, "rev-1")),
+    ];
+    mount_answers(&server, "PUT", "/upload/session/s1", answers).await;
+    let bytes = pattern(size as usize);
+    let file = local_file(&bytes);
+    drive(&server)
+        .create_file(&id("folder"), "notes.txt", file.path(), stamp(), &|_| {})
+        .await
+        .unwrap();
+    let puts = sent(&server, "PUT").await;
+    assert_eq!(puts.len(), 3);
+    assert_eq!(
+        sent_header(&puts[1], "content-range"),
+        format!("bytes */{size}")
+    );
+    assert_eq!(
+        sent_header(&puts[2], "content-range"),
+        format!("bytes 0-{}/{size}", size - 1)
+    );
+    assert_eq!(&puts[2].body[..], &bytes[..]);
+}
+
+#[tokio::test]
+async fn a_status_question_that_already_has_the_file_sends_nothing_more() {
+    let server = MockServer::start().await;
+    mount_new_id(&server, "gen-1").await;
+    mount_method(&server, "POST", "/upload/files", located(&server)).await;
+    let size = 600 * K;
+    let answers = vec![
+        ResponseTemplate::new(503),
+        ok_json(upload_json("gen-1", "notes.txt", size, "rev-9")),
+    ];
+    mount_answers(&server, "PUT", "/upload/session/s1", answers).await;
+    let file = local_file(&pattern(size as usize));
+    let made = drive(&server)
+        .create_file(&id("folder"), "notes.txt", file.path(), stamp(), &|_| {})
+        .await
+        .unwrap();
+    assert_eq!(
+        made.attributes.revision,
+        Some(Revision("rev-9".to_string()))
+    );
+    let puts = sent(&server, "PUT").await;
+    assert_eq!(puts.len(), 2);
+    assert_eq!(
+        sent_header(&puts[1], "content-range"),
+        format!("bytes */{size}")
+    );
+}
+
+#[tokio::test]
+async fn four_failures_that_make_no_progress_end_the_upload() {
+    let server = MockServer::start().await;
+    mount_new_id(&server, "gen-1").await;
+    mount_method(&server, "POST", "/upload/files", located(&server)).await;
+    mount_answers(
+        &server,
+        "PUT",
+        "/upload/session/s1",
+        vec![ResponseTemplate::new(503); 4],
+    )
+    .await;
+    let file = local_file(&pattern((600 * K) as usize));
+    let made = drive(&server)
+        .create_file(&id("folder"), "notes.txt", file.path(), stamp(), &|_| {})
+        .await;
+    assert_eq!(
+        made,
+        Err(VfsError::Other(
+            "Google Drive answered 503 Service Unavailable".into()
+        ))
+    );
+    assert_eq!(sent(&server, "PUT").await.len(), 4);
+
+    let stuck = MockServer::start().await;
+    mount_new_id(&stuck, "gen-1").await;
+    mount_method(&stuck, "POST", "/upload/files", located(&stuck)).await;
+    mount_answers(
+        &stuck,
+        "PUT",
+        "/upload/session/s1",
+        vec![ResponseTemplate::new(308); 4],
+    )
+    .await;
+    let file = local_file(&pattern((600 * K) as usize));
+    let made = drive(&stuck)
+        .create_file(&id("folder"), "notes.txt", file.path(), stamp(), &|_| {})
+        .await;
+    assert_eq!(
+        made,
+        Err(VfsError::Other(
+            "Google Drive answered 308 Permanent Redirect".into()
+        ))
+    );
+    // Four sends that Google kept nothing of, with a question after each of the first three.
+    assert_eq!(sent(&stuck, "PUT").await.len(), 7);
+}
+
+/// Reads one request on a socket of a hand-written session server: the headers, and the body until at least `body_limit` bytes of it, or all of it, have arrived. Body bytes that came with the headers are kept. Wiremock cannot drop a connection partway through a body, so the tests that need that serve the session themselves.
+async fn read_http(
+    socket: &mut tokio::net::TcpStream,
+    body_limit: Option<usize>,
+) -> std::io::Result<(String, Vec<u8>)> {
+    use tokio::io::AsyncReadExt;
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 8192];
+    let header_end = loop {
+        if let Some(pos) = buf.windows(4).position(|window| window == b"\r\n\r\n") {
+            break pos + 4;
+        }
+        let n = socket.read(&mut tmp).await?;
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "closed",
+            ));
+        }
+        buf.extend_from_slice(&tmp[..n]);
+    };
+    let headers = String::from_utf8_lossy(&buf[..header_end]).into_owned();
+    let mut body = buf[header_end..].to_vec();
+    let wanted = headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse().ok())?
+        })
+        .unwrap_or(0);
+    let cap = body_limit.unwrap_or(wanted);
+    while body.len() < cap.min(wanted) {
+        let n = socket.read(&mut tmp).await?;
+        if n == 0 {
+            break;
+        }
+        body.extend_from_slice(&tmp[..n]);
+    }
+    Ok((headers, body))
+}
+
+async fn accept(listener: &tokio::net::TcpListener) -> tokio::net::TcpStream {
+    tokio::time::timeout(Duration::from_secs(5), listener.accept())
+        .await
+        .expect("the upload connected")
+        .unwrap()
+        .0
+}
+
+#[tokio::test]
+async fn an_upload_resumes_after_the_connection_drops() {
+    let server = MockServer::start().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    mount_new_id(&server, "gen-1").await;
+    let started =
+        ResponseTemplate::new(200).insert_header("location", format!("http://{address}/session"));
+    mount_method(&server, "POST", "/upload/files", started).await;
+    let size = 600 * K;
+    let bytes = pattern(size as usize);
+    let tail = bytes[2 * PIECE as usize..].to_vec();
+    let json_body =
+        serde_json::to_string(&upload_json("gen-1", "notes.txt", size, "rev-1")).unwrap();
+    let serve = tokio::spawn(async move {
+        use tokio::io::AsyncWriteExt;
+        let mut socket = accept(&listener).await;
+        read_http(&mut socket, Some(8192)).await.unwrap();
+        drop(socket);
+
+        let mut socket = accept(&listener).await;
+        let (headers, _) = read_http(&mut socket, None).await.unwrap();
+        assert!(headers.contains(&format!("bytes */{size}")), "{headers}");
+        let held = 2 * PIECE - 1;
+        let response = format!(
+            "HTTP/1.1 308 Resume Incomplete\r\nRange: bytes=0-{held}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+        drop(socket);
+
+        let mut socket = accept(&listener).await;
+        let (headers, body) = read_http(&mut socket, None).await.unwrap();
+        assert!(
+            headers.contains(&format!("bytes {}-{}/", 2 * PIECE, size - 1)),
+            "{headers}"
+        );
+        assert_eq!(body, tail);
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json_body}",
+            json_body.len()
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    });
+    let file = local_file(&bytes);
+    let made = drive(&server)
+        .create_file(&id("folder"), "notes.txt", file.path(), stamp(), &|_| {})
+        .await
+        .unwrap();
+    assert_eq!(made.attributes.size, size);
+    assert_eq!(
+        made.attributes.revision,
+        Some(Revision("rev-1".to_string()))
+    );
+    serve.await.unwrap();
+}
+
+#[tokio::test]
+async fn a_finished_upload_whose_body_was_cut_off_is_read_again() {
+    let server = MockServer::start().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    mount_new_id(&server, "gen-1").await;
+    let started =
+        ResponseTemplate::new(200).insert_header("location", format!("http://{address}/session"));
+    mount_method(&server, "POST", "/upload/files", started).await;
+    let size = 1000u64;
+    let json_body =
+        serde_json::to_string(&upload_json("gen-1", "notes.txt", size, "rev-1")).unwrap();
+    let serve = tokio::spawn(async move {
+        use tokio::io::AsyncWriteExt;
+        let mut socket = accept(&listener).await;
+        let _ = read_http(&mut socket, None).await.unwrap();
+        let response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{";
+        socket.write_all(response.as_bytes()).await.unwrap();
+        drop(socket);
+
+        let mut socket = accept(&listener).await;
+        let (headers, body) = read_http(&mut socket, None).await.unwrap();
+        assert!(headers.contains(&format!("bytes */{size}")), "{headers}");
+        assert!(body.is_empty());
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json_body}",
+            json_body.len()
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    });
+    let file = local_file(&pattern(size as usize));
+    let made = drive(&server)
+        .create_file(&id("folder"), "notes.txt", file.path(), stamp(), &|_| {})
+        .await
+        .unwrap();
+    assert_eq!(
+        made.attributes.revision,
+        Some(Revision("rev-1".to_string()))
+    );
+    serve.await.unwrap();
+}
+
+fn denied(reason: &str) -> ResponseTemplate {
+    ResponseTemplate::new(403).set_body_json(json!({
+        "error": { "errors": [{ "reason": reason }] }
+    }))
+}
+
+#[tokio::test]
+async fn a_full_drive_and_a_forbidden_file_end_the_upload() {
+    let server = MockServer::start().await;
+    mount_new_id(&server, "gen-1").await;
+    mount_method(
+        &server,
+        "POST",
+        "/upload/files",
+        denied("storageQuotaExceeded"),
+    )
+    .await;
+    let file = local_file(&pattern(32));
+    let made = drive(&server)
+        .create_file(&id("folder"), "notes.txt", file.path(), stamp(), &|_| {})
+        .await;
+    assert_eq!(made, Err(VfsError::NoSpace));
+    assert!(sent(&server, "PUT").await.is_empty());
+
+    let server = MockServer::start().await;
+    let current = with_revision(file_json("f", "notes.txt", PLAIN, "1"), "rev-1");
+    mount_path(&server, "/files/f", ok_json(current)).await;
+    mount_method(
+        &server,
+        "PATCH",
+        "/upload/files/f",
+        denied("insufficientFilePermissions"),
+    )
+    .await;
+    let file = local_file(&pattern(32));
+    let replaced = drive(&server)
+        .replace_bytes(
+            &id("f"),
+            file.path(),
+            &Revision("rev-1".to_string()),
+            stamp(),
+            &|_| {},
+        )
+        .await;
+    assert_eq!(replaced, Err(VfsError::AccessDenied));
+    assert!(sent(&server, "PUT").await.is_empty());
+}
+
+#[tokio::test]
+async fn a_lost_session_is_opened_once_more() {
+    let server = MockServer::start().await;
+    mount_new_id(&server, "gen-1").await;
+    mount_answers(
+        &server,
+        "POST",
+        "/upload/files",
+        vec![located(&server), located(&server)],
+    )
+    .await;
+    let size = 1000u64;
+    mount_answers(
+        &server,
+        "PUT",
+        "/upload/session/s1",
+        vec![
+            ResponseTemplate::new(404),
+            ok_json(upload_json("gen-1", "notes.txt", size, "rev-1")),
+        ],
+    )
+    .await;
+    let bytes = pattern(size as usize);
+    let file = local_file(&bytes);
+    let made = drive(&server)
+        .create_file(&id("folder"), "notes.txt", file.path(), stamp(), &|_| {})
+        .await
+        .unwrap();
+    assert_eq!(made.id, id("gen-1"));
+    let posts = sent(&server, "POST").await;
+    assert_eq!(posts.len(), 2);
+    assert_eq!(body_of(&posts[0])["id"], "gen-1");
+    assert_eq!(body_of(&posts[1]), body_of(&posts[0]));
+    let puts = sent(&server, "PUT").await;
+    assert_eq!(
+        sent_header(&puts[0], "content-range"),
+        format!("bytes 0-{}/{size}", size - 1)
+    );
+    assert_eq!(
+        sent_header(&puts[1], "content-range"),
+        format!("bytes 0-{}/{size}", size - 1)
+    );
+    assert_eq!(&puts[1].body[..], &bytes);
+
+    let ended = MockServer::start().await;
+    mount_new_id(&ended, "gen-1").await;
+    mount_answers(
+        &ended,
+        "POST",
+        "/upload/files",
+        vec![located(&ended), located(&ended)],
+    )
+    .await;
+    mount_answers(
+        &ended,
+        "PUT",
+        "/upload/session/s1",
+        vec![ResponseTemplate::new(404), ResponseTemplate::new(404)],
+    )
+    .await;
+    let file = local_file(&pattern(size as usize));
+    let made = drive(&ended)
+        .create_file(&id("folder"), "notes.txt", file.path(), stamp(), &|_| {})
+        .await;
+    assert_eq!(
+        made,
+        Err(VfsError::Other("Google Drive ended the upload".into()))
+    );
+    // A lost session is a failure like any other: the fourth in a row ends the call.
+    assert_eq!(sent(&ended, "POST").await.len(), 4);
+    assert_eq!(sent(&ended, "PUT").await.len(), 4);
+}
+
+#[tokio::test]
+async fn a_rejected_token_is_used_once_on_the_upload() {
+    let server = MockServer::start().await;
+    mount_new_id(&server, "gen-1").await;
+    mount_method(&server, "POST", "/upload/files", located(&server)).await;
+    let size = 1000u64;
+    mount_answers(
+        &server,
+        "PUT",
+        "/upload/session/s1",
+        vec![
+            ResponseTemplate::new(401),
+            ok_json(upload_json("gen-1", "notes.txt", size, "rev-1")),
+        ],
+    )
+    .await;
+    let file = local_file(&pattern(size as usize));
+    drive(&server)
+        .create_file(&id("folder"), "notes.txt", file.path(), stamp(), &|_| {})
+        .await
+        .unwrap();
+    let puts = sent(&server, "PUT").await;
+    assert_eq!(sent_header(&puts[0], "authorization"), "Bearer token-1");
+    assert_eq!(sent_header(&puts[1], "authorization"), "Bearer token-2");
+    assert_eq!(
+        sent_header(&puts[1], "content-range"),
+        format!("bytes 0-{}/{size}", size - 1)
+    );
+}
+
+#[tokio::test]
+async fn create_file_reads_the_file_back_when_its_id_is_already_in_use() {
+    let server = MockServer::start().await;
+    mount_new_id(&server, "gen-1").await;
+    mount_method(&server, "POST", "/upload/files", located(&server)).await;
+    let size = 600 * K;
+    mount_answers(
+        &server,
+        "PUT",
+        "/upload/session/s1",
+        vec![resume_at(2 * PIECE), ResponseTemplate::new(409)],
+    )
+    .await;
+    mount_path(
+        &server,
+        "/files/gen-1",
+        ok_json(upload_json("gen-1", "landed.txt", size, "rev-landed")),
+    )
+    .await;
+    let file = local_file(&pattern(size as usize));
+    let made = drive(&server)
+        .create_file(&id("folder"), "notes.txt", file.path(), stamp(), &|_| {})
+        .await
+        .unwrap();
+    assert_eq!(made.id, id("gen-1"));
+    assert_eq!(made.name, "landed.txt");
+    assert_eq!(
+        made.attributes.revision,
+        Some(Revision("rev-landed".to_string()))
+    );
+    let puts = sent(&server, "PUT").await;
+    assert_eq!(puts.len(), 2);
+    assert_eq!(puts[1].url.path(), "/upload/session/s1");
+    let gets = sent(&server, "GET").await;
+    assert!(gets
+        .iter()
+        .any(|request| request.url.path() == "/files/gen-1"));
+}
+
+#[tokio::test]
+async fn the_provider_can_write() {
+    let server = MockServer::start().await;
+    assert!(drive(&server).can_write());
+}
+
+#[tokio::test]
+async fn a_rejected_token_on_the_last_request_checks_the_revision_again() {
+    let server = MockServer::start().await;
+    let same = with_revision(file_json("f", "notes.txt", PLAIN, "1"), "rev-1");
+    let changed = with_revision(file_json("f", "notes.txt", PLAIN, "1"), "rev-2");
+    mount_answers(
+        &server,
+        "GET",
+        "/files/f",
+        vec![ok_json(same.clone()), ok_json(same), ok_json(changed)],
+    )
+    .await;
+    mount_method(&server, "PATCH", "/upload/files/f", located(&server)).await;
+    let size = 100 * K;
+    mount_answers(
+        &server,
+        "PUT",
+        "/upload/session/s1",
+        vec![ResponseTemplate::new(401)],
+    )
+    .await;
+    let file = local_file(&pattern(size as usize));
+    let replaced = drive(&server)
+        .replace_bytes(
+            &id("f"),
+            file.path(),
+            &Revision("rev-1".to_string()),
+            stamp(),
+            &|_| {},
+        )
+        .await;
+    assert_eq!(replaced, Err(VfsError::Conflict));
+    assert_eq!(sent(&server, "PUT").await.len(), 1);
+    assert_eq!(sent(&server, "GET").await.len(), 3);
+}
+
+#[tokio::test]
+async fn an_empty_file_is_sent_again_after_a_failure() {
+    let server = MockServer::start().await;
+    mount_new_id(&server, "gen-1").await;
+    mount_method(&server, "POST", "/upload/files", located(&server)).await;
+    let answers = vec![
+        ResponseTemplate::new(503),
+        ok_json(upload_json("gen-1", "empty.txt", 0, "rev-0")),
+    ];
+    mount_answers(&server, "PUT", "/upload/session/s1", answers).await;
+    let file = local_file(b"");
+    let made = drive(&server)
+        .create_file(&id("folder"), "empty.txt", file.path(), stamp(), &|_| {})
+        .await
+        .unwrap();
+    assert_eq!(made.attributes.size, 0);
+    // No question: for an empty file it ends the file, and it has nothing to learn.
+    let puts = sent(&server, "PUT").await;
+    assert_eq!(puts.len(), 2);
+    assert!(puts
+        .iter()
+        .all(|put| put.body.is_empty() && sent_header(put, "content-range").is_empty()));
+}
+
+#[tokio::test]
+async fn a_create_whose_new_session_finds_its_id_in_use_reads_the_file_back() {
+    let server = MockServer::start().await;
+    mount_new_id(&server, "gen-1").await;
+    let opened = vec![located(&server), ResponseTemplate::new(409)];
+    mount_answers(&server, "POST", "/upload/files", opened).await;
+    mount_answers(
+        &server,
+        "PUT",
+        "/upload/session/s1",
+        vec![ResponseTemplate::new(404)],
+    )
+    .await;
+    let size = 1000u64;
+    mount_path(
+        &server,
+        "/files/gen-1",
+        ok_json(upload_json("gen-1", "notes.txt", size, "rev-landed")),
+    )
+    .await;
+    let file = local_file(&pattern(size as usize));
+    let made = drive(&server)
+        .create_file(&id("folder"), "notes.txt", file.path(), stamp(), &|_| {})
+        .await
+        .unwrap();
+    assert_eq!(made.id, id("gen-1"));
+    assert_eq!(
+        made.attributes.revision,
+        Some(Revision("rev-landed".to_string()))
+    );
+    assert_eq!(sent(&server, "POST").await.len(), 2);
+}
+
+#[tokio::test]
+async fn a_full_drive_on_a_put_ends_the_upload_and_a_rate_limit_opens_a_new_session() {
+    let server = MockServer::start().await;
+    mount_new_id(&server, "gen-1").await;
+    mount_method(&server, "POST", "/upload/files", located(&server)).await;
+    let full = vec![denied("storageQuotaExceeded")];
+    mount_answers(&server, "PUT", "/upload/session/s1", full).await;
+    let size = 1000u64;
+    let bytes = pattern(size as usize);
+    let file = local_file(&bytes);
+    let made = drive(&server)
+        .create_file(&id("folder"), "notes.txt", file.path(), stamp(), &|_| {})
+        .await;
+    assert_eq!(made, Err(VfsError::NoSpace));
+    assert_eq!(sent(&server, "PUT").await.len(), 1);
+
+    let server = MockServer::start().await;
+    mount_new_id(&server, "gen-1").await;
+    mount_method(&server, "POST", "/upload/files", located(&server)).await;
+    let limited = vec![
+        denied("userRateLimitExceeded"),
+        ResponseTemplate::new(429),
+        ok_json(upload_json("gen-1", "notes.txt", size, "rev-1")),
+    ];
+    mount_answers(&server, "PUT", "/upload/session/s1", limited).await;
+    drive(&server)
+        .create_file(&id("folder"), "notes.txt", file.path(), stamp(), &|_| {})
+        .await
+        .unwrap();
+    // Each rate limit opens a new session, with the same pre-made id, and sends from the first byte.
+    let posts = sent(&server, "POST").await;
+    assert_eq!(posts.len(), 3);
+    assert!(posts.iter().all(|post| body_of(post)["id"] == "gen-1"));
+    let puts = sent(&server, "PUT").await;
+    assert_eq!(puts.len(), 3);
+    assert!(puts
+        .iter()
+        .all(|put| sent_header(put, "content-range") == format!("bytes 0-{}/{size}", size - 1)));
+    assert_eq!(&puts[2].body[..], &bytes[..]);
+}
+
+#[tokio::test]
+async fn a_second_rejected_token_in_a_row_needs_a_new_sign_in() {
+    let server = MockServer::start().await;
+    mount_new_id(&server, "gen-1").await;
+    mount_method(&server, "POST", "/upload/files", located(&server)).await;
+    let rejected = vec![ResponseTemplate::new(401)];
+    mount_answers(&server, "PUT", "/upload/session/s1", rejected).await;
+    let file = local_file(&pattern(1000));
+    let made = drive(&server)
+        .create_file(&id("folder"), "notes.txt", file.path(), stamp(), &|_| {})
+        .await;
+    assert_eq!(made, Err(VfsError::SignInNeeded));
+    assert_eq!(sent(&server, "PUT").await.len(), 2);
+}
+
+#[tokio::test]
+async fn a_file_cut_during_its_upload_ends_the_call() {
+    let server = MockServer::start().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    mount_new_id(&server, "gen-1").await;
+    let started =
+        ResponseTemplate::new(200).insert_header("location", format!("http://{address}/session"));
+    mount_method(&server, "POST", "/upload/files", started).await;
+    // One chunk is far more than the socket holds, so most of the file is read after the cut.
+    let file = local_file(&pattern(CHUNK as usize));
+    let path = file.path().to_path_buf();
+    let serve = tokio::spawn(async move {
+        use tokio::io::AsyncReadExt;
+        let mut socket = accept(&listener).await;
+        read_http(&mut socket, Some(0)).await.unwrap();
+        std::fs::File::create(&path).unwrap();
+        let mut sink = [0u8; 8192];
+        while let Ok(read) = socket.read(&mut sink).await {
+            if read == 0 {
+                break;
+            }
+        }
+        // No second request comes: the call ended on the local file.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), listener.accept())
+                .await
+                .is_err()
+        );
+    });
+    let made = drive(&server)
+        .create_file(&id("folder"), "big.bin", file.path(), stamp(), &|_| {})
+        .await;
+    assert_eq!(
+        made,
+        Err(VfsError::Other(
+            "Marlin could not read the file it uploads".into()
+        ))
+    );
+    serve.await.unwrap();
+}
+
+#[tokio::test]
+async fn failures_spread_over_an_upload_that_moves_on_do_not_end_it() {
+    let server = MockServer::start().await;
+    mount_new_id(&server, "gen-1").await;
+    mount_method(&server, "POST", "/upload/files", located(&server)).await;
+    let size = CHUNK + 600 * K;
+    // Four failures in all, but Google holds more bytes after the third, so the count starts again.
+    let answers = vec![
+        ResponseTemplate::new(503),
+        ResponseTemplate::new(308),
+        ResponseTemplate::new(503),
+        ResponseTemplate::new(308),
+        ResponseTemplate::new(503),
+        ResponseTemplate::new(308),
+        resume_at(CHUNK),
+        ResponseTemplate::new(503),
+        resume_at(CHUNK),
+        ok_json(upload_json("gen-1", "big.bin", size, "rev-1")),
+    ];
+    mount_answers(&server, "PUT", "/upload/session/s1", answers).await;
+    let file = local_file(&pattern(size as usize));
+    let made = drive(&server)
+        .create_file(&id("folder"), "big.bin", file.path(), stamp(), &|_| {})
+        .await;
+    assert!(made.is_ok(), "{made:?}");
+    assert_eq!(sent(&server, "PUT").await.len(), 10);
+}
+
+#[tokio::test]
+async fn progress_moves_while_a_request_is_still_sending() {
+    let server = MockServer::start().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    mount_new_id(&server, "gen-1").await;
+    let started =
+        ResponseTemplate::new(200).insert_header("location", format!("http://{address}/session"));
+    mount_method(&server, "POST", "/upload/files", started).await;
+    let size = CHUNK;
+    let json_body = serde_json::to_string(&upload_json("gen-1", "big.bin", size, "rev-1")).unwrap();
+    let serve = tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut socket = accept(&listener).await;
+        let (_, received) = read_http(&mut socket, Some(0)).await.unwrap();
+        // A slow link: the client fills the socket and waits while the ticker reports.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let mut sink = vec![0u8; 1 << 16];
+        let mut read = received.len();
+        while (read as u64) < size {
+            read += socket.read(&mut sink).await.unwrap();
+        }
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json_body}",
+            json_body.len()
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    });
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let heard = Arc::clone(&seen);
+    let progress = move |sent| heard.lock().unwrap().push(sent);
+    let file = local_file(&pattern(size as usize));
+    drive(&server)
+        .create_file(&id("folder"), "big.bin", file.path(), stamp(), &progress)
+        .await
+        .unwrap();
+    serve.await.unwrap();
+    let seen = seen.lock().unwrap().clone();
+    assert!(
+        seen.iter().any(|sent| *sent > 0 && *sent < size),
+        "{seen:?}"
+    );
+    assert_eq!(seen.last().copied(), Some(size));
+}
+
+#[tokio::test]
+async fn replace_bytes_of_an_empty_file_checks_the_revision_before_a_resend() {
+    let server = MockServer::start().await;
+    let same = with_revision(file_json("f", "notes.txt", PLAIN, "1"), "rev-1");
+    let changed = with_revision(file_json("f", "notes.txt", PLAIN, "1"), "rev-2");
+    mount_answers(
+        &server,
+        "GET",
+        "/files/f",
+        vec![ok_json(same.clone()), ok_json(same), ok_json(changed)],
+    )
+    .await;
+    mount_method(&server, "PATCH", "/upload/files/f", located(&server)).await;
+    let failed = vec![ResponseTemplate::new(503)];
+    mount_answers(&server, "PUT", "/upload/session/s1", failed).await;
+    let file = local_file(b"");
+    let replaced = drive(&server)
+        .replace_bytes(
+            &id("f"),
+            file.path(),
+            &Revision("rev-1".to_string()),
+            stamp(),
+            &|_| {},
+        )
+        .await;
+    assert_eq!(replaced, Err(VfsError::Conflict));
+    let puts = sent(&server, "PUT").await;
+    assert_eq!(puts.len(), 1);
+    assert!(puts[0].body.is_empty());
+    assert_eq!(sent_header(&puts[0], "content-range"), "");
+    assert_eq!(sent(&server, "GET").await.len(), 3);
 }

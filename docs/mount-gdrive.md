@@ -1,6 +1,6 @@
 # Google Drive mount provider (`marlin-gdrive`)
 
-`marlin-gdrive` shows one Google account to the [mount core](mount-core.md) as a `Provider`. It reads the Drive API, and it can make a folder, rename or move an item, and trash one. A mount stays read-only until #601, because `can_write` stays false until the provider can also write bytes. It also holds the code that turns a saved Google sign-in into an access token, for the mount and for the app. The app links the crate for that sign-in code. The [mount helper](mount-helper.md) links it as the provider `gdrive`: see [Providers](mount-helper.md#providers).
+`marlin-gdrive` shows one Google account to the [mount core](mount-core.md) as a `Provider`. It reads the Drive API, and it can make a folder, rename or move an item, trash one, and write a file's bytes, so `can_write` is true. A mount takes writes only when it also has a spool, and the helper gives none yet (#602). It also holds the code that turns a saved Google sign-in into an access token, for the mount and for the app. The app links the crate for that sign-in code. The [mount helper](mount-helper.md) links it as the provider `gdrive`: see [Providers](mount-helper.md#providers).
 
 This is not the code behind `gdrive://` paths. The app handles those through its own location provider: see [Location providers](location-providers.md).
 
@@ -9,21 +9,23 @@ This is not the code behind `gdrive://` paths. The app handles those through its
 
 ## The parts
 
-| File                    | Holds                                                                                                            |
-| ----------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `src/provider.rs`       | `DriveProvider`, its five read calls and three change calls, the item IDs, and the two things a caller supplies. |
-| `src/api.rs`            | `request`, the one path every request takes: the token, the retries, and the error table. Google's JSON.         |
-| `src/sign_in.rs`        | `OAuthClient`, `SavedSignIn`, and the keychain entry: see [The saved sign-in](#the-saved-sign-in).               |
-| `build.rs`              | Passes the OAuth client ID and secret to the compiler.                                                           |
-| `tests/drive.rs`        | The provider's tests. They run against a fake Drive server in the test process.                                  |
-| `tests/sign_in.rs`      | The sign-in's tests. They run against a fake token endpoint and an in-memory keychain.                           |
-| `tests/live.rs`         | One manual test against a real account: see [Checked against real Google](#checked-against-real-google).         |
-| `tests/live_changes.rs` | One manual test of the three change calls against a real account. It changes the account.                        |
+| File                    | Holds                                                                                                                             |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `src/provider.rs`       | `DriveProvider`, its five read calls, three change calls, and two byte calls, the item IDs, and the two things a caller supplies. |
+| `src/upload.rs`         | The resumable upload behind the two byte calls: the session, the pieces, and the resume.                                          |
+| `src/api.rs`            | `request`, the path of every request but an upload's `PUT`s: the token, the retries, and the error table. Google's JSON.          |
+| `src/sign_in.rs`        | `OAuthClient`, `SavedSignIn`, and the keychain entry: see [The saved sign-in](#the-saved-sign-in).                                |
+| `build.rs`              | Passes the OAuth client ID and secret to the compiler.                                                                            |
+| `tests/drive.rs`        | The provider's tests. They run against a fake Drive server in the test process.                                                   |
+| `tests/sign_in.rs`      | The sign-in's tests. They run against a fake token endpoint and an in-memory keychain.                                            |
+| `tests/live.rs`         | One manual test against a real account: see [Checked against real Google](#checked-against-real-google).                          |
+| `tests/live_changes.rs` | One manual test of the three change calls against a real account. It changes the account.                                         |
+| `tests/live_uploads.rs` | One manual test of the two byte calls against a real account. It changes the account.                                             |
 
 The provider does not sign in, read a keychain, or know about the helper. A caller gives it two things:
 
 - **`AccessTokens`** hands out an access token for the account. When Google answers 401, the provider calls `rejected(token)`, and the token source must never hand that token out again. A token that is no longer the current one changes nothing, so every call in flight can report one stale token and cause one refresh. `SavedSignIn` implements the trait.
-- **`Config`** holds the API's base address and the wait before the first retry. The tests point the address at the fake server.
+- **`Config`** holds the API's base address, the upload base address, and the wait before the first retry. Neither address has a slash at the end. The tests point both at the fake server.
 
 ## What a mount shows
 
@@ -117,11 +119,11 @@ What follows from that:
 - **Free space with no limit.** Google gives some Workspace accounts no storage limit. The provider then reports 1 PiB free, because a mount that reports 0 free makes file managers refuse to copy.
 - **A shared drive's top folder is asked from the drive, not from `files.get`.** On a real account `files.get` gives that folder another name than the drive's. So `item` asks `drives.get`, and its answer equals the drive's line in the `Shared drives` listing.
 - **A shared drive's modified time** is the time the drive was made. Google gives a shared drive no other time.
-- The five read calls send only GET. The change calls also send POST and PATCH. A token refresh sends a POST to Google's token endpoint.
+- The five read calls send only GET. The change calls also send POST and PATCH, and the byte calls PUT. A token refresh sends a POST to Google's token endpoint.
 
 ## The three change calls
 
-`create_folder`, `remove`, and `rename`. A mount does not call them yet: `can_write` stays false until the byte calls exist (#601). A direct caller can.
+`create_folder`, `remove`, and `rename`. A mount calls them only when it has a spool (#602).
 
 | Call            | Requests                                                                                                                                                                                                                                                                                                                                              |
 | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -156,25 +158,81 @@ A link file as the parent of `create_folder`, or as `to`, is `NotAFolder`.
 
 **A duplicate link file cannot be moved under its shown name.** The core shows the second `Notes` Doc as `Notes.document (2).html`, with ` (2)` before `.html`. That name does not keep the `.document.html` ending, so the rename is `NotSupported`, and no change is sent.
 
+## The two byte calls
+
+`create_file` and `replace_bytes`. Both upload through a resumable session, and open a new one when Google ends it or limits requests (`src/upload.rs`).
+
+| Call            | Requests                                                                                                                                                                             |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `create_file`   | `files.generateIds` for one id. `POST {upload}/files?uploadType=resumable` with the id, the name, the parent, and `modifiedTime`. Then `PUT`s of the bytes.                          |
+| `replace_bytes` | `files.get` to check the revision. `PATCH {upload}/files/{id}?uploadType=resumable` with `modifiedTime` and the file's `mimeType`. Then `PUT`s, with the same check before the last. |
+
+**A file's revision is `headRevisionId`.** Drive changes it only when the bytes change. `version` also changes on a rename or a share, so it is not used. A folder has no revision, and neither has a link file.
+
+**The modified time** goes to Google as `modifiedTime`, in UTC with milliseconds.
+
+**A replace keeps the file's type.** It sends the `mimeType` its check read. Without it, Drive guesses the type again from the new bytes: on a real account a `.txt` file replaced with bytes that start like a PNG became `image/png`. A new file sends no type, and Drive chooses one: a `.txt` file of letters was stored as `text/plain`. Every later replace keeps that type, also after a rename to another ending.
+
+**The session.** Opening it uploads nothing, so it goes through the same retries as every other request ([Errors and retries](#errors-and-retries)). It asks for the same fields as `item`, and the answer to the last `PUT` carries them. Google sends the session's address in `Location`.
+
+**The `PUT`s.** Google takes any length on the request that ends the file, and only a multiple of 256 KiB on every other one. One request carries at most 16 MiB. A failed request is sent again, and the core counts only bytes past the highest count it heard ([Mount core](mount-core.md)), so 16 MiB bounds what a resend sends before the count moves. On a link slower than about 2 Mbit/s that still takes longer than the core's minute without progress, and the core ends the try and sends the file again later.
+
+- **A new file** of up to 16 MiB goes in one request. A longer one goes in 16 MiB requests and then the rest.
+- **A replace** keeps the last 1 byte to 256 KiB for a request of its own, so its revision check runs just before Google applies the new bytes. Every request before it carries whole 256 KiB pieces.
+- **An empty file** is one `PUT` with no `Content-Range`.
+
+While a request runs:
+
+- **Memory.** The body is read from the local file one 256 KiB piece at a time.
+- **Progress.** The provider reports the bytes Google already holds plus the bytes of this request read so far, every 250 ms and when the request ends. A question reports 0, which the core ignores, because it keeps the highest count it heard.
+- **The size** is the local file's length when the call starts. A file that is cut during the call fails it with `Other("Marlin could not read the file it uploads")`, with no retry. The core sends the file again after the edit.
+
+**A failure waits as `request` does, then goes on in one of two ways.**
+
+| Failure                                                                                                 | Then                                                                                                                                                                                                                                                                                                                                                                                                           |
+| ------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A 500 to 599, a dropped connection, an answer whose body did not arrive, or a 308 that kept no new byte | The provider asks what Google holds: `PUT` with `Content-Range: bytes */{size}`. `Range: bytes=0-{n}` in the 308 means Google holds `n + 1` bytes, any number, and no `Range` means none. The next `PUT` starts there. A 200 or 201 is the finished file. An empty file is sent again instead: for it the question ends the file (Google answered it 200 on a real account), with no revision check before it. |
+| A 429, a rate-limit 403, or a 404 or 410 (Google ended the session)                                     | Google's guide starts an upload again after a 4xx. The provider opens a new session with the same metadata, so a create keeps its pre-made id, and sends from the first byte.                                                                                                                                                                                                                                  |
+
+The fourth failure in a row ends the call. Only bytes past the most Google has held in the call reset the count. The call ends with `Offline` for a connection, `Other("Google Drive ended the upload")` for a lost session, or the `Other` that `request` gives for the status. A new session on a large file can pass the core's minute without progress before it gets back to its old count. The core then ends the try as stalled and sends the file again later.
+
+**A 401** rejects the token, and the same request goes again with a new one, through the same loop, so the revision check below runs first. A second 401 in a row is `SignInNeeded`. `storageQuotaExceeded` is `NoSpace`, and any other 403 is `AccessDenied`. Both end the call.
+
+**The revision check runs before every request that ends the file,** a resend included. Google applies the new bytes only when the last byte arrives. So another client's change can be overwritten only between that `files.get` and the last piece, and not during the whole upload. A revision that is not the one the core based the bytes on is `Conflict`, and the rest is never sent. Google drops the unfinished session. The check before the upload means a file that already changed costs no upload.
+
+**A 409 means this call's file already landed.** Google sends it only when the pre-made id is in use. `create_file` then returns `files.get` of that id, as `create_folder` does. The id lives for one call: a later call of the core gets a new one (#632). Drive allows two files with one name, so a taken name is never `Conflict`. On a replace's session a 409 is `Conflict`, as from `request`.
+
+**What a call refuses before it opens a session.** `replace_bytes` learns the kind and the revision from the `files.get` of its check. The others send nothing.
+
+| Call            | `/`, `Shared drives` | A link file    | A folder    | A file with no revision |
+| --------------- | -------------------- | -------------- | ----------- | ----------------------- |
+| `create_file`   | `AccessDenied`       | `NotAFolder`   | Allowed     |                         |
+| `replace_bytes` | `IsAFolder`          | `NotSupported` | `IsAFolder` | `NotSupported`          |
+
+A link file has no bytes on Drive to replace. A mount still shows it, and a file the account may only view, as writable (#631).
+
 ## Errors and retries
 
-| Google answers                                                     | The call returns                                                                                                                                      |
-| ------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Nothing, or the connection drops                                   | `Offline`                                                                                                                                             |
-| 401                                                                | One more try with a new token. A second 401 is `SignInNeeded`.                                                                                        |
-| 403 with the reason `rateLimitExceeded` or `userRateLimitExceeded` | Retries, then `Other("Google Drive is limiting requests")`.                                                                                           |
-| 429                                                                | The same.                                                                                                                                             |
-| 403 with any other reason                                          | `AccessDenied`                                                                                                                                        |
-| 404                                                                | `NotFound`                                                                                                                                            |
-| 409                                                                | `Conflict`, with no retry. Google sends it only when a create's pre-made id is already in use. `create_folder` then returns the folder that id names. |
-| 500 to 599                                                         | Retries, then `Other("Google Drive answered <status>")`.                                                                                              |
-| Any other status                                                   | `Other("Google Drive answered <status>")`, with no retry.                                                                                             |
-| A body that is not the expected JSON                               | `Other("Google Drive sent an answer Marlin could not read")`                                                                                          |
+These are the rules of `request`, which every request but an upload's `PUT`s takes. The `PUT`s have their own: see [The two byte calls](#the-two-byte-calls).
+
+| Google answers                                                     | The call returns                                                                                                                                                     |
+| ------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Nothing, or the connection drops                                   | `Offline`                                                                                                                                                            |
+| 401                                                                | One more try with a new token. A second 401 is `SignInNeeded`.                                                                                                       |
+| 403 with the reason `rateLimitExceeded` or `userRateLimitExceeded` | Retries, then `Other("Google Drive is limiting requests")`.                                                                                                          |
+| 429                                                                | The same.                                                                                                                                                            |
+| 403 with the reason `storageQuotaExceeded`                         | `NoSpace`, with no retry.                                                                                                                                            |
+| 403 with any other reason                                          | `AccessDenied`                                                                                                                                                       |
+| 404                                                                | `NotFound`                                                                                                                                                           |
+| 409                                                                | `Conflict`, with no retry. Google sends it only when a create's pre-made id is already in use. `create_folder` and `create_file` then return the item that id names. |
+| 500 to 599                                                         | Retries, then `Other("Google Drive answered <status>")`.                                                                                                             |
+| Any other status                                                   | `Other("Google Drive answered <status>")`, with no retry.                                                                                                            |
+| A body that is not the expected JSON                               | `Other("Google Drive sent an answer Marlin could not read")`                                                                                                         |
 
 - **Retries.** A request is sent again at most 3 times. A change call sends several requests, and each has its own retries. The waits are 0.5, 1, and 2 seconds, each with up to half as much again added at random, so calls that failed together do not come back together. A failed connection is not retried: the helper counts those toward `offline` ([Health](mount-helper.md#health)).
-- **The core's time limit covers the retries.** The core cancels a call after 30 seconds by dropping it, and that stops a wait or a request in flight.
+- **The core's time limit covers the retries.** The core cancels a call after 30 seconds by dropping it, and that stops a wait or a request in flight. A byte call has no such limit: the core stops it when its byte count has not grown for a minute.
 - **Every failure to reach Google is `Offline`.** The only time limit on the HTTP client is 10 seconds to connect, so a timeout there also means Google could not be reached. `TimedOut` comes from the core alone.
-- **The text of an `Other` is one of the three in this table, or the one from the sign-in:** "Marlin could not use the saved Google sign-in". No file name, ID, address, token, or message from Google is in it, so the helper logs it ([Logs and secrets](mount-helper.md#logs-and-secrets)).
+- **The text of an `Other` is one of the three in this table, the two an upload adds ("Marlin could not read the file it uploads" and "Google Drive ended the upload"), or the one from the sign-in:** "Marlin could not use the saved Google sign-in". No file name, ID, address, token, or message from Google is in it, so the helper logs it ([Logs and secrets](mount-helper.md#logs-and-secrets)).
 - The errors follow the rules on `VfsError` in `marlin-vfs/src/error.rs`: `Other` is a failure of the remote, never of one item.
 
 ## The saved sign-in
@@ -243,7 +301,7 @@ A build with its own OAuth client from a newer project gets these limits.
 | `space`       | `about.get`                                                  | 5                                                                                |
 | A new token   | A POST to Google's token endpoint                            | None. It is not a Drive API request.                                             |
 
-Google's quota units for the change calls are not checked.
+Google's quota units for the change calls and the byte calls are not checked.
 
 | Limit                         | Units       |
 | ----------------------------- | ----------- |
@@ -288,6 +346,17 @@ The [mount core](mount-core.md) runs at most 16 provider calls at once and ends 
 - **The refusals the provider makes itself held:** a folder into its own subfolder, a folder with a child, and a link file renamed to another ending. A `replace` left one folder under the name, with the moved folder's ID.
 - **A change and the listing after it took about one second.** Five creates, each with its listing, took 4.8 s. A rename and its listing took 1.0 s, a move and two listings 1.7 s. The first call of the run, which read the keychain and got a token, took 13 s.
 
+`tests/live_uploads.rs` is a manual test of the two byte calls. It changes the account: it makes a folder `Marlin live upload test {time}` at the top of My Drive, uploads a 100 KiB text file, an empty file, and a 200 MiB file, replaces the text file twice (the second time with nothing) and the 200 MiB file once, and trashes them. It also lists the text file's revisions, downloads the first, and marks it `keepForever`, for risk 4 of [decision 0005](decisions/0005-mount-writes.md). It checks that a replace keeps the modified time it sends and the file's type, and asks one more session how it answers the question for an empty file. The trashed 200 MiB files count against the account until they leave the trash. Its header has the command, and says how to clean up after a failed run without touching anything else in the trash. It ran three times on 2026-11-20 against the same account:
+
+- **A replace kept the file's type.** A `.txt` file replaced with bytes that start like a PNG stayed `text/plain`: see [The two byte calls](#the-two-byte-calls).
+- **Drive keeps the overwritten bytes as a revision** (risk 4 of decision 0005). After a replace, the first revision was still listed, and its download returned the old bytes, before and after it was marked `keepForever`.
+- **The window of risk 4 is about one second.** From the first progress report at or past the start of a 200 MiB replace's last 256 KiB to the answer took 1.0 to 1.1 s. That time holds the revision check and the last piece. It is an upper bound: it also holds the wait for the answer to the request before.
+- **A 200 MiB upload took 7 to 10 seconds,** 20 to 29 MiB/s. The largest sampled growth of the process while it ran was 512 KiB. For a new 200 MiB file, the answer came 0.6 to 0.9 s after the count reached the last 256 KiB, well inside the core's minute. Three samples of a replaced 200 MiB file read back as the bytes sent.
+- **The modified time a call sends is the one Drive keeps,** for a new file and for a replace, to the millisecond.
+- **A stale revision was `Conflict`,** and the file kept its bytes. A replace with an empty file left 0 bytes and a new revision.
+- **The question `bytes */0` ends an empty file.** Google answered 200 with the file. So the provider never asks about an empty file.
+- **A replace of 150 KiB took 1.4 to 1.8 s:** its check, the session, the check before the last piece, and the one request.
+
 Not checked live: a change in a shared drive, a file moved between drives, and what Google answers a folder moved into its own subtree (the provider refuses it before Google sees it).
 
 Every automated test runs against the fake server, so these still rest on Google's documentation:
@@ -295,11 +364,12 @@ Every automated test runs against the fake server, so these still rest on Google
 - That `corpora=drive` with `driveId` lists every child of a folder in a shared drive. The live test lists a shared drive, but it cannot tell whether the listing is complete.
 - That every child of a folder is in the folder's own drive.
 - That Google answers a read of an empty file with 416. The account had no empty file at the top of My Drive.
+- **An upload that fails partway.** `tests/live_uploads.rs` uploads with no failure. What a session answers after a dropped connection, a 308 with no `Range`, a new session after a 429, a 409 on a session, and an upload into a shared drive rest on Google's guide.
 - How long a page of 1,000 items takes, and so how big a folder can be before its listing passes the core's 30 seconds.
-- **A dead connection after sleep.** The HTTP client's only time limit is 10 seconds to connect. After a laptop sleeps or changes network, a kept connection can be dead, and each call on it may hang until the core's 30 seconds.
+- **A dead connection after sleep.** The HTTP client's only time limit is 10 seconds to connect. After a laptop sleeps or changes network, a kept connection can be dead, and each call on it may hang until the core's 30 seconds. An upload on it may hang until the core's minute without progress.
 - **Link files in another browser or on another OS.** Two were opened as a double click does, on macOS with Firefox: see above. Nobody has tried another browser or another OS, or looked at what Quick Look or a thumbnailer does with one. A Doc, a Slides file, a folder, and a shortcut's target are not checked that way. The account had no Slides file, Form, or third-party shortcut at the top of My Drive, so the names of those rest on Google's list of MIME types.
-- **A 403 that covers the whole account.** Any 403 that is not a rate limit is `AccessDenied`, which the helper counts as an answer. If Google answers the free-space request that way, a mount of such an account fails at its first call with -1005. A reason such as `domainPolicy` that starts while a mount is up leaves it `mounted` while every call fails.
-- **Two 30-second limits.** A token refresh times out after 30 seconds, and so does the core's call. A slow token endpoint may show as `TimedOut` and never as `Offline`.
+- **A 403 that covers the whole account.** Any 403 that is not a rate limit or a full drive is `AccessDenied`, which the helper counts as an answer. If Google answers the free-space request that way, a mount of such an account fails at its first call with -1005. A reason such as `domainPolicy` that starts while a mount is up leaves it `mounted` while every call fails.
+- **Two 30-second limits.** A token refresh times out after 30 seconds, and so does the core's call. A slow token endpoint may show as `TimedOut` and never as `Offline`. An upload has no 30-second limit: the core ends it after a minute without progress.
 - **A new token after a 401.** If Google hands back the same access token after a 401, the second 401 is `SignInNeeded`.
 
 ## Testing
@@ -312,6 +382,7 @@ Every automated test runs against the fake server, so these still rest on Google
 - Five tests put the provider under a real `Vfs`: one for duplicate names and a `/` in a name, one for a rename seen on the remote, one for link files that share a name, one for a file moved into a shared drive (it keeps its node), and one for a duplicate link file moved under its shown name.
 - The link file tests cover the name and the ID of each kind, the size in a listing against the bytes a read returns, `item` of a shortcut, a read in parts, a shared drive, a shortcut whose target is gone or missing from the answer, and a read that sends the server nothing.
 - The change-call tests cover creating a folder, trashing, renaming, moving, the refusals, a resent create, and a move whose answer was lost. They check the request, not only the result.
+- The byte-call tests cover a new file, a replacement, the pieces, a resume from an even and an uneven offset, a dropped connection, a body cut off after a finished upload, a lost session, the revision check before a first send and a resend of the last request, and the refusals. The tests of a dropped connection, a cut-off answer, and a local file cut during an upload serve the session from a small HTTP server in the test, because wiremock cannot drop a connection partway through a body. They check the request, not only the result.
 - One test checks that the five read calls send only GET.
 - The helper's tests mount this provider through FUSE against a fake Google: see [Mount helper](mount-helper.md#testing).
-- `tests/live.rs` and `tests/live_changes.rs` are marked `#[ignore]`. Never run this crate's tests with `--ignored` or `--include-ignored`: that runs both, and `live_changes.rs` changes the account. To run one, use the command in its header.
+- `tests/live.rs`, `tests/live_changes.rs`, and `tests/live_uploads.rs` are marked `#[ignore]`. Never run this crate's tests with `--ignored` or `--include-ignored`: that runs all three, and `live_changes.rs` and `live_uploads.rs` change the account. To run one, use the command in its header.
