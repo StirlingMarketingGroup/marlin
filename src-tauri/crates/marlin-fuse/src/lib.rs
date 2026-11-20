@@ -8,8 +8,9 @@ mod linux;
 mod macos;
 
 use std::path::Path;
+use std::time::SystemTime;
 
-use marlin_vfs::{Kind, VfsError};
+use marlin_vfs::{Access, Attributes, Kind, NodeId, Vfs, VfsError};
 
 #[cfg(target_os = "linux")]
 pub use linux::{mount, unmount_dead, Error, Mount};
@@ -24,8 +25,69 @@ pub(crate) const BLOCK_SIZE: u32 = 4096;
 /// The longest name apps expect, in bytes. A longer name is not listed and cannot be looked up.
 pub(crate) const NAME_MAX: usize = 255;
 
-/// One page of a folder listing. A bigger folder is read in pages, so one readdir never clones the whole listing.
+/// The most entries one readdir reply copies out of a frozen listing with `Vfs::read_folder`.
 pub(crate) const PAGE: usize = 256;
+
+/// Names this OS writes for itself, which a mount keeps on this computer and never uploads (decision 0005, choice 14). Pass it as `Spool::stays_local`.
+pub fn stays_local(name: &str) -> bool {
+    cfg!(target_os = "macos") && marlin_vfs::finder_files(name)
+}
+
+/// How the mount shows every node: the mounting user owns it, and its mode says whether the mount takes writes.
+#[derive(Clone, Copy)]
+pub(crate) struct Shown {
+    pub(crate) uid: u32,
+    pub(crate) gid: u32,
+    /// Set from `Vfs::writable` before the mount.
+    pub(crate) writable: bool,
+}
+
+/// An existing name must already be in the folder. A new one is about to be made.
+pub(crate) enum Name {
+    Existing,
+    New,
+}
+
+/// The name as the core takes it. A name over 255 bytes is `ENAMETOOLONG`. A name that is not UTF-8 is `ENOENT` for [`Name::Existing`], because the mount lists no such name, and `EINVAL` for [`Name::New`], because the remote cannot hold it.
+pub(crate) fn utf8_name(name: &[u8], role: Name) -> Result<String, libc::c_int> {
+    if name.len() > NAME_MAX {
+        return Err(libc::ENAMETOOLONG);
+    }
+    match std::str::from_utf8(name) {
+        Ok(name) => Ok(name.to_owned()),
+        Err(_) => Err(match role {
+            Name::Existing => libc::ENOENT,
+            Name::New => libc::EINVAL,
+        }),
+    }
+}
+
+/// What the core opens a file for: reading for a read-only open, writing for any other.
+pub(crate) fn open_access(flags: i32) -> Access {
+    if flags & libc::O_ACCMODE == libc::O_RDONLY {
+        Access::Read
+    } else {
+        Access::Write
+    }
+}
+
+/// Sets a size and a modified time, then reads the attributes back.
+///
+/// The size goes first. `cp -p` writes, then sets the time, and a cut after the time would replace it. An owner or a mode change succeeds and changes nothing. No access time is kept.
+pub(crate) async fn set_attributes(
+    vfs: &Vfs,
+    node: NodeId,
+    size: Option<u64>,
+    modified: Option<SystemTime>,
+) -> Result<Attributes, VfsError> {
+    if let Some(size) = size {
+        vfs.truncate(node, size).await?;
+    }
+    if let Some(time) = modified {
+        vfs.set_modified(node, time).await?;
+    }
+    vfs.attributes(node).await
+}
 
 /// The mode and link count a mount shows. A writable mount gives a folder mode `0o700` and a file mode `0o600`. A read-only mount gives a folder mode `0o500` and a file mode `0o400`. A folder has 2 links. A file has 1.
 pub(crate) fn mode_and_links(kind: Kind, writable: bool) -> (u16, u32) {
@@ -51,7 +113,7 @@ pub(crate) fn errno(error: &VfsError) -> libc::c_int {
         VfsError::SignInNeeded => libc::EACCES,
         VfsError::TimedOut => libc::ETIMEDOUT,
         VfsError::Offline => libc::ENETUNREACH,
-        VfsError::NotSupported => libc::EOPNOTSUPP,
+        VfsError::NotSupported => libc::ENOTSUP,
         VfsError::StaleHandle => libc::ESTALE,
         VfsError::Other(_) => libc::EIO,
     }
@@ -95,5 +157,17 @@ mod tests {
         let link = dir.path().join("link");
         std::os::unix::fs::symlink(&folder, &link).unwrap();
         assert!(!is_dead_mount(&link).await);
+    }
+
+    #[test]
+    fn utf8_name_rejects_a_long_name_before_it_checks_the_bytes() {
+        let long = vec![0xff; 256];
+        assert_eq!(utf8_name(&long, Name::Existing), Err(libc::ENAMETOOLONG));
+        assert_eq!(utf8_name(&long, Name::New), Err(libc::ENAMETOOLONG));
+        let bad = [0xff];
+        assert_eq!(utf8_name(&bad, Name::Existing), Err(libc::ENOENT));
+        assert_eq!(utf8_name(&bad, Name::New), Err(libc::EINVAL));
+        let ok = "a".repeat(255);
+        assert_eq!(utf8_name(ok.as_bytes(), Name::Existing).unwrap(), ok);
     }
 }

@@ -130,8 +130,10 @@ pub async fn mount(vfs: Arc<Vfs>, mount_point: &Path) -> Result<Mount, Error> {
         .to_string_lossy()
         .replace('\\', "\\\\")
         .replace(',', "\\,");
-    // `backend=fskit` is required. Without it macFUSE loads its kernel extension, and macOS asks the user to change security settings in Recovery Mode.
-    let options = CString::new(format!("ro,backend=fskit,fsname=marlin,volname={volname}"))
+    let writable = vfs.writable();
+    // `backend=fskit` is required. Without it macFUSE loads its kernel extension, and macOS asks the user to change security settings in Recovery Mode. `ro` is only for a core that cannot write. A writable mount names neither `ro` nor `rw`.
+    let ro = if writable { "" } else { "ro," };
+    let options = CString::new(format!("{ro}backend=fskit,fsname=marlin,volname={volname}"))
         .map_err(|error| Error::Mount(error.to_string()))?;
     let path = CString::new(mount_point.as_os_str().as_bytes())
         .map_err(|error| Error::Mount(error.to_string()))?;
@@ -147,10 +149,13 @@ pub async fn mount(vfs: Arc<Vfs>, mount_point: &Path) -> Result<Mount, Error> {
     let fs = Box::new(fs::Fs {
         vfs,
         runtime: tokio::runtime::Handle::current(),
-        // SAFETY: getuid cannot fail and touches no memory.
-        uid: unsafe { libc::getuid() },
-        // SAFETY: getgid cannot fail and touches no memory.
-        gid: unsafe { libc::getgid() },
+        shown: crate::Shown {
+            // SAFETY: getuid cannot fail and touches no memory.
+            uid: unsafe { libc::getuid() },
+            // SAFETY: getgid cannot fail and touches no memory.
+            gid: unsafe { libc::getgid() },
+            writable,
+        },
         sys,
         life: Arc::clone(&life),
     });

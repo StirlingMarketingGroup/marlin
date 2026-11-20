@@ -58,7 +58,7 @@ pub async fn mount(vfs: Arc<Vfs>, mount_point: &Path) -> Result<Mount, Error> {
     let filesystem = fs::Fs {
         vfs,
         runtime: tokio::runtime::Handle::current(),
-        shown: fs::Shown {
+        shown: crate::Shown {
             // SAFETY: getuid cannot fail and touches no memory.
             uid: unsafe { libc::getuid() },
             // SAFETY: getgid cannot fail and touches no memory.

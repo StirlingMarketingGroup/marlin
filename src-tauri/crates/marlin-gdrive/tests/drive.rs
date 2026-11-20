@@ -809,7 +809,8 @@ async fn a_google_doc_a_sheet_and_a_file_with_the_docs_name_get_distinct_names_a
     let drive = Arc::new(drive(&server));
     let vfs = Vfs::new(drive, POSIX, Options::default());
     let my_drive = vfs.lookup(Vfs::ROOT, "My Drive").await.unwrap();
-    let folder = vfs.open_folder(my_drive.node).await.unwrap();
+    let folder = vfs.open_folder(my_drive.node).unwrap();
+    vfs.rewind_folder(folder).await.unwrap();
     let names: Vec<_> = vfs
         .read_folder(folder, 0, 10)
         .unwrap()
