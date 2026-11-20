@@ -413,7 +413,8 @@ fn fill_statvfs(space: &Space) -> libc::statvfs {
 fn fill_stat(node: NodeId, attributes: &Attributes, uid: u32, gid: u32) -> libc::stat {
     // SAFETY: stat is plain numbers. Zero is a valid value for the fields this filesystem does not use.
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    let (perm, nlink) = crate::mode_and_links(attributes.kind);
+    // macOS mounts are read-only until #599.
+    let (perm, nlink) = crate::mode_and_links(attributes.kind, false);
     let since = attributes
         .modified
         .duration_since(UNIX_EPOCH)

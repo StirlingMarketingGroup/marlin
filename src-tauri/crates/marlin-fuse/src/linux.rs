@@ -54,19 +54,27 @@ pub struct Mount {
 
 /// Serves `vfs` at `mount_point`, an empty folder that exists. Returns once the mount is in the OS mount table.
 pub async fn mount(vfs: Arc<Vfs>, mount_point: &Path) -> Result<Mount, Error> {
+    let writable = vfs.writable();
     let filesystem = fs::Fs {
         vfs,
         runtime: tokio::runtime::Handle::current(),
-        // SAFETY: getuid cannot fail and touches no memory.
-        uid: unsafe { libc::getuid() },
-        // SAFETY: getgid cannot fail and touches no memory.
-        gid: unsafe { libc::getgid() },
+        shown: fs::Shown {
+            // SAFETY: getuid cannot fail and touches no memory.
+            uid: unsafe { libc::getuid() },
+            // SAFETY: getgid cannot fail and touches no memory.
+            gid: unsafe { libc::getgid() },
+            writable,
+        },
         keep_cache: false,
     };
     let mut config = fuser::Config::default();
     // No `allow_other`: only the mounting user may open the mount. `default_permissions` has the kernel enforce the modes, so the adapter needs no access callback.
     config.mount_options = vec![
-        fuser::MountOption::RO,
+        if writable {
+            fuser::MountOption::RW
+        } else {
+            fuser::MountOption::RO
+        },
         fuser::MountOption::DefaultPermissions,
         fuser::MountOption::FSName("marlin".into()),
         fuser::MountOption::Subtype("marlin".into()),

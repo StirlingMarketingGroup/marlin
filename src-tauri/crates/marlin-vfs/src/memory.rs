@@ -336,6 +336,10 @@ impl Provider for MemoryProvider {
         .await
     }
 
+    fn can_write(&self) -> bool {
+        true
+    }
+
     async fn create_folder(&self, parent: &ItemId, name: &str) -> Result<Item, VfsError> {
         self.answer(|inner| {
             if find(&inner.stored, parent)?.item.attributes.kind != Kind::Folder {

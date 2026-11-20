@@ -5,7 +5,7 @@
 The helper mounts a Google account through it: see [Providers](mount-helper.md#providers). No part of the UI asks for a mount yet (#377).
 
 **Covers:** `src-tauri/crates/marlin-fuse/src/lib.rs`, `src-tauri/crates/marlin-fuse/src/macos.rs`, `src-tauri/crates/marlin-fuse/src/macos/`, `src-tauri/crates/marlin-fuse/test-on-mac.sh`
-**Checked against the code:** 2026-11-17
+**Checked against the code:** 2026-11-20
 
 The design is in [decision 0001](decisions/0001-mount-architecture.md), choices 2 and 6.
 
@@ -43,7 +43,7 @@ The helper sends this text to the app as error -1006.
 
 - **Mount options:** `ro`, `backend=fskit`, file system name `marlin`, and a volume name that is the mount folder's name. The mount table shows `macfuse://<id> on <path> (macfuse, nodev, nosuid, read-only, noowners, noatime, fskit, mounted by <user>)`. Neither name is in that line. Not tested: where Finder shows the volume name (#543).
 - **Only the mounting user can open it.** The adapter never passes `allow_other`.
-- **Made-up permissions, times, the 1-second cache of names and attributes, node IDs, listings, and the 255-byte name limit** are the same as on Linux: see [How a mount behaves](mount-linux.md#how-a-mount-behaves). The adapter has no access callback. A write fails because the mount is read-only.
+- **Made-up permissions.** macOS mounts are read-only until #599, so a folder always has mode 0500 and a file always has mode 0400. Access, change, and creation times repeat the modified time. The 1-second cache of names and attributes, node IDs, listings, and the 255-byte name limit are the same as on Linux: see [How a mount behaves](mount-linux.md#how-a-mount-behaves). The adapter has no access callback. A write fails because the mount is read-only.
 - **A mount takes one to two seconds.** macFUSE starts the real mount when the session loop starts, and the volume appears a moment later. `mount` returns when the mount table lists the path.
 - **Reads answer through `fuse_reply_data`.** With `fuse_reply_buf`, an app that reads 64 KiB or more in one call gets "Input/output error" (macFUSE 5.5.0, macOS 27.2). libfuse reports success for that reply, and macFUSE's extension then fails the read. The test that reads a 300,000-byte file whole guards this.
 - **File bytes.** The adapter does not ask macOS to keep a file's bytes, as the Linux adapter does. macOS keeps them anyway: in the test with a fake Google, a second read of a whole file makes no call to Google. Not tested: when macOS drops the bytes after the file changes on the remote (#543).
@@ -80,7 +80,8 @@ The table in [Linux mount adapter](mount-linux.md#errors) holds for macOS: both 
 Run `src-tauri/crates/marlin-fuse/test-on-mac.sh` on a Mac that has macFUSE 5 with both switches on. CI does not run it: the runners have no macFUSE.
 
 - It runs the `marlin-fuse` tests with the ignored ones, the `marlin-mount` tests with the ignored ones, and `crates/marlin-mount/test-sweep.sh`. The helper's ignored tests mount a Google account against a fake Google with the in-memory keychain: see [Mount helper](mount-helper.md#testing). No test touches a real account or the real keychain.
-- The mount tests are the Linux ones: see [Testing](mount-linux.md#testing). Three differ:
+- The mount tests are the Linux ones: see [Testing](mount-linux.md#testing). These differ:
+  - The write tests are Linux only. macOS mounts are read-only until #599.
   - The test of bytes kept across opens is Linux only. It tests a flag the macOS adapter does not set.
   - A mount on a file must fail fast. This test is macOS only: Linux lets a mount sit on a file.
   - A second mount at a path survives the drop of the first `Mount`. This test is macOS only: on Linux the drop would detach it.

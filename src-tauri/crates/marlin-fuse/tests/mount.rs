@@ -4,10 +4,20 @@
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
+#[cfg(target_os = "linux")]
+use std::collections::BTreeMap;
+#[cfg(target_os = "linux")]
+use std::ffi::{CString, OsString};
+#[cfg(target_os = "linux")]
+use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom};
 #[cfg(target_os = "macos")]
 use std::os::unix::ffi::OsStrExt;
+#[cfg(target_os = "linux")]
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::MetadataExt;
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::{FileExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "linux")]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -18,6 +28,8 @@ use std::time::{Duration, Instant};
 #[cfg(target_os = "linux")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(target_os = "linux")]
+use marlin_vfs::Spool;
 use marlin_vfs::{
     Attributes, Item, ItemId, Kind, MemoryProvider, Options, Provider, Space, Vfs, VfsError,
 };
@@ -135,6 +147,121 @@ async fn read_at(path: &Path, offset: u64, size: usize) -> Vec<u8> {
 
 fn pattern(len: usize) -> Vec<u8> {
     (0..len).map(|index| (index % 251) as u8).collect()
+}
+
+/// A core with a spool and its uploader running. The settle time is whatever `options` holds.
+#[cfg(target_os = "linux")]
+fn spooled_vfs<P: Provider + 'static>(
+    provider: Arc<P>,
+    spool_limit: u64,
+    options: Options,
+) -> (Arc<Vfs>, tempfile::TempDir) {
+    let provider: Arc<dyn Provider> = provider;
+    let spool = tempfile::tempdir().unwrap();
+    let vfs = Arc::new(
+        Vfs::new(provider, marlin_vfs::POSIX, options)
+            .take_writes(Spool {
+                folder: spool.path().to_path_buf(),
+                limit: spool_limit,
+                stays_local: |_| false,
+            })
+            .unwrap(),
+    );
+    tokio::spawn(Arc::clone(&vfs).run_uploads());
+    (vfs, spool)
+}
+
+/// Polls until every spooled file has been uploaded.
+#[cfg(target_os = "linux")]
+async fn wait_for_uploads(vfs: &Vfs) {
+    let started = Instant::now();
+    loop {
+        if vfs.unsent().is_empty() {
+            return;
+        }
+        if started.elapsed() >= Duration::from_secs(30) {
+            panic!("{} still unsent", vfs.unsent().len());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// The provider's tree. A file's value is its bytes. A folder's value is `None`.
+#[cfg(target_os = "linux")]
+async fn remote_files(provider: &MemoryProvider) -> BTreeMap<String, Option<Vec<u8>>> {
+    let mut files = BTreeMap::new();
+    let mut pending = vec![(provider.root(), String::new())];
+    while let Some((folder, prefix)) = pending.pop() {
+        for item in provider.list(&folder).await.unwrap() {
+            let path = if prefix.is_empty() {
+                item.name.clone()
+            } else {
+                format!("{prefix}/{}", item.name)
+            };
+            if files.contains_key(&path) {
+                panic!("{path} occurs twice");
+            }
+            match item.attributes.kind {
+                Kind::Folder => {
+                    files.insert(path.clone(), None);
+                    pending.push((item.id, path));
+                }
+                Kind::File => {
+                    files.insert(path, Some(provider.contents(&item.id)));
+                }
+            }
+        }
+    }
+    files
+}
+
+/// Runs `sh -c script`. A failure shows the script's stderr.
+#[cfg(target_os = "linux")]
+async fn sh(script: &str) {
+    let script = script.to_owned();
+    let output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(target_os = "linux")]
+fn shell(path: &Path) -> String {
+    format!("'{}'", path.display())
+}
+
+#[cfg(target_os = "linux")]
+fn os_code<T>(result: std::io::Result<T>) -> Option<i32> {
+    result.err().and_then(|error| error.raw_os_error())
+}
+
+#[cfg(target_os = "linux")]
+async fn cat(path: &Path) -> Vec<u8> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let output = std::process::Command::new("cat")
+            .arg(path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
+    })
+    .await
+    .unwrap()
 }
 
 #[ignore = "mounts for real: run crates/marlin-fuse/test-in-docker.sh on Linux, crates/marlin-fuse/test-on-mac.sh on a Mac"]
@@ -868,4 +995,551 @@ async fn a_mount_on_a_file_fails() {
     // macOS reports this by ending the session, not through an error code. The adapter must notice that, not wait out its 30 seconds.
     assert!(started.elapsed() < Duration::from_secs(15));
     assert!(mount_line(&point).is_none());
+}
+
+#[cfg(target_os = "linux")]
+#[ignore = "mounts for real: run crates/marlin-fuse/test-in-docker.sh on Linux, crates/marlin-fuse/test-on-mac.sh on a Mac"]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_provider_that_cannot_write_mounts_read_only() {
+    let (vfs, _spool) = spooled_vfs(
+        Arc::new(CountingFile::new(b"abc".to_vec())),
+        1024 * 1024 * 1024,
+        Options::default(),
+    );
+    let (_dir, point) = empty_dir();
+    let mut mount = marlin_fuse::mount(vfs, &point).await.unwrap();
+
+    let line = mount_line(&point).unwrap();
+    assert!(line.split(' ').nth(5).unwrap().starts_with("ro"), "{line}");
+    let at = point.clone();
+    let (file_mode, root_mode) = tokio::task::spawn_blocking(move || {
+        (
+            std::fs::metadata(at.join("file.bin")).unwrap().mode() & 0o777,
+            std::fs::metadata(&at).unwrap().mode() & 0o777,
+        )
+    })
+    .await
+    .unwrap();
+    assert_eq!(file_mode, 0o400);
+    assert_eq!(root_mode, 0o500);
+
+    let at = point.clone();
+    let errors = tokio::task::spawn_blocking(move || {
+        let file = at.join("file.bin");
+        let created = os_code(std::fs::File::create(at.join("new.txt")));
+        let opened = os_code(OpenOptions::new().write(true).open(&file));
+        let made = os_code(std::fs::create_dir(at.join("dir")));
+        let removed = os_code(std::fs::remove_file(&file));
+        let renamed = os_code(std::fs::rename(&file, at.join("other.bin")));
+        let mode = os_code(std::fs::set_permissions(
+            &file,
+            std::fs::Permissions::from_mode(0o600),
+        ));
+        let stamped = os_code(
+            std::fs::File::open(&file).and_then(|opened| opened.set_modified(SystemTime::now())),
+        );
+        [created, opened, made, removed, renamed, mode, stamped]
+    })
+    .await
+    .unwrap();
+    for error in errors {
+        assert_eq!(error, Some(libc::EROFS));
+    }
+
+    mount.unmount().await.unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[ignore = "mounts for real: run crates/marlin-fuse/test-in-docker.sh on Linux, crates/marlin-fuse/test-on-mac.sh on a Mac"]
+#[tokio::test(flavor = "multi_thread")]
+async fn copies_reach_the_provider() {
+    let provider = Arc::new(MemoryProvider::new());
+    let (vfs, _spool) = spooled_vfs(
+        Arc::clone(&provider),
+        1024 * 1024 * 1024,
+        Options::default(),
+    );
+    let (_dir, point) = empty_dir();
+    let mut mount = marlin_fuse::mount(vfs.clone(), &point).await.unwrap();
+
+    let src = tempfile::tempdir().unwrap();
+    let top = pattern(300_000);
+    let five = pattern(5 * 1024 * 1024);
+    let one = pattern(1024 * 1024);
+    std::fs::write(src.path().join("top.bin"), &top).unwrap();
+    std::fs::write(src.path().join("five.bin"), &five).unwrap();
+    let tree = src.path().join("tree");
+    std::fs::create_dir_all(tree.join("sub/deeper")).unwrap();
+    std::fs::create_dir(tree.join("empty")).unwrap();
+    std::fs::write(tree.join("a.txt"), b"a\n").unwrap();
+    std::fs::write(tree.join("sub/b.bin"), &one).unwrap();
+    std::fs::write(tree.join("sub/deeper/c.txt"), b"c\n").unwrap();
+
+    sh(&format!(
+        "cp -- {src}/top.bin {src}/five.bin {mnt}/ && cp -r -- {src}/tree {mnt}/ && rsync -r -- {src}/tree/ {mnt}/synced/ && cp -- {mnt}/top.bin {mnt}/top-copy.bin",
+        src = shell(src.path()),
+        mnt = shell(&point),
+    ))
+    .await;
+
+    let mut expect = BTreeMap::new();
+    expect.insert("top.bin".to_string(), Some(top.clone()));
+    // Both ends on the mount: the kernel copies with reads and writes, because the adapter has no `copy_file_range`.
+    expect.insert("top-copy.bin".to_string(), Some(top));
+    expect.insert("five.bin".to_string(), Some(five));
+    expect.insert("tree".to_string(), None);
+    expect.insert("tree/a.txt".to_string(), Some(b"a\n".to_vec()));
+    expect.insert("tree/sub".to_string(), None);
+    expect.insert("tree/sub/b.bin".to_string(), Some(one.clone()));
+    expect.insert("tree/sub/deeper".to_string(), None);
+    expect.insert("tree/sub/deeper/c.txt".to_string(), Some(b"c\n".to_vec()));
+    expect.insert("tree/empty".to_string(), None);
+    expect.insert("synced".to_string(), None);
+    expect.insert("synced/a.txt".to_string(), Some(b"a\n".to_vec()));
+    expect.insert("synced/sub".to_string(), None);
+    expect.insert("synced/sub/b.bin".to_string(), Some(one));
+    expect.insert("synced/sub/deeper".to_string(), None);
+    expect.insert("synced/sub/deeper/c.txt".to_string(), Some(b"c\n".to_vec()));
+    expect.insert("synced/empty".to_string(), None);
+    let files_copied = expect.values().filter(|bytes| bytes.is_some()).count();
+    for (rel, bytes) in &expect {
+        if let Some(bytes) = bytes {
+            assert_eq!(read_file(&point.join(rel)).await.unwrap(), *bytes, "{rel}");
+        }
+    }
+
+    wait_for_uploads(&vfs).await;
+    assert_eq!(remote_files(&provider).await, expect);
+    eprintln!(
+        "uploads {} for {} files copied",
+        provider.uploads(),
+        files_copied
+    );
+
+    mount.unmount().await.unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[ignore = "mounts for real: run crates/marlin-fuse/test-in-docker.sh on Linux, crates/marlin-fuse/test-on-mac.sh on a Mac"]
+#[tokio::test(flavor = "multi_thread")]
+async fn editor_saves_keep_one_file() {
+    let provider = Arc::new(MemoryProvider::new());
+    let id = provider.add_file(&provider.root(), "notes.txt", b"first line\nold text\n");
+    let (vfs, _spool) = spooled_vfs(
+        Arc::clone(&provider),
+        1024 * 1024 * 1024,
+        Options::default(),
+    );
+    let (_dir, point) = empty_dir();
+    let mut mount = marlin_fuse::mount(vfs.clone(), &point).await.unwrap();
+    let notes = point.join("notes.txt");
+
+    let before = provider.uploads();
+    sh(&format!("sed -i 's/old/new/' {}", shell(&notes))).await;
+    assert_eq!(names(&point).await.unwrap(), ["notes.txt"]);
+    wait_for_uploads(&vfs).await;
+    let items = provider.list(&provider.root()).await.unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].name, "notes.txt");
+    assert_eq!(items[0].id, id);
+    assert_eq!(provider.contents(&id), b"first line\nnew text\n");
+    eprintln!("sed save added {} uploads", provider.uploads() - before);
+
+    let before = provider.uploads();
+    sh(&format!(
+        "vim.tiny -N -u NONE -i NONE -es -c '%s/new/vim/' -c 'wq' {} < /dev/null",
+        shell(&notes)
+    ))
+    .await;
+    assert_eq!(names(&point).await.unwrap(), ["notes.txt"]);
+    wait_for_uploads(&vfs).await;
+    let items = provider.list(&provider.root()).await.unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].name, "notes.txt");
+    assert_eq!(provider.contents(&items[0].id), b"first line\nvim text\n");
+    eprintln!(
+        "vim save added {} uploads, kept the item id: {}",
+        provider.uploads() - before,
+        items[0].id == id
+    );
+
+    mount.unmount().await.unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[ignore = "mounts for real: run crates/marlin-fuse/test-in-docker.sh on Linux, crates/marlin-fuse/test-on-mac.sh on a Mac"]
+#[tokio::test(flavor = "multi_thread")]
+async fn dd_into_the_middle_changes_only_those_bytes() {
+    let provider = Arc::new(MemoryProvider::new());
+    let mut expect = pattern(3 * 1024 * 1024);
+    let id = provider.add_file(&provider.root(), "data.bin", &expect);
+    let (vfs, _spool) = spooled_vfs(
+        Arc::clone(&provider),
+        1024 * 1024 * 1024,
+        Options::default(),
+    );
+    let (_dir, point) = empty_dir();
+    let mut mount = marlin_fuse::mount(vfs.clone(), &point).await.unwrap();
+
+    let patch = point.parent().unwrap().join("patch.bin");
+    // The mount point's parent is the test's temp folder, outside the mount.
+    std::fs::write(&patch, vec![0xAA; 1000]).unwrap();
+    sh(&format!(
+        "dd if={} of={} bs=1000 seek=1500 count=1 conv=notrunc status=none",
+        shell(&patch),
+        shell(&point.join("data.bin"))
+    ))
+    .await;
+    expect[1_500_000..1_501_000].fill(0xAA);
+    assert_eq!(read_file(&point.join("data.bin")).await.unwrap(), expect);
+    wait_for_uploads(&vfs).await;
+    assert_eq!(provider.contents(&id), expect);
+
+    mount.unmount().await.unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[ignore = "mounts for real: run crates/marlin-fuse/test-in-docker.sh on Linux, crates/marlin-fuse/test-on-mac.sh on a Mac"]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_write_is_read_back_at_once_also_by_another_process() {
+    let provider = Arc::new(MemoryProvider::new());
+    let fresh = vec![1u8; 100_000];
+    let page_bytes = pattern(100_000);
+    let fresh_id = provider.add_file(&provider.root(), "fresh.bin", &fresh);
+    let page_id = provider.add_file(&provider.root(), "page.txt", &page_bytes);
+    let (vfs, _spool) = spooled_vfs(
+        Arc::clone(&provider),
+        1024 * 1024 * 1024,
+        Options::default(),
+    );
+    let (_dir, point) = empty_dir();
+    let mut mount = marlin_fuse::mount(vfs.clone(), &point).await.unwrap();
+
+    sh(&format!("printf x > {}", shell(&point.join("fresh.bin")))).await;
+    assert_eq!(provider.largest_read(), 0);
+    assert_eq!(cat(&point.join("fresh.bin")).await, b"x");
+
+    let page = point.join("page.txt");
+    assert_eq!(read_file(&page).await.unwrap(), page_bytes);
+    let mut expect = page_bytes;
+    expect[50_000..50_007].copy_from_slice(b"CHANGED");
+    let writing = tokio::task::spawn_blocking({
+        let page = page.clone();
+        move || {
+            let file = OpenOptions::new().write(true).open(page).unwrap();
+            file.write_at(b"CHANGED", 50_000).unwrap();
+            file
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(read_file(&page).await.unwrap(), expect);
+    assert_eq!(cat(&page).await, expect);
+    tokio::task::spawn_blocking(move || drop(writing))
+        .await
+        .unwrap();
+    assert_eq!(read_file(&page).await.unwrap(), expect);
+    assert_eq!(cat(&page).await, expect);
+
+    sh(&format!("printf %s replaced > {}", shell(&page))).await;
+    let expect = b"replaced".to_vec();
+    assert_eq!(read_file(&page).await.unwrap(), expect);
+    assert_eq!(cat(&page).await, expect);
+    sh(&format!("printf %s \" and more\" >> {}", shell(&page))).await;
+    let expect = b"replaced and more".to_vec();
+    assert_eq!(read_file(&page).await.unwrap(), expect);
+    assert_eq!(cat(&page).await, expect);
+    sh(&format!("truncate -s 4 {}", shell(&page))).await;
+    let expect = b"repl".to_vec();
+    assert_eq!(read_file(&page).await.unwrap(), expect);
+    assert_eq!(cat(&page).await, expect);
+    sh(&format!("truncate -s 10 {}", shell(&page))).await;
+    let expect = b"repl\0\0\0\0\0\0".to_vec();
+    assert_eq!(read_file(&page).await.unwrap(), expect);
+    assert_eq!(cat(&page).await, expect);
+
+    wait_for_uploads(&vfs).await;
+    assert_eq!(provider.contents(&fresh_id), b"x");
+    assert_eq!(provider.contents(&page_id), expect);
+    assert_eq!(read_file(&page).await.unwrap(), expect);
+
+    mount.unmount().await.unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[ignore = "mounts for real: run crates/marlin-fuse/test-in-docker.sh on Linux, crates/marlin-fuse/test-on-mac.sh on a Mac"]
+#[tokio::test(flavor = "multi_thread")]
+async fn names_change_through_the_mount() {
+    let provider = Arc::new(MemoryProvider::new());
+    let root = provider.root();
+    let a_id = provider.add_file(&root, "a.txt", b"aaa");
+    provider.add_file(&root, "b.txt", b"bbb");
+    let dir = provider.add_folder(&root, "dir");
+    provider.add_file(&dir, "inner.txt", b"inner");
+    provider.add_folder(&root, "other");
+    let (vfs, _spool) = spooled_vfs(
+        Arc::clone(&provider),
+        1024 * 1024 * 1024,
+        Options::default(),
+    );
+    let (_dir, point) = empty_dir();
+    let mut mount = marlin_fuse::mount(vfs.clone(), &point).await.unwrap();
+
+    let at = point.clone();
+    tokio::task::spawn_blocking(move || std::fs::create_dir(at.join("made")).unwrap())
+        .await
+        .unwrap();
+    let mut expect = BTreeMap::from([
+        ("a.txt".to_string(), Some(b"aaa".to_vec())),
+        ("b.txt".to_string(), Some(b"bbb".to_vec())),
+        ("dir".to_string(), None),
+        ("dir/inner.txt".to_string(), Some(b"inner".to_vec())),
+        ("other".to_string(), None),
+        ("made".to_string(), None),
+    ]);
+    assert_eq!(remote_files(&provider).await, expect);
+
+    let at = point.clone();
+    tokio::task::spawn_blocking(move || {
+        std::fs::rename(at.join("a.txt"), at.join("made/a2.txt")).unwrap();
+    })
+    .await
+    .unwrap();
+    expect.remove("a.txt");
+    expect.insert("made/a2.txt".to_string(), Some(b"aaa".to_vec()));
+    assert_eq!(remote_files(&provider).await, expect);
+    let made_id = provider
+        .list(&provider.root())
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|item| item.name == "made")
+        .unwrap()
+        .id;
+    let moved = provider.list(&made_id).await.unwrap();
+    assert_eq!(moved.len(), 1);
+    assert_eq!(moved[0].id, a_id);
+    assert_eq!(provider.contents(&a_id), b"aaa");
+
+    // The kernel answers this one itself: it already sees the name taken.
+    let at = point.clone();
+    let errno = tokio::task::spawn_blocking(move || {
+        rename_flag(
+            &at.join("b.txt"),
+            &at.join("made/a2.txt"),
+            libc::RENAME_NOREPLACE,
+        )
+    })
+    .await
+    .unwrap();
+    assert_eq!(errno, libc::EEXIST);
+    let at = point.clone();
+    let errno = tokio::task::spawn_blocking(move || {
+        rename_flag(
+            &at.join("b.txt"),
+            &at.join("made/a2.txt"),
+            libc::RENAME_EXCHANGE,
+        )
+    })
+    .await
+    .unwrap();
+    assert_eq!(errno, libc::EINVAL);
+
+    let at = point.clone();
+    let errors = tokio::task::spawn_blocking(move || {
+        [
+            os_code(std::fs::rename(at.join("dir"), at.join("dir/inside"))),
+            os_code(std::fs::remove_dir(at.join("dir"))),
+            os_code(std::fs::remove_file(at.join("dir"))),
+        ]
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        errors,
+        [
+            Some(libc::EINVAL),
+            Some(libc::ENOTEMPTY),
+            Some(libc::EISDIR)
+        ]
+    );
+
+    let at = point.clone();
+    tokio::task::spawn_blocking(move || {
+        std::fs::remove_file(at.join("dir/inner.txt")).unwrap();
+        std::fs::remove_dir(at.join("dir")).unwrap();
+        std::fs::remove_dir(at.join("other")).unwrap();
+    })
+    .await
+    .unwrap();
+    expect.remove("dir/inner.txt");
+    expect.remove("dir");
+    expect.remove("other");
+    assert_eq!(remote_files(&provider).await, expect);
+
+    let at = point.clone();
+    tokio::task::spawn_blocking(move || {
+        std::fs::rename(at.join("b.txt"), at.join("made/a2.txt")).unwrap();
+    })
+    .await
+    .unwrap();
+    expect.remove("b.txt");
+    expect.insert("made/a2.txt".to_string(), Some(b"bbb".to_vec()));
+    assert_eq!(remote_files(&provider).await, expect);
+
+    let at = point.clone();
+    let errors = tokio::task::spawn_blocking(move || {
+        let mut bytes = b"bad".to_vec();
+        bytes.push(0xff);
+        let name = OsString::from_vec(bytes);
+        let created = os_code(std::fs::File::create(at.join(&name)));
+        let made = os_code(std::fs::create_dir(at.join(&name)));
+        let long = os_code(std::fs::File::create(at.join("a".repeat(256))));
+        let linked = os_code(std::fs::hard_link(
+            at.join("made/a2.txt"),
+            at.join("made/link.txt"),
+        ));
+        let symlinked = os_code(std::os::unix::fs::symlink("target", at.join("made/sym")));
+        [created, made, long, linked, symlinked]
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        errors,
+        [
+            Some(libc::EINVAL),
+            Some(libc::EINVAL),
+            Some(libc::ENAMETOOLONG),
+            Some(libc::EPERM),
+            Some(libc::EPERM),
+        ]
+    );
+
+    mount.unmount().await.unwrap();
+}
+
+#[cfg(target_os = "linux")]
+fn rename_flag(from: &Path, to: &Path, flags: libc::c_uint) -> i32 {
+    let from = CString::new(from.as_os_str().as_bytes()).unwrap();
+    let to = CString::new(to.as_os_str().as_bytes()).unwrap();
+    // SAFETY: both paths are nul-terminated and live until the call returns.
+    let rc = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            from.as_ptr(),
+            libc::AT_FDCWD,
+            to.as_ptr(),
+            flags,
+        )
+    };
+    assert_eq!(rc, -1);
+    std::io::Error::last_os_error().raw_os_error().unwrap()
+}
+
+#[cfg(target_os = "linux")]
+#[ignore = "mounts for real: run crates/marlin-fuse/test-in-docker.sh on Linux, crates/marlin-fuse/test-on-mac.sh on a Mac"]
+#[tokio::test(flavor = "multi_thread")]
+async fn preserved_times_reach_the_provider() {
+    // 2001-02-03 04:05:06 UTC.
+    let modified = UNIX_EPOCH + Duration::from_secs(981_173_106);
+    let provider = Arc::new(MemoryProvider::new());
+    let (vfs, _spool) = spooled_vfs(
+        Arc::clone(&provider),
+        1024 * 1024 * 1024,
+        Options::default(),
+    );
+    let (dir, point) = empty_dir();
+    let mut mount = marlin_fuse::mount(vfs.clone(), &point).await.unwrap();
+    let src = dir.path().join("src.txt");
+    std::fs::write(&src, b"kept\n").unwrap();
+    std::fs::File::open(&src)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    sh(&format!(
+        "cp -p -- {} {} && rsync -t -- {} {}",
+        shell(&src),
+        shell(&point.join("cp.txt")),
+        shell(&src),
+        shell(&point.join("rsync.txt"))
+    ))
+    .await;
+    let cp = point.join("cp.txt");
+    let rsync = point.join("rsync.txt");
+    let (cp_time, rsync_time) = tokio::task::spawn_blocking(move || {
+        (
+            std::fs::metadata(cp).unwrap().modified().unwrap(),
+            std::fs::metadata(rsync).unwrap().modified().unwrap(),
+        )
+    })
+    .await
+    .unwrap();
+    assert_eq!(cp_time, modified);
+    assert_eq!(rsync_time, modified);
+
+    wait_for_uploads(&vfs).await;
+    let mut items = provider.list(&provider.root()).await.unwrap();
+    items.sort_by(|left, right| left.name.cmp(&right.name));
+    let names: Vec<&str> = items.iter().map(|item| item.name.as_str()).collect();
+    assert_eq!(names, ["cp.txt", "rsync.txt"]);
+    for item in &items {
+        assert_eq!(item.attributes.modified, modified, "{}", item.name);
+    }
+
+    mount.unmount().await.unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[ignore = "mounts for real: run crates/marlin-fuse/test-in-docker.sh on Linux, crates/marlin-fuse/test-on-mac.sh on a Mac"]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_copy_bigger_than_the_spool_waits_for_uploads() {
+    let provider = Arc::new(MemoryProvider::new());
+    let (vfs, _spool) = spooled_vfs(
+        Arc::clone(&provider),
+        32 * 1024 * 1024,
+        Options {
+            call_timeout: Duration::from_secs(10),
+            ..Options::default()
+        },
+    );
+    let (_dir, point) = empty_dir();
+    let mut mount = marlin_fuse::mount(vfs.clone(), &point).await.unwrap();
+
+    let src = tempfile::tempdir().unwrap();
+    let big = src.path().join("big");
+    std::fs::create_dir(&big).unwrap();
+    let mut bodies = Vec::new();
+    for n in 0..4u8 {
+        let bytes = vec![n; 16 * 1024 * 1024];
+        std::fs::write(big.join(format!("f{n}.bin")), &bytes).unwrap();
+        bodies.push(bytes);
+    }
+    let started = Instant::now();
+    sh(&format!("cp -r -- {} {}", shell(&big), shell(&point))).await;
+    let took = started.elapsed();
+    eprintln!("cp of four 16 MiB files took {took:?}");
+    // Half the files fit. The rest wait for the first ones to upload, after their settle time.
+    assert!(took >= Options::default().settle, "{took:?}");
+    wait_for_uploads(&vfs).await;
+    let remote = remote_files(&provider).await;
+    assert_eq!(remote.get("big"), Some(&None));
+    for (n, bytes) in bodies.iter().enumerate() {
+        let got = remote
+            .get(&format!("big/f{n}.bin"))
+            .unwrap()
+            .as_ref()
+            .unwrap();
+        assert!(got == bytes, "big/f{n}.bin");
+    }
+    assert_eq!(remote.len(), 5);
+
+    let target = point.join("huge.bin");
+    let error =
+        tokio::task::spawn_blocking(move || std::fs::write(target, vec![9u8; 40 * 1024 * 1024]))
+            .await
+            .unwrap()
+            .unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(libc::ENOSPC), "{error}");
+
+    mount.unmount().await.unwrap();
 }

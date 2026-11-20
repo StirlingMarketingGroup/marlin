@@ -13,7 +13,7 @@ Start here. Each line says what a page answers. The rules for keeping these page
 | [Google Drive mount provider](mount-gdrive.md) | What the `marlin-gdrive` crate shows of a Google account in a mount: the folders, the link files, the item IDs, the errors, the retries, and Google's limits. Also the saved Google sign-in, and where the OAuth client ID and secret come from. |
 | [Mount helper](mount-helper.md)                | How the `marlin-mount` process is built, bundled, and controlled: its socket, its protocol, the rules of its mounts, the providers it links, and the app's commands and events for it.                                                           |
 | [macOS mount adapter](mount-macos.md)          | How `marlin-fuse` serves a mount through macFUSE: what the machine needs, the life of a session, and the tests.                                                                                                                                  |
-| [Linux mount adapter](mount-linux.md)          | How `marlin-fuse` serves a mount through FUSE: what the machine needs, the error table, and the tests.                                                                                                                                           |
+| [Linux mount adapter](mount-linux.md)          | How `marlin-fuse` serves a mount through FUSE: what the machine needs, how writes are served, the error table, and the tests.                                                                                                                    |
 
 ## How to work on it
 

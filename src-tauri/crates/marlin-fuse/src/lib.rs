@@ -27,11 +27,13 @@ pub(crate) const NAME_MAX: usize = 255;
 /// One page of a folder listing. A bigger folder is read in pages, so one readdir never clones the whole listing.
 pub(crate) const PAGE: usize = 256;
 
-/// The mode and link count a mount shows. A folder is mode `0o500` with 2 links. A file is mode `0o400` with 1 link.
-pub(crate) fn mode_and_links(kind: Kind) -> (u16, u32) {
-    match kind {
-        Kind::Folder => (0o500, 2),
-        Kind::File => (0o400, 1),
+/// The mode and link count a mount shows. A writable mount gives a folder mode `0o700` and a file mode `0o600`. A read-only mount gives a folder mode `0o500` and a file mode `0o400`. A folder has 2 links. A file has 1.
+pub(crate) fn mode_and_links(kind: Kind, writable: bool) -> (u16, u32) {
+    match (kind, writable) {
+        (Kind::Folder, true) => (0o700, 2),
+        (Kind::Folder, false) => (0o500, 2),
+        (Kind::File, true) => (0o600, 1),
+        (Kind::File, false) => (0o400, 1),
     }
 }
 

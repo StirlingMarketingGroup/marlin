@@ -1540,6 +1540,23 @@ async fn a_provider_without_changes_is_read_only() {
 }
 
 #[tokio::test]
+async fn writable_needs_a_spool_and_a_provider_that_can_write() {
+    let (_provider, vfs) = mount(Options::default());
+    assert!(!vfs.writable());
+    let (_provider, vfs, _dir) = spooled_mount(Options::default(), 1024, never_local);
+    assert!(vfs.writable());
+    let dir = tempfile::tempdir().unwrap();
+    let vfs = Vfs::new(Arc::new(ReadOnlyProvider), POSIX, Options::default())
+        .take_writes(Spool {
+            folder: dir.path().to_path_buf(),
+            limit: 1024,
+            stays_local: never_local,
+        })
+        .unwrap();
+    assert!(!vfs.writable());
+}
+
+#[tokio::test]
 async fn new_file_operations_reuse_cached_listings() {
     let (provider, vfs, _dir) = spooled_mount(Options::default(), 1024 * 1024, never_local);
     provider.add_folder(&provider.root(), "docs");
@@ -1956,7 +1973,7 @@ async fn two_edits_of_one_spool_file_count_its_room_once() {
     let bytes = vfs.read(handle, 0, 200).await.unwrap();
     assert_eq!(attrs.size, bytes.len() as u64);
     let rest = (100 - attrs.size) as usize;
-    vfs.write(handle, attrs.size, &vec![b'c'; rest])
+    vfs.write(handle, attrs.size, vec![b'c'; rest])
         .await
         .unwrap();
     assert_eq!(vfs.attributes(made.node).await.unwrap().size, 100);
