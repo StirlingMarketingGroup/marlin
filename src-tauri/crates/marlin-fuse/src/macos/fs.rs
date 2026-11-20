@@ -1,21 +1,25 @@
 use std::ffi::{CStr, CString};
 use std::sync::Arc;
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use marlin_vfs::{Access, Attributes, HandleId, Kind, NodeId, Space, Vfs};
+use marlin_vfs::{Attributes, HandleId, IfExists, Kind, NodeId, Space, Vfs};
 
-use super::sys::{FuseBuf, FuseBufvec, FuseEntryParam, FuseFileInfo, FuseLowlevelOps, Req, Sys};
+use crate::Shown;
+
+use super::sys::{
+    FuseBuf, FuseBufvec, FuseEntryParam, FuseFileInfo, FuseLowlevelOps, Req, Sys,
+    FUSE_SET_ATTR_MTIME, FUSE_SET_ATTR_MTIME_NOW, FUSE_SET_ATTR_SIZE,
+};
 use super::Life;
 
 /// The core keeps no parent for a node. libfuse uses this inode (`FUSE_UNKNOWN_INO`) when a filesystem does not know an entry's inode.
 const UNKNOWN_INODE: u64 = 0xffff_ffff;
 
-/// Serves one `Vfs`. A callback that may reach the provider answers from a tokio task, so a slow call never holds up the session thread. `forget`, `readdir`, and the two releases only touch the core's own state and answer in place.
+/// Serves one `Vfs`. A callback that may reach the provider answers from a tokio task, so a slow call never holds up the session thread. `forget`, `opendir`, `readdir` past offset 0, and the two releases answer in place. They touch the core's own state, and the last writer's release also writes the file's small spool record, with no sync. `flush` is left out: every write is in the spool before it answers, and macFUSE closes fine without it. `mknod` is left out because FSKit uses `create`. `fsyncdir` and `access` are left out. The xattr calls are left out: macFUSE then keeps extended attributes in `._name` files, which the core keeps on this computer, and answering `ENOTSUP` does not stop those files. `readlink` is left out: a mount shows no symbolic links.
 pub(super) struct Fs {
     pub(super) vfs: Arc<Vfs>,
     pub(super) runtime: tokio::runtime::Handle,
-    pub(super) uid: u32,
-    pub(super) gid: u32,
+    pub(super) shown: Shown,
     pub(super) sys: &'static Sys,
     pub(super) life: Arc<Life>,
 }
@@ -55,13 +59,7 @@ impl Reply {
     }
 
     fn entry(mut self, node: NodeId, attr: libc::stat) {
-        let param = FuseEntryParam {
-            ino: node.0,
-            generation: 0,
-            attr,
-            attr_timeout: crate::TTL.as_secs_f64(),
-            entry_timeout: crate::TTL.as_secs_f64(),
-        };
+        let param = entry_param(node, attr);
         // SAFETY: this request has not been answered. `param` matches `fuse_entry_param` with Darwin extensions off.
         unsafe { (self.sys.reply_entry)(self.req, &param) };
         self.answered = true;
@@ -76,6 +74,19 @@ impl Reply {
     fn open(mut self, fi: &FuseFileInfo) {
         // SAFETY: this request has not been answered. `fi` is the file info the kernel sent, plus the handle id.
         unsafe { (self.sys.reply_open)(self.req, fi) };
+        self.answered = true;
+    }
+
+    fn write(mut self, count: usize) {
+        // SAFETY: this request has not been answered. `count` is the number of bytes stored.
+        unsafe { (self.sys.reply_write)(self.req, count) };
+        self.answered = true;
+    }
+
+    fn create(mut self, node: NodeId, attr: libc::stat, fi: &FuseFileInfo) {
+        let param = entry_param(node, attr);
+        // SAFETY: this request has not been answered. `param` matches `fuse_entry_param` with Darwin extensions off, and `fi` is the file info the kernel sent, plus the handle id.
+        unsafe { (self.sys.reply_create)(self.req, &param, fi) };
         self.answered = true;
     }
 
@@ -103,6 +114,16 @@ impl Reply {
         // SAFETY: this request has not been answered. `st` is the system `struct statvfs`.
         unsafe { (self.sys.reply_statfs)(self.req, st) };
         self.answered = true;
+    }
+}
+
+fn entry_param(node: NodeId, attr: libc::stat) -> FuseEntryParam {
+    FuseEntryParam {
+        ino: node.0,
+        generation: 0,
+        attr,
+        attr_timeout: crate::TTL.as_secs_f64(),
+        entry_timeout: crate::TTL.as_secs_f64(),
     }
 }
 
@@ -134,26 +155,32 @@ pub(super) static OPS: FuseLowlevelOps = FuseLowlevelOps {
     lookup: Some(ll_lookup),
     forget: Some(ll_forget),
     getattr: Some(ll_getattr),
-    setattr: None,
+    setattr: Some(ll_setattr),
     readlink: None,
     mknod: None,
-    mkdir: None,
-    unlink: None,
-    rmdir: None,
-    symlink: None,
-    rename: None,
-    link: None,
+    mkdir: Some(ll_mkdir),
+    unlink: Some(ll_unlink),
+    rmdir: Some(ll_rmdir),
+    symlink: Some(ll_symlink),
+    rename: Some(ll_rename),
+    link: Some(ll_link),
     open: Some(ll_open),
     read: Some(ll_read),
-    write: None,
+    write: Some(ll_write),
     flush: None,
     release: Some(ll_release),
-    fsync: None,
+    fsync: Some(ll_fsync),
     opendir: Some(ll_opendir),
     readdir: Some(ll_readdir),
     releasedir: Some(ll_release),
     fsyncdir: None,
     statfs: Some(ll_statfs),
+    setxattr: None,
+    getxattr: None,
+    listxattr: None,
+    removexattr: None,
+    access: None,
+    create: Some(ll_create),
 };
 
 extern "C" fn ll_lookup(req: Req, parent: u64, name: *const libc::c_char) {
@@ -162,24 +189,15 @@ extern "C" fn ll_lookup(req: Req, parent: u64, name: *const libc::c_char) {
     let reply = Reply::new(fs, req);
     // SAFETY: `name` is a NUL-terminated string that lives for this callback.
     let name = unsafe { CStr::from_ptr(name) };
-    let Ok(name) = name.to_str() else {
-        reply.err(libc::ENOENT);
-        return;
+    let name = match crate::utf8_name(name.to_bytes(), crate::Name::Existing) {
+        Ok(name) => name,
+        Err(errno) => return reply.err(errno),
     };
-    if name.len() > crate::NAME_MAX {
-        reply.err(libc::ENAMETOOLONG);
-        return;
-    }
-    let name = name.to_owned();
     let vfs = Arc::clone(&fs.vfs);
-    let uid = fs.uid;
-    let gid = fs.gid;
+    let shown = fs.shown;
     fs.runtime.spawn(async move {
         match vfs.lookup(NodeId(parent), &name).await {
-            Ok(entry) => {
-                let attr = fill_stat(entry.node, &entry.attributes, uid, gid);
-                reply.entry(entry.node, attr);
-            }
+            Ok(entry) => reply.entry(entry.node, shown.stat(entry.node, &entry.attributes)),
             Err(error) => reply.err(crate::errno(&error)),
         }
     });
@@ -198,15 +216,51 @@ extern "C" fn ll_getattr(req: Req, ino: u64, _fi: *mut FuseFileInfo) {
     let fs = unsafe { session(req) };
     let reply = Reply::new(fs, req);
     let vfs = Arc::clone(&fs.vfs);
-    let uid = fs.uid;
-    let gid = fs.gid;
+    let shown = fs.shown;
     fs.runtime.spawn(async move {
         let node = NodeId(ino);
         match vfs.attributes(node).await {
-            Ok(attributes) => {
-                let attr = fill_stat(node, &attributes, uid, gid);
-                reply.attr(&attr);
-            }
+            Ok(attributes) => reply.attr(&shown.stat(node, &attributes)),
+            Err(error) => reply.err(crate::errno(&error)),
+        }
+    });
+}
+
+extern "C" fn ll_setattr(
+    req: Req,
+    ino: u64,
+    attr: *mut libc::stat,
+    to_set: libc::c_int,
+    _fi: *mut FuseFileInfo,
+) {
+    // SAFETY: libfuse calls this with a request for this session.
+    let fs = unsafe { session(req) };
+    let reply = Reply::new(fs, req);
+    // libfuse leaves every `struct stat` member but the ones `to_set` names undefined.
+    // An open with O_TRUNC arrives as a size of 0: macFUSE does not offer
+    // FUSE_CAP_ATOMIC_O_TRUNC. The core cuts a clean file to zero without reading it.
+    let size = (to_set & FUSE_SET_ATTR_SIZE != 0).then(|| {
+        // SAFETY: `attr` lives for this callback, and the size bit says `st_size` is set.
+        unsafe { (*attr).st_size as u64 }
+    });
+    let mtime = if to_set & FUSE_SET_ATTR_MTIME_NOW != 0 {
+        Some(SystemTime::now())
+    } else if to_set & FUSE_SET_ATTR_MTIME != 0 {
+        // SAFETY: `attr` lives for this callback, and the mtime bit says these two members are set.
+        let time = unsafe { from_timespec((*attr).st_mtime, (*attr).st_mtime_nsec) };
+        match time {
+            Some(time) => Some(time),
+            None => return reply.err(libc::EINVAL),
+        }
+    } else {
+        None
+    };
+    let vfs = Arc::clone(&fs.vfs);
+    let shown = fs.shown;
+    fs.runtime.spawn(async move {
+        let node = NodeId(ino);
+        match crate::set_attributes(&vfs, node, size, mtime).await {
+            Ok(attributes) => reply.attr(&shown.stat(node, &attributes)),
             Err(error) => reply.err(crate::errno(&error)),
         }
     });
@@ -218,11 +272,7 @@ extern "C" fn ll_open(req: Req, ino: u64, fi: *mut FuseFileInfo) {
     let reply = Reply::new(fs, req);
     // SAFETY: libfuse passes its own file info to this callback, and it is valid until the callback returns.
     let mut fi = unsafe { *fi };
-    let access = if fi.flags & libc::O_ACCMODE == libc::O_RDONLY {
-        Access::Read
-    } else {
-        Access::Write
-    };
+    let access = crate::open_access(fi.flags);
     let vfs = Arc::clone(&fs.vfs);
     fs.runtime.spawn(async move {
         match vfs.open(NodeId(ino), access).await {
@@ -252,6 +302,30 @@ extern "C" fn ll_read(req: Req, _ino: u64, size: usize, off: i64, fi: *mut FuseF
     });
 }
 
+extern "C" fn ll_write(
+    req: Req,
+    _ino: u64,
+    buf: *const libc::c_char,
+    size: usize,
+    off: i64,
+    fi: *mut FuseFileInfo,
+) {
+    // SAFETY: libfuse calls this with a request for this session.
+    let fs = unsafe { session(req) };
+    let reply = Reply::new(fs, req);
+    // SAFETY: libfuse passes `size` readable bytes that live for this callback.
+    let data = unsafe { std::slice::from_raw_parts(buf.cast::<u8>(), size) }.to_vec();
+    // SAFETY: libfuse passes its own file info to this callback, and it is valid until the callback returns.
+    let fh = unsafe { (*fi).fh };
+    let vfs = Arc::clone(&fs.vfs);
+    fs.runtime.spawn(async move {
+        match vfs.write(HandleId(fh), off as u64, data).await {
+            Ok(()) => reply.write(size),
+            Err(error) => reply.err(crate::errno(&error)),
+        }
+    });
+}
+
 /// Serves `release` and `releasedir`: the core closes a file handle and a folder handle the same way.
 extern "C" fn ll_release(req: Req, _ino: u64, fi: *mut FuseFileInfo) {
     // SAFETY: libfuse calls this with a request for this session.
@@ -263,22 +337,33 @@ extern "C" fn ll_release(req: Req, _ino: u64, fi: *mut FuseFileInfo) {
     reply.err(0);
 }
 
+/// macFUSE 5.5.0 never sends this: it writes an app's cached bytes to the adapter, then answers the app's `fsync` itself. Served for a macFUSE that does send it.
+extern "C" fn ll_fsync(req: Req, ino: u64, _datasync: libc::c_int, _fi: *mut FuseFileInfo) {
+    // SAFETY: libfuse calls this with a request for this session.
+    let fs = unsafe { session(req) };
+    let reply = Reply::new(fs, req);
+    let vfs = Arc::clone(&fs.vfs);
+    fs.runtime.spawn(async move {
+        match vfs.fsync(NodeId(ino)).await {
+            Ok(()) => reply.err(0),
+            Err(error) => reply.err(crate::errno(&error)),
+        }
+    });
+}
+
 extern "C" fn ll_opendir(req: Req, ino: u64, fi: *mut FuseFileInfo) {
     // SAFETY: libfuse calls this with a request for this session.
     let fs = unsafe { session(req) };
     let reply = Reply::new(fs, req);
     // SAFETY: libfuse passes its own file info to this callback, and it is valid until the callback returns.
     let mut fi = unsafe { *fi };
-    let vfs = Arc::clone(&fs.vfs);
-    fs.runtime.spawn(async move {
-        match vfs.open_folder(NodeId(ino)).await {
-            Ok(handle) => {
-                fi.fh = handle.0;
-                reply.open(&fi);
-            }
-            Err(error) => reply.err(crate::errno(&error)),
+    match fs.vfs.open_folder(NodeId(ino)) {
+        Ok(handle) => {
+            fi.fh = handle.0;
+            reply.open(&fi);
         }
-    });
+        Err(error) => reply.err(crate::errno(&error)),
+    }
 }
 
 extern "C" fn ll_readdir(req: Req, ino: u64, size: usize, off: i64, fi: *mut FuseFileInfo) {
@@ -287,12 +372,28 @@ extern "C" fn ll_readdir(req: Req, ino: u64, size: usize, off: i64, fi: *mut Fus
     let reply = Reply::new(fs, req);
     // SAFETY: libfuse passes its own file info to this callback, and it is valid until the callback returns.
     let fh = unsafe { (*fi).fh };
-    // Offset 0 is `.`, offset 1 is `..`, and listing entry `i` is offset `i + 2`. The offset sent with an entry is where the next call resumes. An entry that does not fit is not sent.
+    // The listing is taken at every read from offset 0. macFUSE keeps a folder handle open and re-reads it from offset 0 for every new listing.
+    if off == 0 {
+        let vfs = Arc::clone(&fs.vfs);
+        fs.runtime.spawn(async move {
+            if let Err(error) = vfs.rewind_folder(HandleId(fh)).await {
+                reply.err(crate::errno(&error));
+                return;
+            }
+            fill_dir(&vfs, reply, ino, fh, 0, size);
+        });
+        return;
+    }
+    fill_dir(&fs.vfs, reply, ino, fh, off, size);
+}
+
+/// Fills one readdir reply from the frozen listing. Offset 0 is `.`, offset 1 is `..`, and listing entry `i` is offset `i + 2`. The offset sent with an entry is where the next call resumes. An entry that does not fit is not sent.
+fn fill_dir(vfs: &Vfs, reply: Reply, parent: u64, fh: u64, off: i64, size: usize) {
     let mut offset = off as u64;
     let mut buf = vec![0u8; size];
     let mut used = 0;
     if offset == 0 {
-        if add(&reply, &mut buf, &mut used, ino, Kind::Folder, ".", 1) {
+        if add(&reply, &mut buf, &mut used, parent, Kind::Folder, ".", 1) {
             return reply.buf(&buf[..used]);
         }
         offset = 1;
@@ -312,10 +413,7 @@ extern "C" fn ll_readdir(req: Req, ino: u64, size: usize, off: i64, fi: *mut Fus
         offset = 2;
     }
     loop {
-        let page = match fs
-            .vfs
-            .read_folder(HandleId(fh), (offset - 2) as usize, crate::PAGE)
-        {
+        let page = match vfs.read_folder(HandleId(fh), (offset - 2) as usize, crate::PAGE) {
             Ok(page) => page,
             Err(error) => return reply.err(crate::errno(&error)),
         };
@@ -382,6 +480,161 @@ fn add(
     false
 }
 
+extern "C" fn ll_mkdir(req: Req, parent: u64, name: *const libc::c_char, _mode: libc::mode_t) {
+    // SAFETY: libfuse calls this with a request for this session.
+    let fs = unsafe { session(req) };
+    let reply = Reply::new(fs, req);
+    // SAFETY: `name` is a NUL-terminated string that lives for this callback.
+    let name = unsafe { CStr::from_ptr(name) };
+    let name = match crate::utf8_name(name.to_bytes(), crate::Name::New) {
+        Ok(name) => name,
+        Err(errno) => return reply.err(errno),
+    };
+    let vfs = Arc::clone(&fs.vfs);
+    let shown = fs.shown;
+    fs.runtime.spawn(async move {
+        match vfs.create_folder(NodeId(parent), &name).await {
+            Ok(entry) => reply.entry(entry.node, shown.stat(entry.node, &entry.attributes)),
+            Err(error) => reply.err(crate::errno(&error)),
+        }
+    });
+}
+
+extern "C" fn ll_unlink(req: Req, parent: u64, name: *const libc::c_char) {
+    // SAFETY: libfuse calls this with a request for this session.
+    let fs = unsafe { session(req) };
+    let reply = Reply::new(fs, req);
+    // SAFETY: `name` is a NUL-terminated string that lives for this callback.
+    let name = unsafe { CStr::from_ptr(name) };
+    let name = match crate::utf8_name(name.to_bytes(), crate::Name::Existing) {
+        Ok(name) => name,
+        Err(errno) => return reply.err(errno),
+    };
+    let vfs = Arc::clone(&fs.vfs);
+    fs.runtime.spawn(async move {
+        match vfs.remove(NodeId(parent), &name, Kind::File).await {
+            Ok(()) => reply.err(0),
+            Err(error) => reply.err(crate::errno(&error)),
+        }
+    });
+}
+
+extern "C" fn ll_rmdir(req: Req, parent: u64, name: *const libc::c_char) {
+    // SAFETY: libfuse calls this with a request for this session.
+    let fs = unsafe { session(req) };
+    let reply = Reply::new(fs, req);
+    // SAFETY: `name` is a NUL-terminated string that lives for this callback.
+    let name = unsafe { CStr::from_ptr(name) };
+    let name = match crate::utf8_name(name.to_bytes(), crate::Name::Existing) {
+        Ok(name) => name,
+        Err(errno) => return reply.err(errno),
+    };
+    let vfs = Arc::clone(&fs.vfs);
+    fs.runtime.spawn(async move {
+        match vfs.remove(NodeId(parent), &name, Kind::Folder).await {
+            Ok(()) => reply.err(0),
+            Err(error) => reply.err(crate::errno(&error)),
+        }
+    });
+}
+
+extern "C" fn ll_rename(
+    req: Req,
+    parent: u64,
+    name: *const libc::c_char,
+    newparent: u64,
+    newname: *const libc::c_char,
+    flags: libc::c_uint,
+) {
+    // SAFETY: libfuse calls this with a request for this session.
+    let fs = unsafe { session(req) };
+    let reply = Reply::new(fs, req);
+    let if_exists = match if_exists(flags) {
+        Ok(if_exists) => if_exists,
+        Err(errno) => return reply.err(errno),
+    };
+    // A folder moved into itself never reaches here. macOS refuses it with EINVAL.
+    // SAFETY: `name` is a NUL-terminated string that lives for this callback.
+    let name = unsafe { CStr::from_ptr(name) };
+    let name = match crate::utf8_name(name.to_bytes(), crate::Name::Existing) {
+        Ok(name) => name,
+        Err(errno) => return reply.err(errno),
+    };
+    // SAFETY: `newname` is a NUL-terminated string that lives for this callback.
+    let newname = unsafe { CStr::from_ptr(newname) };
+    let newname = match crate::utf8_name(newname.to_bytes(), crate::Name::New) {
+        Ok(name) => name,
+        Err(errno) => return reply.err(errno),
+    };
+    let vfs = Arc::clone(&fs.vfs);
+    fs.runtime.spawn(async move {
+        match vfs
+            .rename(
+                NodeId(parent),
+                &name,
+                NodeId(newparent),
+                &newname,
+                if_exists,
+            )
+            .await
+        {
+            Ok(()) => reply.err(0),
+            Err(error) => reply.err(crate::errno(&error)),
+        }
+    });
+}
+
+extern "C" fn ll_create(
+    req: Req,
+    parent: u64,
+    name: *const libc::c_char,
+    _mode: libc::mode_t,
+    fi: *mut FuseFileInfo,
+) {
+    // SAFETY: libfuse calls this with a request for this session.
+    let fs = unsafe { session(req) };
+    let reply = Reply::new(fs, req);
+    // SAFETY: libfuse passes its own file info to this callback, and it is valid until the callback returns.
+    let mut fi = unsafe { *fi };
+    // SAFETY: `name` is a NUL-terminated string that lives for this callback.
+    let name = unsafe { CStr::from_ptr(name) };
+    let name = match crate::utf8_name(name.to_bytes(), crate::Name::New) {
+        Ok(name) => name,
+        Err(errno) => return reply.err(errno),
+    };
+    let access = crate::open_access(fi.flags);
+    let vfs = Arc::clone(&fs.vfs);
+    let shown = fs.shown;
+    fs.runtime.spawn(async move {
+        match vfs.create(NodeId(parent), &name, access).await {
+            Ok((entry, handle)) => {
+                fi.fh = handle.0;
+                reply.create(entry.node, shown.stat(entry.node, &entry.attributes), &fi);
+            }
+            Err(error) => reply.err(crate::errno(&error)),
+        }
+    });
+}
+
+/// A mount has no hard links (decision 0005). `ENOTSUP` is what `link(2)` on macOS answers for a filesystem without them. Left out, the app would get libfuse's `ENOSYS`, "Function not implemented".
+extern "C" fn ll_link(req: Req, _ino: u64, _newparent: u64, _newname: *const libc::c_char) {
+    // SAFETY: libfuse calls this with a request for this session.
+    let fs = unsafe { session(req) };
+    Reply::new(fs, req).err(libc::ENOTSUP);
+}
+
+/// A mount makes no new symbolic links (decision 0005), and answers like `ll_link`.
+extern "C" fn ll_symlink(
+    req: Req,
+    _target: *const libc::c_char,
+    _parent: u64,
+    _name: *const libc::c_char,
+) {
+    // SAFETY: libfuse calls this with a request for this session.
+    let fs = unsafe { session(req) };
+    Reply::new(fs, req).err(libc::ENOTSUP);
+}
+
 extern "C" fn ll_statfs(req: Req, _ino: u64) {
     // SAFETY: libfuse calls this with a request for this session.
     let fs = unsafe { session(req) };
@@ -410,37 +663,81 @@ fn fill_statvfs(space: &Space) -> libc::statvfs {
     st
 }
 
-fn fill_stat(node: NodeId, attributes: &Attributes, uid: u32, gid: u32) -> libc::stat {
-    // SAFETY: stat is plain numbers. Zero is a valid value for the fields this filesystem does not use.
-    let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    // macOS mounts are read-only until #599.
-    let (perm, nlink) = crate::mode_and_links(attributes.kind, false);
-    let since = attributes
-        .modified
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let sec = since.as_secs() as libc::time_t;
-    let nsec = libc::c_long::from(since.subsec_nanos());
-    st.st_ino = node.0;
-    st.st_mode = match attributes.kind {
-        Kind::Folder => libc::S_IFDIR,
-        Kind::File => libc::S_IFREG,
-    } | perm;
-    st.st_nlink = nlink as libc::nlink_t;
-    st.st_uid = uid;
-    st.st_gid = gid;
-    st.st_size = attributes.size as libc::off_t;
-    st.st_blocks = attributes.size.div_ceil(512) as libc::blkcnt_t;
-    st.st_blksize = crate::BLOCK_SIZE as libc::blksize_t;
-    st.st_atime = sec;
-    st.st_atime_nsec = nsec;
-    st.st_mtime = sec;
-    st.st_mtime_nsec = nsec;
-    st.st_ctime = sec;
-    st.st_ctime_nsec = nsec;
-    st.st_birthtime = sec;
-    st.st_birthtime_nsec = nsec;
-    st
+/// What a rename does when the new name is taken. macFUSE sends `RENAME_EXCL` for a rename onto a free name, and no flag for a rename over an item. `RENAME_SWAP` is `ENOTSUP`, which is what macOS answers for a rename flag a filesystem does not support.
+fn if_exists(flags: libc::c_uint) -> Result<IfExists, libc::c_int> {
+    if flags & libc::RENAME_SWAP != 0 {
+        return Err(libc::ENOTSUP);
+    }
+    if flags & libc::RENAME_EXCL != 0 {
+        Ok(IfExists::Refuse)
+    } else {
+        Ok(IfExists::Replace)
+    }
+}
+
+/// `time` as seconds and nanoseconds. `nsec` is in `0..1_000_000_000`, including for a time before 1970.
+fn to_timespec(time: SystemTime) -> (libc::time_t, libc::c_long) {
+    match time.duration_since(UNIX_EPOCH) {
+        Ok(after) => (
+            after.as_secs() as libc::time_t,
+            libc::c_long::from(after.subsec_nanos()),
+        ),
+        Err(early) => {
+            let before = early.duration();
+            let mut sec = -(before.as_secs() as i64);
+            let nsec = if before.subsec_nanos() == 0 {
+                0
+            } else {
+                sec -= 1;
+                1_000_000_000 - before.subsec_nanos()
+            };
+            (sec as libc::time_t, libc::c_long::from(nsec))
+        }
+    }
+}
+
+/// The instant as a `SystemTime`, or `None` when the numbers cannot become one. A panic here would abort the helper and every mount.
+fn from_timespec(sec: libc::time_t, nsec: libc::c_long) -> Option<SystemTime> {
+    if sec >= 0 {
+        UNIX_EPOCH.checked_add(Duration::new(sec as u64, nsec as u32))
+    } else if nsec == 0 {
+        // `checked_neg` refuses `time_t::MIN`, whose negation would panic.
+        UNIX_EPOCH.checked_sub(Duration::new(sec.checked_neg()? as u64, 0))
+    } else {
+        UNIX_EPOCH.checked_sub(Duration::new(
+            (sec.checked_neg()? as u64) - 1,
+            (1_000_000_000 - nsec) as u32,
+        ))
+    }
+}
+
+impl Shown {
+    fn stat(self, node: NodeId, attributes: &Attributes) -> libc::stat {
+        // SAFETY: stat is plain numbers. Zero is a valid value for the fields this filesystem does not use.
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        let (perm, nlink) = crate::mode_and_links(attributes.kind, self.writable);
+        let (sec, nsec) = to_timespec(attributes.modified);
+        st.st_ino = node.0;
+        st.st_mode = match attributes.kind {
+            Kind::Folder => libc::S_IFDIR,
+            Kind::File => libc::S_IFREG,
+        } | perm;
+        st.st_nlink = nlink as libc::nlink_t;
+        st.st_uid = self.uid;
+        st.st_gid = self.gid;
+        st.st_size = attributes.size as libc::off_t;
+        st.st_blocks = attributes.size.div_ceil(512) as libc::blkcnt_t;
+        st.st_blksize = crate::BLOCK_SIZE as libc::blksize_t;
+        st.st_atime = sec;
+        st.st_atime_nsec = nsec;
+        st.st_mtime = sec;
+        st.st_mtime_nsec = nsec;
+        st.st_ctime = sec;
+        st.st_ctime_nsec = nsec;
+        st.st_birthtime = sec;
+        st.st_birthtime_nsec = nsec;
+        st
+    }
 }
 
 #[cfg(test)]
@@ -451,6 +748,8 @@ mod tests {
 
     use super::*;
 
+    use crate::Shown;
+
     fn attributes(kind: Kind, size: u64) -> Attributes {
         Attributes {
             kind,
@@ -460,9 +759,17 @@ mod tests {
         }
     }
 
+    fn shown(writable: bool) -> Shown {
+        Shown {
+            uid: 11,
+            gid: 22,
+            writable,
+        }
+    }
+
     #[test]
-    fn fill_stat_for_a_file() {
-        let st = fill_stat(NodeId(7), &attributes(Kind::File, 1000), 11, 22);
+    fn stat_for_a_file() {
+        let st = shown(false).stat(NodeId(7), &attributes(Kind::File, 1000));
         assert_eq!(st.st_ino, 7);
         assert_eq!(st.st_mode & libc::S_IFMT, libc::S_IFREG);
         assert_eq!(st.st_mode & 0o777, 0o400);
@@ -477,6 +784,13 @@ mod tests {
         assert_eq!(st.st_atime_nsec, 0);
         assert_eq!(st.st_uid, 11);
         assert_eq!(st.st_gid, 22);
+        assert_eq!(
+            shown(true)
+                .stat(NodeId(7), &attributes(Kind::File, 1000))
+                .st_mode
+                & 0o777,
+            0o600
+        );
     }
 
     #[test]
@@ -502,8 +816,8 @@ mod tests {
     }
 
     #[test]
-    fn fill_stat_for_a_folder() {
-        let st = fill_stat(NodeId(4), &attributes(Kind::Folder, 40), 11, 22);
+    fn stat_for_a_folder() {
+        let st = shown(false).stat(NodeId(4), &attributes(Kind::Folder, 40));
         assert_eq!(st.st_ino, 4);
         assert_eq!(st.st_mode & libc::S_IFMT, libc::S_IFDIR);
         assert_eq!(st.st_mode & 0o777, 0o500);
@@ -518,5 +832,33 @@ mod tests {
         assert_eq!(st.st_birthtime_nsec, 0);
         assert_eq!(st.st_uid, 11);
         assert_eq!(st.st_gid, 22);
+        assert_eq!(
+            shown(true)
+                .stat(NodeId(4), &attributes(Kind::Folder, 40))
+                .st_mode
+                & 0o777,
+            0o700
+        );
+    }
+
+    #[test]
+    fn rename_flags_map_to_what_a_taken_name_does() {
+        assert_eq!(if_exists(0), Ok(IfExists::Replace));
+        assert_eq!(if_exists(libc::RENAME_EXCL), Ok(IfExists::Refuse));
+        assert_eq!(if_exists(libc::RENAME_SWAP), Err(libc::ENOTSUP));
+    }
+
+    #[test]
+    fn a_time_round_trips_through_a_timespec() {
+        for time in [
+            UNIX_EPOCH - Duration::new(5, 250_000_000),
+            UNIX_EPOCH,
+            UNIX_EPOCH + Duration::new(9, 1),
+        ] {
+            let (sec, nsec) = to_timespec(time);
+            assert_eq!(from_timespec(sec, nsec), Some(time));
+        }
+        assert_eq!(from_timespec(libc::time_t::MIN, 0), None);
+        assert_eq!(from_timespec(libc::time_t::MIN, 1), None);
     }
 }

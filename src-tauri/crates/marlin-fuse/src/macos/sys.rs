@@ -79,7 +79,7 @@ pub(super) struct FuseBufvec {
     pub buf: [FuseBuf; 1],
 }
 
-/// `struct fuse_lowlevel_ops` through `statfs`. libfuse accepts a shorter struct when `op_size` says how much was passed.
+/// `struct fuse_lowlevel_ops` through `create`. libfuse accepts a shorter struct when `op_size` says how much was passed.
 #[repr(C)]
 pub(super) struct FuseLowlevelOps {
     pub init: Option<extern "C" fn()>,
@@ -87,27 +87,41 @@ pub(super) struct FuseLowlevelOps {
     pub lookup: Option<extern "C" fn(Req, u64, *const libc::c_char)>,
     pub forget: Option<extern "C" fn(Req, u64, u64)>,
     pub getattr: Option<extern "C" fn(Req, u64, *mut FuseFileInfo)>,
-    pub setattr: Option<extern "C" fn()>,
+    pub setattr: Option<extern "C" fn(Req, u64, *mut libc::stat, libc::c_int, *mut FuseFileInfo)>,
     pub readlink: Option<extern "C" fn()>,
     pub mknod: Option<extern "C" fn()>,
-    pub mkdir: Option<extern "C" fn()>,
-    pub unlink: Option<extern "C" fn()>,
-    pub rmdir: Option<extern "C" fn()>,
-    pub symlink: Option<extern "C" fn()>,
-    pub rename: Option<extern "C" fn()>,
-    pub link: Option<extern "C" fn()>,
+    pub mkdir: Option<extern "C" fn(Req, u64, *const libc::c_char, libc::mode_t)>,
+    pub unlink: Option<extern "C" fn(Req, u64, *const libc::c_char)>,
+    pub rmdir: Option<extern "C" fn(Req, u64, *const libc::c_char)>,
+    pub symlink: Option<extern "C" fn(Req, *const libc::c_char, u64, *const libc::c_char)>,
+    pub rename: Option<
+        extern "C" fn(Req, u64, *const libc::c_char, u64, *const libc::c_char, libc::c_uint),
+    >,
+    pub link: Option<extern "C" fn(Req, u64, u64, *const libc::c_char)>,
     pub open: Option<extern "C" fn(Req, u64, *mut FuseFileInfo)>,
     pub read: Option<extern "C" fn(Req, u64, usize, i64, *mut FuseFileInfo)>,
-    pub write: Option<extern "C" fn()>,
+    pub write: Option<extern "C" fn(Req, u64, *const libc::c_char, usize, i64, *mut FuseFileInfo)>,
     pub flush: Option<extern "C" fn()>,
     pub release: Option<extern "C" fn(Req, u64, *mut FuseFileInfo)>,
-    pub fsync: Option<extern "C" fn()>,
+    pub fsync: Option<extern "C" fn(Req, u64, libc::c_int, *mut FuseFileInfo)>,
     pub opendir: Option<extern "C" fn(Req, u64, *mut FuseFileInfo)>,
     pub readdir: Option<extern "C" fn(Req, u64, usize, i64, *mut FuseFileInfo)>,
     pub releasedir: Option<extern "C" fn(Req, u64, *mut FuseFileInfo)>,
     pub fsyncdir: Option<extern "C" fn()>,
     pub statfs: Option<extern "C" fn(Req, u64)>,
+    pub setxattr: Option<extern "C" fn()>,
+    pub getxattr: Option<extern "C" fn()>,
+    pub listxattr: Option<extern "C" fn()>,
+    pub removexattr: Option<extern "C" fn()>,
+    pub access: Option<extern "C" fn()>,
+    pub create:
+        Option<extern "C" fn(Req, u64, *const libc::c_char, libc::mode_t, *mut FuseFileInfo)>,
 }
+
+// `fuse_lowlevel.h`. Darwin extensions off does not change these values.
+pub(super) const FUSE_SET_ATTR_SIZE: libc::c_int = 1 << 3;
+pub(super) const FUSE_SET_ATTR_MTIME: libc::c_int = 1 << 5;
+pub(super) const FUSE_SET_ATTR_MTIME_NOW: libc::c_int = 1 << 8;
 
 type SessionNew = unsafe extern "C" fn(
     *mut FuseArgs,
@@ -129,6 +143,9 @@ type ReplyAttr = unsafe extern "C" fn(Req, *const libc::stat, f64) -> libc::c_in
 type ReplyOpen = unsafe extern "C" fn(Req, *const FuseFileInfo) -> libc::c_int;
 type ReplyData = unsafe extern "C" fn(Req, *mut FuseBufvec, libc::c_int) -> libc::c_int;
 type ReplyStatfs = unsafe extern "C" fn(Req, *const libc::statvfs) -> libc::c_int;
+type ReplyWrite = unsafe extern "C" fn(Req, usize) -> libc::c_int;
+type ReplyCreate =
+    unsafe extern "C" fn(Req, *const FuseEntryParam, *const FuseFileInfo) -> libc::c_int;
 type AddDirentry = unsafe extern "C" fn(
     Req,
     *mut libc::c_char,
@@ -154,6 +171,8 @@ pub(super) struct Sys {
     pub reply_open: ReplyOpen,
     pub reply_data: ReplyData,
     pub reply_statfs: ReplyStatfs,
+    pub reply_write: ReplyWrite,
+    pub reply_create: ReplyCreate,
     pub add_direntry: AddDirentry,
 }
 
@@ -187,6 +206,8 @@ pub(super) fn load(path: &Path) -> Result<&'static Sys, ()> {
         reply_open: symbol(&lib, b"fuse_reply_open\0")?,
         reply_data: symbol(&lib, b"fuse_reply_data\0")?,
         reply_statfs: symbol(&lib, b"fuse_reply_statfs\0")?,
+        reply_write: symbol(&lib, b"fuse_reply_write\0")?,
+        reply_create: symbol(&lib, b"fuse_reply_create\0")?,
         add_direntry: symbol(&lib, b"fuse_add_direntry\0")?,
         _lib: lib,
     };
@@ -247,7 +268,7 @@ mod tests {
         assert_eq!(offset_of!(FuseEntryParam, attr_timeout), 160);
         assert_eq!(offset_of!(FuseEntryParam, entry_timeout), 168);
 
-        assert_eq!(size_of::<FuseLowlevelOps>(), 200);
+        assert_eq!(size_of::<FuseLowlevelOps>(), 248);
         assert_eq!(offset_of!(FuseLowlevelOps, init), 0);
         assert_eq!(offset_of!(FuseLowlevelOps, destroy), 8);
         assert_eq!(offset_of!(FuseLowlevelOps, lookup), 16);
@@ -273,5 +294,11 @@ mod tests {
         assert_eq!(offset_of!(FuseLowlevelOps, releasedir), 176);
         assert_eq!(offset_of!(FuseLowlevelOps, fsyncdir), 184);
         assert_eq!(offset_of!(FuseLowlevelOps, statfs), 192);
+        assert_eq!(offset_of!(FuseLowlevelOps, setxattr), 200);
+        assert_eq!(offset_of!(FuseLowlevelOps, getxattr), 208);
+        assert_eq!(offset_of!(FuseLowlevelOps, listxattr), 216);
+        assert_eq!(offset_of!(FuseLowlevelOps, removexattr), 224);
+        assert_eq!(offset_of!(FuseLowlevelOps, access), 232);
+        assert_eq!(offset_of!(FuseLowlevelOps, create), 240);
     }
 }

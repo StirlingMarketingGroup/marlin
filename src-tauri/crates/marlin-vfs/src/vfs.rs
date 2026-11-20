@@ -474,7 +474,7 @@ impl Vfs {
         &self.unplaced
     }
 
-    /// Whether this core can serve a read-write mount: the provider can write, and [`Self::take_writes`] gave the mount a spool. The Linux adapter asks before it mounts, and mounts read-only when this is `false`. The core does not check it on each call: a provider without the write calls answers [`VfsError::ReadOnly`] for them.
+    /// Whether this core can serve a read-write mount: the provider can write, and [`Self::take_writes`] gave the mount a spool. Each adapter asks once, before it mounts, and mounts read-only when this is `false`. The core does not check it on each call: a provider without the write calls answers [`VfsError::ReadOnly`] for them.
     pub fn writable(&self) -> bool {
         self.spool.is_some() && self.provider.can_write()
     }
@@ -539,33 +539,50 @@ impl Vfs {
         Ok(remember(&mut found.attributes, asked, attributes))
     }
 
-    /// Opens a folder and freezes that listing. The folder and each item in it keep a handle reference until `release`. New files are part of the frozen copy.
-    pub async fn open_folder(&self, node: NodeId) -> Result<HandleId, VfsError> {
-        let item = self.folder_of(node)?;
-        let listing = self.listing(&item).await?;
+    /// Opens a folder. The handle holds no listing until [`Self::rewind_folder`] takes one: an adapter calls it for every read from offset 0. The folder keeps a handle reference until `release`. A file is [`VfsError::NotAFolder`].
+    pub fn open_folder(&self, node: NodeId) -> Result<HandleId, VfsError> {
         let mut state = self.state.lock().unwrap();
         let Some(opened) = state.nodes.get_mut(&node) else {
             return Err(VfsError::StaleHandle);
         };
-        opened.handles += 1;
-        let items = renamed_items(&state, &self.rules, &item, &listing)
-            .map_or_else(|| Arc::clone(&listing.shown), Arc::new);
-        let new_files: Vec<Holder> = state.new_files.get(&item).map_or(Vec::new(), |held| {
-            held.values()
-                .map(|node| Holder::New {
-                    node: *node,
-                    name: new_file_name(&state, &self.rules, *node),
-                })
-                .collect()
-        });
-        let mut entries = Vec::with_capacity(items.len() + new_files.len());
-        let holders = items.iter().cloned().map(Holder::Item).chain(new_files);
-        for holder in holders {
-            let entry = entry_for(&mut state, &self.rules, &item, &listing, holder);
-            state.nodes.get_mut(&entry.node).unwrap().handles += 1;
-            entries.push(entry);
+        if held_kind(node, opened) == Some(Kind::File) {
+            return Err(VfsError::NotAFolder);
         }
-        Ok(insert_handle(&mut state, Opened::Folder { node, entries }))
+        opened.handles += 1;
+        Ok(insert_handle(
+            &mut state,
+            Opened::Folder {
+                node,
+                entries: Vec::new(),
+            },
+        ))
+    }
+
+    /// Takes the folder's listing into an open folder handle and freezes it there, as a read from offset 0 asks: the first read and every rewind. Each item in the new listing gains a handle reference, and each item in the one it replaces loses one. New files are part of the frozen copy. An unknown handle, or one that is not a folder, is [`VfsError::StaleHandle`].
+    pub async fn rewind_folder(&self, handle: HandleId) -> Result<(), VfsError> {
+        let node = match self.state.lock().unwrap().handles.get(&handle) {
+            Some(Opened::Folder { node, .. }) => *node,
+            _ => return Err(VfsError::StaleHandle),
+        };
+        let item = self.folder_of(node)?;
+        let listing = self.listing(&item).await?;
+        let mut state = self.state.lock().unwrap();
+        // The handle can be released while the listing is fetched.
+        if !matches!(state.handles.get(&handle), Some(Opened::Folder { .. })) {
+            return Err(VfsError::StaleHandle);
+        }
+        let entries = folder_entries(&mut state, &self.rules, &item, &listing);
+        let Some(Opened::Folder { entries: held, .. }) = state.handles.get_mut(&handle) else {
+            unreachable!("the handle was checked under this lock");
+        };
+        // The new references come first, so an item in both listings keeps its node.
+        let old = std::mem::replace(held, entries);
+        drop_handle_refs(
+            &mut state,
+            &self.room,
+            old.into_iter().map(|entry| entry.node),
+        );
+        Ok(())
     }
 
     /// Returns one stored page of a folder handle. Past the end is empty, and these entries are not lookups.
@@ -845,12 +862,7 @@ impl Vfs {
                 .chain(entries.into_iter().map(|entry| entry.node))
                 .collect(),
         };
-        for node in nodes {
-            if let Some(found) = state.nodes.get_mut(&node) {
-                found.handles -= 1;
-            }
-            drop_unreferenced(&mut state, &self.room, node);
-        }
+        drop_handle_refs(&mut state, &self.room, nodes);
     }
 
     /// How much space the account has: the answer the core holds while it is fresh, or a new one from the provider.
@@ -1237,26 +1249,18 @@ impl Vfs {
         Ok(listing)
     }
 
-    /// Whether `node` may be opened for write or cut: the mount has a spool, and the node is a file. A spooled node is a file, and a new file is always spooled. An item uses the kind it already holds, however old that answer is. A node with no answer is [`VfsError::StaleHandle`]: this asks the provider nothing.
+    /// Whether `node` may be opened for write or cut: the mount has a spool, and the node is a file by [`held_kind`]. A node with no answer is [`VfsError::StaleHandle`]: this asks the provider nothing.
     fn check_writable(&self, node: NodeId) -> Result<(), VfsError> {
         self.spool()?;
-        if node == Self::ROOT {
-            return Err(VfsError::IsAFolder);
-        }
         let state = self.state.lock().unwrap();
         let Some(found) = state.nodes.get(&node) else {
             return Err(VfsError::StaleHandle);
         };
-        if matches!(found.bytes, Bytes::Spooled(_)) {
-            return Ok(());
-        }
-        // Every other node came from a listing, a lookup, or a change, which each store an answer.
-        let Some((_, attributes)) = &found.attributes else {
-            return Err(VfsError::StaleHandle);
-        };
-        match attributes.kind {
-            Kind::File => Ok(()),
-            Kind::Folder => Err(VfsError::IsAFolder),
+        // Every node but the root came from a listing, a lookup, or a change, which each store an answer.
+        match held_kind(node, found) {
+            Some(Kind::File) => Ok(()),
+            Some(Kind::Folder) => Err(VfsError::IsAFolder),
+            None => Err(VfsError::StaleHandle),
         }
     }
 
@@ -1780,6 +1784,33 @@ fn resolve(
     item.map(Holder::Item)
 }
 
+/// The frozen listing of `folder`, with one handle reference added to each entry node.
+fn folder_entries(
+    state: &mut State,
+    rules: &NameRules,
+    folder: &ItemId,
+    listing: &Listing,
+) -> Vec<Entry> {
+    let items = renamed_items(state, rules, folder, listing)
+        .map_or_else(|| Arc::clone(&listing.shown), Arc::new);
+    let new_files: Vec<Holder> = state.new_files.get(folder).map_or(Vec::new(), |held| {
+        held.values()
+            .map(|node| Holder::New {
+                node: *node,
+                name: new_file_name(state, rules, *node),
+            })
+            .collect()
+    });
+    let mut entries = Vec::with_capacity(items.len() + new_files.len());
+    let holders = items.iter().cloned().map(Holder::Item).chain(new_files);
+    for holder in holders {
+        let entry = entry_for(state, rules, folder, listing, holder);
+        state.nodes.get_mut(&entry.node).unwrap().handles += 1;
+        entries.push(entry);
+    }
+    entries
+}
+
 /// The entry a holder shows as. An item gets its node, and the node keeps what the listing said about it and where it was shown. Counts nothing.
 fn entry_for(
     state: &mut State,
@@ -1982,6 +2013,30 @@ fn remember<T: Clone>(held: &mut Option<(Asked, T)>, asked: Asked, answer: T) ->
     }
     *held = Some((asked, answer.clone()));
     answer
+}
+
+/// The kind `node` holds, with no provider call. The root is a folder. A spooled node, and a new file, is a file. An item uses the kind it already holds, however old that answer is. `None` when the node holds no answer.
+fn held_kind(node: NodeId, found: &Node) -> Option<Kind> {
+    if node == Vfs::ROOT {
+        return Some(Kind::Folder);
+    }
+    if matches!(found.bytes, Bytes::Spooled(_)) || found.identity.remote_id().is_none() {
+        return Some(Kind::File);
+    }
+    found
+        .attributes
+        .as_ref()
+        .map(|(_, attributes)| attributes.kind)
+}
+
+/// Drops one handle reference on each node. A node nothing else holds goes away.
+fn drop_handle_refs(state: &mut State, room: &Notify, nodes: impl IntoIterator<Item = NodeId>) {
+    for node in nodes {
+        if let Some(found) = state.nodes.get_mut(&node) {
+            found.handles -= 1;
+        }
+        drop_unreferenced(state, room, node);
+    }
 }
 
 fn drop_unreferenced(state: &mut State, room: &Notify, node: NodeId) {

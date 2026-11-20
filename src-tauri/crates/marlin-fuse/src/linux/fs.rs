@@ -5,31 +5,24 @@ use std::time::SystemTime;
 
 use fuser::{
     BsdFileFlags, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, Generation,
-    INodeNo, InitFlags, KernelConfig, LockOwner, OpenAccMode, OpenFlags, RenameFlags, ReplyAttr,
-    ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs,
-    ReplyWrite, Request, TimeOrNow, WriteFlags,
+    INodeNo, InitFlags, KernelConfig, LockOwner, OpenFlags, RenameFlags, ReplyAttr, ReplyCreate,
+    ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, Request,
+    TimeOrNow, WriteFlags,
 };
-use marlin_vfs::{Access, Attributes, HandleId, IfExists, Kind, NodeId, Vfs};
+use marlin_vfs::{Attributes, HandleId, IfExists, Kind, NodeId, Vfs};
+
+use crate::Shown;
 
 /// The core keeps no parent for a node. This is the value libfuse sends (`FUSE_UNKNOWN_INO`) when a filesystem does not know an entry's inode.
 const UNKNOWN_INODE: INodeNo = INodeNo(0xffff_ffff);
 
-/// Serves one `Vfs` to the kernel. A callback that may reach the provider answers from a tokio task, so a slow call never holds up the `fuser` thread. `forget`, `readdir`, and the two releases answer in place: they touch the core's own state, and the last writer's release also writes the file's small spool record, with no sync. `flush` is left out: every write is in the spool before it answers, so a close has nothing to flush, and after the first `ENOSYS` the kernel stops sending it. `release` starts the settle time. `mknod` is left out because the kernel uses `create` for a regular file. `fsyncdir`, `fallocate`, `copy_file_range`, `lseek`, `ioctl`, the xattr calls, and `getlk`/`setlk` are left out. `link` and `symlink` stay at `fuser`'s `EPERM`.
+/// Serves one `Vfs` to the kernel. A callback that may reach the provider answers from a tokio task, so a slow call never holds up the `fuser` thread. `forget`, `opendir`, `readdir` past offset 0, and the two releases answer in place. They touch the core's own state, and the last writer's release also writes the file's small spool record, with no sync. `flush` is left out: every write is in the spool before it answers, so a close has nothing to flush, and after the first `ENOSYS` the kernel stops sending it. `release` starts the settle time. `mknod` is left out because the kernel uses `create` for a regular file. `fsyncdir`, `fallocate`, `copy_file_range`, `lseek`, `ioctl`, the xattr calls, and `getlk`/`setlk` are left out. `link` and `symlink` stay at `fuser`'s `EPERM`.
 pub(crate) struct Fs {
     pub(crate) vfs: Arc<Vfs>,
     pub(crate) runtime: tokio::runtime::Handle,
     pub(crate) shown: Shown,
     /// Whether an open may keep the kernel's cached bytes of the file. Set in `init`.
     pub(crate) keep_cache: bool,
-}
-
-/// How the mount shows every node: the mounting user owns it, and its mode says whether the mount takes writes.
-#[derive(Clone, Copy)]
-pub(crate) struct Shown {
-    pub(crate) uid: u32,
-    pub(crate) gid: u32,
-    /// Set from `Vfs::writable` before the mount.
-    pub(crate) writable: bool,
 }
 
 impl Fs {
@@ -55,9 +48,9 @@ impl Filesystem for Fs {
     }
 
     fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
-        let name = match utf8_name(name, Errno::ENOENT) {
+        let name = match crate::utf8_name(name.as_bytes(), crate::Name::Existing) {
             Ok(name) => name,
-            Err(errno) => return reply.error(errno),
+            Err(errno) => return reply.error(Errno::from_i32(errno)),
         };
         let vfs = Arc::clone(&self.vfs);
         let shown = self.shown;
@@ -109,7 +102,6 @@ impl Filesystem for Fs {
         _flags: Option<BsdFileFlags>,
         reply: ReplyAttr,
     ) {
-        // An owner or a mode change succeeds and changes nothing. No access time is kept.
         // An open with O_TRUNC arrives as a size of 0. The core cuts a clean file to zero
         // without reading it. The adapter does not ask for FUSE_ATOMIC_O_TRUNC.
         let mtime = mtime.map(|time| match time {
@@ -120,17 +112,7 @@ impl Filesystem for Fs {
         let shown = self.shown;
         self.runtime.spawn(async move {
             let node = NodeId(ino.0);
-            let result = async {
-                if let Some(size) = size {
-                    vfs.truncate(node, size).await?;
-                }
-                if let Some(time) = mtime {
-                    vfs.set_modified(node, time).await?;
-                }
-                vfs.attributes(node).await
-            }
-            .await;
-            match result {
+            match crate::set_attributes(&vfs, node, size, mtime).await {
                 Ok(attributes) => {
                     let attr = shown.file_attr(node, &attributes);
                     reply.attr(&crate::TTL, &attr);
@@ -141,7 +123,7 @@ impl Filesystem for Fs {
     }
 
     fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
-        let access = open_access(flags);
+        let access = crate::open_access(flags.0);
         let vfs = Arc::clone(&self.vfs);
         let flags = self.fopen_flags();
         self.runtime.spawn(async move {
@@ -228,13 +210,10 @@ impl Filesystem for Fs {
     }
 
     fn opendir(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
-        let vfs = Arc::clone(&self.vfs);
-        self.runtime.spawn(async move {
-            match vfs.open_folder(NodeId(ino.0)).await {
-                Ok(handle) => reply.opened(FileHandle(handle.0), FopenFlags::empty()),
-                Err(error) => reply.error(Errno::from_i32(crate::errno(&error))),
-            }
-        });
+        match self.vfs.open_folder(NodeId(ino.0)) {
+            Ok(handle) => reply.opened(FileHandle(handle.0), FopenFlags::empty()),
+            Err(error) => reply.error(Errno::from_i32(crate::errno(&error))),
+        }
     }
 
     fn readdir(
@@ -242,48 +221,22 @@ impl Filesystem for Fs {
         _req: &Request,
         ino: INodeNo,
         fh: FileHandle,
-        mut offset: u64,
-        mut reply: ReplyDirectory,
+        offset: u64,
+        reply: ReplyDirectory,
     ) {
-        // Offset 0 is `.`, offset 1 is `..`, and listing entry `i` is offset `i + 2`. The offset sent with an entry is where the next call resumes. An entry that does not fit is not sent.
+        // The listing is taken at every read from offset 0: the first one, and a rewind (`rewinddir`) on the same handle.
         if offset == 0 {
-            if reply.add(ino, 1, FileType::Directory, ".") {
-                return reply.ok();
-            }
-            offset = 1;
-        }
-        if offset == 1 {
-            if reply.add(UNKNOWN_INODE, 2, FileType::Directory, "..") {
-                return reply.ok();
-            }
-            offset = 2;
-        }
-        loop {
-            let page =
-                match self
-                    .vfs
-                    .read_folder(HandleId(fh.0), (offset - 2) as usize, crate::PAGE)
-                {
-                    Ok(page) => page,
-                    Err(error) => return reply.error(Errno::from_i32(crate::errno(&error))),
-                };
-            if page.is_empty() {
-                return reply.ok();
-            }
-            for entry in page {
-                offset += 1;
-                if entry.name.len() > crate::NAME_MAX {
-                    continue;
+            let vfs = Arc::clone(&self.vfs);
+            self.runtime.spawn(async move {
+                if let Err(error) = vfs.rewind_folder(HandleId(fh.0)).await {
+                    reply.error(Errno::from_i32(crate::errno(&error)));
+                    return;
                 }
-                let kind = match entry.attributes.kind {
-                    Kind::Folder => FileType::Directory,
-                    Kind::File => FileType::RegularFile,
-                };
-                if reply.add(INodeNo(entry.node.0), offset, kind, entry.name) {
-                    return reply.ok();
-                }
-            }
+                fill_dir(&vfs, ino, fh, 0, reply);
+            });
+            return;
         }
+        fill_dir(&self.vfs, ino, fh, offset, reply);
     }
 
     fn releasedir(
@@ -307,9 +260,9 @@ impl Filesystem for Fs {
         _umask: u32,
         reply: ReplyEntry,
     ) {
-        let name = match utf8_name(name, Errno::EINVAL) {
+        let name = match crate::utf8_name(name.as_bytes(), crate::Name::New) {
             Ok(name) => name,
-            Err(errno) => return reply.error(errno),
+            Err(errno) => return reply.error(Errno::from_i32(errno)),
         };
         let vfs = Arc::clone(&self.vfs);
         let shown = self.shown;
@@ -325,9 +278,9 @@ impl Filesystem for Fs {
     }
 
     fn unlink(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
-        let name = match utf8_name(name, Errno::ENOENT) {
+        let name = match crate::utf8_name(name.as_bytes(), crate::Name::Existing) {
             Ok(name) => name,
-            Err(errno) => return reply.error(errno),
+            Err(errno) => return reply.error(Errno::from_i32(errno)),
         };
         let vfs = Arc::clone(&self.vfs);
         self.runtime.spawn(async move {
@@ -339,9 +292,9 @@ impl Filesystem for Fs {
     }
 
     fn rmdir(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
-        let name = match utf8_name(name, Errno::ENOENT) {
+        let name = match crate::utf8_name(name.as_bytes(), crate::Name::Existing) {
             Ok(name) => name,
-            Err(errno) => return reply.error(errno),
+            Err(errno) => return reply.error(Errno::from_i32(errno)),
         };
         let vfs = Arc::clone(&self.vfs);
         self.runtime.spawn(async move {
@@ -367,13 +320,13 @@ impl Filesystem for Fs {
             Err(errno) => return reply.error(errno),
         };
         // A folder moved into itself never reaches here. The kernel refuses it with EINVAL from its own dentry tree.
-        let name = match utf8_name(name, Errno::ENOENT) {
+        let name = match crate::utf8_name(name.as_bytes(), crate::Name::Existing) {
             Ok(name) => name,
-            Err(errno) => return reply.error(errno),
+            Err(errno) => return reply.error(Errno::from_i32(errno)),
         };
-        let newname = match utf8_name(newname, Errno::EINVAL) {
+        let newname = match crate::utf8_name(newname.as_bytes(), crate::Name::New) {
             Ok(name) => name,
-            Err(errno) => return reply.error(errno),
+            Err(errno) => return reply.error(Errno::from_i32(errno)),
         };
         let vfs = Arc::clone(&self.vfs);
         self.runtime.spawn(async move {
@@ -403,11 +356,11 @@ impl Filesystem for Fs {
         flags: i32,
         reply: ReplyCreate,
     ) {
-        let name = match utf8_name(name, Errno::EINVAL) {
+        let name = match crate::utf8_name(name.as_bytes(), crate::Name::New) {
             Ok(name) => name,
-            Err(errno) => return reply.error(errno),
+            Err(errno) => return reply.error(Errno::from_i32(errno)),
         };
-        let access = open_access(OpenFlags(flags));
+        let access = crate::open_access(flags);
         let vfs = Arc::clone(&self.vfs);
         let shown = self.shown;
         let flags = self.fopen_flags();
@@ -449,18 +402,6 @@ impl Filesystem for Fs {
     }
 }
 
-/// The name as the core takes it. A name over 255 bytes is `ENAMETOOLONG`. A name that is not UTF-8 is `not_utf8`: `ENOENT` for a name that must exist, because the mount lists none, and `EINVAL` for a new name, because the remote cannot hold it.
-fn utf8_name(name: &OsStr, not_utf8: Errno) -> Result<String, Errno> {
-    let bytes = name.as_bytes();
-    if bytes.len() > crate::NAME_MAX {
-        return Err(Errno::ENAMETOOLONG);
-    }
-    match std::str::from_utf8(bytes) {
-        Ok(name) => Ok(name.to_owned()),
-        Err(_) => Err(not_utf8),
-    }
-}
-
 /// What a rename does when the new name is taken. `RENAME_EXCHANGE` and `RENAME_WHITEOUT` are `EINVAL`: Linux file systems answer that for a rename flag they do not support, and the FUSE kernel code does the same when a server has no `RENAME2`.
 fn if_exists(flags: RenameFlags) -> Result<IfExists, Errno> {
     if flags.intersects(RenameFlags::RENAME_EXCHANGE | RenameFlags::RENAME_WHITEOUT) {
@@ -473,12 +414,47 @@ fn if_exists(flags: RenameFlags) -> Result<IfExists, Errno> {
     }
 }
 
-/// What the core opens a file for: reading for a read-only open, writing for any other.
-fn open_access(flags: OpenFlags) -> Access {
-    if flags.acc_mode() == OpenAccMode::O_RDONLY {
-        Access::Read
-    } else {
-        Access::Write
+/// Fills one readdir reply from the frozen listing. Offset 0 is `.`, offset 1 is `..`, and listing entry `i` is offset `i + 2`. The offset sent with an entry is where the next call resumes. An entry that does not fit is not sent.
+fn fill_dir(
+    vfs: &Vfs,
+    parent: INodeNo,
+    fh: FileHandle,
+    mut offset: u64,
+    mut reply: ReplyDirectory,
+) {
+    if offset == 0 {
+        if reply.add(parent, 1, FileType::Directory, ".") {
+            return reply.ok();
+        }
+        offset = 1;
+    }
+    if offset == 1 {
+        if reply.add(UNKNOWN_INODE, 2, FileType::Directory, "..") {
+            return reply.ok();
+        }
+        offset = 2;
+    }
+    loop {
+        let page = match vfs.read_folder(HandleId(fh.0), (offset - 2) as usize, crate::PAGE) {
+            Ok(page) => page,
+            Err(error) => return reply.error(Errno::from_i32(crate::errno(&error))),
+        };
+        if page.is_empty() {
+            return reply.ok();
+        }
+        for entry in page {
+            offset += 1;
+            if entry.name.len() > crate::NAME_MAX {
+                continue;
+            }
+            let kind = match entry.attributes.kind {
+                Kind::Folder => FileType::Directory,
+                Kind::File => FileType::RegularFile,
+            };
+            if reply.add(INodeNo(entry.node.0), offset, kind, entry.name) {
+                return reply.ok();
+            }
+        }
     }
 }
 
@@ -511,8 +487,6 @@ impl Shown {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsString;
-    use std::os::unix::ffi::OsStringExt;
     use std::time::{Duration, UNIX_EPOCH};
 
     use super::*;
@@ -589,17 +563,5 @@ mod tests {
         );
         assert_eq!(if_exists(RenameFlags::RENAME_EXCHANGE), Err(Errno::EINVAL));
         assert_eq!(if_exists(RenameFlags::RENAME_WHITEOUT), Err(Errno::EINVAL));
-    }
-
-    #[test]
-    fn utf8_name_rejects_a_long_name_before_it_checks_the_bytes() {
-        let long = OsString::from_vec(vec![0xff; 256]);
-        assert_eq!(utf8_name(&long, Errno::ENOENT), Err(Errno::ENAMETOOLONG));
-        assert_eq!(utf8_name(&long, Errno::EINVAL), Err(Errno::ENAMETOOLONG));
-        let bad = OsString::from_vec(vec![0xff]);
-        assert_eq!(utf8_name(&bad, Errno::ENOENT), Err(Errno::ENOENT));
-        assert_eq!(utf8_name(&bad, Errno::EINVAL), Err(Errno::EINVAL));
-        let ok = "a".repeat(255);
-        assert_eq!(utf8_name(OsStr::new(&ok), Errno::ENOENT).unwrap(), ok);
     }
 }

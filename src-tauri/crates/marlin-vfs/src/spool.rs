@@ -12,7 +12,7 @@ pub struct Spool {
     /// The most bytes the spool may hold at once. [`Spool::default_limit`] gives the default.
     pub limit: u64,
 
-    /// Names the OS writes for itself (choice 14). A file under one is spooled and shown like any other, and never uploads. [`crate::finder_files`] for macOS; `|_| false` for Linux.
+    /// Names the OS writes for itself (choice 14). A file under one is spooled and shown like any other, and never uploads. [`crate::finder_files`] is the macOS set. The adapter crate names the set for its OS: `marlin_fuse::stays_local`.
     pub stays_local: fn(&str) -> bool,
 }
 

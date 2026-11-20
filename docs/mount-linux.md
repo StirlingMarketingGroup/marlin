@@ -11,13 +11,13 @@ The design is in [decision 0001](decisions/0001-mount-architecture.md), choices 
 
 ## The parts
 
-| File                | Holds                                                                                               |
-| ------------------- | --------------------------------------------------------------------------------------------------- |
-| `src/lib.rs`        | What both systems share: the errno table, the limits, the made-up permissions, and `is_dead_mount`. |
-| `src/linux.rs`      | `mount`, `Mount::unmount`, `unmount_dead`, `Error`, and the check of what the machine has.          |
-| `src/linux/fs.rs`   | The `fuser::Filesystem` callbacks and the attribute rules.                                          |
-| `tests/mount.rs`    | Tests that mount for real. They are marked `#[ignore]`, and `test-in-docker.sh` runs them.          |
-| `test-in-docker.sh` | Runs every test in a container, as a user who is not root.                                          |
+| File                | Holds                                                                                                                                                                                    |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/lib.rs`        | What both systems share: the errno table, the limits, the made-up permissions, the name rule, the open access rule, the `setattr` order, the names that stay local, and `is_dead_mount`. |
+| `src/linux.rs`      | `mount`, `Mount::unmount`, `unmount_dead`, `Error`, and the check of what the machine has.                                                                                               |
+| `src/linux/fs.rs`   | The `fuser::Filesystem` callbacks and the attribute rules.                                                                                                                               |
+| `tests/mount.rs`    | Tests that mount for real. They are marked `#[ignore]`, and `test-in-docker.sh` runs them.                                                                                               |
+| `test-in-docker.sh` | Runs every test in a container, as a user who is not root.                                                                                                                               |
 
 - The crate is the only one that imports `fuser`. The version is pinned exactly (`=0.18.0`), because `fuser` changes its `Filesystem` trait between releases (risk 8 in decision 0001).
 - The Linux code and `fuser` are behind `cfg(target_os = "linux")`. A Mac compiles the macOS half of the crate, so it never checks this code. The CI check runs on Linux and does. To check it from a Mac, run `rustup target add x86_64-unknown-linux-gnu` once, then `cargo check -p marlin-fuse --all-targets --target x86_64-unknown-linux-gnu` in `src-tauri/`. That does not work for `marlin-mount`: it links the Google Drive provider, whose TLS code is C and needs a Linux C compiler. `test-in-docker.sh` compiles and tests the helper's Linux half.
@@ -46,7 +46,7 @@ The `.deb` and `.rpm` packages depend on `fuse3` (`src-tauri/tauri.conf.json`). 
 - **Listings.** A folder lists `.` and `..` first. `..` carries the inode number `0xffffffff`, which is libfuse's value for "not known": the core keeps no parent for a node.
 - **Free space.** `statfs` reports the provider's total and free bytes in 4,096-byte blocks. The core reuses the provider's answer for 30 seconds.
 - **Names.** A name longer than 255 bytes is not listed and cannot be opened (`ENAMETOOLONG`). A name that is not UTF-8 cannot be opened (`ENOENT`). A new name that is not UTF-8 is refused (`EINVAL`), because the remote cannot hold it. The core sets no length limit, so each adapter sets its own.
-- **A slow call blocks nothing else.** Each kernel request that may reach the provider becomes a tokio task, and the `fuser` thread goes back for the next request at once. `forget`, `readdir`, and the two release calls answer in place. They touch the core's own state, and the last writer's release also writes the file's small spool record, with no sync.
+- **A slow call blocks nothing else.** Each kernel request that may reach the provider becomes a tokio task, and the `fuser` thread goes back for the next request at once. `forget`, `opendir`, `readdir` past offset 0, and the two release calls answer in place. They touch the core's own state, and the last writer's release also writes the file's small spool record, with no sync. `opendir` takes no listing. A `readdir` from offset 0 calls `Vfs::rewind_folder` in a task, which takes the listing then: at the first read, and again at a `rewinddir`.
 
 ## Writes
 
@@ -77,7 +77,7 @@ The adapter does not ask for `FUSE_WRITEBACK_CACHE`. A `write` call goes through
 | `SignInNeeded` | `EACCES`      | Permission denied         |
 | `TimedOut`     | `ETIMEDOUT`   | Connection timed out      |
 | `Offline`      | `ENETUNREACH` | Network is unreachable    |
-| `NotSupported` | `EOPNOTSUPP`  | Operation not supported   |
+| `NotSupported` | `ENOTSUP`     | Operation not supported   |
 | `StaleHandle`  | `ESTALE`      | Stale file handle         |
 | `Other`        | `EIO`         | Input/output error        |
 
@@ -113,8 +113,8 @@ Run `src-tauri/crates/marlin-fuse/test-in-docker.sh`. It needs Docker.
 - Last, it runs `crates/marlin-mount/test-sweep.sh`, which kills a mount's server and checks that the helper clears the dead mount. The script mounts with the spike program in `spikes/mount-hello/`, so the container gets the whole repo, read-only.
 - The first run downloads and builds everything. Two Docker volumes keep the registry and the build folder for later runs.
 - The unit tests cover the attribute rules, the two "missing" messages, and what is not a dead mount: a folder, a missing path, a symbolic link. They need no kernel support.
-- The mount tests mount a `MemoryProvider` and use ordinary file calls: list, read at an offset, free space, a 1,000-file folder, a listed folder whose files open with no provider call, a name that is too long, every row of the error table, four slow reads at once, an unmount while a file is open, an unmount after one from outside, an unmount while the provider is slow, two mounts at once (one at a path with a space), a dropped mount, an unmount from outside and a drop while a read is waiting, a name with an accent, a live mount that must not count as dead, and the cached bytes: a second open makes no provider read, and a file with a new modified time is read again.
-- The write tests run on Linux only. They are `a_provider_that_cannot_write_mounts_read_only`, `copies_reach_the_provider`, `editor_saves_keep_one_file`, `dd_into_the_middle_changes_only_those_bytes`, `a_write_is_read_back_at_once_also_by_another_process`, `names_change_through_the_mount`, `preserved_times_reach_the_provider`, and `a_copy_bigger_than_the_spool_waits_for_uploads`. The container installs `rsync` and `vim-tiny`. `copies_reach_the_provider` and `preserved_times_reach_the_provider` need `rsync`. `editor_saves_keep_one_file` needs `vim-tiny`.
+- The mount tests mount a `MemoryProvider` and use ordinary file calls: list, read at an offset, free space, a 1,000-file folder, a listed folder whose files open with no provider call, a name that is too long, every row of the error table, four slow reads at once, an unmount while a file is open, an unmount after one from outside, an unmount while the provider is slow, two mounts at once (one at a path with a space), a dropped mount, an unmount from outside and a drop while a read is waiting, a name with an accent, a live mount that must not count as dead, a listing that shows a new file, a removed file, and a file made before a `rewinddir`, and the cached bytes: a second open makes no provider read, and a file with a new modified time is read again.
+- The write tests are `a_provider_that_cannot_write_mounts_read_only`, `copies_reach_the_provider`, `editor_saves_keep_one_file`, `dd_into_the_middle_changes_only_those_bytes`, `a_write_is_read_back_at_once_also_by_another_process`, `fsync_puts_open_bytes_in_the_spool`, `names_change_through_the_mount`, `preserved_times_reach_the_provider`, and `a_copy_bigger_than_the_spool_waits_for_uploads`. They run on macOS too: see [macOS mount adapter](mount-macos.md#testing). The container installs `rsync` and `vim-tiny`. `copies_reach_the_provider` and `preserved_times_reach_the_provider` need `rsync`. `editor_saves_keep_one_file` needs `vim-tiny`.
 - On a Linux machine, `cargo test -p marlin-fuse` runs the unit tests only. Add `-- --include-ignored --test-threads=1` to run the mount tests there.
 - The mount tests run one at a time. In parallel they fail now and then: a test that starts a program forks, and the child briefly holds a copy of a file that another test has open on its mount, so that test's unmount is refused as busy.
 

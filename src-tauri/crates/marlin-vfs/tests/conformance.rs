@@ -148,7 +148,8 @@ async fn read_folder_pages_a_stable_listing() {
     for index in 0..5 {
         provider.add_file(&provider.root(), &format!("f{index}.txt"), b"x");
     }
-    let handle = vfs.open_folder(Vfs::ROOT).await.unwrap();
+    let handle = vfs.open_folder(Vfs::ROOT).unwrap();
+    vfs.rewind_folder(handle).await.unwrap();
     let all = vfs.read_folder(handle, 0, 10).unwrap();
     assert_eq!(all.len(), 5);
     let mut paged = Vec::new();
@@ -165,6 +166,44 @@ async fn read_folder_pages_a_stable_listing() {
     assert!(vfs.read_folder(handle, 5, 2).unwrap().is_empty());
     provider.add_file(&provider.root(), "later.txt", b"y");
     assert_eq!(vfs.read_folder(handle, 0, 10).unwrap(), all);
+}
+
+#[tokio::test]
+async fn rewind_folder_takes_a_new_listing() {
+    let (provider, vfs) = mount(Options::default());
+    let removed_id = provider.add_file(&provider.root(), "a.txt", b"a");
+    provider.add_file(&provider.root(), "b.txt", b"b");
+    let handle = vfs.open_folder(Vfs::ROOT).unwrap();
+    vfs.rewind_folder(handle).await.unwrap();
+    let opened = vfs.read_folder(handle, 0, 10).unwrap();
+    let names = |entries: &[marlin_vfs::Entry]| {
+        entries
+            .iter()
+            .map(|entry| entry.name.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(names(&opened), ["a.txt", "b.txt"]);
+    let removed = opened
+        .iter()
+        .find(|entry| entry.name == "a.txt")
+        .unwrap()
+        .node;
+    provider.add_file(&provider.root(), "c.txt", b"c");
+    provider.remote_remove(&removed_id);
+    vfs.refresh();
+    assert_eq!(
+        names(&vfs.read_folder(handle, 0, 10).unwrap()),
+        ["a.txt", "b.txt"]
+    );
+    vfs.rewind_folder(handle).await.unwrap();
+    assert_eq!(
+        names(&vfs.read_folder(handle, 0, 10).unwrap()),
+        ["b.txt", "c.txt"]
+    );
+    // The rewind took off the removed item's last reference.
+    assert_eq!(vfs.attributes(removed).await, Err(VfsError::StaleHandle));
+    vfs.release(handle);
+    assert_eq!(vfs.rewind_folder(handle).await, Err(VfsError::StaleHandle));
 }
 
 #[tokio::test]
@@ -201,7 +240,7 @@ async fn open_checks_kind_and_write_access() {
         Err(VfsError::IsAFolder)
     );
     let file = vfs.lookup(folder.node, "a.txt").await.unwrap();
-    assert_eq!(vfs.open_folder(file.node).await, Err(VfsError::NotAFolder));
+    assert_eq!(vfs.open_folder(file.node), Err(VfsError::NotAFolder));
     assert_eq!(
         vfs.open(file.node, Access::Write).await,
         Err(VfsError::ReadOnly)
@@ -292,7 +331,8 @@ async fn duplicate_names_and_a_slash_map_to_distinct_files() {
     provider.add_file(&root, "same.txt", b"first");
     provider.add_file(&root, "same.txt", b"second");
     provider.add_file(&root, "a/b", b"slash");
-    let handle = vfs.open_folder(Vfs::ROOT).await.unwrap();
+    let handle = vfs.open_folder(Vfs::ROOT).unwrap();
+    vfs.rewind_folder(handle).await.unwrap();
     let entries = vfs.read_folder(handle, 0, 10).unwrap();
     let names: HashSet<_> = entries.iter().map(|entry| entry.name.clone()).collect();
     assert_eq!(names.len(), 3);
@@ -529,7 +569,8 @@ async fn an_open_folder_holds_its_own_node() {
     let (provider, vfs) = mount(Options::default());
     provider.add_folder(&provider.root(), "docs");
     let folder = vfs.lookup(Vfs::ROOT, "docs").await.unwrap();
-    let handle = vfs.open_folder(folder.node).await.unwrap();
+    let handle = vfs.open_folder(folder.node).unwrap();
+    vfs.rewind_folder(handle).await.unwrap();
     vfs.forget(folder.node, 1);
     assert!(vfs.attributes(folder.node).await.is_ok());
     vfs.release(handle);
@@ -557,7 +598,8 @@ async fn attributes_after_a_listing_ask_the_provider_nothing() {
     for name in ["a.txt", "b.txt", "c.txt"] {
         provider.add_file(&provider.root(), name, b"hello");
     }
-    let handle = vfs.open_folder(Vfs::ROOT).await.unwrap();
+    let handle = vfs.open_folder(Vfs::ROOT).unwrap();
+    vfs.rewind_folder(handle).await.unwrap();
     let entries = vfs.read_folder(handle, 0, 10).unwrap();
     assert_eq!(entries.len(), 3);
     for entry in &entries {
@@ -741,7 +783,8 @@ async fn a_slow_listing_is_reused_from_when_it_came() {
     let (provider, vfs) = mount(options);
     provider.add_file(&provider.root(), "a.txt", b"hello");
     provider.set_delay(options.listing_ttl + Duration::from_secs(1));
-    let handle = vfs.open_folder(Vfs::ROOT).await.unwrap();
+    let handle = vfs.open_folder(Vfs::ROOT).unwrap();
+    vfs.rewind_folder(handle).await.unwrap();
     vfs.release(handle);
     provider.set_delay(Duration::ZERO);
     tokio::time::advance(options.listing_ttl - Duration::from_millis(1)).await;
@@ -1183,7 +1226,8 @@ async fn rename_replaces_the_item_that_holds_the_name() {
     );
     let moved = vfs.lookup(Vfs::ROOT, "b.txt").await.unwrap();
     assert_eq!(moved.node, source.node);
-    let handle = vfs.open_folder(Vfs::ROOT).await.unwrap();
+    let handle = vfs.open_folder(Vfs::ROOT).unwrap();
+    vfs.rewind_folder(handle).await.unwrap();
     let entries = vfs.read_folder(handle, 0, 10).unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].name, "b.txt");
@@ -1459,7 +1503,8 @@ async fn a_listing_that_already_holds_the_new_folder_shows_it_once() {
     provider.set_delay(Duration::ZERO);
     vfs.lookup(Vfs::ROOT, "other.txt").await.unwrap();
     task.await.unwrap().unwrap();
-    let handle = vfs.open_folder(Vfs::ROOT).await.unwrap();
+    let handle = vfs.open_folder(Vfs::ROOT).unwrap();
+    vfs.rewind_folder(handle).await.unwrap();
     let entries = vfs.read_folder(handle, 0, 10).unwrap();
     let docs: Vec<_> = entries
         .iter()
@@ -1637,7 +1682,8 @@ async fn a_spooled_file_shows_the_spool_size_and_modified_time() {
     let calls = provider.calls();
     let looked = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
     let looked_new = vfs.lookup(Vfs::ROOT, "b.txt").await.unwrap();
-    let folder = vfs.open_folder(Vfs::ROOT).await.unwrap();
+    let folder = vfs.open_folder(Vfs::ROOT).unwrap();
+    vfs.rewind_folder(folder).await.unwrap();
     let entries = vfs.read_folder(folder, 0, 10).unwrap();
     let listed = entries.iter().find(|entry| entry.name == "a.txt").unwrap();
     let listed_new = entries.iter().find(|entry| entry.name == "b.txt").unwrap();
@@ -1675,7 +1721,8 @@ async fn a_new_file_renamed_over_an_existing_file_takes_its_id() {
     .await
     .unwrap();
     assert_eq!(provider.calls(), calls);
-    let folder = vfs.open_folder(Vfs::ROOT).await.unwrap();
+    let folder = vfs.open_folder(Vfs::ROOT).unwrap();
+    vfs.rewind_folder(folder).await.unwrap();
     let names: Vec<_> = vfs
         .read_folder(folder, 0, 10)
         .unwrap()
@@ -1796,7 +1843,8 @@ async fn a_removed_new_file_with_an_open_handle_keeps_its_bytes_until_the_node_g
     assert_eq!(vfs.read(handle, 0, 5).await.unwrap(), b"hello");
     vfs.write(handle, 0, b"HELLO").await.unwrap();
     assert_eq!(vfs.read(handle, 0, 5).await.unwrap(), b"HELLO");
-    let folder = vfs.open_folder(Vfs::ROOT).await.unwrap();
+    let folder = vfs.open_folder(Vfs::ROOT).unwrap();
+    vfs.rewind_folder(folder).await.unwrap();
     assert!(vfs.read_folder(folder, 0, 10).unwrap().is_empty());
     assert_eq!(spool_files(&dir), 1);
     vfs.release(handle);
@@ -1880,7 +1928,8 @@ async fn a_remote_item_that_takes_a_new_files_name_gets_a_suffix() {
     let (made, _handle) = vfs.create(Vfs::ROOT, "a.txt", Access::Write).await.unwrap();
     provider.add_file(&provider.root(), "a.txt", b"remote");
     vfs.refresh();
-    let folder = vfs.open_folder(Vfs::ROOT).await.unwrap();
+    let folder = vfs.open_folder(Vfs::ROOT).unwrap();
+    vfs.rewind_folder(folder).await.unwrap();
     let entries = vfs.read_folder(folder, 0, 10).unwrap();
     let new_name = entries
         .iter()
@@ -1923,7 +1972,8 @@ async fn a_remote_file_renamed_onto_a_new_file_replaces_nothing() {
     vfs.refresh();
     let found = vfs.lookup(Vfs::ROOT, "new.txt").await.unwrap();
     assert_eq!(found.node, old.node);
-    let folder = vfs.open_folder(Vfs::ROOT).await.unwrap();
+    let folder = vfs.open_folder(Vfs::ROOT).unwrap();
+    vfs.rewind_folder(folder).await.unwrap();
     let names: Vec<_> = vfs
         .read_folder(folder, 0, 10)
         .unwrap()
@@ -3286,7 +3336,8 @@ fn recovered(name: &str) -> bool {
 }
 
 async fn folder_names(vfs: &Vfs) -> Vec<String> {
-    let handle = vfs.open_folder(Vfs::ROOT).await.unwrap();
+    let handle = vfs.open_folder(Vfs::ROOT).unwrap();
+    vfs.rewind_folder(handle).await.unwrap();
     let names = vfs
         .read_folder(handle, 0, 20)
         .unwrap()
