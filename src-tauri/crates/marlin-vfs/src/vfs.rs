@@ -13,8 +13,10 @@ use crate::{
     Space, VfsError,
 };
 
+mod record;
 mod upload;
 
+use record::save_record;
 use upload::Attempt;
 pub use upload::{Unsent, UnsentState};
 
@@ -81,7 +83,7 @@ pub struct Options {
     /// How long a file waits after its last writer closes, or after its last change, before it uploads.
     pub settle: Duration,
 
-    /// How many uploads may run at once. An upload's byte calls never take a slot of [`Self::max_calls`] and have no [`Self::call_timeout`]. A conflict copy's `item` call and the remove of a stray item are ordinary calls.
+    /// How many uploads may run at once. An upload's byte calls never take a slot of [`Self::max_calls`] and have no [`Self::call_timeout`]. A conflict copy's `item` call, the remove of a stray item, and the check before an adopted file's first try are ordinary calls.
     pub max_uploads: usize,
 
     /// An upload whose progress has not moved for this long is stopped and fails with [`VfsError::TimedOut`].
@@ -124,7 +126,7 @@ impl Asked {
 }
 
 /// A folder, and a remote name in it.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct Place {
     folder: ItemId,
 
@@ -209,6 +211,25 @@ struct SpoolFile {
 
     /// The last failed try's error, and how many tries in a row have failed.
     failure: Option<(VfsError, u32)>,
+
+    /// Whether a byte call of this file may have reached the remote.
+    sent: Sent,
+
+    /// The record last written for this file. `None` until a write succeeds.
+    written: Option<record::Record>,
+}
+
+/// Whether a byte call of a spool file may have reached the remote. A failed or stopped try may still have landed, so only a confirm that applies an answer goes back to `Never`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Sent {
+    /// No try has started since the last answer was applied.
+    Never,
+
+    /// A try started in this run.
+    ThisRun,
+
+    /// A try started in an earlier run, and the remote has not been checked for it. The next try checks first (decision 0005, choice 10).
+    EarlierRun,
 }
 
 struct Node {
@@ -317,7 +338,7 @@ struct State {
 /// How much of a remote file one fetch reads at a time. A stored size never limits a read, so the piece size is the only cap.
 const PIECE: u32 = 4 * 1024 * 1024;
 
-/// The mount core. With a spool it can create, write, cut, rename, and remove a file locally, and [`Vfs::run_uploads`] sends those files. Adapters share one value across tasks. The state lock is never held across a provider call. The only spool file call made under it is the delete of a spool file. A separate lock, `changes`, is held across the provider call of a name change, and across the confirm of an upload.
+/// The mount core. With a spool it can create, write, cut, rename, and remove a file locally, and [`Vfs::run_uploads`] sends those files. Adapters share one value across tasks. The state lock is never held across a provider call. Three spool file calls run under it: deleting a spool file, and reading its length and modified time for its record and writing the record. `take_writes` also reads the spool folder under it, before any other call can run. A separate lock, `changes`, is held across the provider call of a name change, and across the confirm of an upload.
 pub struct Vfs {
     provider: Arc<dyn Provider>,
     rules: NameRules,
@@ -337,6 +358,12 @@ pub struct Vfs {
     uploads: Arc<Notify>,
 
     spool: Option<Spool>,
+
+    /// Spool files from an earlier run that [`Self::take_writes`] could not place.
+    unplaced: Vec<PathBuf>,
+
+    /// Paths for the background thread that syncs a spool file after its last close. `None` without a spool. Dropping it ends the thread; it is never joined.
+    syncs: Option<std::sync::mpsc::Sender<PathBuf>>,
 
     /// The next spool file's number, which is also its name in the spool folder. A file already there keeps its number.
     next_spool: std::sync::atomic::AtomicU64,
@@ -395,6 +422,8 @@ impl Vfs {
             room: Arc::new(Notify::new()),
             uploads: Arc::new(Notify::new()),
             spool: None,
+            unplaced: Vec::new(),
+            syncs: None,
             next_spool: std::sync::atomic::AtomicU64::new(1),
             watcher: None,
         }
@@ -414,10 +443,35 @@ impl Vfs {
         self.spool.as_ref().ok_or(VfsError::ReadOnly)
     }
 
-    /// Lets the mount take writes into `spool`. Without one, opening a file for writing, [`Self::create`], [`Self::truncate`], and [`Self::set_modified`] are [`VfsError::ReadOnly`].
-    pub fn take_writes(mut self, spool: Spool) -> Self {
+    /// Lets the mount take writes into `spool`, and puts back to work what an earlier run left in that folder.
+    ///
+    /// A file whose writers had closed is queued again. A file that was still open is queued as a recovered copy. A file the record cannot place is listed by [`Self::unplaced_spool_files`]. Without a spool, opening a file for writing, [`Self::create`], [`Self::truncate`], and [`Self::set_modified`] are [`VfsError::ReadOnly`].
+    pub fn take_writes(mut self, spool: Spool) -> Result<Self, VfsError> {
+        let (unplaced, next) = {
+            let mut state = self.state.lock().unwrap();
+            record::recover(&mut state, &spool.folder, spool.stays_local, &self.rules)
+                .map_err(spool::map_io)?
+        };
+        self.unplaced = unplaced;
+        self.next_spool
+            .store(next, std::sync::atomic::Ordering::Relaxed);
         self.spool = Some(spool);
-        self
+        let (sender, receiver) = std::sync::mpsc::channel::<PathBuf>();
+        std::thread::Builder::new()
+            .name("marlin-vfs-sync".into())
+            .spawn(move || {
+                for path in receiver {
+                    let _ = spool::sync_to_disk(&path);
+                }
+            })
+            .map_err(spool::map_io)?;
+        self.syncs = Some(sender);
+        Ok(self)
+    }
+
+    /// Spool files from an earlier run that this mount could not place. The mount helper reports them (#602).
+    pub fn unplaced_spool_files(&self) -> &[PathBuf] {
+        &self.unplaced
     }
 
     /// Finds `name` in `parent` and adds one lookup to the item's node.
@@ -542,6 +596,9 @@ impl Vfs {
         opened.handles += 1;
         if access == Access::Write {
             opened.writers += 1;
+            if let Bytes::Spooled(id) = opened.bytes {
+                let _ = save_record(&mut state, id);
+            }
         }
         Ok(insert_handle(&mut state, Opened::File { node, access }))
     }
@@ -649,6 +706,7 @@ impl Vfs {
                         id,
                         Instant::now() + self.options.settle,
                     );
+                    let _ = save_record(&mut state, id);
                     spool_attributes(&state, node)
                 }
                 _ => None,
@@ -658,6 +716,27 @@ impl Vfs {
             Some(attributes) => Ok(attributes),
             None => self.attributes(node).await,
         }
+    }
+
+    /// Puts a spooled file's bytes and its record on the disk (decision 0005, choice 5).
+    ///
+    /// `close` returns when the bytes are in the spool. This returns when they are on the disk. Neither waits for the upload. A clean or fetching file, and a mount with no spool, has nothing local to put there. A node that is gone is [`VfsError::StaleHandle`].
+    pub async fn fsync(&self, node: NodeId) -> Result<(), VfsError> {
+        let path = {
+            let mut state = self.state.lock().unwrap();
+            let Some(found) = state.nodes.get(&node) else {
+                return Err(VfsError::StaleHandle);
+            };
+            let Bytes::Spooled(id) = found.bytes else {
+                return Ok(());
+            };
+            save_record(&mut state, id).map_err(spool::map_io)?;
+            state.spools[&id].path.clone()
+        };
+        tokio::task::spawn_blocking(move || spool::sync_to_disk(&path))
+            .await
+            .map_err(|error| VfsError::Other(error.to_string()))?
+            .map_err(spool::map_io)
     }
 
     /// Makes a new empty file named `name` in `parent`, opens it, and counts one lookup and one handle. `name` is the name the OS sent. A mount with no spool answers [`VfsError::ReadOnly`], and a name that is taken is [`VfsError::Conflict`].
@@ -695,6 +774,12 @@ impl Vfs {
             },
         );
         list(&mut state, &self.rules, node, &parent_item, name);
+        if let Err(error) = save_record(&mut state, spool_id) {
+            unlist(&mut state, &self.rules, node);
+            state.nodes.remove(&node);
+            discard(&mut state, &self.room, spool_id);
+            return Err(spool::map_io(error));
+        }
         // A writer holds the upload back. A file made for reading uploads empty, as `touch` needs.
         upload::schedule(
             &mut state,
@@ -736,6 +821,11 @@ impl Vfs {
                     id,
                     Instant::now() + self.options.settle,
                 );
+                let _ = save_record(&mut state, id);
+                // The sync thread puts the file on the disk, so this call never waits for it. A file that stays on this computer is deleted at the next mount, and a Finder copy makes one per file.
+                if let (Some(syncs), Some(_)) = (&self.syncs, self.sends(&state, id)) {
+                    let _ = syncs.send(state.spools[&id].path.clone());
+                }
             }
         }
         let nodes = match opened {
@@ -812,9 +902,9 @@ impl Vfs {
             remote.push(created.clone());
         });
         let node = node_for(&mut state, created.id);
+        set_place(&mut state, node, &parent_item, remote_name);
         let found_node = state.nodes.get_mut(&node).unwrap();
         found_node.lookups += 1;
-        set_place(found_node, &parent_item, remote_name);
         let attributes = remember(&mut found_node.attributes, asked, created.attributes);
         Ok(Entry {
             node,
@@ -1008,18 +1098,21 @@ impl Vfs {
             // The new files in a moved folder follow it to its new id.
             if let Some(children) = state.new_files.remove(&source.id) {
                 for child in children.values() {
-                    if let Identity::New(place) = &mut state.nodes.get_mut(child).unwrap().identity
-                    {
+                    let found = state.nodes.get_mut(child).unwrap();
+                    if let Identity::New(place) = &mut found.identity {
                         place.folder = moved.id.clone();
+                    }
+                    if let Bytes::Spooled(spool_id) = found.bytes {
+                        let _ = save_record(&mut state, spool_id);
                     }
                 }
                 state.new_files.insert(moved.id.clone(), children);
             }
         }
         if let Some(node) = state.by_item.get(&moved.id).copied() {
+            set_place(&mut state, node, &to, remote_name);
             let found = state.nodes.get_mut(&node).unwrap();
             remember(&mut found.attributes, asked, moved.attributes);
-            set_place(found, &to, remote_name);
             // The new name can move the file into or out of the names that stay local, so the uploader looks at it again.
             if let Bytes::Spooled(spool_id) = found.bytes {
                 upload::schedule(
@@ -1286,6 +1379,13 @@ impl Vfs {
             return Ok(Fetched::Replaced);
         }
         state.nodes.get_mut(&node).unwrap().bytes = Bytes::Spooled(spool_id);
+        if let Err(error) = save_record(&mut state, spool_id) {
+            discard(&mut state, &self.room, spool_id);
+            if let Some(found) = state.nodes.get_mut(&node) {
+                found.bytes = Bytes::Clean;
+            }
+            return Err(spool::map_io(error));
+        }
         upload::schedule(
             &mut state,
             &self.uploads,
@@ -1310,10 +1410,6 @@ impl Vfs {
         };
         let limit = self.spool()?.limit;
         let end = edit.end();
-        // No wait makes room for a file larger than the whole spool.
-        if end > limit {
-            return Err(VfsError::NoSpace);
-        }
         let (path, before, guard) = loop {
             // Enabled before the room check, so a wake-up that lands between the check and the wait is not lost.
             let notified = self.room.notified();
@@ -1332,7 +1428,8 @@ impl Vfs {
                         spool.size,
                     )
                 };
-                if state.spool_used + growth <= limit {
+                // An edit that adds no bytes always fits: after a remount the adopted files can hold more than a smaller new limit, and a cut or an overwrite must still work.
+                if growth == 0 || state.spool_used + growth <= limit {
                     state.spool_used += growth;
                     state.spools.get_mut(&id).unwrap().reserved = growth;
                     // A fetch's own writes land before the node holds the spool file, and do not count as a change of the file the node shows.
@@ -1341,6 +1438,10 @@ impl Vfs {
                         state.spools.get_mut(&id).unwrap().editing = true;
                     }
                     break (path, before, guard);
+                }
+                // No wait makes room for a file larger than the whole spool.
+                if end > limit {
+                    return Err(VfsError::NoSpace);
                 }
             }
             drop(guard);
@@ -1404,8 +1505,12 @@ impl Vfs {
                         due: Instant::now(),
                         attempt: None,
                         failure: None,
+                        sent: Sent::Never,
+                        written: None,
                     };
-                    self.state.lock().unwrap().spools.insert(id, file);
+                    let mut state = self.state.lock().unwrap();
+                    state.spools.insert(id, file);
+                    let _ = save_record(&mut state, id);
                     return Ok(id);
                 }
                 Ok(Err(error)) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -1461,6 +1566,7 @@ impl Vfs {
         }
         // The name is part of what a create sends, so a try that already started stops and the file waits again.
         upload::stop_attempt(&mut state, spool_id);
+        let _ = save_record(&mut state, spool_id);
         upload::schedule(
             &mut state,
             &self.uploads,
@@ -1580,6 +1686,7 @@ fn account(
     if upload::node_holds(&state, id) {
         upload::schedule(&mut state, uploads, id, Instant::now() + settle);
     }
+    let _ = save_record(&mut state, id);
 }
 
 /// A spooled node's size and modified time, when it has a spool file.
@@ -1678,8 +1785,8 @@ fn entry_for(
         },
         Holder::Item(item) => {
             let node = node_for(state, item.id);
+            set_place(state, node, folder, unescape(&item.name, rules));
             let found = state.nodes.get_mut(&node).unwrap();
-            set_place(found, folder, unescape(&item.name, rules));
             let held = remember(&mut found.attributes, listing.asked, item.attributes);
             Entry {
                 node,
@@ -1690,12 +1797,22 @@ fn entry_for(
     }
 }
 
-fn set_place(node: &mut Node, folder: &ItemId, remote_name: String) {
-    if let Identity::Item { place, .. } = &mut node.identity {
-        *place = Some(Place {
-            folder: folder.clone(),
-            name: remote_name,
-        });
+/// Notes where the mount shows an item. A spooled item's record holds the place, so a new place is saved there too.
+fn set_place(state: &mut State, node: NodeId, folder: &ItemId, remote_name: String) {
+    let found = state.nodes.get_mut(&node).unwrap();
+    let Identity::Item { place, .. } = &mut found.identity else {
+        return;
+    };
+    let new = Place {
+        folder: folder.clone(),
+        name: remote_name,
+    };
+    if place.as_ref() == Some(&new) {
+        return;
+    }
+    *place = Some(new);
+    if let Bytes::Spooled(spool_id) = found.bytes {
+        let _ = save_record(state, spool_id);
     }
 }
 
@@ -1704,10 +1821,11 @@ fn mark_removed(state: &mut State, room: &Notify, id: ItemId) {
     let Some(node) = state.by_item.remove(&id) else {
         return;
     };
+    state.nodes.get_mut(&node).unwrap().identity = Identity::Removed(id);
     if let Bytes::Spooled(spool_id) = state.nodes[&node].bytes {
         upload::stop_attempt(state, spool_id);
+        let _ = save_record(state, spool_id);
     }
-    state.nodes.get_mut(&node).unwrap().identity = Identity::Removed(id);
     drop_unreferenced(state, room, node);
 }
 
@@ -1743,11 +1861,12 @@ fn unlist(state: &mut State, rules: &NameRules, node: NodeId) {
 
 /// A new file loses its name, as a remove or a rename over it does. Its open handles still work, and its node goes once nothing holds it.
 fn unname(state: &mut State, rules: &NameRules, room: &Notify, node: NodeId) {
-    if let Bytes::Spooled(spool_id) = state.nodes[&node].bytes {
-        upload::stop_attempt(state, spool_id);
-    }
     unlist(state, rules, node);
     state.nodes.get_mut(&node).unwrap().identity = Identity::Unnamed;
+    if let Bytes::Spooled(spool_id) = state.nodes[&node].bytes {
+        upload::stop_attempt(state, spool_id);
+        let _ = save_record(state, spool_id);
+    }
     drop_unreferenced(state, room, node);
 }
 
@@ -1758,8 +1877,9 @@ fn discard(state: &mut State, room: &Notify, id: SpoolId) {
     state.spool_used -= spool.size + spool.reserved;
     state.queue.remove(&(spool.due, id));
     room.notify_waiters();
-    // Unlinking is one quick call, and the sync callers (`release`, `forget`) cannot wait. When any caller returns, the bytes are gone.
+    // Unlinking is one quick call, and the sync callers (`release`, `forget`) cannot wait. When any caller returns, the bytes are gone. The record goes second: a crash between the two leaves a record with no file, which the next mount deletes.
     let _ = std::fs::remove_file(&spool.path);
+    let _ = std::fs::remove_file(spool::record_path(&spool.path));
 }
 
 /// A change the provider was asked to make. It ends one of two ways: `confirmed`, or dropped. Dropped (an error, the time limit, or a cancelled call), the remote may or may not have changed, so the cached listing of each folder it names is forgotten.

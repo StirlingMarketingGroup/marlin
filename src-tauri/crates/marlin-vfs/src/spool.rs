@@ -1,5 +1,5 @@
 use std::fs::{File, OpenOptions};
-use std::io::{self, ErrorKind};
+use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
 use crate::VfsError;
@@ -78,6 +78,45 @@ pub(crate) fn write_all_at(path: &Path, mut data: &[u8], mut offset: u64) -> io:
 
 pub(crate) fn set_len(path: &Path, size: u64) -> io::Result<()> {
     OpenOptions::new().write(true).open(path)?.set_len(size)
+}
+
+/// `{n}.record`, the record beside spool file `{n}`. A spool file's name is a number, with no extension.
+pub(crate) fn record_path(spool_path: &Path) -> PathBuf {
+    spool_path.with_extension("record")
+}
+
+/// Writes `bytes` as the record beside `spool_path`. A crash mid-write leaves the old record or the new one.
+pub(crate) fn write_record(spool_path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let temporary = spool_path.with_extension("record.new");
+    {
+        let mut options = OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options.open(&temporary)?.write_all(bytes)?;
+    }
+    std::fs::rename(temporary, record_path(spool_path))
+}
+
+/// Puts the spool file, its record, and (on Unix) their folder on the disk. A file a confirmed upload already deleted is not an error.
+pub(crate) fn sync_to_disk(spool_path: &Path) -> io::Result<()> {
+    // Windows flushes a file only through a handle that can write.
+    for path in [spool_path, &record_path(spool_path)] {
+        match OpenOptions::new().write(true).open(path) {
+            Ok(file) => file.sync_all()?,
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    // A folder has no sync on Windows.
+    #[cfg(unix)]
+    if let Some(folder) = spool_path.parent() {
+        File::open(folder)?.sync_all()?;
+    }
+    Ok(())
 }
 
 pub(crate) fn map_io(error: io::Error) -> VfsError {

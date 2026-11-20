@@ -24,6 +24,8 @@ struct Inner {
     uploads: usize,
     rename_changes_ids: bool,
     hide_revisions: bool,
+    /// A byte call changes the tree, then never answers.
+    lose_answers: bool,
     largest_read: u32,
 }
 
@@ -74,6 +76,7 @@ impl MemoryProvider {
                 uploads: 0,
                 rename_changes_ids: false,
                 hide_revisions: false,
+                lose_answers: false,
                 largest_read: 0,
             }),
         }
@@ -124,6 +127,11 @@ impl MemoryProvider {
     /// While on, `item` and `list` give no revision, as a provider without revisions would. Off by default.
     pub fn hide_revisions(&self, on: bool) {
         self.inner.lock().unwrap().hide_revisions = on;
+    }
+
+    /// While on, a byte call changes the tree as usual and then never answers, as an upload whose answer a crash lost.
+    pub fn lose_upload_answers(&self, on: bool) {
+        self.inner.lock().unwrap().lose_answers = on;
     }
 
     /// Makes every later provider call wait this long before it answers. The two byte calls wait for [`Self::set_upload_delay`] instead.
@@ -221,11 +229,18 @@ impl MemoryProvider {
         tokio::time::sleep(delay / 2).await;
         progress(std::fs::metadata(from).map_or(0, |metadata| metadata.len()) / 2);
         tokio::time::sleep(delay - delay / 2).await;
-        let mut inner = self.inner.lock().unwrap();
-        match inner.error.clone() {
-            Some(error) => Err(error),
-            None => op(&mut inner),
+        let (lose, result) = {
+            let mut inner = self.inner.lock().unwrap();
+            let result = match inner.error.clone() {
+                Some(error) => Err(error),
+                None => op(&mut inner),
+            };
+            (inner.lose_answers, result)
+        };
+        if lose && result.is_ok() {
+            return std::future::pending().await;
         }
+        result
     }
 }
 

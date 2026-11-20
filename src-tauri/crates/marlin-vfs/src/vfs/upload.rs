@@ -5,11 +5,12 @@ use std::time::{Duration, SystemTime};
 use tokio::sync::Notify;
 use tokio::time::Instant;
 
-use crate::{Item, ItemId, Revision, VfsError};
+use crate::{spool, Item, ItemId, Revision, VfsError};
 
+use super::record::save_record;
 use super::{
     change_listing, discard, drop_unreferenced, note_changed, remember, unlist, unname, Asked,
-    Bytes, Identity, NodeId, Place, SpoolId, State, Vfs,
+    Bytes, Identity, NodeId, Place, Sent, SpoolId, State, Vfs, PIECE,
 };
 
 /// How long the first retry waits. Each later wait is twice the one before, up to [`RETRY_MAX`].
@@ -99,8 +100,12 @@ struct Job {
     path: PathBuf,
     modified: SystemTime,
     version: u64,
+    /// The spool file's length when the try started.
+    size: u64,
     stop: Arc<Notify>,
     target: Target,
+    /// An earlier run's try may have landed these bytes, so this try looks at the remote first.
+    check_remote_first: bool,
 }
 
 /// Ends a try whichever way it ends, an aborted task included, and puts the file back in the queue so the uploader looks at it again.
@@ -153,6 +158,27 @@ pub(super) fn bytes_changed(state: &mut State, spool_id: SpoolId) {
     spool.version += 1;
     spool.failure = None;
     stop_attempt(state, spool_id);
+}
+
+/// What a spool file is for, before the names that stay on this computer are left out: the item and the place the mount last showed it, or a new file's place.
+pub(super) fn sends_to(state: &State, spool_id: SpoolId) -> Option<(Target, Place)> {
+    if !node_holds(state, spool_id) {
+        return None;
+    }
+    match &state.nodes[&state.spools[&spool_id].node].identity {
+        Identity::Item {
+            id,
+            place: Some(place),
+        } => Some((Target::Replace { id: id.clone() }, place.clone())),
+        Identity::New(place) => Some((
+            Target::Create {
+                folder: place.folder.clone(),
+                name: place.name.clone(),
+            },
+            place.clone(),
+        )),
+        _ => None,
+    }
 }
 
 /// Whether the spool file is its node's bytes. A fetch's spool file is not, until the fetch publishes it.
@@ -213,16 +239,23 @@ impl Vfs {
                         path: spool.path.clone(),
                         modified: spool.modified,
                         version: spool.version,
+                        size: spool.size,
                         stop: Arc::clone(&stop),
                         target,
+                        check_remote_first: spool.sent == Sent::EarlierRun,
                     };
                     let base = spool.base.clone();
-                    state.spools.get_mut(&spool_id).unwrap().attempt = Some(Attempt {
+                    let spool = state.spools.get_mut(&spool_id).unwrap();
+                    spool.attempt = Some(Attempt {
                         stopped: false,
                         sent: 0,
                         moved: now,
                         stop,
                     });
+                    if spool.sent == Sent::Never {
+                        spool.sent = Sent::ThisRun;
+                        let _ = save_record(&mut state, spool_id);
+                    }
                     let guard = AttemptGuard {
                         vfs: Arc::clone(&self),
                         spool_id,
@@ -308,24 +341,8 @@ impl Vfs {
     /// What a spool file sends now, and where: `None` unless its node holds it, as an item or a new file, under a name that does not stay on this computer (decision 0005, choice 14).
     pub(super) fn sends(&self, state: &State, spool_id: SpoolId) -> Option<(Target, Place)> {
         let stays_local = self.spool.as_ref()?.stays_local;
-        if !node_holds(state, spool_id) {
-            return None;
-        }
-        let (target, place) = match &state.nodes[&state.spools[&spool_id].node].identity {
-            Identity::Item {
-                id,
-                place: Some(place),
-            } => (Target::Replace { id: id.clone() }, place),
-            Identity::New(place) => (
-                Target::Create {
-                    folder: place.folder.clone(),
-                    name: place.name.clone(),
-                },
-                place,
-            ),
-            _ => return None,
-        };
-        (!stays_local(&place.name)).then(|| (target, place.clone()))
+        let (target, place) = sends_to(state, spool_id)?;
+        (!stays_local(&place.name)).then_some((target, place))
     }
 
     /// The spool file of a node that has unsent bytes, and where they go.
@@ -339,6 +356,39 @@ impl Vfs {
 
     /// One try of one spool file.
     async fn upload(self: Arc<Self>, job: Job, base: Option<Revision>) {
+        if job.check_remote_first {
+            // An edit or a discard stops the check too, so it never downloads a large file for nothing. The next try checks again.
+            let found = tokio::select! {
+                biased;
+                found = self.find_landed(&job, base.as_ref()) => found,
+                _ = job.stop.notified() => return,
+            };
+            match found {
+                Ok(Some((item, landed))) => {
+                    self.confirm(&job, item, landed).await;
+                    return;
+                }
+                Ok(None) => {
+                    if let Some(spool) = self.state.lock().unwrap().spools.get_mut(&job.spool_id) {
+                        spool.sent = Sent::ThisRun;
+                    }
+                }
+                Err(error) => {
+                    self.fail_try(&job, error);
+                    return;
+                }
+            }
+        }
+        // The record that says a try may have reached the remote is on the disk before anything can land.
+        let path = job.path.clone();
+        let synced = match tokio::task::spawn_blocking(move || spool::sync_to_disk(&path)).await {
+            Ok(result) => result.map_err(spool::map_io),
+            Err(error) => Err(VfsError::Other(error.to_string())),
+        };
+        if let Err(error) = synced {
+            self.fail_try(&job, error);
+            return;
+        }
         match &job.target {
             Target::Replace { id } => {
                 // Choice 7: an item is only ever replaced on the revision its bytes came from.
@@ -462,7 +512,7 @@ impl Vfs {
         let Some(place) = self.place_now(job, id) else {
             return;
         };
-        let name = conflict_name(&place.name, chrono::Local::now());
+        let name = stamped_name(&place.name, "conflict", chrono::Local::now());
         let Some(copy) = self.send_new(job, &place.folder, &name).await else {
             return;
         };
@@ -531,6 +581,9 @@ impl Vfs {
                     }
                     if sent_now {
                         back_to_remote(&mut state, &self.room, job.node, job.spool_id);
+                    } else if let Some(spool) = state.spools.get_mut(&job.spool_id) {
+                        spool.sent = Sent::Never;
+                        let _ = save_record(&mut state, job.spool_id);
                     }
                     None
                 }
@@ -580,8 +633,10 @@ impl Vfs {
                         back_to_remote(&mut state, &self.room, job.node, job.spool_id);
                     } else {
                         // The remote now has the bytes this try sent, so the next replace must not take its own upload for a change.
-                        state.spools.get_mut(&job.spool_id).unwrap().base =
-                            item.attributes.revision.clone();
+                        let spool = state.spools.get_mut(&job.spool_id).unwrap();
+                        spool.base = item.attributes.revision.clone();
+                        spool.sent = Sent::Never;
+                        let _ = save_record(&mut state, job.spool_id);
                     }
                     None
                 }
@@ -624,16 +679,136 @@ impl Vfs {
     }
 }
 
-/// `{stem} (conflict {date} {time}){extension}`. The time has no colon: Finder shows one as `/`, and Windows forbids it.
-fn conflict_name(name: &str, at: chrono::DateTime<chrono::Local>) -> String {
+/// `{stem} ({word} {date} {time}){extension}`. The time has no colon: Finder shows one as `/`, and Windows forbids it.
+pub(super) fn stamped_name(name: &str, word: &str, at: chrono::DateTime<chrono::Local>) -> String {
     let (stem, extension) = crate::names::split_extension(name);
     let stamp = at.format("%Y-%m-%d %H-%M-%S");
-    format!("{stem} (conflict {stamp}){extension}")
+    format!("{stem} ({word} {stamp}){extension}")
+}
+
+/// Whether `name` is `original` with a `word` stamp from [`stamped_name`].
+fn is_stamped(name: &str, original: &str, word: &str) -> bool {
+    let (stem, extension) = crate::names::split_extension(original);
+    let (prefix, suffix) = (format!("{stem} ({word} "), format!("){extension}"));
+    name.len() >= prefix.len() + suffix.len()
+        && name.starts_with(&prefix)
+        && name.ends_with(&suffix)
+}
+
+impl Vfs {
+    /// Whether an earlier run's try of this adopted file already landed, and what it made. `Ok(None)` means the try should send.
+    async fn find_landed(
+        &self,
+        job: &Job,
+        base: Option<&Revision>,
+    ) -> Result<Option<(Item, Landed)>, VfsError> {
+        let id = match &job.target {
+            Target::Create { folder, name } => {
+                let found = self.find_sent(job, folder, |listed| listed == name).await?;
+                let landed = || Landed::Created {
+                    folder: folder.clone(),
+                    gone: None,
+                };
+                return Ok(found.map(|item| (item, landed())));
+            }
+            Target::Replace { id } => id,
+        };
+        let Some(place) = self.place_now(job, id) else {
+            return Ok(None);
+        };
+        let (at, generation) = (Instant::now(), self.state.lock().unwrap().generation);
+        let remote = match self.call(self.provider.item(id)).await {
+            Ok(remote) => remote,
+            // The item is gone, and the try may have created it again under its name.
+            Err(VfsError::NotFound) => {
+                let found = self
+                    .find_sent(job, &place.folder, |listed| listed == place.name)
+                    .await?;
+                let landed = || Landed::Created {
+                    folder: place.folder.clone(),
+                    gone: Some(id.clone()),
+                };
+                return Ok(found.map(|item| (item, landed())));
+            }
+            Err(error) => return Err(error),
+        };
+        if remote.attributes.revision.as_ref() == base {
+            return Ok(None);
+        }
+        if self.holds_bytes(&remote, job).await? {
+            return Ok(Some((remote, Landed::Replaced)));
+        }
+        // Another client changed the item, and the try may have made the conflict copy.
+        let found = self
+            .find_sent(job, &place.folder, |listed| {
+                is_stamped(listed, &place.name, "conflict")
+            })
+            .await?;
+        let asked = Asked {
+            at,
+            generation,
+            answered: Instant::now(),
+        };
+        let landed = Landed::Copied {
+            folder: place.folder.clone(),
+            remote: Some((asked, remote)),
+        };
+        Ok(found.map(|copy| (copy, landed)))
+    }
+
+    /// A file in `folder` whose name `named` accepts and that holds this try's bytes. A folder that is gone holds none.
+    async fn find_sent(
+        &self,
+        job: &Job,
+        folder: &ItemId,
+        named: impl Fn(&str) -> bool,
+    ) -> Result<Option<Item>, VfsError> {
+        // The cached listing serves a mount that adopts many files from one folder.
+        let listing = match self.listing(folder).await {
+            Ok(listing) => listing,
+            Err(VfsError::NotFound) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        for item in listing.remote.iter() {
+            if named(&item.name) && self.holds_bytes(item, job).await? {
+                return Ok(Some(item.clone()));
+            }
+        }
+        Ok(None)
+    }
+
+    /// The item is a file of this try's length and modified time, and its bytes are the spool file's. The time counts in whole seconds, which Drive and SFTP keep.
+    async fn holds_bytes(&self, item: &Item, job: &Job) -> Result<bool, VfsError> {
+        use super::record::whole_seconds;
+        if item.attributes.kind != crate::Kind::File
+            || item.attributes.size != job.size
+            || whole_seconds(item.attributes.modified) != whole_seconds(job.modified)
+        {
+            return Ok(false);
+        }
+        let mut offset = 0;
+        while offset < job.size {
+            let length = u64::from(PIECE).min(job.size - offset) as u32;
+            let remote = self
+                .call(self.provider.read(&item.id, offset, length))
+                .await?;
+            let path = job.path.clone();
+            let local = tokio::task::spawn_blocking(move || spool::read_at(&path, offset, length))
+                .await
+                .map_err(|error| VfsError::Other(error.to_string()))?
+                .map_err(spool::map_io)?;
+            if remote != local || remote.len() != length as usize {
+                return Ok(false);
+            }
+            offset += u64::from(length);
+        }
+        Ok(true)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::conflict_name;
+    use super::stamped_name;
     use chrono::TimeZone;
 
     #[test]
@@ -644,16 +819,20 @@ mod tests {
             .unwrap();
         let at = chrono::Local.from_local_datetime(&naive).single().unwrap();
         assert_eq!(
-            conflict_name("report.docx", at),
+            stamped_name("report.docx", "conflict", at),
             "report (conflict 2026-11-19 14-03-27).docx"
         );
         assert_eq!(
-            conflict_name(".bashrc", at),
+            stamped_name(".bashrc", "conflict", at),
             ".bashrc (conflict 2026-11-19 14-03-27)"
         );
         assert_eq!(
-            conflict_name("a.tar.gz", at),
+            stamped_name("a.tar.gz", "conflict", at),
             "a.tar (conflict 2026-11-19 14-03-27).gz"
+        );
+        assert_eq!(
+            stamped_name("report.docx", "recovered", at),
+            "report (recovered 2026-11-19 14-03-27).docx"
         );
     }
 }
