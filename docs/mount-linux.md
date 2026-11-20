@@ -1,6 +1,6 @@
 # Linux mount adapter (`marlin-fuse`)
 
-`marlin-fuse` serves one [mount core](mount-core.md) `Vfs` to Linux as a FUSE mount. The [mount helper](mount-helper.md) uses it on Linux. The same crate serves macOS through macFUSE: see [macOS mount adapter](mount-macos.md). The adapter serves writes when `Vfs::writable()` is true, and mounts read-only otherwise. [Decision 0005](decisions/0005-mount-writes.md) says how a write works. No mount the helper makes takes writes yet: the helper gives no mount a spool (#602), and the Google Drive provider has no write calls (#600, #601).
+`marlin-fuse` serves one [mount core](mount-core.md) `Vfs` to Linux as a FUSE mount. The [mount helper](mount-helper.md) uses it on Linux. The same crate serves macOS through macFUSE: see [macOS mount adapter](mount-macos.md). The adapter serves writes when `Vfs::writable()` is true, and mounts read-only otherwise. [Decision 0005](decisions/0005-mount-writes.md) says how a write works. No mount the helper makes takes writes yet: the helper gives no mount a spool (#602), and the Google Drive provider has no byte calls, so its `can_write` is false (#601).
 
 The helper mounts a Google account through it: see [Providers](mount-helper.md#providers). No part of the UI asks for a mount yet (#377).
 

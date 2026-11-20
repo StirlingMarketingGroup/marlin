@@ -26,7 +26,7 @@ The crate has no FUSE, WinFsp, or Tauri types. It depends on `tokio`, `async-tra
 
 Five read calls: `root`, `item`, `list`, `read` (a byte range), and `space`. A provider returns the names the remote uses and does not make them unique or safe. `can_write` says whether the provider has the three change calls and the two byte calls. It defaults to false. A provider that leaves those calls out leaves `can_write` at that default. A mount of a provider that answers false is read-only.
 
-Three change calls, each optional: `create_folder`, `remove`, and `rename`. A provider that leaves one out answers `ReadOnly` for it. The Google Drive provider leaves all three out until #600. `create_folder` and `rename` get remote names, so a name can hold `/` or be `..`. A remote that cannot hold such a name answers `NotSupported`.
+Three change calls, each optional: `create_folder`, `remove`, and `rename`. A provider that leaves one out answers `ReadOnly` for it. The Google Drive provider has all three, and its mounts stay read-only until it also has the byte calls (#601). `create_folder` and `rename` get remote names, so a name can hold `/` or be `..`. A remote that cannot hold such a name answers `NotSupported`.
 
 - `remove` and `rename` get the folder the core believes the item is in. The core's listing can be a few seconds old, so a provider that can tell answers `NotFound` when the item is no longer there.
 - `remove` refuses a folder that holds anything (`NotEmpty`). A remote that has a trash moves the item there.

@@ -10,11 +10,11 @@ description = "Marlin's Google Drive provider for native mounts, and the saved G
 [dependencies]
 marlin-vfs = { path = "../marlin-vfs" }
 async-trait = "0.1"
-reqwest = { version = "0.13", features = ["query", "form"] }
+reqwest = { version = "0.13", features = ["query", "form", "json"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
-tokio = { version = "1.50", features = ["time", "sync"] }
+tokio = { version = "1.50", features = ["time", "sync", "macros"] }
 fastrand = "2"
 keyring = { version = "3.6.3", default-features = false, features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust", "vendored"] }
 dirs = "7.0"

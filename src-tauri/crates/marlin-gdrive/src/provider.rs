@@ -2,9 +2,9 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use marlin_vfs::{Attributes, Item, ItemId, Kind, Provider, Space, VfsError};
-use reqwest::StatusCode;
+use reqwest::{Method, StatusCode};
 
-use crate::api::{self, About, DriveFile, DrivePage, FilePage, SharedDrive};
+use crate::api::{self, About, DriveFile, DrivePage, FilePage, FileParents, SharedDrive};
 
 /// The id of the top of a mount. A Drive id never holds `/`, so neither made-up id can be a real one.
 const MOUNT_ROOT: &str = "/";
@@ -14,6 +14,13 @@ const SHARED_DRIVES: &str = "/shared-drives";
 
 /// Google's own name for the My Drive folder. It works wherever a file id does.
 const MY_DRIVE: &str = "root";
+
+/// The MIME type of a Drive folder.
+const FOLDER_TYPE: &str = "application/vnd.google-apps.folder";
+
+/// The fields `item` and the change calls ask for: what an item is built from, plus `trashed` and `driveId` for their checks.
+const ITEM_FIELDS: &str =
+    "id,name,mimeType,size,modifiedTime,trashed,driveId,shortcutDetails(targetId)";
 
 /// Gives the provider an access token for one Google account.
 #[async_trait::async_trait]
@@ -44,7 +51,9 @@ impl Default for Config {
     }
 }
 
-/// One Google account, read through the Drive API. It shows My Drive and the shared drives, and it never changes anything.
+/// One Google account through the Drive API. It shows My Drive and the shared drives.
+///
+/// It can make a folder, rename or move an item, and trash one. A mount stays read-only until the provider can also write bytes (#601), because `can_write` stays false.
 pub struct DriveProvider {
     pub(crate) tokens: Arc<dyn AccessTokens>,
     pub(crate) config: Config,
@@ -88,6 +97,22 @@ enum Place<'a> {
     },
 }
 
+impl Place<'_> {
+    /// The id that names this place: the reverse of [`place`].
+    fn id(&self) -> ItemId {
+        let real = |drive: &Option<&str>, file: &str| match drive {
+            Some(drive) => format!("{drive}/{file}"),
+            None => file.to_string(),
+        };
+        ItemId(match self {
+            Place::Top => MOUNT_ROOT.to_string(),
+            Place::SharedDrives => SHARED_DRIVES.to_string(),
+            Place::File { drive, file } => real(drive, file),
+            Place::Link { drive, file, opens } => format!("{}#{opens}", real(drive, file)),
+        })
+    }
+}
+
 fn place(id: &ItemId) -> Place<'_> {
     match id.0.as_str() {
         MOUNT_ROOT => Place::Top,
@@ -123,39 +148,63 @@ fn made_up_folder(id: &ItemId, name: &str) -> Item {
     }
 }
 
-/// The item a mount shows for a Drive file. `drive` is the shared drive it is in, if any.
+/// The ending a link file's shown name adds to the name Google stores. A folder and a plain file have none, so a rename of those sends the shown name unchanged.
 ///
-/// A Google Doc, Sheet, shortcut, or other Google item that is not a folder has no bytes to read, so it is a link file.
+/// A third-party shortcut's type is `drive-sdk.{app id}`, and the ending keeps only the word before the dot.
+fn link_ending(mime_type: &str) -> Option<String> {
+    let google_type = mime_type.strip_prefix("application/vnd.google-apps.")?;
+    if google_type == "folder" {
+        return None;
+    }
+    let google_type = google_type
+        .split_once('.')
+        .map_or(google_type, |(word, _)| word);
+    Some(format!(".{google_type}.html"))
+}
+
+/// Where a mount shows the Drive file `id`, and the ending its name gets. `drive` is the shared drive it is in, if any.
+///
+/// A Google Doc, Sheet, shortcut, or other Google item that is not a folder has no bytes to read, so it is a link file: its id carries the id its page opens, and its name gets an ending.
+fn shown<'a>(
+    drive: Option<&'a str>,
+    id: &'a str,
+    file: &'a DriveFile,
+) -> (Place<'a>, Option<String>) {
+    let Some(ending) = link_ending(&file.mime_type) else {
+        return (Place::File { drive, file: id }, None);
+    };
+    // Only a shortcut has a target. Every other item opens itself.
+    let target = file
+        .shortcut_details
+        .as_ref()
+        .and_then(|shortcut| shortcut.target_id.as_deref());
+    let link = Place::Link {
+        drive,
+        file: id,
+        opens: target.unwrap_or(id),
+    };
+    (link, Some(ending))
+}
+
+/// The item a mount shows for a Drive file. `drive` is the shared drive it is in, if any.
 fn item_from(drive: Option<&str>, id: String, file: DriveFile) -> Item {
     let modified = modified(file.modified_time.as_deref());
-    let plain = match drive {
-        Some(drive) => format!("{drive}/{id}"),
-        None => id.clone(),
+    let (place, ending) = shown(drive, &id, &file);
+    let item_id = place.id();
+    let (kind, size) = match place {
+        _ if file.mime_type == FOLDER_TYPE => (Kind::Folder, 0),
+        Place::Link { opens, .. } => (Kind::File, link_page(opens).len() as u64),
+        _ => {
+            let size = file.size.as_deref().and_then(|size| size.parse().ok());
+            (Kind::File, size.unwrap_or(0))
+        }
     };
-    let (id, name, kind, size) = if file.mime_type == "application/vnd.google-apps.folder" {
-        (plain, file.name, Kind::Folder, 0)
-    } else if let Some(google_type) = file.mime_type.strip_prefix("application/vnd.google-apps.") {
-        // Only a shortcut has a target. Every other item opens itself.
-        let target = file
-            .shortcut_details
-            .and_then(|shortcut| shortcut.target_id);
-        let opens = target.unwrap_or(id);
-        // A third-party shortcut's type is `drive-sdk.{app id}`.
-        let google_type = google_type
-            .split_once('.')
-            .map_or(google_type, |(word, _)| word);
-        (
-            format!("{plain}#{opens}"),
-            format!("{}.{google_type}.html", file.name),
-            Kind::File,
-            link_page(&opens).len() as u64,
-        )
-    } else {
-        let size = file.size.and_then(|size| size.parse().ok());
-        (plain, file.name, Kind::File, size.unwrap_or(0))
+    let name = match ending {
+        Some(ending) => format!("{}{ending}", file.name),
+        None => file.name,
     };
     Item {
-        id: ItemId(id),
+        id: item_id,
         name,
         attributes: Attributes {
             kind,
@@ -183,7 +232,11 @@ fn link_page(opens: &str) -> String {
 fn shared_drive_item(drive: SharedDrive) -> Item {
     Item {
         // A shared drive's id is also the id of its top folder.
-        id: ItemId(format!("{0}/{0}", drive.id)),
+        id: Place::File {
+            drive: Some(&drive.id),
+            file: &drive.id,
+        }
+        .id(),
         name: drive.name,
         attributes: Attributes {
             kind: Kind::Folder,
@@ -194,10 +247,137 @@ fn shared_drive_item(drive: SharedDrive) -> Item {
     }
 }
 
+/// The drive and the Drive folder of a folder that takes a new item. `/` and Shared drives are not Drive folders, and a link file is not a folder.
+fn destination(id: &ItemId) -> Result<(Option<&str>, &str), VfsError> {
+    match place(id) {
+        Place::Top | Place::SharedDrives => Err(VfsError::AccessDenied),
+        Place::Link { .. } => Err(VfsError::NotAFolder),
+        Place::File { drive, file } => Ok((drive, file)),
+    }
+}
+
+/// The Drive file of an item a caller removes or renames, and the id a link file opens. `/`, Shared drives, My Drive, and a shared drive's top folder are not Drive files that can be removed or renamed.
+fn changeable(id: &ItemId) -> Result<(&str, Option<&str>), VfsError> {
+    match place(id) {
+        Place::Top | Place::SharedDrives => Err(VfsError::AccessDenied),
+        Place::File {
+            drive: None,
+            file: MY_DRIVE,
+        } => Err(VfsError::AccessDenied),
+        Place::File {
+            drive: Some(drive),
+            file,
+        } if drive == file => Err(VfsError::AccessDenied),
+        Place::File { file, .. } => Ok((file, None)),
+        Place::Link { file, opens, .. } => Ok((file, Some(opens))),
+    }
+}
+
+/// The query for the children of a folder that are not trashed. `children` is the `q` that names the folder. Google lists a shared drive's folder in full only when the request names that drive.
+fn children_query<'a>(drive: Option<&'a str>, children: &'a str) -> Vec<(&'a str, &'a str)> {
+    let mut query = vec![
+        ("q", children),
+        ("supportsAllDrives", "true"),
+        ("includeItemsFromAllDrives", "true"),
+    ];
+    if let Some(drive) = drive {
+        query.push(("corpora", "drive"));
+        query.push(("driveId", drive));
+    }
+    query
+}
+
 /// A time as Google writes it. One that is missing or unreadable is the start of 1970.
 fn modified(time: Option<&str>) -> SystemTime {
     time.and_then(|time| chrono::DateTime::parse_from_rfc3339(time).ok())
         .map_or(UNIX_EPOCH, SystemTime::from)
+}
+
+impl DriveProvider {
+    /// The Drive file the core holds as `id` in `folder`, as Google has it now.
+    ///
+    /// `NotFound` when Google has trashed it, moved it out of `folder`, or given it a drive or a type that would build a different id. My Drive's top is `root` in an id, while `parents` holds My Drive's real id, so that id is read at the same time and nothing is kept.
+    async fn held(&self, id: &ItemId, folder: &ItemId) -> Result<DriveFile, VfsError> {
+        let (drive, file) = match place(id) {
+            Place::File { drive, file } | Place::Link { drive, file, .. } => (drive, file),
+            Place::Top | Place::SharedDrives => return Err(VfsError::NotFound),
+        };
+        let folder_file = match place(folder) {
+            Place::File { file, .. } => file,
+            _ => return Err(VfsError::NotFound),
+        };
+        let fields = format!("{ITEM_FIELDS},parents");
+        let query = [("fields", fields.as_str()), ("supportsAllDrives", "true")];
+        let path = format!("/files/{file}");
+        let asked = self.request(Method::GET, &path, &query, None, None);
+        let (response, parent_id) = if folder_file == MY_DRIVE {
+            let root_query = [("fields", "id")];
+            let root = self.request(Method::GET, "/files/root", &root_query, None, None);
+            let (response, root) = tokio::try_join!(asked, root)?;
+            (response, api::json::<FileParents>(root).await?.id)
+        } else {
+            (asked.await?, folder_file.to_string())
+        };
+        let found: DriveFile = api::json(response).await?;
+        if found.trashed || found.drive_id.as_deref() != drive {
+            return Err(VfsError::NotFound);
+        }
+        // The same rule as `item`: an answer that builds another id is not the item the core holds.
+        if shown(drive, file, &found).0.id() != *id {
+            return Err(VfsError::NotFound);
+        }
+        if !found.parents.contains(&parent_id) {
+            return Err(VfsError::NotFound);
+        }
+        Ok(found)
+    }
+
+    /// The Drive file to trash for `id` in `folder`, once it passes the checks a trash needs. A folder that holds anything is `NotEmpty`: Drive would trash the folder and everything in it.
+    async fn trashable<'a>(&self, id: &'a ItemId, folder: &ItemId) -> Result<&'a str, VfsError> {
+        let (file, _) = changeable(id)?;
+        let found = self.held(id, folder).await?;
+        if found.mime_type != FOLDER_TYPE {
+            return Ok(file);
+        }
+        let children = format!("'{file}' in parents and trashed = false");
+        let mut page_token: Option<String> = None;
+        // Google can send an empty page that still has a next page, so an empty first page is not an empty folder.
+        loop {
+            // `held` checked that this is the drive in `id`.
+            let mut query = children_query(found.drive_id.as_deref(), &children);
+            query.push(("fields", "nextPageToken,files(id)"));
+            query.push(("pageSize", "1"));
+            if let Some(token) = &page_token {
+                query.push(("pageToken", token.as_str()));
+            }
+            let response = self
+                .request(Method::GET, "/files", &query, None, None)
+                .await?;
+            let page: api::ChildPage = api::json(response).await?;
+            if !page.files.is_empty() {
+                return Err(VfsError::NotEmpty);
+            }
+            let Some(next) = page.next_page_token else {
+                return Ok(file);
+            };
+            page_token = Some(next);
+        }
+    }
+
+    /// Moves one Drive file to the trash. A removed item can be restored, and a shortcut's target is a different file.
+    async fn trash(&self, file: &str) -> Result<(), VfsError> {
+        let body = serde_json::json!({ "trashed": true });
+        let query = [("supportsAllDrives", "true"), ("fields", "id")];
+        self.request(
+            Method::PATCH,
+            &format!("/files/{file}"),
+            &query,
+            Some(&body),
+            None,
+        )
+        .await?;
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]
@@ -216,19 +396,17 @@ impl Provider for DriveProvider {
                 file,
             } if drive == file => {
                 let query = [("fields", "id,name,createdTime")];
-                let response = self.get(&format!("/drives/{drive}"), &query, None).await?;
+                let response = self
+                    .request(Method::GET, &format!("/drives/{drive}"), &query, None, None)
+                    .await?;
                 return Ok(shared_drive_item(api::json(response).await?));
             }
             Place::File { drive, file } | Place::Link { drive, file, .. } => (drive, file),
         };
-        let query = [
-            (
-                "fields",
-                "id,name,mimeType,size,modifiedTime,trashed,shortcutDetails(targetId)",
-            ),
-            ("supportsAllDrives", "true"),
-        ];
-        let response = self.get(&format!("/files/{file}"), &query, None).await?;
+        let query = [("fields", ITEM_FIELDS), ("supportsAllDrives", "true")];
+        let response = self
+            .request(Method::GET, &format!("/files/{file}"), &query, None, None)
+            .await?;
         let mut found: DriveFile = api::json(response).await?;
         if found.trashed {
             return Err(VfsError::NotFound);
@@ -263,7 +441,9 @@ impl Provider for DriveProvider {
                     if let Some(token) = &page_token {
                         query.push(("pageToken", token.as_str()));
                     }
-                    let response = self.get("/drives", &query, None).await?;
+                    let response = self
+                        .request(Method::GET, "/drives", &query, None, None)
+                        .await?;
                     let page: DrivePage = api::json(response).await?;
                     items.extend(page.drives.into_iter().map(shared_drive_item));
                     let Some(next) = page.next_page_token else {
@@ -282,24 +462,18 @@ impl Provider for DriveProvider {
                 let mut google_listed_any = false;
                 let mut page_token: Option<String> = None;
                 loop {
-                    let mut query = vec![
-                        ("q", children.as_str()),
-                        (
-                            "fields",
-                            "nextPageToken,files(id,name,mimeType,size,modifiedTime,shortcutDetails(targetId))",
-                        ),
-                        ("pageSize", "1000"),
-                        ("supportsAllDrives", "true"),
-                        ("includeItemsFromAllDrives", "true"),
-                    ];
-                    if let Some(drive) = drive {
-                        query.push(("corpora", "drive"));
-                        query.push(("driveId", drive));
-                    }
+                    let mut query = children_query(drive, &children);
+                    query.push((
+                        "fields",
+                        "nextPageToken,files(id,name,mimeType,size,modifiedTime,shortcutDetails(targetId))",
+                    ));
+                    query.push(("pageSize", "1000"));
                     if let Some(token) = &page_token {
                         query.push(("pageToken", token.as_str()));
                     }
-                    let response = self.get("/files", &query, None).await?;
+                    let response = self
+                        .request(Method::GET, "/files", &query, None, None)
+                        .await?;
                     let page: FilePage = api::json(response).await?;
                     google_listed_any |= !page.files.is_empty();
                     for file in page.files {
@@ -339,7 +513,13 @@ impl Provider for DriveProvider {
         let range = format!("bytes={offset}-{last}");
         let query = [("alt", "media"), ("supportsAllDrives", "true")];
         let mut response = self
-            .get(&format!("/files/{file}"), &query, Some(&range))
+            .request(
+                Method::GET,
+                &format!("/files/{file}"),
+                &query,
+                None,
+                Some(&range),
+            )
             .await?;
         // The range starts at or past the end of the file.
         if response.status() == StatusCode::RANGE_NOT_SATISFIABLE {
@@ -367,7 +547,9 @@ impl Provider for DriveProvider {
 
     async fn space(&self) -> Result<Space, VfsError> {
         let query = [("fields", "storageQuota(limit,usage)")];
-        let response = self.get("/about", &query, None).await?;
+        let response = self
+            .request(Method::GET, "/about", &query, None, None)
+            .await?;
         let quota = api::json::<About>(response).await?.storage_quota;
         let usage = quota.usage.and_then(|usage| usage.parse().ok());
         let usage: u64 = usage.unwrap_or(0);
@@ -383,5 +565,133 @@ impl Provider for DriveProvider {
             total: limit,
             free: limit.saturating_sub(usage),
         })
+    }
+
+    async fn create_folder(&self, parent: &ItemId, name: &str) -> Result<Item, VfsError> {
+        let (drive, parent_file) = destination(parent)?;
+        let query = [("count", "1"), ("space", "drive"), ("type", "files")];
+        let response = self
+            .request(Method::GET, "/files/generateIds", &query, None, None)
+            .await?;
+        let [id] = api::json::<api::GeneratedIds>(response).await?.ids;
+        let body = serde_json::json!({
+            "id": &id,
+            "name": name,
+            "mimeType": FOLDER_TYPE,
+            "parents": [parent_file],
+        });
+        let query = [("supportsAllDrives", "true"), ("fields", ITEM_FIELDS)];
+        // The same id goes out on every try, so a 409 means the folder was made and the answer was lost. Nobody else knows that id.
+        match self
+            .request(Method::POST, "/files", &query, Some(&body), None)
+            .await
+        {
+            // A folder's children are in the folder's own drive, as in a listing.
+            Ok(response) => Ok(item_from(drive, id, api::json(response).await?)),
+            Err(VfsError::Conflict) => self.item(&Place::File { drive, file: &id }.id()).await,
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn remove(&self, id: &ItemId, parent: &ItemId) -> Result<(), VfsError> {
+        let file = self.trashable(id, parent).await?;
+        self.trash(file).await
+    }
+
+    async fn rename(
+        &self,
+        id: &ItemId,
+        from: &ItemId,
+        to: &ItemId,
+        name: &str,
+        replace: Option<&ItemId>,
+    ) -> Result<Item, VfsError> {
+        let (file, opens) = changeable(id)?;
+        let (to_drive, to_file) = destination(to)?;
+        let Place::File {
+            drive: from_drive,
+            file: from_file,
+        } = place(from)
+        else {
+            return Err(VfsError::NotFound);
+        };
+        let found = self.held(id, from).await?;
+        let drive_name = match link_ending(&found.mime_type) {
+            // Drive stores a link file's name without the ending the mount adds. A name without that ending would not show back as the name asked for, and a duplicate's `Notes.document (2).html` is such a name.
+            Some(ending) => name.strip_suffix(&ending).ok_or(VfsError::NotSupported)?,
+            None => name,
+        };
+        if found.mime_type == FOLDER_TYPE && from != to {
+            if from_drive != to_drive {
+                // Google refuses to move a folder into a shared drive, and the items inside it would keep ids that still name the old drive.
+                return Err(VfsError::NotSupported);
+            }
+            // Google answers a move into the folder's own subtree with a 400 that looks like any other 400, so the folders above `to` are walked up to `from` or to the top.
+            let mut above = to_file.to_string();
+            while above != from_file {
+                if above == file {
+                    return Err(VfsError::NotSupported);
+                }
+                let query = [("fields", "id,parents"), ("supportsAllDrives", "true")];
+                let response = self
+                    .request(Method::GET, &format!("/files/{above}"), &query, None, None)
+                    .await?;
+                let Some(parent) = api::json::<FileParents>(response)
+                    .await?
+                    .parents
+                    .into_iter()
+                    .next()
+                else {
+                    break;
+                };
+                above = parent;
+            }
+        }
+        let replaced = match replace {
+            Some(replace) => Some(self.trashable(replace, to).await?),
+            None => None,
+        };
+        let mut query = vec![("supportsAllDrives", "true"), ("fields", ITEM_FIELDS)];
+        if from != to {
+            query.push(("addParents", to_file));
+            query.push(("removeParents", from_file));
+        }
+        let body = serde_json::json!({ "name": drive_name });
+        let sent: Result<DriveFile, VfsError> = async {
+            let path = format!("/files/{file}");
+            let response = self
+                .request(Method::PATCH, &path, &query, Some(&body), None)
+                .await?;
+            api::json(response).await
+        }
+        .await;
+        // A change Google applied can still come back as a failure: a server error, a dropped connection, or a resent move Google refuses because the item already has the new parent. The change counts when the item is already in `to` under the name that was sent.
+        let answer = match sent {
+            Ok(answer) => answer,
+            Err(error @ (VfsError::Other(_) | VfsError::Offline)) => {
+                let moved = match opens {
+                    Some(opens) => Place::Link {
+                        drive: to_drive,
+                        file,
+                        opens,
+                    },
+                    None => Place::File {
+                        drive: to_drive,
+                        file,
+                    },
+                };
+                match self.held(&moved.id(), to).await {
+                    Ok(found) if found.name == drive_name => found,
+                    _ => return Err(error),
+                }
+            }
+            Err(error) => return Err(error),
+        };
+        if let Some(replace_file) = replaced {
+            // The move is already done. A failed trash leaves both items, so the name is never left with none.
+            self.trash(replace_file).await?;
+        }
+        // A folder's children are in the folder's own drive, as in a listing.
+        Ok(item_from(to_drive, file.to_string(), answer))
     }
 }
