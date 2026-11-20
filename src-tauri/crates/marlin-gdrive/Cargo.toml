@@ -10,11 +10,12 @@ description = "Marlin's Google Drive provider for native mounts, and the saved G
 [dependencies]
 marlin-vfs = { path = "../marlin-vfs" }
 async-trait = "0.1"
-reqwest = { version = "0.13", features = ["query", "form", "json"] }
+reqwest = { version = "0.13", features = ["query", "form", "json", "stream"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
-tokio = { version = "1.50", features = ["time", "sync", "macros"] }
+tokio = { version = "1.50", features = ["time", "sync", "macros", "fs", "io-util"] }
+futures-util = "0.3"
 fastrand = "2"
 keyring = { version = "3.6.3", default-features = false, features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust", "vendored"] }
 dirs = "7.0"
@@ -23,7 +24,7 @@ dirs = "7.0"
 dotenvy = "0.15"
 
 [dev-dependencies]
-tokio = { version = "1.50", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.50", features = ["macros", "rt-multi-thread", "sync", "time", "net"] }
 wiremock = "0.6"
 tempfile = "3.27"
 marlin-test-keychain = { path = "../marlin-test-keychain" }

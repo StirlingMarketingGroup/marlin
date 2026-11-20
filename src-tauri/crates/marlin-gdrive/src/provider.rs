@@ -1,10 +1,12 @@
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use marlin_vfs::{Attributes, Item, ItemId, Kind, Provider, Space, VfsError};
+use marlin_vfs::{Attributes, Item, ItemId, Kind, Progress, Provider, Revision, Space, VfsError};
 use reqwest::{Method, StatusCode};
 
 use crate::api::{self, About, DriveFile, DrivePage, FilePage, FileParents, SharedDrive};
+use crate::upload::Upload;
 
 /// The id of the top of a mount. A Drive id never holds `/`, so neither made-up id can be a real one.
 const MOUNT_ROOT: &str = "/";
@@ -18,9 +20,11 @@ const MY_DRIVE: &str = "root";
 /// The MIME type of a Drive folder.
 const FOLDER_TYPE: &str = "application/vnd.google-apps.folder";
 
-/// The fields `item` and the change calls ask for: what an item is built from, plus `trashed` and `driveId` for their checks.
-const ITEM_FIELDS: &str =
-    "id,name,mimeType,size,modifiedTime,trashed,driveId,shortcutDetails(targetId)";
+/// The fields `item`, the change calls, and an upload's answer ask for: what an item is built from, plus `trashed` and `driveId` for their checks.
+///
+/// `headRevisionId` changes only when the bytes change. `version` also changes on a rename or a share, so it is not here.
+pub(crate) const ITEM_FIELDS: &str =
+    "id,name,mimeType,size,modifiedTime,headRevisionId,trashed,driveId,shortcutDetails(targetId)";
 
 /// Gives the provider an access token for one Google account.
 #[async_trait::async_trait]
@@ -38,6 +42,9 @@ pub struct Config {
     /// The API's base address, with no slash at the end.
     pub api: String,
 
+    /// The base address for uploads, with no slash at the end.
+    pub upload: String,
+
     /// The wait before the first retry. Each later retry waits twice as long as the one before.
     pub retry_delay: Duration,
 }
@@ -46,6 +53,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             api: "https://www.googleapis.com/drive/v3".to_string(),
+            upload: "https://www.googleapis.com/upload/drive/v3".to_string(),
             retry_delay: Duration::from_millis(500),
         }
     }
@@ -53,7 +61,7 @@ impl Default for Config {
 
 /// One Google account through the Drive API. It shows My Drive and the shared drives.
 ///
-/// It can make a folder, rename or move an item, and trash one. A mount stays read-only until the provider can also write bytes (#601), because `can_write` stays false.
+/// It can make a folder, rename or move an item, trash one, and write a file's bytes. `can_write` is true. A mount still takes writes only when it has a spool.
 pub struct DriveProvider {
     pub(crate) tokens: Arc<dyn AccessTokens>,
     pub(crate) config: Config,
@@ -191,12 +199,17 @@ fn item_from(drive: Option<&str>, id: String, file: DriveFile) -> Item {
     let modified = modified(file.modified_time.as_deref());
     let (place, ending) = shown(drive, &id, &file);
     let item_id = place.id();
-    let (kind, size) = match place {
-        _ if file.mime_type == FOLDER_TYPE => (Kind::Folder, 0),
-        Place::Link { opens, .. } => (Kind::File, link_page(opens).len() as u64),
+    // A folder has no bytes, and a link file's bytes are its page, which never changes, so neither has a revision.
+    let (kind, size, revision) = match place {
+        _ if file.mime_type == FOLDER_TYPE => (Kind::Folder, 0, None),
+        Place::Link { opens, .. } => (Kind::File, link_page(opens).len() as u64, None),
         _ => {
             let size = file.size.as_deref().and_then(|size| size.parse().ok());
-            (Kind::File, size.unwrap_or(0))
+            (
+                Kind::File,
+                size.unwrap_or(0),
+                file.head_revision_id.map(Revision),
+            )
         }
     };
     let name = match ending {
@@ -210,7 +223,7 @@ fn item_from(drive: Option<&str>, id: String, file: DriveFile) -> Item {
             kind,
             size,
             modified,
-            revision: None,
+            revision,
         },
     }
 }
@@ -298,8 +311,8 @@ impl DriveProvider {
     ///
     /// `NotFound` when Google has trashed it, moved it out of `folder`, or given it a drive or a type that would build a different id. My Drive's top is `root` in an id, while `parents` holds My Drive's real id, so that id is read at the same time and nothing is kept.
     async fn held(&self, id: &ItemId, folder: &ItemId) -> Result<DriveFile, VfsError> {
-        let (drive, file) = match place(id) {
-            Place::File { drive, file } | Place::Link { drive, file, .. } => (drive, file),
+        let drive = match place(id) {
+            Place::File { drive, .. } | Place::Link { drive, .. } => drive,
             Place::Top | Place::SharedDrives => return Err(VfsError::NotFound),
         };
         let folder_file = match place(folder) {
@@ -307,26 +320,16 @@ impl DriveProvider {
             _ => return Err(VfsError::NotFound),
         };
         let fields = format!("{ITEM_FIELDS},parents");
-        let query = [("fields", fields.as_str()), ("supportsAllDrives", "true")];
-        let path = format!("/files/{file}");
-        let asked = self.request(Method::GET, &path, &query, None, None);
-        let (response, parent_id) = if folder_file == MY_DRIVE {
+        let asked = self.file_of(id, &fields);
+        let (found, parent_id) = if folder_file == MY_DRIVE {
             let root_query = [("fields", "id")];
             let root = self.request(Method::GET, "/files/root", &root_query, None, None);
-            let (response, root) = tokio::try_join!(asked, root)?;
-            (response, api::json::<FileParents>(root).await?.id)
+            let (found, root) = tokio::try_join!(asked, root)?;
+            (found, api::json::<FileParents>(root).await?.id)
         } else {
             (asked.await?, folder_file.to_string())
         };
-        let found: DriveFile = api::json(response).await?;
-        if found.trashed || found.drive_id.as_deref() != drive {
-            return Err(VfsError::NotFound);
-        }
-        // The same rule as `item`: an answer that builds another id is not the item the core holds.
-        if shown(drive, file, &found).0.id() != *id {
-            return Err(VfsError::NotFound);
-        }
-        if !found.parents.contains(&parent_id) {
+        if found.drive_id.as_deref() != drive || !found.parents.contains(&parent_id) {
             return Err(VfsError::NotFound);
         }
         Ok(found)
@@ -378,6 +381,50 @@ impl DriveProvider {
         .await?;
         Ok(())
     }
+
+    /// One id from `files.generateIds`. The same id goes out on every try of the create, so a retry cannot make a second item.
+    async fn new_file_id(&self) -> Result<String, VfsError> {
+        let query = [("count", "1"), ("space", "drive"), ("type", "files")];
+        let response = self
+            .request(Method::GET, "/files/generateIds", &query, None, None)
+            .await?;
+        let [id] = api::json::<api::GeneratedIds>(response).await?.ids;
+        Ok(id)
+    }
+
+    /// The Drive file the core holds as `id`, as Google has it now, with `fields`. `NotFound` when Google has trashed it, or when its answer builds another id. Such an answer is not the item the core holds: a plain id whose file is now a Google Doc, or a link whose shortcut has another target. Its size would not be the size of the bytes `read` returns.
+    async fn file_of(&self, id: &ItemId, fields: &str) -> Result<DriveFile, VfsError> {
+        let (drive, file) = match place(id) {
+            Place::File { drive, file } | Place::Link { drive, file, .. } => (drive, file),
+            Place::Top | Place::SharedDrives => return Err(VfsError::NotFound),
+        };
+        let query = [("fields", fields), ("supportsAllDrives", "true")];
+        let response = self
+            .request(Method::GET, &format!("/files/{file}"), &query, None, None)
+            .await?;
+        let found: DriveFile = api::json(response).await?;
+        if found.trashed || shown(drive, file, &found).0.id() != *id {
+            return Err(VfsError::NotFound);
+        }
+        Ok(found)
+    }
+
+    /// The Drive file the core holds as `id`, once it is checked to still hold the bytes of revision `base`. Bytes based on another revision would overwrite a change the core never saw, so that is `Conflict`. A file with no revision is `NotSupported`, a folder `IsAFolder`, and a trashed or gone file `NotFound`.
+    pub(crate) async fn replaceable(
+        &self,
+        id: &ItemId,
+        base: &Revision,
+    ) -> Result<DriveFile, VfsError> {
+        let found = self.file_of(id, ITEM_FIELDS).await?;
+        if found.mime_type == FOLDER_TYPE {
+            return Err(VfsError::IsAFolder);
+        }
+        match &found.head_revision_id {
+            None => Err(VfsError::NotSupported),
+            Some(revision) if *revision == base.0 => Ok(found),
+            Some(_) => Err(VfsError::Conflict),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -403,24 +450,12 @@ impl Provider for DriveProvider {
             }
             Place::File { drive, file } | Place::Link { drive, file, .. } => (drive, file),
         };
-        let query = [("fields", ITEM_FIELDS), ("supportsAllDrives", "true")];
-        let response = self
-            .request(Method::GET, &format!("/files/{file}"), &query, None, None)
-            .await?;
-        let mut found: DriveFile = api::json(response).await?;
-        if found.trashed {
-            return Err(VfsError::NotFound);
-        }
+        let mut found = self.file_of(id, ITEM_FIELDS).await?;
         // The two folders at the top of a mount have the same names for every account, whatever Google calls My Drive.
         if file == MY_DRIVE {
             found.name = "My Drive".to_string();
         }
-        let item = item_from(drive, file.to_string(), found);
-        // The id says whether the core holds a plain item or a link, and which id the link opens. An answer that builds another id is not the item the core holds, and its size would not be the size of the bytes `read` returns.
-        if item.id != *id {
-            return Err(VfsError::NotFound);
-        }
-        Ok(item)
+        Ok(item_from(drive, file.to_string(), found))
     }
 
     async fn list(&self, folder: &ItemId) -> Result<Vec<Item>, VfsError> {
@@ -463,10 +498,9 @@ impl Provider for DriveProvider {
                 let mut page_token: Option<String> = None;
                 loop {
                     let mut query = children_query(drive, &children);
-                    query.push((
-                        "fields",
-                        "nextPageToken,files(id,name,mimeType,size,modifiedTime,shortcutDetails(targetId))",
-                    ));
+                    // The fields `item` asks for, so a listed item and an asked one are built from the same facts.
+                    let fields = format!("nextPageToken,files({ITEM_FIELDS})");
+                    query.push(("fields", &fields));
                     query.push(("pageSize", "1000"));
                     if let Some(token) = &page_token {
                         query.push(("pageToken", token.as_str()));
@@ -567,13 +601,13 @@ impl Provider for DriveProvider {
         })
     }
 
+    fn can_write(&self) -> bool {
+        true
+    }
+
     async fn create_folder(&self, parent: &ItemId, name: &str) -> Result<Item, VfsError> {
         let (drive, parent_file) = destination(parent)?;
-        let query = [("count", "1"), ("space", "drive"), ("type", "files")];
-        let response = self
-            .request(Method::GET, "/files/generateIds", &query, None, None)
-            .await?;
-        let [id] = api::json::<api::GeneratedIds>(response).await?.ids;
+        let id = self.new_file_id().await?;
         let body = serde_json::json!({
             "id": &id,
             "name": name,
@@ -693,5 +727,55 @@ impl Provider for DriveProvider {
         }
         // A folder's children are in the folder's own drive, as in a listing.
         Ok(item_from(to_drive, file.to_string(), answer))
+    }
+
+    async fn create_file(
+        &self,
+        parent: &ItemId,
+        name: &str,
+        from: &Path,
+        modified: SystemTime,
+        progress: &Progress,
+    ) -> Result<Item, VfsError> {
+        let (drive, parent_file) = destination(parent)?;
+        let id = self.new_file_id().await?;
+        let upload = Upload::Create {
+            id: &id,
+            name,
+            parent: parent_file,
+        };
+        let uploaded = self.upload(upload, from, modified, progress).await;
+        // Drive allows two files with one name, so a taken name is not a conflict. A 409 means this call's pre-made id already landed.
+        match uploaded {
+            Ok(file) => Ok(item_from(drive, id, file)),
+            Err(VfsError::Conflict) => self.item(&Place::File { drive, file: &id }.id()).await,
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn replace_bytes(
+        &self,
+        id: &ItemId,
+        from: &Path,
+        base: &Revision,
+        modified: SystemTime,
+        progress: &Progress,
+    ) -> Result<Item, VfsError> {
+        let (drive, file) = match place(id) {
+            // A link file has no bytes on Drive to replace.
+            Place::Link { .. } => return Err(VfsError::NotSupported),
+            Place::Top | Place::SharedDrives => return Err(VfsError::IsAFolder),
+            Place::File { drive, file } => (drive, file),
+        };
+        // A file that already changed costs no upload.
+        let found = self.replaceable(id, base).await?;
+        let upload = Upload::Replace {
+            file,
+            id,
+            base,
+            mime_type: &found.mime_type,
+        };
+        let answer = self.upload(upload, from, modified, progress).await?;
+        Ok(item_from(drive, file.to_string(), answer))
     }
 }

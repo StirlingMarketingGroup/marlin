@@ -244,6 +244,7 @@ async fn running_with(
         Arc::new(OsAdapter),
         Arc::new(LinkedProviders::new(
             marlin_gdrive::Config {
+                upload: format!("{api}/upload"),
                 api,
                 retry_delay: Duration::from_millis(1),
             },
