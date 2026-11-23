@@ -10,7 +10,7 @@ rust-version = "1.92"
 default-run = "marlin"
 
 [workspace]
-members = ["crates/marlin-smb", "crates/marlin-smb-client", "crates/marlin-vfs", "crates/marlin-mount", "crates/marlin-mount-client", "crates/marlin-fuse", "crates/marlin-gdrive", "crates/marlin-sftp", "crates/marlin-test-keychain"]
+members = ["crates/marlin-smb", "crates/marlin-smb-client", "crates/marlin-vfs", "crates/marlin-mount", "crates/marlin-mount-client", "crates/marlin-fuse", "crates/marlin-gdrive", "crates/marlin-sftp", "crates/marlin-test-keychain", "crates/marlin-test-samba"]
 
 [features]
 default = []

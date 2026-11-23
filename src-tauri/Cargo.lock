@@ -4318,9 +4318,11 @@ name = "marlin-smb"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "libc",
  "marlin-smb-client",
- "once_cell",
+ "marlin-test-samba",
  "pavao",
+ "serde",
  "serde_json",
 ]
 
@@ -4328,6 +4330,7 @@ dependencies = [
 name = "marlin-smb-client"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
  "dirs",
  "keyring",
  "libc",
@@ -4344,6 +4347,14 @@ version = "0.1.0"
 dependencies = [
  "keyring",
  "once_cell",
+]
+
+[[package]]
+name = "marlin-test-samba"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "tempfile",
 ]
 
 [[package]]
