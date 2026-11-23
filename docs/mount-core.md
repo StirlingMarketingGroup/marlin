@@ -48,7 +48,7 @@ When a file's bytes change, its modified time or its size must change too. An ad
 
 The text of a `VfsError::Other` holds no secret and no file name. The mount helper logs it.
 
-An `ItemId` should stay with an item when the remote renames or moves it. Google Drive's file ID does. A provider that only has paths, such as SFTP, uses the path, and a rename that another client makes there looks like one item removed and another added. For this mount's own rename, see "A rename that changes the item's ID" below.
+An `ItemId` should stay with an item when the remote renames or moves it. Google Drive's file ID does. A provider that only has paths, such as [SFTP](mount-sftp.md), uses the path, and a rename that another client makes there looks like one item removed and another added. For this mount's own rename, see "A rename that changes the item's ID" below.
 
 ## What an adapter calls
 

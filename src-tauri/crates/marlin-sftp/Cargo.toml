@@ -5,7 +5,7 @@ edition = "2021"
 license = "MIT"
 publish = false
 rust-version = "1.89"
-description = "Marlin's saved SFTP servers, their host key check, and the connection."
+description = "Marlin's saved SFTP servers, their host key check, the connection, and the read-only provider for mounts."
 
 [dependencies]
 russh = "0.61"
@@ -14,7 +14,11 @@ keyring = { version = "3.6.3", default-features = false, features = ["apple-nati
 dirs = "7.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tokio = { version = "1.50", features = ["time"] }
+tokio = { version = "1.50", features = ["time", "sync", "rt", "macros", "io-util"] }
+marlin-vfs = { path = "../marlin-vfs" }
+async-trait = "0.1"
+futures-util = "0.3"
+tokio-util = "0.7"
 
 [dev-dependencies]
 tokio = { version = "1.50", features = ["macros", "rt-multi-thread", "net"] }
