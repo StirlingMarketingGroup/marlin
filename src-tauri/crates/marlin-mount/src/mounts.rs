@@ -683,7 +683,7 @@ impl Mounts {
         Some(unsent_files(&key, attempt, &vfs))
     }
 
-    /// Sends a failed file now. A node with no unsent bytes, or a mount id that is not this mount's, is [`MountError::NotUnsent`].
+    /// Sends a failed or refused file now. A node with no unsent bytes, or a mount id that is not this mount's, is [`MountError::NotUnsent`].
     pub fn retry_unsent(
         &self,
         provider: &str,
@@ -739,7 +739,7 @@ impl Mounts {
         Ok((guard, Arc::clone(&writes.vfs)))
     }
 
-    /// Waits until no unsent file of `vfs` is waiting or uploading, or until `hurry`. A failed file and an open file do not hold it: a failed one waits for its retry, and nothing can close an open one after the unmount.
+    /// Waits until no unsent file of `vfs` is waiting or uploading, or until `hurry`. A failed, a refused, and an open file do not hold it: a failed one waits for its retry, a refused one waits to be asked, and nothing can close an open one after the unmount.
     async fn finish_uploads(&self, vfs: &Vfs) {
         let mut hurry = self.hurry.subscribe();
         loop {
@@ -971,6 +971,9 @@ fn unsent_files(key: &Key, attempt: Uuid, vfs: &Vfs) -> UnsentFiles {
                     marlin_vfs::UnsentState::Waiting => UnsentState::Waiting,
                     marlin_vfs::UnsentState::Uploading { sent } => UnsentState::Uploading { sent },
                     marlin_vfs::UnsentState::Failed(error) => UnsentState::Failed {
+                        error: redact(&error.to_string()),
+                    },
+                    marlin_vfs::UnsentState::Refused(error) => UnsentState::Refused {
                         error: redact(&error.to_string()),
                     },
                 },

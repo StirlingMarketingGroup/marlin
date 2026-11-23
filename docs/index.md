@@ -36,6 +36,7 @@ Start here. Each line says what a page answers. The rules for keeping these page
 | [0005: Mount writes](decisions/0005-mount-writes.md)                                   | How a mount takes writes: what goes to the remote at once, what waits in the local spool, and what `close`, `fsync`, a conflict, and a crash mean. |
 | [0006: SMB mounts](decisions/0006-smb-mounts.md)                                       | What an SMB mount is and what it is named, who starts `marlin-smb` for it, how many processes it runs, and where it gets the password.             |
 | [0007: Permanent delete](decisions/0007-permanent-delete.md)                           | How a permanent delete runs on four threads without following a link or emptying another drive inside it, and why no native tool is used.          |
+| [0008: Read-only files](decisions/0008-read-only-files.md)                             | How a mount shows a file the account may not change, what the core refuses, and why an upload the remote refuses stops and waits for the user.     |
 
 ## Frozen history
 

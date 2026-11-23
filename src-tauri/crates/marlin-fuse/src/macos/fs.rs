@@ -15,7 +15,7 @@ use super::Life;
 /// The core keeps no parent for a node. libfuse uses this inode (`FUSE_UNKNOWN_INO`) when a filesystem does not know an entry's inode.
 const UNKNOWN_INODE: u64 = 0xffff_ffff;
 
-/// Serves one `Vfs`. A callback that may reach the provider answers from a tokio task, so a slow call never holds up the session thread. `forget`, `opendir`, `readdir` past offset 0, and the two releases answer in place. They touch the core's own state, and the last writer's release also writes the file's small spool record, with no sync. `flush` is left out: every write is in the spool before it answers, and macFUSE closes fine without it. `mknod` is left out because FSKit uses `create`. `fsyncdir` and `access` are left out. The xattr calls are left out: macFUSE then keeps extended attributes in `._name` files, which the core keeps on this computer, and answering `ENOTSUP` does not stop those files. `readlink` is left out: a mount shows no symbolic links.
+/// Serves one `Vfs`. A callback that may reach the provider answers from a tokio task, so a slow call never holds up the session thread. `forget`, `opendir`, `readdir` past offset 0, and the two releases answer in place. They touch the core's own state, and the last writer's release also writes the file's small spool record, with no sync. `flush` is left out: every write is in the spool before it answers, and macFUSE closes fine without it. `mknod` is left out because FSKit uses `create`. `fsyncdir` is left out. `access` is left out: macOS asks it for `W_OK` before it renames or removes a file too, so an answer from the mode would stop a rename or a trash of a read-only file. The xattr calls are left out: macFUSE then keeps extended attributes in `._name` files, which the core keeps on this computer, and answering `ENOTSUP` does not stop those files. `readlink` is left out: a mount shows no symbolic links.
 pub(super) struct Fs {
     pub(super) vfs: Arc<Vfs>,
     pub(super) runtime: tokio::runtime::Handle,
@@ -715,7 +715,7 @@ impl Shown {
     fn stat(self, node: NodeId, attributes: &Attributes) -> libc::stat {
         // SAFETY: stat is plain numbers. Zero is a valid value for the fields this filesystem does not use.
         let mut st: libc::stat = unsafe { std::mem::zeroed() };
-        let (perm, nlink) = crate::mode_and_links(attributes.kind, self.writable);
+        let (perm, nlink) = self.mode_and_links(attributes);
         let (sec, nsec) = to_timespec(attributes.modified);
         st.st_ino = node.0;
         st.st_mode = match attributes.kind {
@@ -756,6 +756,7 @@ mod tests {
             size,
             modified: UNIX_EPOCH + Duration::from_secs(9),
             revision: None,
+            read_only: false,
         }
     }
 
@@ -790,6 +791,12 @@ mod tests {
                 .st_mode
                 & 0o777,
             0o600
+        );
+        let mut read_only = attributes(Kind::File, 1000);
+        read_only.read_only = true;
+        assert_eq!(
+            shown(true).stat(NodeId(7), &read_only).st_mode & 0o777,
+            0o400
         );
     }
 

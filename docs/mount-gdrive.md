@@ -5,7 +5,7 @@
 This is not the code behind `gdrive://` paths. The app handles those through its own location provider: see [Location providers](location-providers.md).
 
 **Covers:** `src-tauri/crates/marlin-gdrive/`
-**Checked against the code:** 2026-11-20
+**Checked against the code:** 2026-11-23
 
 ## The parts
 
@@ -40,6 +40,7 @@ The provider does not sign in, read a keychain, or know about the helper. A call
 - **A Google Doc, Sheet, Slides file, or other Google editor file is a link file, and so is a shortcut.** See [Link files](#link-files).
 - A name is the name Google gives. A link file's name has two more parts. Drive allows two files with one name in a folder, and any character in a name. The core makes the names unique and safe: see [Mount core](mount-core.md).
 - A file in the trash is not listed.
+- **A file the account may not change shows as read-only.** Every request that builds an item asks Google for `capabilities.canModifyContent`. A file is read-only when it is false, so a file shared with the account to view or comment shows without write permission. A link file is always read-only. A folder never is (#639). See [decision 0008](decisions/0008-read-only-files.md).
 
 ## Link files
 
@@ -69,6 +70,7 @@ Some Drive items have no bytes to read: Google Docs, Sheets, Slides, Forms, and 
 - **The modified time** is the item's own, as for any file.
 - **A shortcut is never followed.** The provider does not ask Google about the target. A shortcut whose target is gone, or is not shared with the account, lists like any other, and its page leads to Google's error page. A shortcut to a folder is a file, so no folder is reachable through two parents.
 - **A link file is a file.** Listing one returns `NotAFolder` and sends no request.
+- **A link file is read-only.** It has no bytes on Drive to replace. The mount shows it without write permission, and opening it for write fails with `EACCES`.
 - **Remove trashes the Drive file the link is.** A Google Doc is trashed. A shortcut is trashed. The shortcut's target is a different file, and it is left as it is.
 - **Rename keeps the ending.** `Notes.document.html` can become `Plan.document.html`, and Drive stores `Plan`. A name that drops the ending, such as `Notes.txt`, is `NotSupported`, and no change is sent. The provider does not turn a Google Doc into another kind of file. A duplicate link file is a known limit: see [The three change calls](#the-three-change-calls).
 
@@ -162,10 +164,10 @@ A link file as the parent of `create_folder`, or as `to`, is `NotAFolder`.
 
 `create_file` and `replace_bytes`. Both upload through a resumable session, and open a new one when Google ends it or limits requests (`src/upload.rs`).
 
-| Call            | Requests                                                                                                                                                                             |
-| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `create_file`   | `files.generateIds` for one id. `POST {upload}/files?uploadType=resumable` with the id, the name, the parent, and `modifiedTime`. Then `PUT`s of the bytes.                          |
-| `replace_bytes` | `files.get` to check the revision. `PATCH {upload}/files/{id}?uploadType=resumable` with `modifiedTime` and the file's `mimeType`. Then `PUT`s, with the same check before the last. |
+| Call            | Requests                                                                                                                                                                                                                      |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `create_file`   | `files.generateIds` for one id. `POST {upload}/files?uploadType=resumable` with the id, the name, the parent, and `modifiedTime`. Then `PUT`s of the bytes.                                                                   |
+| `replace_bytes` | `files.get` to check the revision and that the account may change the file. `PATCH {upload}/files/{id}?uploadType=resumable` with `modifiedTime` and the file's `mimeType`. Then `PUT`s, with the same check before the last. |
 
 **A file's revision is `headRevisionId`.** Drive changes it only when the bytes change. `version` also changes on a rename or a share, so it is not used. A folder has no revision, and neither has a link file.
 
@@ -202,14 +204,14 @@ The fourth failure in a row ends the call. Only bytes past the most Google has h
 
 **A 409 means this call's file already landed.** Google sends it only when the pre-made id is in use. `create_file` then returns `files.get` of that id, as `create_folder` does. The id lives for one call: a later call of the core gets a new one (#632). Drive allows two files with one name, so a taken name is never `Conflict`. On a replace's session a 409 is `Conflict`, as from `request`.
 
-**What a call refuses before it opens a session.** `replace_bytes` learns the kind and the revision from the `files.get` of its check. The others send nothing.
+**What a call refuses before it opens a session.** `replace_bytes` learns the kind, the revision, and whether the account may change the file from the `files.get` of its check. The others send nothing.
 
-| Call            | `/`, `Shared drives` | A link file    | A folder    | A file with no revision |
-| --------------- | -------------------- | -------------- | ----------- | ----------------------- |
-| `create_file`   | `AccessDenied`       | `NotAFolder`   | Allowed     |                         |
-| `replace_bytes` | `IsAFolder`          | `NotSupported` | `IsAFolder` | `NotSupported`          |
+| Call            | `/`, `Shared drives` | A link file    | A folder    | A file the account may only view | A file with no revision |
+| --------------- | -------------------- | -------------- | ----------- | -------------------------------- | ----------------------- |
+| `create_file`   | `AccessDenied`       | `NotAFolder`   | Allowed     |                                  |                         |
+| `replace_bytes` | `IsAFolder`          | `NotSupported` | `IsAFolder` | `AccessDenied`                   | `NotSupported`          |
 
-A link file has no bytes on Drive to replace. A mount still shows it, and a file the account may only view, as writable (#631).
+A link file has no bytes on Drive to replace. The mount shows it, and a file the account may only view, as read-only, so the core refuses a write to either before anything is spooled. The core stops an upload that one of these refusals ends: see [Mount core](mount-core.md#rules-the-core-keeps).
 
 ## Errors and retries
 
@@ -336,6 +338,7 @@ The [mount core](mount-core.md) runs at most 16 provider calls at once and ends 
 - **A real shortcut carries its target, in a listing and in `files.get`.** The ID of a shortcut held a target that is not the shortcut itself. `item` of a Google Sheet and of that shortcut each returned the line from the listing.
 - **A link file opens its item in the browser.** The helper mounted the account on macOS through macFUSE. The top of My Drive showed the same 150 entries, 88 of them link files. One Google Doc's link file had the same size from `stat` as the bytes read, and Firefox showed the Doc within two seconds of opening it. The page for a public Google Sheet, in a normal folder, opened the Sheet the same way.
 - **One request takes a quarter to half a second.** In six runs, a listing of 150 items took 287 to 512 ms, and a read of 14 KiB took 254 to 528 ms.
+- **Google accepts `capabilities(canModifyContent)`, in a listing and in `files.get`.** A run on 2026-11-23 listed 151 items at the top of My Drive. All 88 link files were read-only, and 1 of the other 63 items was a file the account may not change.
 
 `tests/live_changes.rs` is a manual test of the three change calls. It changes the account: it makes a folder `Marlin live test {time}` at the top of My Drive, works inside it, moves one folder to the top of My Drive and back, and trashes the test folder at the end. It never touches a shared drive. Its header has the command. It ran on 2026-11-20 against the same account:
 
@@ -384,5 +387,6 @@ Every automated test runs against the fake server, so these still rest on Google
 - The change-call tests cover creating a folder, trashing, renaming, moving, the refusals, a resent create, and a move whose answer was lost. They check the request, not only the result.
 - The byte-call tests cover a new file, a replacement, the pieces, a resume from an even and an uneven offset, a dropped connection, a body cut off after a finished upload, a lost session, the revision check before a first send and a resend of the last request, and the refusals. The tests of a dropped connection, a cut-off answer, and a local file cut during an upload serve the session from a small HTTP server in the test, because wiremock cannot drop a connection partway through a body. They check the request, not only the result.
 - One test checks that the five read calls send only GET.
+- The listing test checks the read-only mark of a file the account may only view, a file it owns, a file with no `capabilities`, a folder, and a link file. The `item` test checks a view-only file and an owned one. A replace of a view-only file opens no upload session.
 - The helper's tests mount this provider through FUSE against a fake Google: see [Mount helper](mount-helper.md#testing).
 - `tests/live.rs`, `tests/live_changes.rs`, and `tests/live_uploads.rs` are marked `#[ignore]`. Never run this crate's tests with `--ignored` or `--include-ignored`: that runs all three, and `live_changes.rs` and `live_uploads.rs` change the account. To run one, use the command in its header.

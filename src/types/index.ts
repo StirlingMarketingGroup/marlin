@@ -413,7 +413,8 @@ export type UnsentFileState =
   | { state: 'open' }
   | { state: 'waiting' }
   | { state: 'uploading'; sent: number }
-  | { state: 'failed'; error: string };
+  | { state: 'failed'; error: string }
+  | { state: 'refused'; error: string };
 
 export type UnsentFile = { node: number; name: string; size: number } & UnsentFileState;
 

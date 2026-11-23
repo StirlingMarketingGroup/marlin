@@ -1212,6 +1212,14 @@ fn unsent_call(account: &str, mount_id: &str, node: u64) -> Value {
     json!({"provider": "memory", "account": account, "mountId": mount_id, "node": node})
 }
 
+fn refused_access(params: &Value) -> bool {
+    params["files"].as_array().is_some_and(|files| {
+        files
+            .iter()
+            .any(|file| file["state"] == "refused" && file["error"] == "access denied")
+    })
+}
+
 fn failed_offline(params: &Value) -> bool {
     params["files"].as_array().is_some_and(|files| {
         files
@@ -1309,6 +1317,33 @@ async fn a_failed_upload_is_reported_and_a_retry_sends_it() {
         stored(&provider(&harness, "ana"), "a.txt").await.unwrap(),
         b"hello"
     );
+}
+
+#[tokio::test]
+async fn a_refused_upload_is_reported_and_a_retry_sends_it() {
+    let harness = start();
+    let mut client = Client::connect(&harness.socket).await;
+    let mut watcher = Client::connect(&harness.socket).await;
+    client.call("mount", mount("ana", "drive")).await;
+    let vfs = harness.fake.vfs.lock().unwrap()["drive"].clone();
+    let (entry, handle) = vfs.create(Vfs::ROOT, "a.txt", Access::Write).await.unwrap();
+    fail(&harness, "ana", Some(VfsError::AccessDenied));
+    vfs.write(handle, 0, b"hello".to_vec()).await.unwrap();
+    vfs.release(handle);
+    vfs.forget(entry.node, 1);
+    let reported = watcher.unsent(refused_access).await;
+    let remote = provider(&harness, "ana");
+    fail(&harness, "ana", None);
+    let node = reported["files"][0]["node"].as_u64().unwrap();
+    let mount_id = reported["mountId"].as_str().unwrap();
+    let retry = client
+        .call("retryUnsent", unsent_call("ana", mount_id, node))
+        .await;
+    assert!(retry["error"].is_null());
+    tokio::time::timeout(Duration::from_secs(3), watcher.unsent(no_files))
+        .await
+        .expect("the retry did not send the file");
+    assert_eq!(stored(&remote, "a.txt").await.unwrap(), b"hello");
 }
 
 #[tokio::test]

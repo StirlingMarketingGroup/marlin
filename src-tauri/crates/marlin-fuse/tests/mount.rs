@@ -646,6 +646,7 @@ impl CountingFile {
                 size: inner.0.len() as u64,
                 modified: inner.1,
                 revision: None,
+                read_only: false,
             },
         }
     }
@@ -667,6 +668,7 @@ impl Provider for CountingFile {
                     size: 0,
                     modified: UNIX_EPOCH,
                     revision: None,
+                    read_only: false,
                 },
             });
         }
@@ -794,6 +796,7 @@ impl Provider for HeldRead {
                     size: 0,
                     modified: std::time::UNIX_EPOCH,
                     revision: None,
+                    read_only: false,
                 },
             });
         }
@@ -806,6 +809,7 @@ impl Provider for HeldRead {
                     size: self.bytes.len() as u64,
                     modified: std::time::UNIX_EPOCH,
                     revision: None,
+                    read_only: false,
                 },
             });
         }
@@ -1187,6 +1191,88 @@ async fn dd_into_the_middle_changes_only_those_bytes() {
     assert_eq!(read_file(&point.join("data.bin")).await.unwrap(), expect);
     wait_for_uploads(&vfs).await;
     assert_eq!(provider.contents(&id), expect);
+
+    mount.unmount().await.unwrap();
+}
+
+#[ignore = "mounts for real: run crates/marlin-fuse/test-in-docker.sh on Linux, crates/marlin-fuse/test-on-mac.sh on a Mac"]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_the_account_may_not_change_shows_read_only() {
+    let provider = Arc::new(MemoryProvider::new());
+    let mine_id = provider.add_file(&provider.root(), "mine.txt", b"mine");
+    let theirs_id = provider.add_file(&provider.root(), "theirs.txt", b"theirs");
+    provider.set_read_only(&theirs_id, true);
+    let gone_id = provider.add_file(&provider.root(), "gone.txt", b"gone");
+    provider.set_read_only(&gone_id, true);
+    let (vfs, _spool) = spooled_vfs(
+        Arc::clone(&provider),
+        1024 * 1024 * 1024,
+        Options::default(),
+    );
+    let (_dir, point) = empty_dir();
+    let mut mount = marlin_fuse::mount(vfs.clone(), &point).await.unwrap();
+
+    let mine = point.join("mine.txt");
+    let at = point.clone();
+    // The new file stays open, so its upload waits and the rename meets a file that is only in the spool.
+    let (modes, asked, open, rename, kept, moved, removed, writing) =
+        tokio::task::spawn_blocking(move || {
+            let mode = |name: &str| std::fs::metadata(at.join(name)).unwrap().mode() & 0o777;
+            let modes = [mode("mine.txt"), mode("theirs.txt")];
+            // What an app that asks before it saves hears, as Cocoa's `isWritableFileAtPath` asks.
+            let path = CString::new(at.join("theirs.txt").into_os_string().into_vec()).unwrap();
+            // SAFETY: `path` is a valid C string that lives through the call.
+            let asked = (unsafe { libc::access(path.as_ptr(), libc::W_OK) } == -1)
+                .then(|| std::io::Error::last_os_error().raw_os_error())
+                .flatten();
+            let open = os_code(OpenOptions::new().write(true).open(at.join("theirs.txt")));
+            let writing = std::fs::File::create(at.join("tmp.txt")).unwrap();
+            writing.write_at(b"new", 0).unwrap();
+            let rename = os_code(std::fs::rename(at.join("tmp.txt"), at.join("theirs.txt")));
+            let kept = std::fs::read(at.join("theirs.txt")).unwrap();
+            // The mark is about the file's bytes. Its name still changes, as a link file's does.
+            let moved = os_code(std::fs::rename(at.join("theirs.txt"), at.join("kept.txt")));
+            let removed = os_code(std::fs::remove_file(at.join("gone.txt")));
+            (modes, asked, open, rename, kept, moved, removed, writing)
+        })
+        .await
+        .unwrap();
+    assert_eq!(modes, [0o600, 0o400]);
+    // macOS does not check the mode on this mount, and the adapter leaves `access` unanswered (see `Fs` in `macos/fs.rs`). An app that asks first finds out when its open fails.
+    let refused_by_access = cfg!(target_os = "linux").then_some(libc::EACCES);
+    assert_eq!(asked, refused_by_access);
+    assert_eq!(open, Some(libc::EACCES));
+    assert_eq!(rename, Some(libc::EACCES));
+    assert_eq!(kept, b"theirs");
+    assert_eq!(moved, None);
+    assert_eq!(removed, None);
+    // macOS writes a `._name` file beside each new file, and those stay on this computer.
+    let listed: Vec<String> = names(&point)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|name| !marlin_fuse::stays_local(name))
+        .collect();
+    assert_eq!(listed, ["kept.txt", "mine.txt", "tmp.txt"]);
+    // Nothing was spooled for the two refusals.
+    let unsent: Vec<String> = vfs
+        .unsent()
+        .into_iter()
+        .map(|file| file.name)
+        .filter(|name| !marlin_fuse::stays_local(name))
+        .collect();
+    assert_eq!(unsent, ["tmp.txt"]);
+    tokio::task::spawn_blocking(move || drop(writing))
+        .await
+        .unwrap();
+
+    sh(&format!("printf changed > {}", shell(&mine))).await;
+    wait_for_uploads(&vfs).await;
+    assert_eq!(provider.contents(&mine_id), b"changed");
+    let files = remote_files(&provider).await;
+    assert_eq!(files.get("kept.txt"), Some(&Some(b"theirs".to_vec())));
+    assert_eq!(files.get("tmp.txt"), Some(&Some(b"new".to_vec())));
+    assert!(!files.contains_key("gone.txt"));
 
     mount.unmount().await.unwrap();
 }

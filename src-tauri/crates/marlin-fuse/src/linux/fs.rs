@@ -460,7 +460,7 @@ fn fill_dir(
 
 impl Shown {
     fn file_attr(self, node: NodeId, attributes: &Attributes) -> FileAttr {
-        let (perm, nlink) = crate::mode_and_links(attributes.kind, self.writable);
+        let (perm, nlink) = self.mode_and_links(attributes);
         let kind = match attributes.kind {
             Kind::Folder => FileType::Directory,
             Kind::File => FileType::RegularFile,
@@ -497,6 +497,7 @@ mod tests {
             size,
             modified: UNIX_EPOCH + Duration::from_secs(9),
             revision: None,
+            read_only: false,
         }
     }
 
@@ -529,6 +530,9 @@ mod tests {
                 .perm,
             0o600
         );
+        let mut read_only = attributes(Kind::File, 1000);
+        read_only.read_only = true;
+        assert_eq!(shown(true).file_attr(NodeId(7), &read_only).perm, 0o400);
     }
 
     #[test]

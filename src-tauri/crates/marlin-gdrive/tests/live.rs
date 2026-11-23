@@ -46,6 +46,16 @@ async fn a_real_account_lists_and_reads() {
 
     // A link file has `#` in its id. A read of one sends Google nothing, and its name ends with the type and `.html`.
     let (links, plain): (Vec<_>, Vec<_>) = items.iter().partition(|item| item.id.0.contains('#'));
+    assert!(links.iter().all(|link| link.attributes.read_only));
+    // A folder is never read-only, so this counts files the account may only view.
+    println!(
+        "read-only among the other items at the top of My Drive: {} of {}",
+        plain
+            .iter()
+            .filter(|item| item.attributes.read_only)
+            .count(),
+        plain.len()
+    );
 
     match plain
         .iter()
