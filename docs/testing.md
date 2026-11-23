@@ -1,6 +1,6 @@
 # Testing
 
-Marlin has static checks and fourteen test suites. CI runs the static checks, the unit tests, the end-to-end tests, and the Rust tests that need no mount, server, or account. It does not run the real-app tests, the tests that mount for real, or the tests that need samba, a server, or an account, so run those yourself when you change that code.
+Marlin has static checks and fourteen test suites. CI runs the static checks, the unit tests, the end-to-end tests, the real-app tests on Linux, and the Rust tests that need no mount, server, or account. It does not run the real-app tests on macOS, the tests that mount for real, or the tests that need samba, a server, or an account, so run those yourself when you change that code.
 
 **Covers:** `package.json` (the test scripts), `vitest.config.ts`, `src/test-setup.ts`, `playwright.config.ts`, `e2e/`, `vitest.app.config.ts`, `app-tests/`, `.github/workflows/check.yml`, `.husky/pre-push`, `src-tauri/tests/`, `src-tauri/crates/marlin-smb/tests/`, `src-tauri/crates/marlin-smb/test-in-docker.sh`, `src-tauri/crates/marlin-smb-client/`, `src-tauri/crates/marlin-vfs/tests/`, `src-tauri/crates/marlin-gdrive/tests/`, `src-tauri/crates/marlin-sftp/`, `src-tauri/crates/marlin-test-keychain/`, `src-tauri/crates/marlin-test-samba/`, `src-tauri/crates/marlin-mount/tests/`, `src-tauri/crates/marlin-mount/test-sweep.sh`, `src-tauri/crates/marlin-fuse/tests/`, `src-tauri/crates/marlin-fuse/test-in-docker.sh`, `src-tauri/crates/marlin-fuse/test-on-mac.sh`
 **Checked against the code:** 2026-11-23
@@ -12,7 +12,7 @@ Marlin has static checks and fourteen test suites. CI runs the static checks, th
 | Static checks        | `npm run check`                          | ESLint, Prettier, `tsc`, `cargo check`                          | yes        | nothing                             |
 | Unit                 | `npm run test:run` (`npm test` to watch) | Vitest, Testing Library, jsdom                                  | yes        | nothing                             |
 | End-to-end           | `npm run test:e2e`                       | Playwright, Chromium                                            | yes        | nothing; it starts Vite itself      |
-| Real app             | `npm run test:app`                       | Vitest, WebdriverIO, the app's own WebDriver server             | no         | a Rust toolchain; a display; `sshd` |
+| Real app             | `npm run test:app`                       | Vitest, WebdriverIO, the app's own WebDriver server             | Linux      | a Rust toolchain; a display; `sshd` |
 | Rust                 | `npm run test:rust`                      | `cargo test`                                                    | yes        | a Rust toolchain                    |
 | Mount core           | `npm run test:rust`                      | `cargo test`                                                    | yes        | a Rust toolchain                    |
 | Drive mount provider | `npm run test:rust`                      | `cargo test`                                                    | yes        | a Rust toolchain                    |
@@ -30,6 +30,8 @@ Marlin has static checks and fourteen test suites. CI runs the static checks, th
 CI also runs `npm run check:licenses`, which is not part of `npm run check`: see [Licenses](licenses.md#the-check).
 
 CI skips a job's steps when the files they cover did not change (`check.yml` uses path filters). The Rust tests have a narrower filter than the static checks: see [Rust tests](#rust-tests).
+
+**Each runner keeps its own Rust build folder,** `~/.cache/cargo-target/<runner name>/marlin-check`, so a warm run builds only what changed. The lint job and the real-app job both use it. It is per runner, not per machine, for two reasons. Cargo judges a workspace crate fresh by file times, so a folder shared by two checkouts can hand one PR's build of a crate to another PR. And a runner runs one job at a time, so no other job can relink the app between its build and its tests. Each job deletes the folder when it holds more than 25 GB, because old builds pile up with each toolchain or dependency change. Every Rust build in `check.yml` runs with `RUSTFLAGS=-D warnings` and `CARGO_PROFILE_DEV_DEBUG=line-tables-only`, so the two jobs share compiled crates, and a panic still names its file and line at a fraction of the disk.
 
 ## Unit tests
 
@@ -60,7 +62,8 @@ These start the real app and drive its window: click, type, read the page, take 
 - **A wait for a changed file needs a long timeout on macOS. A wait for a new, renamed, or removed one does not.** On a busy Mac, the event for changed bytes in an existing file can come minutes late. An added, removed, or renamed entry shows in about a second (see "A watched folder on macOS has two sources" in [Architecture](architecture.md)). `directory-watcher.test.ts` waits 10 seconds for each change. On Linux every event comes at once.
 - **On Linux, run `app-tests/test-in-docker.sh`.** It runs the same command in a container with a virtual display. Use it for a change whose Linux behavior a Mac cannot show, like the folder watcher.
 - **What it cannot reach:** the app menu, the native context menu, a drag out of the window, and system dialogs. WebDriver sees the page only. A test that mounts an account is also out for now: the mount helper is its own process and uses the real keychain (#580).
-- **CI does not run it yet** (#578).
+- **CI runs it on Linux,** in the `app-tests` job of `check.yml`, under Xvfb (`xvfb-run -a`), when a file that goes into the test build or the harness changes (the `app` path filter). A failing test fails the job, and the job stops after 30 minutes. It points `src-tauri/target/app-test` at the runner's build folder (see above), so the build stays warm. It builds with `-D warnings`. `npm run check` never compiles the code behind the `app-test` feature, so this job is the one check that fails on a warning there.
+- **CI does not run it on macOS.** No Mac is among the self-hosted runners, and a GitHub-hosted Mac starts empty, so every run would be a cold build of about 8 GB. On a busy Mac an event for changed bytes can also come minutes late (see the bullet on waits above), which would make a CI check flaky. Run it on a Mac yourself when a change can only be seen in the running app (`AGENTS.md`, "Before you call work done").
 
 **An agent checks its own work with this suite.** When a change can only be seen in the running app, write a test for it in `app-tests/`, run it, and keep the test in the branch. For a one-off look, write a throwaway test that saves a screenshot, read the picture, and delete the test.
 

@@ -9,6 +9,13 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Every Rust build in this workflow uses the same flags, so the lint job and the
+  # real-app tests reuse each other's compiled crates in a runner's build folder.
+  RUSTFLAGS: '-D warnings'
+  # File and line in a panic's backtrace, at a fraction of the disk of full debug info.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
 jobs:
   lint-typecheck-rust:
     runs-on: [self-hosted, medium]
@@ -18,10 +25,17 @@ jobs:
           fetch-depth: 0
 
       - name: Setup persistent cargo target dir
-        run: |
-          # Use persistent target dir outside workspace so it survives between different repo checkouts
-          echo "CARGO_TARGET_DIR=$HOME/.cache/cargo-target/marlin-check" >> $GITHUB_ENV
-          mkdir -p "$HOME/.cache/cargo-target/marlin-check"
+        run: &cargo-target-dir |
+          # One folder per runner. Cargo judges a workspace crate fresh by file times, so a
+          # folder shared by two checkouts can hand one PR's build of a crate to another PR.
+          # A runner runs one job at a time, so no two jobs write its folder at once.
+          dir="$HOME/.cache/cargo-target/$RUNNER_NAME/marlin-check"
+          # Old builds pile up with each toolchain or dependency change. Start over past 25 GB.
+          if [ -d "$dir" ] && [ "$(du -s --block-size=1G "$dir" | cut -f1)" -gt 25 ]; then
+            rm -rf "$dir"
+          fi
+          mkdir -p "$dir"
+          echo "CARGO_TARGET_DIR=$dir" >> "$GITHUB_ENV"
 
       - name: Detect files requiring checks
         id: changes
@@ -59,7 +73,7 @@ jobs:
         # A runner that cannot reach the Ubuntu mirror would otherwise try
         # every package for hours.
         timeout-minutes: 10
-        run: |
+        run: &linux-packages |
           apt_retry() {
             for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
               if sudo DEBIAN_FRONTEND=noninteractive apt-get "$@"; then
@@ -73,6 +87,7 @@ jobs:
 
           # Fail on a mirror that does not answer, so the retry loop sees it.
           apt_retry update -o APT::Update::Error-Mode=any
+          # xvfb and xauth give the real-app tests a display; their SFTP test runs sshd.
           apt_retry install -y \
             build-essential \
             clang \
@@ -87,6 +102,9 @@ jobs:
             librsvg2-dev \
             pkg-config \
             patchelf \
+            xvfb \
+            xauth \
+            openssh-server \
             libglib2.0-bin \
             libgdk-pixbuf2.0-bin \
             desktop-file-utils \
@@ -174,3 +192,70 @@ jobs:
           name: playwright-report
           path: playwright-report/
           retention-days: 7
+
+  app-tests:
+    runs-on: [self-hosted, medium]
+    # A hung test or build would otherwise hold the runner for six hours.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Detect files requiring real-app tests
+        id: changes
+        uses: dorny/paths-filter@v4
+        with:
+          filters: |
+            app:
+              - 'src/**'
+              - 'src-tauri/**'
+              - 'app-tests/**'
+              - 'vitest.app.config.ts'
+              - 'index.html'
+              - 'public/**'
+              - 'vite.config.ts'
+              - 'tsconfig.json'
+              - 'tailwind.config.js'
+              - 'postcss.config.js'
+              - 'LICENSE'
+              - 'THIRD-PARTY-NOTICES.md'
+              - 'package.json'
+              - 'package-lock.json'
+              - 'scripts/**'
+              - '.github/workflows/check.yml'
+
+      - name: Skip real-app tests
+        if: steps.changes.outputs.app != 'true'
+        run: echo "No relevant changes detected. Skipping real-app tests."
+
+      - name: Setup persistent cargo target dir
+        if: steps.changes.outputs.app == 'true'
+        run: *cargo-target-dir
+
+      - name: Install Rust toolchain
+        if: steps.changes.outputs.app == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies (Ubuntu)
+        if: steps.changes.outputs.app == 'true'
+        # A runner that cannot reach the Ubuntu mirror would otherwise try
+        # every package for hours.
+        timeout-minutes: 10
+        run: *linux-packages
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Install dependencies
+        if: steps.changes.outputs.app == 'true'
+        run: npm ci
+
+      - name: Run real-app tests
+        if: steps.changes.outputs.app == 'true'
+        run: |
+          # The harness builds and starts the app in src-tauri/target/app-test.
+          # Point that at this runner's folder, so the build stays warm between runs.
+          mkdir -p src-tauri/target
+          ln -sfn "$CARGO_TARGET_DIR" src-tauri/target/app-test
+          xvfb-run -a npm run test:app

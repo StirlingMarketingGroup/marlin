@@ -24,7 +24,7 @@ This file holds the rules that always apply. Everything longer lives in the wiki
 - `npm run check` runs ESLint on changed files, Prettier, both TypeScript projects, and `cargo check` with warnings as errors. The pre-push hook runs it.
 - `npm run test:run` runs the unit tests once.
 - `npm run test:e2e` runs the Playwright tests. They start their own Vite server and mock Tauri, so the desktop app does not need to run.
-- `npm run test:app` builds a test build of the real app and drives its window with the tests in `app-tests/`. It runs beside `npm run tauri dev`. CI does not run it.
+- `npm run test:app` builds a test build of the real app and drives its window with the tests in `app-tests/`. It runs beside `npm run tauri dev`. CI runs it on Linux, not on macOS.
 - `npm run test:rust` runs the Rust tests with warnings as errors: the app's, then those of every workspace crate but `marlin-smb`.
 - `npm run check:licenses` checks the license of every npm package and Rust crate that ships. It needs cargo-about (see [`docs/licenses.md`](docs/licenses.md)). CI runs it.
 - `npm run install:cargo-about` installs cargo-about. `npm run check:licenses` and every build that makes a bundle (`npm run tauri build`) need it.
