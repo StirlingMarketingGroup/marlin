@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 
 const KEYRING_SERVICE: &str = "marlin-sftp";
 
+/// Starts an error text that the app answers by asking the user for the server's secret.
+pub(crate) const NO_CREDENTIALS_TAG: &str = "[SFTP_NO_CREDENTIALS]";
+
 /// A saved SFTP server, with no secrets. The frontend gets it, and it is the record in the servers file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -16,33 +19,66 @@ pub struct SftpServerInfo {
     pub key_path: Option<String>,
 }
 
-/// A saved server's sign-in, with the password or key passphrase from the keychain.
-#[derive(Clone)]
-pub struct SftpServerCredentials {
-    pub username: String,
-    pub auth_method: String,
-    pub password: Option<String>,
-    pub key_path: Option<String>,
+/// How a server signs in, with its secret.
+#[derive(Clone, PartialEq, Eq)]
+pub enum SignIn {
+    Password(String),
+    Key {
+        path: String,
+        passphrase: Passphrase,
+    },
+    Agent,
+}
+
+/// What a sign-in has of a key's passphrase.
+#[derive(Clone, PartialEq, Eq)]
+pub enum Passphrase {
+    /// No passphrase. A saved server keeps a key with none as no keychain entry.
+    None,
+    Given(String),
+    /// The keychain could not be read. The text is its error, for the user.
+    Unread(String),
 }
 
 // Written by hand: a derived `Debug` would print the password.
-impl std::fmt::Debug for SftpServerCredentials {
+impl std::fmt::Debug for SignIn {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SftpServerCredentials")
-            .field("username", &self.username)
-            .field("auth_method", &self.auth_method)
-            .field("password", &self.password.as_ref().map(|_| "<hidden>"))
-            .field("key_path", &self.key_path)
-            .finish()
+        match self {
+            SignIn::Password(_) => f.debug_tuple("Password").field(&"<hidden>").finish(),
+            SignIn::Key { path, passphrase } => f
+                .debug_struct("Key")
+                .field("path", path)
+                .field("passphrase", passphrase)
+                .finish(),
+            SignIn::Agent => f.write_str("Agent"),
+        }
     }
+}
+
+// Written by hand: a derived `Debug` would print the passphrase.
+impl std::fmt::Debug for Passphrase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Passphrase::None => f.write_str("None"),
+            Passphrase::Given(_) => f.debug_tuple("Given").field(&"<hidden>").finish(),
+            Passphrase::Unread(text) => f.debug_tuple("Unread").field(text).finish(),
+        }
+    }
+}
+
+/// A server's user and sign-in.
+#[derive(Debug, Clone)]
+pub struct SftpServerCredentials {
+    pub username: String,
+    pub sign_in: SignIn,
 }
 
 /// Why a saved server's credentials could not be read. Each text is what the user reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CredentialsError {
-    /// No saved server has this host and port, or the keychain holds no password for a password server. The user must add the server again.
+    /// No saved server has this host and port, the keychain holds no password for a password server, or no key file is saved for a key server. The user must add the server again.
     NotSaved(String),
-    /// The servers file or the keychain could not be read. The keychain text starts with the tag that makes the app ask for the secret again.
+    /// The servers file or the keychain could not be read, or the saved sign-in method is not password, key, or agent. The keychain text starts with the tag that makes the app ask for the secret again.
     Failed(String),
 }
 
@@ -93,8 +129,8 @@ fn get_password(hostname: &str, port: u16, username: &str) -> Result<String, Cre
     let entry = keyring_entry(hostname, port, username).map_err(CredentialsError::Failed)?;
     entry.get_password().map_err(|e| {
         let text = format!(
-            "[SFTP_NO_CREDENTIALS] Failed to read password from keychain: {}",
-            e
+            "{} Failed to read the saved secret from the keychain: {}",
+            NO_CREDENTIALS_TAG, e
         );
         match e {
             keyring::Error::NoEntry => CredentialsError::NotSaved(text),
@@ -182,30 +218,45 @@ pub fn server_credentials(
         .map(|index| list.swap_remove(index))
         .ok_or_else(|| {
             CredentialsError::NotSaved(format!(
-                "[SFTP_NO_CREDENTIALS] No credentials stored for server: {}:{}",
-                hostname, port
+                "{} No credentials stored for server: {}:{}",
+                NO_CREDENTIALS_TAG, hostname, port
             ))
         })?;
 
-    let password = if server.auth_method == "password" {
-        Some(get_password(
+    let sign_in = match server.auth_method.as_str() {
+        "password" => SignIn::Password(get_password(
             &server.hostname,
             server.port,
             &server.username,
-        )?)
-    } else if server.auth_method == "key" {
-        // A key with no passphrase has no keychain entry, and a machine with no keychain service
-        // (a Linux session without one) has none to read.
-        get_password(&server.hostname, server.port, &server.username).ok()
-    } else {
-        None
+        )?),
+        "key" => {
+            let Some(path) = server.key_path else {
+                return Err(CredentialsError::NotSaved(format!(
+                    "{} No key file is saved for server: {}:{}",
+                    NO_CREDENTIALS_TAG, hostname, port
+                )));
+            };
+            // A read that fails, as on a machine with no keychain service, is kept, so a key that
+            // needs its passphrase can report it.
+            let passphrase = match get_password(&server.hostname, server.port, &server.username) {
+                Ok(saved) => Passphrase::Given(saved),
+                Err(CredentialsError::NotSaved(_)) => Passphrase::None,
+                Err(error) => Passphrase::Unread(error.to_string()),
+            };
+            SignIn::Key { path, passphrase }
+        }
+        "agent" => SignIn::Agent,
+        other => {
+            return Err(CredentialsError::Failed(format!(
+                "Unknown auth method: {}",
+                other
+            )));
+        }
     };
 
     Ok(SftpServerCredentials {
         username: server.username,
-        auth_method: server.auth_method,
-        password,
-        key_path: server.key_path,
+        sign_in,
     })
 }
 
@@ -305,9 +356,11 @@ mod tests {
         assert_eq!(listed[0].auth_method, saved.auth_method);
         assert_eq!(listed[0].key_path, saved.key_path);
         let creds = server_credentials(&path, "Password.Example", 22).unwrap();
-        assert_eq!(creds.password.as_deref(), Some("secret"));
+        assert_eq!(creds.sign_in, SignIn::Password("secret".to_string()));
         assert_eq!(creds.username, "user");
-        assert_eq!(creds.auth_method, "password");
+        let shown = format!("{creds:?}");
+        assert!(shown.contains("<hidden>"), "{shown}");
+        assert!(!shown.contains("secret"), "{shown}");
     }
 
     #[test]
@@ -329,8 +382,7 @@ mod tests {
         assert_eq!(servers[0].hostname, "reread.example");
         let creds = server_credentials(&path, "reread.example", 22).unwrap();
         assert_eq!(creds.username, "other");
-        assert_eq!(creds.auth_method, "agent");
-        assert_eq!(creds.password, None);
+        assert_eq!(creds.sign_in, SignIn::Agent);
     }
 
     #[test]
@@ -383,11 +435,8 @@ mod tests {
         add("nas.readd", "ana", "new");
         assert_eq!(saved_servers(&path).unwrap().len(), 1);
         assert_eq!(
-            server_credentials(&path, "NAS.readd", 22)
-                .unwrap()
-                .password
-                .as_deref(),
-            Some("new")
+            server_credentials(&path, "NAS.readd", 22).unwrap().sign_in,
+            SignIn::Password("new".to_string())
         );
         assert_eq!(
             marlin_test_keychain::get(KEYRING_SERVICE, "ana@NAS.readd:22"),
@@ -421,7 +470,9 @@ mod tests {
 
         match server_credentials(&path, "nopassword.example", 22) {
             Err(CredentialsError::NotSaved(text)) => assert!(
-                text.starts_with("[SFTP_NO_CREDENTIALS] Failed to read password from keychain: "),
+                text.starts_with(
+                    "[SFTP_NO_CREDENTIALS] Failed to read the saved secret from the keychain: "
+                ),
                 "{text}"
             ),
             other => panic!("expected a missing password, got {other:?}"),
@@ -481,6 +532,170 @@ mod tests {
                 assert!(text.starts_with("Failed to parse servers file: "), "{text}");
             }
             other => panic!("expected a parse failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_key_server_reads_its_saved_passphrase() {
+        marlin_test_keychain::install();
+        let dir = tempfile::tempdir().unwrap();
+        let path = servers_file(dir.path());
+        add_server(
+            &path,
+            "keypass.example".to_string(),
+            22,
+            "user".to_string(),
+            Some("correct-horse".to_string()),
+            "key".to_string(),
+            Some("/home/user/.ssh/id_ed25519".to_string()),
+        )
+        .unwrap();
+
+        let creds = server_credentials(&path, "keypass.example", 22).unwrap();
+        assert_eq!(
+            creds.sign_in,
+            SignIn::Key {
+                path: "/home/user/.ssh/id_ed25519".to_string(),
+                passphrase: Passphrase::Given("correct-horse".to_string()),
+            }
+        );
+        let shown = format!("{creds:?}");
+        assert!(shown.contains("Given(\"<hidden>\")"), "{shown}");
+        assert!(!shown.contains("correct-horse"), "{shown}");
+    }
+
+    #[test]
+    fn a_key_server_with_no_keychain_entry_has_no_passphrase() {
+        marlin_test_keychain::install();
+        let dir = tempfile::tempdir().unwrap();
+        let path = servers_file(dir.path());
+        add_server(
+            &path,
+            "keynone.example".to_string(),
+            22,
+            "user".to_string(),
+            None,
+            "key".to_string(),
+            Some("/home/user/.ssh/id_ed25519".to_string()),
+        )
+        .unwrap();
+
+        let creds = server_credentials(&path, "keynone.example", 22).unwrap();
+        assert_eq!(
+            creds.sign_in,
+            SignIn::Key {
+                path: "/home/user/.ssh/id_ed25519".to_string(),
+                passphrase: Passphrase::None,
+            }
+        );
+        let shown = format!("{creds:?}");
+        assert!(shown.contains("passphrase: None"), "{shown}");
+    }
+
+    #[test]
+    fn a_key_server_whose_keychain_read_fails_keeps_the_error() {
+        marlin_test_keychain::install();
+        let dir = tempfile::tempdir().unwrap();
+        let path = servers_file(dir.path());
+        add_server(
+            &path,
+            "keyreadfail.example".to_string(),
+            22,
+            "user".to_string(),
+            Some("correct-horse".to_string()),
+            "key".to_string(),
+            Some("/keys/id_ed25519".to_string()),
+        )
+        .unwrap();
+        marlin_test_keychain::fail_reads_for(KEYRING_SERVICE, "user@keyreadfail.example:22");
+
+        let creds = server_credentials(&path, "keyreadfail.example", 22).unwrap();
+        match creds.sign_in {
+            SignIn::Key {
+                passphrase: Passphrase::Unread(ref text),
+                ..
+            } => {
+                assert!(text.starts_with("[SFTP_NO_CREDENTIALS] "), "{text}");
+                assert!(text.contains("test keychain read failed"), "{text}");
+            }
+            other => panic!("expected a key whose passphrase could not be read, got {other:?}"),
+        }
+        let shown = format!("{creds:?}");
+        assert!(shown.contains("Unread("), "{shown}");
+        assert!(!shown.contains("correct-horse"), "{shown}");
+    }
+
+    #[test]
+    fn a_password_server_whose_keychain_read_fails_is_failed() {
+        marlin_test_keychain::install();
+        let dir = tempfile::tempdir().unwrap();
+        let path = servers_file(dir.path());
+        add_server(
+            &path,
+            "passreadfail.example".to_string(),
+            22,
+            "user".to_string(),
+            Some("secret".to_string()),
+            "password".to_string(),
+            None,
+        )
+        .unwrap();
+        marlin_test_keychain::fail_reads_for(KEYRING_SERVICE, "user@passreadfail.example:22");
+
+        match server_credentials(&path, "passreadfail.example", 22) {
+            Err(CredentialsError::Failed(text)) => {
+                assert!(text.starts_with("[SFTP_NO_CREDENTIALS] "), "{text}");
+                assert!(text.contains("test keychain read failed"), "{text}");
+            }
+            other => panic!("expected a failed keychain read, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unknown_auth_method_fails_that_server_only() {
+        marlin_test_keychain::install();
+        let dir = tempfile::tempdir().unwrap();
+        let path = servers_file(dir.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{"servers":[
+                {"hostname":"badmethod.example","port":22,"username":"user","authMethod":"token","keyPath":null},
+                {"hostname":"stillreads.example","port":22,"username":"other","authMethod":"agent","keyPath":null}
+            ]}"#,
+        )
+        .unwrap();
+
+        match server_credentials(&path, "badmethod.example", 22) {
+            Err(CredentialsError::Failed(text)) => {
+                assert_eq!(text, "Unknown auth method: token");
+            }
+            other => panic!("expected an unknown auth method, got {other:?}"),
+        }
+        let creds = server_credentials(&path, "stillreads.example", 22).unwrap();
+        assert_eq!(creds.sign_in, SignIn::Agent);
+    }
+
+    #[test]
+    fn a_key_server_with_no_key_file_is_not_saved() {
+        marlin_test_keychain::install();
+        let dir = tempfile::tempdir().unwrap();
+        let path = servers_file(dir.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{"servers":[{"hostname":"nokeyfile.example","port":22,"username":"user","authMethod":"key","keyPath":null}]}"#,
+        )
+        .unwrap();
+
+        match server_credentials(&path, "nokeyfile.example", 22) {
+            Err(CredentialsError::NotSaved(text)) => {
+                assert_eq!(
+                    text,
+                    "[SFTP_NO_CREDENTIALS] No key file is saved for server: nokeyfile.example:22"
+                );
+            }
+            other => panic!("expected a missing key file, got {other:?}"),
         }
     }
 }

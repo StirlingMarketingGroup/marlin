@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::host_key::{self, HostKeyRejection};
-use crate::servers::SftpServerCredentials;
+use crate::servers::{Passphrase, SftpServerCredentials, SignIn, NO_CREDENTIALS_TAG};
 
 const CONNECT_TIMEOUT_SECS: u64 = 15;
 
@@ -17,11 +17,15 @@ pub enum ConnectError {
     UnknownHostKey(PublicKey),
     /// `known_hosts` holds another key for the host. The text is `changed_host_key_warning`, which names a local path.
     ChangedHostKey(String),
-    /// The server could not be reached: the 15-second connect limit ran out, or the SSH connection failed (`"SSH connection to … timed out after …s"`, `"SSH connection failed: …"`).
+    /// The server could not be reached: the 15-second connect limit ran out, the SSH connection failed, or the connection closed during sign-in before any refusal (`"SSH connection to … timed out after …s"`, `"SSH connection failed: …"`, `"The server closed the connection during sign-in"`). A server that closes at once on a wrong password, rather than saying no, lands here too: the two cannot be told apart.
     Unreachable(String),
-    /// The server said no to the password, the key, or every agent key (`"Password authentication rejected by server"`, `"Key authentication rejected by server"`, `"No SSH agent key was accepted by the server"`).
+    /// The server said no to the password, the key, or every agent key it was offered (`"Password authentication rejected by server"`, `"Key authentication rejected by server"`, `"No SSH agent key was accepted by the server"`). A server that closes the connection after refusing agent keys has said no too.
     SignInRejected(String),
-    /// Any other failure, as the text the user reads: a known_hosts file that could not be read, a key file or passphrase that would not load, no agent, no password for password sign-in, an unknown auth method, an error during a sign-in call, or the SFTP channel.
+    /// The key needs a passphrase this sign-in does not have: none was given, the keychain could not give the saved one, or, for a key in OpenSSH's format, the one given does not open it. The text starts with the `[SFTP_NO_CREDENTIALS]` tag that makes the app ask for it (`"… The SSH key needs its passphrase."`, `"… The passphrase does not open the SSH key."`, or the keychain error). A keychain entry that could not even be named gives an error with no tag.
+    PassphraseNeeded(String),
+    /// The sign-in cannot be used on this machine: the key file does not load, or the SSH agent cannot sign (`"Failed to load SSH key: …"`, `"Failed to connect to SSH agent: …"`, `"Failed to list SSH agent identities: …"`, `"No keys available in SSH agent"`, `"The SSH agent could not sign with a key: …"`).
+    SignInUnusable(String),
+    /// A known_hosts file that could not be read, an error returned by a sign-in call (`"Password authentication failed: …"`, `"Key authentication failed: …"`), or the SFTP channel, subsystem, and session start.
     Failed(String),
 }
 
@@ -34,6 +38,8 @@ impl std::fmt::Display for ConnectError {
             ConnectError::ChangedHostKey(text)
             | ConnectError::Unreachable(text)
             | ConnectError::SignInRejected(text)
+            | ConnectError::PassphraseNeeded(text)
+            | ConnectError::SignInUnusable(text)
             | ConnectError::Failed(text) => f.write_str(text),
         }
     }
@@ -89,6 +95,38 @@ impl client::Handler for SshHandler {
     ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
         async { Ok(()) }
     }
+}
+
+/// How one sign-in try ended.
+enum Attempt {
+    Accepted,
+    /// The server said no, and the connection is still open.
+    Refused,
+    /// The connection closed before the server answered.
+    Closed,
+}
+
+/// Sorts one sign-in answer. russh answers `Failure` when the connection closes before the server's reply, and a call on a closed connection fails, so only an open connection means the server said no. Any other error is the caller's to name.
+fn attempt<E>(
+    session: &client::Handle<SshHandler>,
+    answer: Result<client::AuthResult, E>,
+) -> Result<Attempt, E> {
+    match answer {
+        Ok(result) if result.success() => Ok(Attempt::Accepted),
+        _ if session.is_closed() => Ok(Attempt::Closed),
+        Ok(_) => Ok(Attempt::Refused),
+        Err(error) => Err(error),
+    }
+}
+
+/// The hash an RSA key signs with: the strongest `rsa-sha2` the server offers. With none, russh signs with SHA-1 (`ssh-rsa`), which OpenSSH 8.8 and later refuse. Asking can wait a second for the server's list, so only a sign-in with an RSA key asks. A failed ask means a closed connection, which the sign-in that follows reports.
+async fn rsa_hash(session: &client::Handle<SshHandler>) -> Option<russh::keys::HashAlg> {
+    session
+        .best_supported_rsa_hash()
+        .await
+        .ok()
+        .flatten()
+        .flatten()
 }
 
 /// Open an SFTP session. An unknown host key is returned, not remembered.
@@ -148,115 +186,153 @@ pub async fn connect(
         }
     };
 
-    match creds.auth_method.as_str() {
-        "password" => {
-            let password = creds.password.as_deref().ok_or_else(|| {
-                ConnectError::Failed("Password auth selected but no password available".to_string())
-            })?;
-            let auth_result = session
+    // How the sign-in ended, and the text the server's "no" gets.
+    let (outcome, refusal) = match &creds.sign_in {
+        SignIn::Password(password) => {
+            let answer = session
                 .authenticate_password(&creds.username, password)
-                .await
-                .map_err(|e| {
-                    ConnectError::Failed(format!("Password authentication failed: {}", e))
-                })?;
-            if !auth_result.success() {
-                return Err(ConnectError::SignInRejected(
-                    "Password authentication rejected by server".to_string(),
-                ));
-            }
-        }
-        "key" => {
-            let key_path_str = creds.key_path.as_deref().ok_or_else(|| {
-                ConnectError::Failed("Key auth selected but no key path available".to_string())
+                .await;
+            let outcome = attempt(&session, answer).map_err(|e| {
+                ConnectError::Failed(format!("Password authentication failed: {}", e))
             })?;
-
-            let expanded = if key_path_str.starts_with('~') {
+            (outcome, "Password authentication rejected by server")
+        }
+        SignIn::Key { path, passphrase } => {
+            let expanded = if path.starts_with('~') {
                 if let Some(home) = dirs::home_dir() {
-                    home.join(&key_path_str[1..].trim_start_matches('/'))
+                    home.join(path[1..].trim_start_matches('/'))
                 } else {
-                    std::path::PathBuf::from(key_path_str)
+                    std::path::PathBuf::from(path)
                 }
             } else {
-                std::path::PathBuf::from(key_path_str)
+                std::path::PathBuf::from(path)
             };
 
-            let private_key = russh::keys::load_secret_key(&expanded, creds.password.as_deref())
-                .map_err(|e| ConnectError::Failed(format!("Failed to load SSH key: {}", e)))?;
+            let given = match passphrase {
+                Passphrase::Given(text) => Some(text.as_str()),
+                Passphrase::None | Passphrase::Unread(_) => None,
+            };
+            let private_key = match russh::keys::load_secret_key(&expanded, given) {
+                Ok(key) => key,
+                Err(error) => {
+                    return Err(match (&error, passphrase) {
+                        (russh::keys::Error::KeyIsEncrypted, Passphrase::Unread(keychain)) => {
+                            ConnectError::PassphraseNeeded(keychain.clone())
+                        }
+                        (russh::keys::Error::KeyIsEncrypted, _) => ConnectError::PassphraseNeeded(
+                            format!("{} The SSH key needs its passphrase.", NO_CREDENTIALS_TAG),
+                        ),
+                        // OpenSSH's format checks the passphrase it decrypts with, so a wrong one fails this way.
+                        (
+                            russh::keys::Error::SshKey(russh::keys::ssh_key::Error::Crypto),
+                            Passphrase::Given(_),
+                        ) => ConnectError::PassphraseNeeded(format!(
+                            "{} The passphrase does not open the SSH key.",
+                            NO_CREDENTIALS_TAG
+                        )),
+                        _ => ConnectError::SignInUnusable(format!(
+                            "Failed to load SSH key: {}",
+                            error
+                        )),
+                    });
+                }
+            };
 
-            let key_with_alg = russh::keys::PrivateKeyWithHashAlg::new(Arc::new(private_key), None);
+            let hash = if private_key.algorithm().is_rsa() {
+                rsa_hash(&session).await
+            } else {
+                None
+            };
+            let key_with_alg = russh::keys::PrivateKeyWithHashAlg::new(Arc::new(private_key), hash);
 
-            let auth_result = session
+            let answer = session
                 .authenticate_publickey(&creds.username, key_with_alg)
-                .await
+                .await;
+            let outcome = attempt(&session, answer)
                 .map_err(|e| ConnectError::Failed(format!("Key authentication failed: {}", e)))?;
-            if !auth_result.success() {
-                return Err(ConnectError::SignInRejected(
-                    "Key authentication rejected by server".to_string(),
-                ));
-            }
+            (outcome, "Key authentication rejected by server")
         }
-        "agent" => 'agent: {
+        SignIn::Agent => {
             let mut agent = russh::keys::agent::client::AgentClient::connect_env()
                 .await
                 .map_err(|e| {
-                    ConnectError::Failed(format!("Failed to connect to SSH agent: {}", e))
+                    ConnectError::SignInUnusable(format!("Failed to connect to SSH agent: {}", e))
                 })?;
 
             let identities = agent.request_identities().await.map_err(|e| {
-                ConnectError::Failed(format!("Failed to list SSH agent identities: {}", e))
+                ConnectError::SignInUnusable(format!("Failed to list SSH agent identities: {}", e))
             })?;
 
             if identities.is_empty() {
-                return Err(ConnectError::Failed(
+                return Err(ConnectError::SignInUnusable(
                     "No keys available in SSH agent".to_string(),
                 ));
             }
 
-            // An agent can fail to sign, as when the user refuses its prompt. That is not the server saying no.
-            let mut signing_failed = false;
-            for identity in identities {
-                let auth_result = match &identity {
-                    russh::keys::agent::AgentIdentity::PublicKey { key, .. } => {
-                        session
-                            .authenticate_publickey_with(
-                                &creds.username,
-                                key.clone(),
-                                None,
-                                &mut agent,
-                            )
-                            .await
-                    }
-                    russh::keys::agent::AgentIdentity::Certificate { certificate, .. } => {
-                        session
-                            .authenticate_certificate_with(
-                                &creds.username,
-                                certificate.clone(),
-                                None,
-                                &mut agent,
-                            )
-                            .await
-                    }
-                };
-
-                match auth_result {
-                    Ok(result) if result.success() => break 'agent,
-                    Ok(_) => {}
-                    Err(_) => signing_failed = true,
+            let holds_rsa = identities.iter().any(|identity| match identity {
+                russh::keys::agent::AgentIdentity::PublicKey { key, .. } => {
+                    key.algorithm().is_rsa()
                 }
-            }
-
-            let text = "No SSH agent key was accepted by the server".to_string();
-            return Err(if signing_failed {
-                ConnectError::Failed(text)
-            } else {
-                ConnectError::SignInRejected(text)
+                russh::keys::agent::AgentIdentity::Certificate { certificate, .. } => {
+                    certificate.algorithm().is_rsa()
+                }
             });
+            let hash = if holds_rsa {
+                rsa_hash(&session).await
+            } else {
+                None
+            };
+
+            let outcome = 'offers: {
+                for (offered_before, identity) in identities.iter().enumerate() {
+                    let answer = match identity {
+                        russh::keys::agent::AgentIdentity::PublicKey { key, .. } => {
+                            session
+                                .authenticate_publickey_with(
+                                    &creds.username,
+                                    key.clone(),
+                                    hash,
+                                    &mut agent,
+                                )
+                                .await
+                        }
+                        russh::keys::agent::AgentIdentity::Certificate { certificate, .. } => {
+                            session
+                                .authenticate_certificate_with(
+                                    &creds.username,
+                                    certificate.clone(),
+                                    hash,
+                                    &mut agent,
+                                )
+                                .await
+                        }
+                    };
+                    // An error on an open connection is the agent failing to sign, as when the user declines its prompt. That is not the server saying no, and russh then waits for a signature that never comes, so no other key can be tried.
+                    match attempt(&session, answer).map_err(|e| {
+                        ConnectError::SignInUnusable(format!(
+                            "The SSH agent could not sign with a key: {}",
+                            e
+                        ))
+                    })? {
+                        Attempt::Refused => continue,
+                        // A server can close the connection after too many refused keys (OpenSSH's `MaxAuthTries`). That is still its "no".
+                        Attempt::Closed if offered_before > 0 => break 'offers Attempt::Refused,
+                        done => break 'offers done,
+                    }
+                }
+                Attempt::Refused
+            };
+            (outcome, "No SSH agent key was accepted by the server")
         }
-        other => {
-            return Err(ConnectError::Failed(format!(
-                "Unknown auth method: {}",
-                other
-            )));
+    };
+
+    match outcome {
+        Attempt::Accepted => {}
+        Attempt::Refused => return Err(ConnectError::SignInRejected(refusal.to_string())),
+        Attempt::Closed => {
+            return Err(ConnectError::Unreachable(
+                "The server closed the connection during sign-in".to_string(),
+            ));
         }
     }
 
@@ -321,9 +397,84 @@ mod tests {
     fn password_creds() -> SftpServerCredentials {
         SftpServerCredentials {
             username: "user".to_string(),
-            auth_method: "password".to_string(),
-            password: Some("secret".to_string()),
-            key_path: None,
+            sign_in: SignIn::Password("secret".to_string()),
+        }
+    }
+
+    fn key_creds(path: &Path, passphrase: Passphrase) -> SftpServerCredentials {
+        SftpServerCredentials {
+            username: "user".to_string(),
+            sign_in: SignIn::Key {
+                path: path.to_string_lossy().into_owned(),
+                passphrase,
+            },
+        }
+    }
+
+    /// The keychain error a key server gets when its passphrase cannot be read.
+    const UNREAD_KEYCHAIN: &str =
+        "[SFTP_NO_CREDENTIALS] Failed to read the saved secret from the keychain: test keychain read failed";
+
+    async fn key_error(creds: &SftpServerCredentials) -> ConnectError {
+        let (port, _dir, known_hosts) = trusted(RejectServer {
+            passwords_seen: Arc::new(AtomicUsize::new(0)),
+        })
+        .await;
+        match connect("127.0.0.1", port, creds, &known_hosts).await {
+            Ok(_) => panic!("expected the connection to fail"),
+            Err(error) => error,
+        }
+    }
+
+    async fn start_server<S: Server + Send + 'static>(server: S) -> (u16, PublicKey) {
+        let host_key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
+        let public_key = host_key.public_key().clone();
+        let mut config = russh::server::Config::default();
+        config.auth_rejection_time = Duration::from_millis(0);
+        config.auth_rejection_time_initial = Some(Duration::from_millis(0));
+        config.inactivity_timeout = None;
+        config.keys.push(host_key);
+        let config = Arc::new(config);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let mut server = server;
+            let _ = server.run_on_socket(config, &listener).await;
+        });
+        (port, public_key)
+    }
+
+    async fn trusted<S: Server + Send + 'static>(
+        server: S,
+    ) -> (u16, tempfile::TempDir, std::path::PathBuf) {
+        let (port, public_key) = start_server(server).await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("known_hosts");
+        write_host_line(&path, &format!("[127.0.0.1]:{port}"), &public_key);
+        (port, dir, path)
+    }
+
+    /// Completes the handshake and never answers a password: the handler returns an error, which closes the connection.
+    struct ClosesOnPassword;
+
+    impl Handler for ClosesOnPassword {
+        type Error = russh::Error;
+
+        async fn auth_password(
+            &mut self,
+            _user: &str,
+            _password: &str,
+        ) -> Result<Auth, Self::Error> {
+            Err(russh::Error::Disconnect)
+        }
+    }
+
+    impl Server for ClosesOnPassword {
+        type Handler = Self;
+
+        fn new_client(&mut self, _: Option<std::net::SocketAddr>) -> Self::Handler {
+            ClosesOnPassword
         }
     }
 
@@ -344,27 +495,12 @@ mod tests {
 
     #[tokio::test]
     async fn connect_checks_the_server_key_against_known_hosts() {
-        let host_key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
-        let server_public = host_key.public_key().clone();
-        let server_fingerprint = server_public.fingerprint(HashAlg::Sha256).to_string();
-
-        let mut server_config = russh::server::Config::default();
-        server_config.auth_rejection_time = Duration::from_millis(0);
-        server_config.auth_rejection_time_initial = Some(Duration::from_millis(0));
-        server_config.inactivity_timeout = None;
-        server_config.keys.push(host_key);
-        let server_config = Arc::new(server_config);
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
         let passwords_seen = Arc::new(AtomicUsize::new(0));
-        let server_passwords_seen = passwords_seen.clone();
-        tokio::spawn(async move {
-            let mut server = RejectServer {
-                passwords_seen: server_passwords_seen,
-            };
-            let _ = server.run_on_socket(server_config, &listener).await;
-        });
+        let (port, server_public) = start_server(RejectServer {
+            passwords_seen: passwords_seen.clone(),
+        })
+        .await;
+        let server_fingerprint = server_public.fingerprint(HashAlg::Sha256).to_string();
 
         let unknown_dir = tempfile::tempdir().unwrap();
         let unknown_path = unknown_dir.path().join("known_hosts");
@@ -429,5 +565,73 @@ mod tests {
             other => panic!("expected a changed host key, got {other:?}"),
         }
         assert_eq!(passwords_seen.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn an_encrypted_key_without_a_working_passphrase_asks_for_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("id_ed25519");
+        let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519)
+            .unwrap()
+            .encrypt(&mut rand::rng(), "correct-horse")
+            .unwrap();
+        fs::write(
+            &path,
+            key.to_openssh(russh::keys::ssh_key::LineEnding::LF)
+                .unwrap()
+                .as_bytes(),
+        )
+        .unwrap();
+
+        for (passphrase, expected) in [
+            (
+                Passphrase::Unread(UNREAD_KEYCHAIN.to_string()),
+                UNREAD_KEYCHAIN,
+            ),
+            (
+                Passphrase::None,
+                "[SFTP_NO_CREDENTIALS] The SSH key needs its passphrase.",
+            ),
+            (
+                Passphrase::Given("wrong-horse".to_string()),
+                "[SFTP_NO_CREDENTIALS] The passphrase does not open the SSH key.",
+            ),
+        ] {
+            match key_error(&key_creds(&path, passphrase)).await {
+                ConnectError::PassphraseNeeded(text) => assert_eq!(text, expected),
+                other => panic!("expected a request for the passphrase, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_missing_key_file_says_the_key_did_not_load_whatever_the_keychain_said() {
+        let missing = Path::new("/no/such/marlin-sftp-key");
+        for passphrase in [
+            Passphrase::None,
+            Passphrase::Unread(UNREAD_KEYCHAIN.to_string()),
+        ] {
+            match key_error(&key_creds(missing, passphrase)).await {
+                ConnectError::SignInUnusable(text) => {
+                    assert!(text.starts_with("Failed to load SSH key"), "{text}");
+                }
+                other => panic!("expected an unusable sign-in, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_server_that_closes_during_sign_in_is_unreachable() {
+        let (port, _dir, known_hosts) = trusted(ClosesOnPassword).await;
+        let error = match connect("127.0.0.1", port, &password_creds(), &known_hosts).await {
+            Ok(_) => panic!("expected the connection to fail"),
+            Err(error) => error,
+        };
+        match error {
+            ConnectError::Unreachable(text) => {
+                assert_eq!(text, "The server closed the connection during sign-in");
+            }
+            other => panic!("expected an unreachable server, got {other:?}"),
+        }
     }
 }
