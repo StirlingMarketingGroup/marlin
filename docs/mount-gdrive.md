@@ -1,6 +1,6 @@
 # Google Drive mount provider (`marlin-gdrive`)
 
-`marlin-gdrive` shows one Google account to the [mount core](mount-core.md) as a `Provider`. It reads the Drive API, and it can make a folder, rename or move an item, trash one, and write a file's bytes, so `can_write` is true. A mount takes writes only when it also has a spool, and the helper gives none yet (#602). It also holds the code that turns a saved Google sign-in into an access token, for the mount and for the app. The app links the crate for that sign-in code. The [mount helper](mount-helper.md) links it as the provider `gdrive`: see [Providers](mount-helper.md#providers).
+`marlin-gdrive` shows one Google account to the [mount core](mount-core.md) as a `Provider`. It reads the Drive API, and it can make a folder, rename or move an item, trash one, and write a file's bytes, so `can_write` is true. A mount takes writes when the helper gives it a spool. It also holds the code that turns a saved Google sign-in into an access token, for the mount and for the app. The app links the crate for that sign-in code. The [mount helper](mount-helper.md) links it as the provider `gdrive`: see [Providers](mount-helper.md#providers).
 
 This is not the code behind `gdrive://` paths. The app handles those through its own location provider: see [Location providers](location-providers.md).
 
@@ -123,7 +123,7 @@ What follows from that:
 
 ## The three change calls
 
-`create_folder`, `remove`, and `rename`. A mount calls them only when it has a spool (#602).
+`create_folder`, `remove`, and `rename`. A mount calls them when it has a spool.
 
 | Call            | Requests                                                                                                                                                                                                                                                                                                                                              |
 | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

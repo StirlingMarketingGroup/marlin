@@ -11,7 +11,7 @@ Marlin is one Tauri 2 desktop app: a Rust backend that owns all file access, and
 | -------------- | ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------- |
 | `marlin`       | `src-tauri/src/main.rs` → `app_lib::run()` in `lib.rs` | The app. Hosts the webview, runs every command.                                                          |
 | `marlin-smb`   | `src-tauri/crates/marlin-smb/`, its own crate          | SMB helper. Keeps `libsmbclient` out of the main app so the app starts even when samba is not installed. |
-| `marlin-mount` | `src-tauri/crates/marlin-mount/`, its own crate        | Mount helper. Owns every native mount. The app starts it on demand. On Linux it mounts a Google account. |
+| `marlin-mount` | `src-tauri/crates/marlin-mount/`, its own crate        | Mount helper. Owns every native mount. The app starts it on demand. It mounts Google on Linux and macOS. |
 
 The main app starts `marlin-smb` on demand, through `marlin-smb-client`, and talks to it over stdin and stdout. See [Location providers](location-providers.md). `marlin-mount` is controlled over a local socket instead, so that it can outlive the app. The app starts it detached on the first mount command and asks it to stop when the user quits. See [Mount helper](mount-helper.md).
 
@@ -37,7 +37,7 @@ The workspace has seven library-only crates under `src-tauri/crates/`. `marlin-v
 | `fs_utils.rs`            | Local path expansion, `FileItem` building, local copy helpers.                                            |
 | `delete_entry.rs`        | Deletes a local file, link, or folder. See [decision 0007](decisions/0007-permanent-delete.md).           |
 | `fs_watcher.rs`          | Watches local folders and emits `directory-changed`.                                                      |
-| `mount_helper.rs`        | The five mount commands, and the request to stop the helper at quit. See [Mount helper](mount-helper.md). |
+| `mount_helper.rs`        | The eight mount commands and the request to stop the helper at quit. See [Mount helper](mount-helper.md). |
 | `state.rs`               | Shared state types: directory streams, folder-size jobs, menu state, trash undo.                          |
 | `menu.rs`                | The native menu bar.                                                                                      |
 | `native_drag.rs`         | macOS only. Starts a native drag of files out of the app.                                                 |

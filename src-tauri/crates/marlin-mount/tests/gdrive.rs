@@ -9,10 +9,11 @@ use std::time::Duration;
 
 use marlin_gdrive::{OAuthClient, KEYRING_SERVICE};
 use marlin_mount::protocol::MountState;
-use marlin_mount::protocol::{error_codes, MountStatus};
+use marlin_mount::protocol::{error_codes, MountStatus, ReadOnly};
 use marlin_mount::{Config, LinkedProviders, OsAdapter, Server};
 use marlin_mount_client::Event;
 use marlin_mount_client::{Client, ClientError, Start};
+use marlin_vfs::Options;
 use serde_json::{json, Value};
 use wiremock::matchers::any;
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
@@ -240,6 +241,8 @@ async fn running_with(
         Config {
             socket: socket.clone(),
             root: root.clone(),
+            spool: dir.path().join("spool"),
+            options: Options::default(),
         },
         Arc::new(OsAdapter),
         Arc::new(LinkedProviders::new(
@@ -478,7 +481,7 @@ async fn changed(
         loop {
             match events.recv().await {
                 Some(Event::Changed(status)) if status.state == state => return status,
-                Some(Event::Changed(_)) => {}
+                Some(Event::Changed(_) | Event::Unsent(_)) => {}
                 Some(Event::Closed) | None => panic!("the helper closed"),
             }
         }
@@ -497,8 +500,12 @@ async fn a_google_account_mounts_and_reads_through_fuse() {
     marlin_test_keychain::set(KEYRING_SERVICE, email, "refresh-1");
     let running = running_with(uri.clone(), oauth(&uri)).await;
 
+    // The fake Google takes no writes, so this test keeps the mount read-only through the "spool folder cannot be made" rule, and checks that rule through a real mount.
+    let spool = running.root.parent().unwrap().join("spool");
+    std::fs::write(&spool, b"not a folder").unwrap();
     let status = mount_gdrive(&running.client, email, "drive").await.unwrap();
     assert_eq!(status.state, MountState::Mounted);
+    assert!(matches!(status.read_only, Some(ReadOnly::Spool { .. })));
     let point = PathBuf::from(&status.mount_point);
     assert_eq!(
         names(&point).await,
@@ -620,6 +627,7 @@ async fn a_rejected_sign_in_shows_auth_required_and_a_new_sign_in_recovers() {
 
     let status = mount_gdrive(&running.client, email, "drive").await.unwrap();
     assert_eq!(status.state, MountState::Mounted);
+    assert_eq!(status.read_only, None);
     let point = PathBuf::from(status.mount_point);
 
     {

@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use marlin_mount::protocol::PROTOCOL_VERSION;
 use marlin_mount::{Adapter, BindError, Config, MountError, Providers, Server, Session};
-use marlin_vfs::{MemoryProvider, Provider, Vfs, VfsError};
+use marlin_vfs::{Access, ItemId, MemoryProvider, Options, Provider, Vfs, VfsError};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -186,6 +186,15 @@ impl Client {
         notification["params"].take()
     }
 
+    /// The next `unsentChanged` whose params pass `check`. A missing one fails the test instead of hanging it.
+    async fn unsent(&mut self, check: impl Fn(&Value) -> bool) -> Value {
+        let found = self.find(|line| line["method"] == "unsentChanged" && check(&line["params"]));
+        let mut notification = tokio::time::timeout(Duration::from_secs(30), found)
+            .await
+            .expect("no such unsentChanged");
+        notification["params"].take()
+    }
+
     async fn find(&mut self, wanted: impl Fn(&Value) -> bool) -> Value {
         loop {
             if let Some(index) = self.inbox.iter().position(&wanted) {
@@ -201,6 +210,7 @@ impl Client {
 struct Harness {
     socket: PathBuf,
     root: PathBuf,
+    spool: PathBuf,
     fake: Arc<Fake>,
     run: tokio::task::JoinHandle<()>,
 
@@ -210,13 +220,29 @@ struct Harness {
 }
 
 fn start() -> Harness {
-    start_after(|_, _| {})
+    start_with(None, |_, _| {})
+}
+
+fn start_on(spool: PathBuf) -> Harness {
+    start_with(Some(spool), |_, _| {})
 }
 
 fn start_after(prepare: impl FnOnce(&Path, &Fake)) -> Harness {
+    start_with(None, prepare)
+}
+
+fn harness_options() -> Options {
+    Options {
+        settle: Duration::from_millis(50),
+        ..Options::default()
+    }
+}
+
+fn start_with(spool: Option<PathBuf>, prepare: impl FnOnce(&Path, &Fake)) -> Harness {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("mount.sock");
     let root = dir.path().join("Marlin");
+    let spool = spool.unwrap_or_else(|| dir.path().join("spool"));
     let fake = Fake::default();
     prepare(&root, &fake);
     let fake = Arc::new(fake);
@@ -224,6 +250,8 @@ fn start_after(prepare: impl FnOnce(&Path, &Fake)) -> Harness {
         Config {
             socket: socket.clone(),
             root: root.clone(),
+            spool: spool.clone(),
+            options: harness_options(),
         },
         Arc::new(FakeAdapter(Arc::clone(&fake))),
         Arc::new(MemoryProviders(Arc::clone(&fake))),
@@ -233,6 +261,7 @@ fn start_after(prepare: impl FnOnce(&Path, &Fake)) -> Harness {
     Harness {
         socket,
         root,
+        spool,
         fake,
         run: tokio::spawn(server.run(async {
             let _ = signaled.await;
@@ -623,6 +652,8 @@ async fn a_second_helper_cannot_bind_while_the_first_one_lives() {
             Config {
                 socket: dir.path().join("mount.sock"),
                 root: dir.path().join("Marlin"),
+                spool: dir.path().join("spool"),
+                options: harness_options(),
             },
             Arc::new(FakeAdapter(Arc::default())),
             Arc::new(MemoryProviders(Arc::default())),
@@ -646,6 +677,8 @@ async fn a_file_at_the_socket_path_is_not_removed() {
         Config {
             socket: socket.clone(),
             root: dir.path().join("Marlin"),
+            spool: dir.path().join("spool"),
+            options: harness_options(),
         },
         Arc::new(FakeAdapter(Arc::default())),
         Arc::new(MemoryProviders(Arc::default())),
@@ -721,6 +754,8 @@ async fn the_built_helper_answers_refuses_an_unknown_provider_and_exits_on_shutd
             .arg(&socket)
             .arg("--root")
             .arg(dir.path().join("Marlin"))
+            .arg("--spool")
+            .arg(dir.path().join("spool"))
             .spawn()
             .unwrap(),
     );
@@ -828,6 +863,7 @@ async fn one_failed_call_between_answers_changes_nothing() {
     let states: Vec<_> = watcher
         .inbox
         .iter()
+        .filter(|line| line["method"] == "mountChanged")
         .map(|line| &line["params"]["state"])
         .collect();
     assert_eq!(states, ["unmounting"]);
@@ -1142,4 +1178,505 @@ async fn the_text_of_a_provider_failure_is_logged_once_a_minute_with_secrets_mas
         let message = value["message"].as_str().unwrap();
         assert!(message.ends_with("Bearer [redacted]"), "{message}");
     }
+}
+
+fn provider(harness: &Harness, account: &str) -> Arc<MemoryProvider> {
+    harness.fake.providers.lock().unwrap()[account].clone()
+}
+
+fn account_spool(harness: &Harness, account: &str) -> PathBuf {
+    harness.spool.join("memory").join(account)
+}
+
+fn mode_bits(path: &Path) -> u32 {
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+fn entry_names(path: &Path) -> Vec<String> {
+    let mut names = std::fs::read_dir(path)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    names.sort();
+    names
+}
+
+fn numbered_files(path: &Path) -> Vec<String> {
+    entry_names(path)
+        .into_iter()
+        .filter(|name| name.parse::<u64>().is_ok())
+        .collect()
+}
+
+fn unsent_call(account: &str, mount_id: &str, node: u64) -> Value {
+    json!({"provider": "memory", "account": account, "mountId": mount_id, "node": node})
+}
+
+fn failed_offline(params: &Value) -> bool {
+    params["files"].as_array().is_some_and(|files| {
+        files
+            .iter()
+            .any(|file| file["state"] == "failed" && file["error"] == "offline")
+    })
+}
+
+fn no_files(params: &Value) -> bool {
+    params["files"]
+        .as_array()
+        .is_some_and(|files| files.is_empty())
+}
+
+fn uploading(params: &Value) -> bool {
+    params["files"]
+        .as_array()
+        .is_some_and(|files| files.iter().any(|file| file["state"] == "uploading"))
+}
+
+async fn write_bytes(vfs: &Vfs, name: &str, bytes: &[u8]) {
+    let (entry, handle) = vfs.create(Vfs::ROOT, name, Access::Write).await.unwrap();
+    vfs.write(handle, 0, bytes.to_vec()).await.unwrap();
+    vfs.release(handle);
+    // `create` counts one lookup. The OS forgets it when it drops the name. A held lookup keeps the spool file after a discard.
+    vfs.forget(entry.node, 1);
+}
+
+async fn stored(provider: &MemoryProvider, name: &str) -> Option<Vec<u8>> {
+    let items = provider.list(&ItemId("root".to_string())).await.unwrap();
+    let item = items.into_iter().find(|item| item.name == name)?;
+    Some(provider.contents(&item.id))
+}
+
+/// Creates `a.txt` while the provider is healthy, then fails the upload.
+async fn leave_failed(
+    harness: &Harness,
+    watcher: &mut Client,
+    account: &str,
+    mount_name: &str,
+) -> Value {
+    let vfs = harness.fake.vfs.lock().unwrap()[mount_name].clone();
+    let (entry, handle) = vfs.create(Vfs::ROOT, "a.txt", Access::Write).await.unwrap();
+    fail(harness, account, Some(VfsError::Offline));
+    vfs.write(handle, 0, b"hello".to_vec()).await.unwrap();
+    vfs.release(handle);
+    // `create` counts one lookup. The OS forgets it when it drops the name. A held lookup keeps the spool file after a discard.
+    vfs.forget(entry.node, 1);
+    watcher.unsent(failed_offline).await
+}
+
+#[tokio::test]
+async fn a_mount_makes_a_private_spool_and_uploads_a_written_file() {
+    let harness = start();
+    let mut client = Client::connect(&harness.socket).await;
+    let mut watcher = Client::connect(&harness.socket).await;
+    let mounted = client.call("mount", mount("ana", "drive")).await;
+    assert_eq!(mounted["result"]["state"], "mounted");
+    assert!(mounted["result"].get("readOnly").is_none());
+    let folder = account_spool(&harness, "ana");
+    assert!(folder.is_dir());
+    assert_eq!(mode_bits(&folder), 0o700);
+
+    let remote = provider(&harness, "ana");
+    remote.set_upload_delay(Duration::from_secs(2));
+    let vfs = harness.fake.vfs.lock().unwrap()["drive"].clone();
+    write_bytes(&vfs, "a.txt", b"hello").await;
+    watcher.unsent(uploading).await;
+    watcher.unsent(no_files).await;
+    assert_eq!(stored(&remote, "a.txt").await.unwrap(), b"hello");
+}
+
+#[tokio::test]
+async fn a_failed_upload_is_reported_and_a_retry_sends_it() {
+    let harness = start();
+    let mut client = Client::connect(&harness.socket).await;
+    let mut watcher = Client::connect(&harness.socket).await;
+    client.call("mount", mount("ana", "drive")).await;
+    let reported = leave_failed(&harness, &mut watcher, "ana", "drive").await;
+    let listed = client.call("unsent", account("ana")).await;
+    assert_eq!(listed["result"], reported);
+
+    fail(&harness, "ana", None);
+    let node = reported["files"][0]["node"].as_u64().unwrap();
+    let mount_id = reported["mountId"].as_str().unwrap();
+    let retry = client
+        .call("retryUnsent", unsent_call("ana", mount_id, node))
+        .await;
+    assert!(retry["error"].is_null());
+    // The automatic retry comes 5 seconds after the failure, so this proves the asked-for one.
+    tokio::time::timeout(Duration::from_secs(3), watcher.unsent(no_files))
+        .await
+        .expect("the retry did not send the file");
+    assert_eq!(
+        stored(&provider(&harness, "ana"), "a.txt").await.unwrap(),
+        b"hello"
+    );
+}
+
+#[tokio::test]
+async fn discard_drops_a_failed_file_and_it_is_not_uploaded_later() {
+    let harness = start();
+    let mut client = Client::connect(&harness.socket).await;
+    let mut watcher = Client::connect(&harness.socket).await;
+    client.call("mount", mount("ana", "drive")).await;
+    let reported = leave_failed(&harness, &mut watcher, "ana", "drive").await;
+    let node = reported["files"][0]["node"].as_u64().unwrap();
+    let mount_id = reported["mountId"].as_str().unwrap();
+    let discard = client
+        .call("discardUnsent", unsent_call("ana", mount_id, node))
+        .await;
+    assert!(discard["error"].is_null());
+    watcher.unsent(no_files).await;
+    let retry = client
+        .call("retryUnsent", unsent_call("ana", mount_id, node))
+        .await;
+    assert_eq!(code(&retry), -1015);
+    assert!(numbered_files(&account_spool(&harness, "ana")).is_empty());
+}
+
+#[tokio::test]
+async fn retry_and_discard_refuse_a_mount_id_or_a_node_that_is_not_this_mounts() {
+    let harness = start();
+    let mut client = Client::connect(&harness.socket).await;
+    let mut watcher = Client::connect(&harness.socket).await;
+    client.call("mount", mount("ana", "drive")).await;
+    let first = client.call("unsent", account("ana")).await;
+    let old_id = first["result"]["mountId"].as_str().unwrap().to_string();
+    client.call("unmount", account("ana")).await;
+    client.call("mount", mount("ana", "drive")).await;
+    let reported = leave_failed(&harness, &mut watcher, "ana", "drive").await;
+    let current = reported["mountId"].as_str().unwrap();
+    let node = reported["files"][0]["node"].as_u64().unwrap();
+    assert_ne!(current, old_id);
+
+    for params in [
+        unsent_call("ana", &old_id, node),
+        unsent_call("ana", "not-a-uuid", node),
+        unsent_call("ana", current, node + 1000),
+    ] {
+        assert_eq!(
+            code(&client.call("retryUnsent", params.clone()).await),
+            -1015
+        );
+        assert_eq!(code(&client.call("discardUnsent", params).await), -1015);
+    }
+    let listed = client.call("unsent", account("ana")).await;
+    assert!(failed_offline(&listed["result"]));
+    let discard = client
+        .call("discardUnsent", unsent_call("ana", current, node))
+        .await;
+    assert!(discard["error"].is_null());
+
+    let mut older = Client::open(&harness.socket).await;
+    older
+        .call("hello", json!({"protocol": PROTOCOL_VERSION - 1}))
+        .await;
+    assert_eq!(code(&older.call("unsent", account("ana")).await), -1011);
+}
+
+#[tokio::test]
+async fn an_unmount_leaves_a_failed_file_and_the_next_mount_uploads_it() {
+    let harness = start();
+    let mut client = Client::connect(&harness.socket).await;
+    let mut watcher = Client::connect(&harness.socket).await;
+    client.call("mount", mount("ana", "drive")).await;
+    leave_failed(&harness, &mut watcher, "ana", "drive").await;
+    let id = client.send("unmount", account("ana")).await;
+    let mut last = None;
+    loop {
+        let line = watcher
+            .find(|line| {
+                line["method"] == "unsentChanged"
+                    || (line["method"] == "mountChanged" && line["params"]["state"] == "unmounted")
+            })
+            .await;
+        if line["method"] == "unsentChanged" {
+            last = Some(line["params"].clone());
+            continue;
+        }
+        break;
+    }
+    assert!(failed_offline(&last.unwrap()));
+    assert!(client.response(id).await["error"].is_null());
+    let names = entry_names(&account_spool(&harness, "ana"));
+    assert!(names.iter().any(|name| name.parse::<u64>().is_ok()));
+    assert!(names.iter().any(|name| name.ends_with(".record")));
+
+    harness.fake.hold_mount.send_replace(true);
+    let id = client.send("mount", mount("ana", "drive")).await;
+    wait(&harness.fake.mounts, |count| *count == 2).await;
+    provider(&harness, "ana").set_upload_delay(Duration::from_secs(2));
+    harness.fake.hold_mount.send_replace(false);
+    assert_eq!(client.response(id).await["result"]["state"], "mounted");
+    watcher.unsent(uploading).await;
+    watcher.unsent(no_files).await;
+    assert_eq!(
+        stored(&provider(&harness, "ana"), "a.txt").await.unwrap(),
+        b"hello"
+    );
+}
+
+#[tokio::test]
+async fn an_unmount_waits_for_a_running_upload() {
+    let harness = start();
+    let mut client = Client::connect(&harness.socket).await;
+    let mut watcher = Client::connect(&harness.socket).await;
+    client.call("mount", mount("ana", "drive")).await;
+    let remote = provider(&harness, "ana");
+    remote.set_upload_delay(Duration::from_secs(2));
+    let vfs = harness.fake.vfs.lock().unwrap()["drive"].clone();
+    write_bytes(&vfs, "a.txt", b"hello").await;
+    watcher.unsent(uploading).await;
+    let id = client.send("unmount", account("ana")).await;
+    watcher.event("unmounting").await;
+    assert!(stored(&remote, "a.txt").await.is_none());
+    assert!(client.response(id).await["error"].is_null());
+    assert_eq!(stored(&remote, "a.txt").await.unwrap(), b"hello");
+    assert!(numbered_files(&account_spool(&harness, "ana")).is_empty());
+}
+
+#[tokio::test]
+async fn a_shutdown_from_another_protocol_version_waits_for_the_upload() {
+    let harness = start();
+    let mut client = Client::connect(&harness.socket).await;
+    let mut watcher = Client::connect(&harness.socket).await;
+    client.call("mount", mount("ana", "drive")).await;
+    let remote = provider(&harness, "ana");
+    remote.set_upload_delay(Duration::from_secs(2));
+    let vfs = harness.fake.vfs.lock().unwrap()["drive"].clone();
+    write_bytes(&vfs, "a.txt", b"hello").await;
+    watcher.unsent(uploading).await;
+    let mut older = Client::open(&harness.socket).await;
+    older
+        .call("hello", json!({"protocol": PROTOCOL_VERSION - 1}))
+        .await;
+    let id = older.send("shutdown", Value::Null).await;
+    assert!(stored(&remote, "a.txt").await.is_none());
+    assert!(older.response(id).await["error"].is_null());
+    harness.run.await.unwrap();
+    assert_eq!(stored(&remote, "a.txt").await.unwrap(), b"hello");
+}
+
+#[tokio::test]
+async fn a_signal_stops_the_wait_and_the_next_start_uploads_what_is_left() {
+    let harness = start();
+    let mut client = Client::connect(&harness.socket).await;
+    let mut watcher = Client::connect(&harness.socket).await;
+    client.call("mount", mount("ana", "drive")).await;
+    provider(&harness, "ana").set_upload_delay(Duration::from_secs(60));
+    let vfs = harness.fake.vfs.lock().unwrap()["drive"].clone();
+    write_bytes(&vfs, "a.txt", b"hello").await;
+    watcher.unsent(uploading).await;
+    client.send("unmount", account("ana")).await;
+    watcher.event("unmounting").await;
+    let folder = account_spool(&harness, "ana");
+    let spool = harness.spool.clone();
+    harness.signal.send(()).unwrap();
+    let run = harness.run;
+    tokio::time::timeout(Duration::from_secs(10), run)
+        .await
+        .expect("the helper did not exit")
+        .unwrap();
+    let names = entry_names(&folder);
+    assert!(names.iter().any(|name| name.parse::<u64>().is_ok()));
+    assert!(names.iter().any(|name| name.ends_with(".record")));
+
+    let next = start_on(spool);
+    let mut client = Client::connect(&next.socket).await;
+    let mut watcher = Client::connect(&next.socket).await;
+    next.fake.hold_mount.send_replace(true);
+    let id = client.send("mount", mount("ana", "drive")).await;
+    wait(&next.fake.mounts, |count| *count == 1).await;
+    provider(&next, "ana").set_upload_delay(Duration::from_secs(2));
+    next.fake.hold_mount.send_replace(false);
+    assert_eq!(client.response(id).await["result"]["state"], "mounted");
+    watcher.unsent(uploading).await;
+    watcher.unsent(no_files).await;
+    assert_eq!(
+        stored(&provider(&next, "ana"), "a.txt").await.unwrap(),
+        b"hello"
+    );
+}
+
+#[tokio::test]
+async fn a_file_where_the_spool_folder_should_be_mounts_read_only() {
+    let harness = start();
+    std::fs::create_dir_all(&harness.spool).unwrap();
+    std::fs::write(harness.spool.join("memory"), b"not a folder").unwrap();
+    let mut client = Client::connect(&harness.socket).await;
+    let mounted = client.call("mount", mount("ana", "drive")).await;
+    assert_eq!(mounted["result"]["state"], "mounted");
+    assert_eq!(mounted["result"]["readOnly"]["reason"], "spool");
+    let vfs = harness.fake.vfs.lock().unwrap()["drive"].clone();
+    let error = vfs
+        .create(Vfs::ROOT, "a.txt", Access::Write)
+        .await
+        .unwrap_err();
+    assert_eq!(error, VfsError::ReadOnly);
+    assert!(client.call("unsent", account("ana")).await["result"].is_null());
+}
+
+#[tokio::test]
+async fn an_open_spool_folder_is_closed_and_a_symlink_stays_read_only() {
+    let harness = start();
+    let folder = account_spool(&harness, "ana");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut client = Client::connect(&harness.socket).await;
+    let mounted = client.call("mount", mount("ana", "drive")).await;
+    assert!(mounted["result"].get("readOnly").is_none());
+    assert_eq!(mode_bits(&folder), 0o700);
+
+    // A folder the user cannot write in takes writes once it is 0700 again.
+    let closed = account_spool(&harness, "carol");
+    std::fs::create_dir_all(&closed).unwrap();
+    std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let mounted = client.call("mount", mount("carol", "music")).await;
+    assert!(mounted["result"].get("readOnly").is_none());
+    assert_eq!(mode_bits(&closed), 0o700);
+
+    let link = account_spool(&harness, "bob");
+    std::os::unix::fs::symlink(&folder, &link).unwrap();
+    let mounted = client.call("mount", mount("bob", "photos")).await;
+    assert_eq!(mounted["result"]["readOnly"]["reason"], "spool");
+}
+
+#[tokio::test]
+async fn two_helpers_cannot_share_one_accounts_spool() {
+    let first = start();
+    let second = start_on(first.spool.clone());
+    let mut one = Client::connect(&first.socket).await;
+    let mut other = Client::connect(&second.socket).await;
+    let mounted = one.call("mount", mount("ana", "drive")).await;
+    assert!(mounted["result"].get("readOnly").is_none());
+    let mounted = other.call("mount", mount("ana", "drive")).await;
+    assert_eq!(mounted["result"]["readOnly"]["reason"], "spool");
+    assert!(other.call("unsent", account("ana")).await["result"].is_null());
+
+    assert!(other.call("unmount", account("ana")).await["error"].is_null());
+    assert!(one.call("unmount", account("ana")).await["error"].is_null());
+    let mounted = other.call("mount", mount("ana", "drive")).await;
+    assert!(mounted["result"].get("readOnly").is_none());
+    assert!(other.call("unsent", account("ana")).await["result"]["mountId"].is_string());
+}
+
+#[tokio::test]
+async fn a_discard_that_waits_on_the_change_lock_holds_up_the_unmount() {
+    let harness = start();
+    let mut client = Client::connect(&harness.socket).await;
+    let mut watcher = Client::connect(&harness.socket).await;
+    client.call("mount", mount("ana", "drive")).await;
+    let reported = leave_failed(&harness, &mut watcher, "ana", "drive").await;
+    fail(&harness, "ana", None);
+    let remote = provider(&harness, "ana");
+    remote.set_delay(Duration::from_secs(1));
+    let vfs = harness.fake.vfs.lock().unwrap()["drive"].clone();
+    let creating = tokio::spawn({
+        let vfs = Arc::clone(&vfs);
+        async move {
+            vfs.create_folder(Vfs::ROOT, "x").await.unwrap();
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if remote.in_flight() >= 1 {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let node = reported["files"][0]["node"].as_u64().unwrap();
+    let mount_id = reported["mountId"].as_str().unwrap();
+    let discard_id = client
+        .send("discardUnsent", unsent_call("ana", mount_id, node))
+        .await;
+    let unmount_id = client.send("unmount", account("ana")).await;
+    let first = client
+        .find(|line| line["id"] == discard_id || line["id"] == unmount_id)
+        .await;
+    assert_eq!(first["id"], discard_id);
+    assert!(first["error"].is_null());
+    assert!(client.response(unmount_id).await["error"].is_null());
+    creating.await.unwrap();
+
+    client.call("mount", mount("ana", "drive")).await;
+    let listed = client.call("unsent", account("ana")).await;
+    assert!(listed["result"]["files"].as_array().unwrap().is_empty());
+    assert!(numbered_files(&account_spool(&harness, "ana")).is_empty());
+}
+
+#[tokio::test]
+async fn a_spool_file_with_no_record_is_unplaced() {
+    let harness = start();
+    let folder = account_spool(&harness, "ana");
+    std::fs::create_dir_all(&folder).unwrap();
+    let orphan = folder.join("1");
+    std::fs::write(&orphan, b"bytes").unwrap();
+    let mut client = Client::connect(&harness.socket).await;
+    let mut watcher = Client::connect(&harness.socket).await;
+    client.call("mount", mount("ana", "drive")).await;
+    let reported = watcher
+        .unsent(|params| {
+            no_files(params)
+                && params["unplaced"]
+                    .as_array()
+                    .is_some_and(|paths| paths.len() == 1)
+        })
+        .await;
+    assert_eq!(reported["unplaced"][0], orphan.display().to_string());
+    let listed = client.call("unsent", account("ana")).await;
+    assert_eq!(listed["result"], reported);
+}
+
+#[tokio::test]
+async fn a_discard_while_an_unmount_waits_stops_the_upload_and_ends_the_wait() {
+    let harness = start();
+    let mut client = Client::connect(&harness.socket).await;
+    let mut watcher = Client::connect(&harness.socket).await;
+    client.call("mount", mount("ana", "drive")).await;
+    let remote = provider(&harness, "ana");
+    remote.set_upload_delay(Duration::from_secs(60));
+    let vfs = harness.fake.vfs.lock().unwrap()["drive"].clone();
+    write_bytes(&vfs, "a.txt", b"hello").await;
+    let reported = watcher.unsent(uploading).await;
+    let id = client.send("unmount", account("ana")).await;
+    watcher.event("unmounting").await;
+
+    let node = reported["files"][0]["node"].as_u64().unwrap();
+    let mount_id = reported["mountId"].as_str().unwrap();
+    let discard = client
+        .call("discardUnsent", unsent_call("ana", mount_id, node))
+        .await;
+    assert!(discard["error"].is_null());
+    let unmounted = tokio::time::timeout(Duration::from_secs(10), client.response(id))
+        .await
+        .expect("the unmount still waited for the discarded upload");
+    assert!(unmounted["error"].is_null());
+    assert!(stored(&remote, "a.txt").await.is_none());
+    assert!(numbered_files(&account_spool(&harness, "ana")).is_empty());
+}
+
+#[tokio::test]
+async fn a_mount_during_a_shutdown_that_waits_for_uploads_is_refused_at_once() {
+    let harness = start();
+    let mut client = Client::connect(&harness.socket).await;
+    let mut watcher = Client::connect(&harness.socket).await;
+    client.call("mount", mount("ana", "drive")).await;
+    provider(&harness, "ana").set_upload_delay(Duration::from_secs(60));
+    let vfs = harness.fake.vfs.lock().unwrap()["drive"].clone();
+    write_bytes(&vfs, "a.txt", b"hello").await;
+    watcher.unsent(uploading).await;
+    client.send("shutdown", Value::Null).await;
+    watcher.event("unmounting").await;
+
+    let again = tokio::time::timeout(
+        Duration::from_secs(5),
+        client.call("mount", mount("ana", "drive")),
+    )
+    .await
+    .expect("the mount waited behind the shutdown");
+    assert_eq!(code(&again), -1009);
+    harness.signal.send(()).unwrap();
+    harness.run.await.unwrap();
 }

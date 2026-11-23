@@ -15,19 +15,23 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{mpsc, oneshot, Notify};
 
 use crate::log;
-use crate::mounts::{Adapter, Mounts, Providers};
+use crate::mounts::{Adapter, Mounts, Notice, Providers};
 use crate::protocol::{
     error_codes, methods, AccountParams, HelloParams, HelloResult, MountParams, Request, Response,
-    RpcError, JSONRPC_VERSION, PROTOCOL_VERSION,
+    RpcError, UnsentParams, JSONRPC_VERSION, PROTOCOL_VERSION,
 };
 
 /// The longest request line a client may send, in bytes.
 const MAX_LINE: usize = 64 * 1024;
 
-/// Where the helper listens, and the folder that holds its mount points.
+/// Where the helper listens, the folder that holds its mount points, and the spool each mount writes into.
 pub struct Config {
     pub socket: PathBuf,
     pub root: PathBuf,
+    /// The folder that holds one spool folder per account.
+    pub spool: PathBuf,
+    /// The limits of each mount's core.
+    pub options: marlin_vfs::Options,
 }
 
 /// Why the helper could not take the socket.
@@ -114,7 +118,13 @@ impl Server {
             listener,
             socket: config.socket,
             shared: Arc::new(Shared {
-                mounts: Arc::new(Mounts::new(config.root, adapter, providers)),
+                mounts: Arc::new(Mounts::new(
+                    config.root,
+                    config.spool,
+                    config.options,
+                    adapter,
+                    providers,
+                )),
                 uid,
                 stop: Notify::new(),
             }),
@@ -131,6 +141,7 @@ impl Server {
         self.shared.mounts.sweep().await;
         tokio::select! {
             _ = stop => {
+                self.shared.mounts.hurry();
                 if let Err(error) = self.shared.mounts.close().await {
                     log::write("error", "helper.stop_unmount", json!({"message": error.to_string()}));
                 }
@@ -218,13 +229,18 @@ async fn serve(stream: UnixStream, shared: Arc<Shared>) {
         let outgoing = outgoing.clone();
         tokio::spawn(async move {
             loop {
-                let status = match events.recv().await {
-                    Ok(status) => status,
-                    // A client this far behind has missed changes. It can ask for `list`.
+                let notice = match events.recv().await {
+                    Ok(notice) => notice,
+                    // A client this far behind has missed changes. It can ask for `list` and `unsent`.
                     Err(RecvError::Lagged(_)) => continue,
                     Err(RecvError::Closed) => return,
                 };
-                let notification = json!({"jsonrpc": JSONRPC_VERSION, "method": methods::MOUNT_CHANGED, "params": status});
+                let (method, params) = match notice {
+                    Notice::Mount(status) => (methods::MOUNT_CHANGED, json!(status)),
+                    Notice::Unsent(files) => (methods::UNSENT_CHANGED, json!(files)),
+                };
+                let notification =
+                    json!({"jsonrpc": JSONRPC_VERSION, "method": method, "params": params});
                 if outgoing.send((line(&notification), None)).await.is_err() {
                     return;
                 }
@@ -308,6 +324,33 @@ async fn answer(
             let AccountParams { provider, account } =
                 serde_json::from_value(params).map_err(invalid_params)?;
             json!(mounts.status(&provider, &account))
+        }
+        methods::UNSENT => {
+            let AccountParams { provider, account } =
+                serde_json::from_value(params).map_err(invalid_params)?;
+            json!(mounts.unsent(&provider, &account))
+        }
+        methods::RETRY_UNSENT => {
+            let UnsentParams {
+                provider,
+                account,
+                mount_id,
+                node,
+            } = serde_json::from_value(params).map_err(invalid_params)?;
+            mounts.retry_unsent(&provider, &account, &mount_id, node)?;
+            Value::Null
+        }
+        methods::DISCARD_UNSENT => {
+            let UnsentParams {
+                provider,
+                account,
+                mount_id,
+                node,
+            } = serde_json::from_value(params).map_err(invalid_params)?;
+            mounts
+                .discard_unsent(&provider, &account, &mount_id, node)
+                .await?;
+            Value::Null
         }
         _ => {
             return Err(RpcError {
