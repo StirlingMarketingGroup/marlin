@@ -22,7 +22,7 @@
 
 **Samba stays out of the helper's binary.** Samba is GPL. Rule 2 of [`licenses.md`](../licenses.md) keeps GPL code out of the app and the helper, which is why `marlin-smb` is its own program. So the helper cannot link libsmbclient, and it talks to `marlin-smb` the way the app does.
 
-**One process runs one call at a time.** `marlin-smb` holds one lock around every libsmbclient call (`operations.rs`), because libsmbclient keeps global state that is not safe across threads, even across connections. Calls that run at the same time need more than one process.
+**One process runs one call at a time.** `marlin-smb` answers one request at a time, and pavao holds one lock around every libsmbclient call, because libsmbclient keeps global state that is not safe across threads, even across connections. Calls that run at the same time need more than one process.
 
 **Only a process can be stopped in the middle of a call.** A libsmbclient call that waits on a hung server cannot be cancelled from another thread. The mount core already gives up on a call after its limit, but the call goes on holding the process, and every later call waits behind it. Ending the process frees the mount.
 

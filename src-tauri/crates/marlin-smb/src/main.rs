@@ -12,11 +12,9 @@
 
 mod operations;
 
-use marlin_smb_client::protocol::{
-    error_codes, methods, CopyParams, CreateDirectoryParams, DeleteParams, DownloadFileParams,
-    DownloadPartialParams, GetFileMetadataParams, ListSharesParams, PingResult,
-    ReadDirectoryParams, RenameParams, Request, Response, TestConnectionParams, UploadFileParams,
-};
+use marlin_smb_client::protocol::{error_codes, methods, PingResult, Request, Response};
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 use std::io::{BufRead, Write};
 
 /// Run the sidecar main loop.
@@ -90,17 +88,18 @@ fn write_response<W: Write>(writer: &mut W, response: &Response) {
 fn dispatch_request(request: &Request) -> Response {
     match request.method.as_str() {
         methods::PING => handle_ping(request),
-        methods::READ_DIRECTORY => handle_read_directory(request),
-        methods::GET_FILE_METADATA => handle_get_file_metadata(request),
-        methods::CREATE_DIRECTORY => handle_create_directory(request),
-        methods::DELETE => handle_delete(request),
-        methods::RENAME => handle_rename(request),
-        methods::COPY => handle_copy(request),
-        methods::LIST_SHARES => handle_list_shares(request),
-        methods::TEST_CONNECTION => handle_test_connection(request),
-        methods::DOWNLOAD_FILE => handle_download_file(request),
-        methods::DOWNLOAD_PARTIAL => handle_download_partial(request),
-        methods::UPLOAD_FILE => handle_upload_file(request),
+        methods::READ_DIRECTORY => respond(request, operations::read_directory),
+        methods::GET_FILE_METADATA => respond(request, operations::get_file_metadata),
+        methods::CREATE_DIRECTORY => respond(request, operations::create_directory),
+        methods::DELETE => respond(request, operations::delete),
+        methods::RENAME => respond(request, operations::rename),
+        methods::COPY => respond(request, operations::copy),
+        methods::LIST_SHARES => respond(request, operations::list_shares),
+        methods::READ => respond(request, operations::read),
+        methods::SPACE => respond(request, operations::space),
+        methods::DOWNLOAD_FILE => respond(request, operations::download_file),
+        methods::DOWNLOAD_PARTIAL => respond(request, operations::download_partial),
+        methods::UPLOAD_FILE => respond(request, operations::upload_file),
         _ => Response::error(
             request.id,
             error_codes::METHOD_NOT_FOUND,
@@ -118,8 +117,12 @@ fn handle_ping(request: &Request) -> Response {
     )
 }
 
-fn handle_read_directory(request: &Request) -> Response {
-    let params: ReadDirectoryParams = match serde_json::from_value(request.params.clone()) {
+/// Reads the params, runs `operation`, and answers with its result or its error.
+fn respond<P: DeserializeOwned, R: Serialize>(
+    request: &Request,
+    operation: fn(P) -> Result<R, (i32, String)>,
+) -> Response {
+    let params: P = match serde_json::from_value(request.params.clone()) {
         Ok(p) => p,
         Err(e) => {
             return Response::error(
@@ -130,187 +133,7 @@ fn handle_read_directory(request: &Request) -> Response {
         }
     };
 
-    match operations::read_directory(params) {
-        Ok(result) => Response::success(request.id, result),
-        Err((code, msg)) => Response::error(request.id, code, msg),
-    }
-}
-
-fn handle_get_file_metadata(request: &Request) -> Response {
-    let params: GetFileMetadataParams = match serde_json::from_value(request.params.clone()) {
-        Ok(p) => p,
-        Err(e) => {
-            return Response::error(
-                request.id,
-                error_codes::INVALID_PARAMS,
-                format!("Invalid params: {}", e),
-            )
-        }
-    };
-
-    match operations::get_file_metadata(params) {
-        Ok(result) => Response::success(request.id, result),
-        Err((code, msg)) => Response::error(request.id, code, msg),
-    }
-}
-
-fn handle_create_directory(request: &Request) -> Response {
-    let params: CreateDirectoryParams = match serde_json::from_value(request.params.clone()) {
-        Ok(p) => p,
-        Err(e) => {
-            return Response::error(
-                request.id,
-                error_codes::INVALID_PARAMS,
-                format!("Invalid params: {}", e),
-            )
-        }
-    };
-
-    match operations::create_directory(params) {
-        Ok(()) => Response::success(request.id, serde_json::Value::Null),
-        Err((code, msg)) => Response::error(request.id, code, msg),
-    }
-}
-
-fn handle_delete(request: &Request) -> Response {
-    let params: DeleteParams = match serde_json::from_value(request.params.clone()) {
-        Ok(p) => p,
-        Err(e) => {
-            return Response::error(
-                request.id,
-                error_codes::INVALID_PARAMS,
-                format!("Invalid params: {}", e),
-            )
-        }
-    };
-
-    match operations::delete(params) {
-        Ok(()) => Response::success(request.id, serde_json::Value::Null),
-        Err((code, msg)) => Response::error(request.id, code, msg),
-    }
-}
-
-fn handle_rename(request: &Request) -> Response {
-    let params: RenameParams = match serde_json::from_value(request.params.clone()) {
-        Ok(p) => p,
-        Err(e) => {
-            return Response::error(
-                request.id,
-                error_codes::INVALID_PARAMS,
-                format!("Invalid params: {}", e),
-            )
-        }
-    };
-
-    match operations::rename(params) {
-        Ok(()) => Response::success(request.id, serde_json::Value::Null),
-        Err((code, msg)) => Response::error(request.id, code, msg),
-    }
-}
-
-fn handle_copy(request: &Request) -> Response {
-    let params: CopyParams = match serde_json::from_value(request.params.clone()) {
-        Ok(p) => p,
-        Err(e) => {
-            return Response::error(
-                request.id,
-                error_codes::INVALID_PARAMS,
-                format!("Invalid params: {}", e),
-            )
-        }
-    };
-
-    match operations::copy(params) {
-        Ok(()) => Response::success(request.id, serde_json::Value::Null),
-        Err((code, msg)) => Response::error(request.id, code, msg),
-    }
-}
-
-fn handle_list_shares(request: &Request) -> Response {
-    let params: ListSharesParams = match serde_json::from_value(request.params.clone()) {
-        Ok(p) => p,
-        Err(e) => {
-            return Response::error(
-                request.id,
-                error_codes::INVALID_PARAMS,
-                format!("Invalid params: {}", e),
-            )
-        }
-    };
-
-    match operations::list_shares(params) {
-        Ok(result) => Response::success(request.id, result),
-        Err((code, msg)) => Response::error(request.id, code, msg),
-    }
-}
-
-fn handle_test_connection(request: &Request) -> Response {
-    let params: TestConnectionParams = match serde_json::from_value(request.params.clone()) {
-        Ok(p) => p,
-        Err(e) => {
-            return Response::error(
-                request.id,
-                error_codes::INVALID_PARAMS,
-                format!("Invalid params: {}", e),
-            )
-        }
-    };
-
-    match operations::test_connection(params) {
-        Ok(result) => Response::success(request.id, result),
-        Err((code, msg)) => Response::error(request.id, code, msg),
-    }
-}
-
-fn handle_download_file(request: &Request) -> Response {
-    let params: DownloadFileParams = match serde_json::from_value(request.params.clone()) {
-        Ok(p) => p,
-        Err(e) => {
-            return Response::error(
-                request.id,
-                error_codes::INVALID_PARAMS,
-                format!("Invalid params: {}", e),
-            )
-        }
-    };
-
-    match operations::download_file(params) {
-        Ok(result) => Response::success(request.id, result),
-        Err((code, msg)) => Response::error(request.id, code, msg),
-    }
-}
-
-fn handle_download_partial(request: &Request) -> Response {
-    let params: DownloadPartialParams = match serde_json::from_value(request.params.clone()) {
-        Ok(p) => p,
-        Err(e) => {
-            return Response::error(
-                request.id,
-                error_codes::INVALID_PARAMS,
-                format!("Invalid params: {}", e),
-            )
-        }
-    };
-
-    match operations::download_partial(params) {
-        Ok(result) => Response::success(request.id, result),
-        Err((code, msg)) => Response::error(request.id, code, msg),
-    }
-}
-
-fn handle_upload_file(request: &Request) -> Response {
-    let params: UploadFileParams = match serde_json::from_value(request.params.clone()) {
-        Ok(p) => p,
-        Err(e) => {
-            return Response::error(
-                request.id,
-                error_codes::INVALID_PARAMS,
-                format!("Invalid params: {}", e),
-            )
-        }
-    };
-
-    match operations::upload_file(params) {
+    match operation(params) {
         Ok(result) => Response::success(request.id, result),
         Err((code, msg)) => Response::error(request.id, code, msg),
     }

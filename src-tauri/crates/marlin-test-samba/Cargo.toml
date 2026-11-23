@@ -1,0 +1,12 @@
+[package]
+name = "marlin-test-samba"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+rust-version = "1.89"
+description = "A Samba server for Marlin's tests only."
+
+[dependencies]
+tempfile = "3.27"
+libc = "0.2"

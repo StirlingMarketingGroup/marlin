@@ -27,9 +27,17 @@ pub mod error_codes {
     pub const SMB_PERMISSION_DENIED: i32 = -1004;
     /// libsmbclient library missing
     pub const SMB_LIBRARY_MISSING: i32 = -1005;
+    /// The server could not be reached, or the connection broke during the call.
+    pub const SMB_CONNECTION_LOST: i32 = -1006;
+    /// A file was asked for and the path is a folder.
+    pub const SMB_IS_A_FOLDER: i32 = -1007;
     /// Generic SMB error
     pub const SMB_ERROR: i32 = -1000;
 }
+
+/// The most bytes one `read` may ask for.
+/// A longer request fails with `INVALID_PARAMS`, so a caller that needs more asks again from where the last read ended.
+pub const READ_MAX: u32 = 16 * 1024 * 1024;
 
 /// JSON-RPC 2.0 request.
 // No `Debug`: `params` holds the password as plain JSON.
@@ -165,10 +173,53 @@ pub struct ListSharesParams {
     pub credentials: SmbCredentials,
 }
 
-/// Parameters for test_connection method.
+/// Parameters for read method.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TestConnectionParams {
+pub struct ReadParams {
     pub credentials: SmbCredentials,
+    pub share: String,
+    pub path: String,
+    pub offset: u64,
+    pub length: u32,
+}
+
+/// Bytes from one `read`.
+/// The bytes travel as standard base64 text, because a JSON string cannot hold raw bytes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadResult {
+    #[serde(with = "base64_text")]
+    pub data: Vec<u8>,
+}
+
+mod base64_text {
+    use base64::Engine;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&base64::engine::general_purpose::STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        base64::engine::general_purpose::STANDARD
+            .decode(text)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+/// Parameters for space method.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpaceParams {
+    pub credentials: SmbCredentials,
+    pub share: String,
+}
+
+/// A share's total and free bytes.
+/// `space` answers `None`, which is JSON `null`, when the server reports no size.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpaceResult {
+    pub total: u64,
+    pub free: u64,
 }
 
 /// Parameters for download_file method.
@@ -267,12 +318,6 @@ pub struct DownloadPartialResult {
     pub total_size: u64,
 }
 
-/// Result of test_connection.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TestConnectionResult {
-    pub success: bool,
-}
-
 /// Ping result (used to verify sidecar is alive).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PingResult {
@@ -289,7 +334,8 @@ pub mod methods {
     pub const RENAME: &str = "rename";
     pub const COPY: &str = "copy";
     pub const LIST_SHARES: &str = "list_shares";
-    pub const TEST_CONNECTION: &str = "test_connection";
+    pub const READ: &str = "read";
+    pub const SPACE: &str = "space";
     pub const DOWNLOAD_FILE: &str = "download_file";
     pub const DOWNLOAD_PARTIAL: &str = "download_partial";
     pub const UPLOAD_FILE: &str = "upload_file";
