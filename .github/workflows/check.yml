@@ -13,7 +13,8 @@ env:
   # Every Rust build in this workflow uses the same flags, so the lint job and the
   # real-app tests reuse each other's compiled crates in a runner's build folder.
   RUSTFLAGS: '-D warnings'
-  # File and line in a panic's backtrace, at a fraction of the disk of full debug info.
+  # A fraction of the disk of full debug info. A backtrace (RUST_BACKTRACE=1) still
+  # names file and line.
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
