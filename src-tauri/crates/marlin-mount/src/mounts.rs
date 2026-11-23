@@ -2,15 +2,21 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::fs::File;
 use std::io::ErrorKind;
-use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use marlin_vfs::{Options, Provider, Vfs, VfsError};
+use marlin_vfs::{NodeId, Options, Provider, Spool, Vfs, VfsError};
+use uuid::Uuid;
 
 use crate::log::{self, redact};
-use crate::protocol::{error_codes, DeadMount, MountState, MountStatus, RpcError};
+use crate::protocol::{
+    error_codes, DeadMount, MountState, MountStatus, ReadOnly, RpcError, UnsentFile, UnsentFiles,
+    UnsentState,
+};
 
 /// What an OS adapter gives the helper. `marlin-fuse` is the one for Linux and macOS. Issue #375 adds Windows.
 #[async_trait::async_trait]
@@ -62,6 +68,10 @@ pub enum MountError {
     SignInNeeded,
     /// The account's first call got no answer from the remote. A later try can work.
     Unreachable,
+    /// That file has no unsent bytes in this mount, or the mount id is not this mount's.
+    NotUnsent,
+    /// A discard waited too long for the mount's other changes.
+    Busy,
 }
 
 impl fmt::Display for MountError {
@@ -81,6 +91,8 @@ impl fmt::Display for MountError {
             Self::ShuttingDown => f.write_str("the helper is shutting down"),
             Self::SignInNeeded => f.write_str("the account needs a new sign-in"),
             Self::Unreachable => f.write_str("the account's storage could not be reached"),
+            Self::NotUnsent => f.write_str("that file has no unsent bytes in this mount"),
+            Self::Busy => f.write_str("the mount is busy with another change; try again"),
         }
     }
 }
@@ -110,6 +122,8 @@ impl From<MountError> for RpcError {
                 MountError::ShuttingDown => error_codes::SHUTTING_DOWN,
                 MountError::SignInNeeded => error_codes::SIGN_IN_NEEDED,
                 MountError::Unreachable => error_codes::UNREACHABLE,
+                MountError::NotUnsent => error_codes::NOT_UNSENT,
+                MountError::Busy => error_codes::BUSY,
             },
         }
     }
@@ -125,7 +139,17 @@ struct Key {
 const FAILURES_IN_A_ROW: u32 = 3;
 
 /// How long a mount waits before it logs the same failure text again.
-const LOG_SAME_TEXT_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+const LOG_SAME_TEXT_EVERY: Duration = Duration::from_secs(60);
+
+/// How often the helper looks at each mount's unsent files. It bounds the rate of `unsentChanged`, and it is how often an unmount looks whether its uploads are done.
+const UNSENT_EVERY: Duration = Duration::from_millis(500);
+
+/// What the helper tells every client on its protocol version.
+#[derive(Clone)]
+pub(crate) enum Notice {
+    Mount(MountStatus),
+    Unsent(UnsentFiles),
+}
 
 /// What the last provider calls say about a mount's remote, from best to worst. A run of failed calls only moves a mount toward the worse end. The first call the remote answers moves it back to `Healthy`.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -148,9 +172,11 @@ struct MountEntry {
     name: String,
     lifecycle: Lifecycle,
 
-    /// Which mount attempt made this entry. A provider call from an earlier attempt of the same account must not change this one.
-    attempt: u64,
+    /// Which mount attempt made this entry, and its `mountId` on the wire. A provider call from an earlier attempt of the same account must not change this one. A random ID, because a list kept across a remount or a helper restart must never name another mount's files: a discard drops bytes for good.
+    attempt: Uuid,
     health: Health,
+
+    writing: Writing,
 
     /// Provider calls that failed in a row.
     failures: u32,
@@ -167,41 +193,101 @@ struct Table {
 
     /// True from the moment a shutdown starts until it fails or the helper exits.
     closing: bool,
+}
 
-    /// How many mount attempts this helper has started. Each new entry takes the next number.
-    attempts: u64,
+/// How a mount takes writes. Decided when the mount comes up, and turned off when its unmount stops the uploads.
+enum Writing {
+    /// Not now: the mount is starting, it failed, or its unmount has stopped the uploads.
+    Off,
+    /// Never, for this reason.
+    ReadOnly(ReadOnly),
+    /// Into its spool, from the moment the mount is up until its unmount has stopped the uploads.
+    Spooled(Writes),
+}
+
+/// A mount's spool at work: the core that holds it, the two tasks that run beside the mount, and what keeps the spool folder this mount's alone.
+struct Writes {
+    vfs: Arc<Vfs>,
+    /// `Vfs::run_uploads`. Aborted to stop uploading; the spool files stay.
+    uploads: tokio::task::JoinHandle<()>,
+    /// Sends `unsentChanged` when the mount's unsent files change.
+    watch: tokio::task::JoinHandle<()>,
+    /// Each retry and discard holds it for reading while it runs. The unmount takes it for writing before it lets the spool go, so no call of this mount touches the spool folder after a new mount of the account has it.
+    calls: Arc<tokio::sync::RwLock<()>>,
+    /// The lock `open_spool` took on the account's spool, held for the life of this value.
+    _lock: File,
+}
+
+impl Writes {
+    /// Stops the uploads, waits until nothing of this mount can touch the spool folder, then lets the spool lock go.
+    async fn stop(mut self) {
+        // Waits for every retry and discard that already started. None starts once the mount's writing is off.
+        let _calls = self.calls.write().await;
+        self.uploads.abort();
+        self.watch.abort();
+        let _ = (&mut self.uploads).await;
+        let _ = (&mut self.watch).await;
+        // Aborting `run_uploads` only asks its upload tasks to stop, and each try leaves the uploading state when its task ends. A try a discard already stopped no longer shows as uploading, so this does not wait for it: such a try only ends, and its spool file is already gone.
+        while self
+            .vfs
+            .unsent()
+            .iter()
+            .any(|file| matches!(file.state, marlin_vfs::UnsentState::Uploading { .. }))
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
 }
 
 /// Every mount the helper serves, keyed by provider and account.
 ///
-/// A mount or unmount first takes its key's operation lock, so operations on one mount run one at a time and operations on different mounts run together. The table's own lock is never held across an `.await` or a log write. Events are sent under that lock, because a provider call can change a mount's health at any moment, outside the operation lock.
+/// A mount or unmount first takes its key's operation lock, so operations on one mount run one at a time and operations on different mounts run together. The table's own lock is never held across an `.await` or a log write. A `mountChanged` is sent under that lock, because a provider call can change a mount's health at any moment, outside the operation lock. An `unsentChanged` needs no lock: it comes from the mount's own watcher, or from its unmount once that watcher has stopped.
 pub struct Mounts {
     table: Mutex<Table>,
-    events: tokio::sync::broadcast::Sender<MountStatus>,
+    events: tokio::sync::broadcast::Sender<Notice>,
+    /// A signal sets this. Every unmount stops waiting for uploads, now and after.
+    hurry: tokio::sync::watch::Sender<bool>,
     adapter: Arc<dyn Adapter>,
     providers: Arc<dyn Providers>,
     root: PathBuf,
+    /// The folder that holds one spool folder per account.
+    spool: PathBuf,
+    /// The limits of each mount's core.
+    options: Options,
 }
 
 impl Mounts {
-    pub fn new(root: PathBuf, adapter: Arc<dyn Adapter>, providers: Arc<dyn Providers>) -> Self {
+    pub fn new(
+        root: PathBuf,
+        spool: PathBuf,
+        options: Options,
+        adapter: Arc<dyn Adapter>,
+        providers: Arc<dyn Providers>,
+    ) -> Self {
         Self {
             table: Mutex::new(Table {
                 entries: HashMap::new(),
                 locks: HashMap::new(),
                 closing: false,
-                attempts: 0,
             }),
             events: tokio::sync::broadcast::channel(64).0,
+            hurry: tokio::sync::watch::channel(false).0,
             adapter,
             providers,
             root,
+            spool,
+            options,
         }
     }
 
-    /// Every state change of every mount, from now on.
-    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<MountStatus> {
+    /// Every notice for every mount, from now on.
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<Notice> {
         self.events.subscribe()
+    }
+
+    /// A signal is an order to exit. Every unmount stops waiting for uploads, now and after, and the spool keeps what is left for the next mount of the account.
+    pub fn hurry(&self) {
+        self.hurry.send_replace(true);
     }
 
     /// The real folders in the mount folder. The type comes from the mount folder's own listing, so a symbolic link is never handed to the adapter or removed.
@@ -273,6 +359,10 @@ impl Mounts {
             provider: provider.to_string(),
             account: account.to_string(),
         };
+        // A shutdown can hold this account's operation lock while it waits for uploads. A mount sent meanwhile is refused at once, not queued behind it.
+        if self.table.lock().unwrap().closing {
+            return Err(MountError::ShuttingDown);
+        }
         let operation = self.operation_lock(&key);
         let _operation = operation.lock().await;
 
@@ -293,8 +383,7 @@ impl Mounts {
             if name_in_use {
                 return Err(MountError::NameInUse);
             }
-            table.attempts += 1;
-            let attempt = table.attempts;
+            let attempt = Uuid::new_v4();
             let entry = MountEntry {
                 name: name.to_string(),
                 lifecycle: Lifecycle::Starting,
@@ -302,6 +391,7 @@ impl Mounts {
                 health: Health::Healthy,
                 failures: 0,
                 logged_other: None,
+                writing: Writing::Off,
             };
             let starting = self.announce(&key, &entry);
             table.entries.insert(key.clone(), entry);
@@ -312,17 +402,20 @@ impl Mounts {
         let mount_point = self.root.join(name);
         let mounted = async {
             // The provider comes first, so a mount it refuses leaves no folder behind.
-            let provider = self.providers.open(provider, account).await?;
-            let mounts = Arc::downgrade(self);
-            let watched = key.clone();
-            let vfs = Vfs::new(provider, marlin_vfs::POSIX, Options::default()).watch_calls(
-                // Weak, because a session can hold the `Vfs`, and the table holds the session.
-                move |error| {
-                    if let Some(mounts) = mounts.upgrade() {
-                        mounts.record(&watched, attempt, error);
-                    }
-                },
-            );
+            let opened = self.providers.open(provider, account).await?;
+            let build = || {
+                let mounts = Arc::downgrade(self);
+                let watched = key.clone();
+                Vfs::new(Arc::clone(&opened), marlin_vfs::POSIX, self.options).watch_calls(
+                    // Weak, because a session can hold the `Vfs`, and the table holds the session.
+                    move |error| {
+                        if let Some(mounts) = mounts.upgrade() {
+                            mounts.record(&watched, attempt, error);
+                        }
+                    },
+                )
+            };
+            let vfs = build();
             // A mount starts as `mounted`, and its health only changes at a provider call. So the remote answers one call before the mount comes up, and before any folder is made. A provider that kept a token from an earlier mount cannot hide a remote that is out of reach.
             vfs.space().await.map_err(|error| match error {
                 VfsError::SignInNeeded => MountError::SignInNeeded,
@@ -353,12 +446,69 @@ impl Mounts {
                     }
                 }
             }
-            self.adapter.mount(Arc::new(vfs), &mount_point).await
+            // The spool lock, or why the mount takes no writes.
+            let (vfs, lock) = if !opened.can_write() {
+                (vfs, Err(ReadOnly::Provider))
+            } else {
+                let taken = self.open_spool(&key).and_then(|(spool, lock)| {
+                    let vfs = vfs.take_writes(spool).map_err(|error| error.to_string())?;
+                    Ok((vfs, lock))
+                });
+                match taken {
+                    Ok((vfs, lock)) => (vfs, Ok(lock)),
+                    Err(message) => {
+                        // A read-only mount uploads nothing and deletes no unsent bytes, while the user can still read. `take_writes` used up the first core.
+                        let message = redact(&message);
+                        log::write(
+                            "warn",
+                            "mount.spool_failed",
+                            serde_json::json!({
+                                "provider": key.provider,
+                                "account": key.account,
+                                "message": message,
+                            }),
+                        );
+                        (build(), Err(ReadOnly::Spool { message }))
+                    }
+                }
+            };
+            let vfs = Arc::new(vfs);
+            let session = self.adapter.mount(Arc::clone(&vfs), &mount_point).await?;
+            Ok((session, vfs, lock))
         }
         .await;
 
         match mounted {
-            Ok(session) => Ok(self.transition(&key, Lifecycle::Mounted(session))),
+            Ok((session, vfs, lock)) => {
+                let writing = match lock {
+                    Ok(lock) => {
+                        let uploads = tokio::spawn(Arc::clone(&vfs).run_uploads());
+                        let watch = tokio::spawn(watch_unsent(
+                            Arc::downgrade(self),
+                            key.clone(),
+                            attempt,
+                            Arc::clone(&vfs),
+                        ));
+                        Writing::Spooled(Writes {
+                            vfs,
+                            uploads,
+                            watch,
+                            calls: Arc::new(tokio::sync::RwLock::new(())),
+                            _lock: lock,
+                        })
+                    }
+                    Err(reason) => Writing::ReadOnly(reason),
+                };
+                let status = {
+                    let mut table = self.table.lock().unwrap();
+                    let entry = table.entries.get_mut(&key).unwrap();
+                    entry.writing = writing;
+                    entry.lifecycle = Lifecycle::Mounted(session);
+                    self.announce(&key, entry)
+                };
+                log_state(&status);
+                Ok(status)
+            }
             Err(error) => {
                 // An empty folder at a mount point is the helper's to remove. This fails, and changes nothing, on a file, a symlink, or a folder with something in it.
                 let _ = std::fs::remove_dir(&mount_point);
@@ -401,6 +551,43 @@ impl Mounts {
             }
             // The folder goes before the entry does, so no other account can be given this name while the folder is being removed.
             let _ = std::fs::remove_dir(self.root.join(&unmounting.name));
+
+            let spooled = {
+                let table = self.table.lock().unwrap();
+                let entry = &table.entries[&key];
+                match &entry.writing {
+                    Writing::Spooled(writes) => Some((Arc::clone(&writes.vfs), entry.attempt)),
+                    Writing::Off | Writing::ReadOnly(_) => None,
+                }
+            };
+            if let Some((vfs, attempt)) = spooled {
+                // Retry and discard still work while this waits.
+                self.finish_uploads(&vfs).await;
+                // No retry or discard starts after this. Everything that can touch the spool folder must be done before the spool lock goes, so a new mount of the account never shares the folder with this one.
+                let writing = {
+                    let mut table = self.table.lock().unwrap();
+                    let entry = table.entries.get_mut(&key).unwrap();
+                    std::mem::replace(&mut entry.writing, Writing::Off)
+                };
+                let Writing::Spooled(writes) = writing else {
+                    unreachable!("only an unmount turns a mount's writing off");
+                };
+                writes.stop().await;
+                let report = unsent_files(&key, attempt, &vfs);
+                if !report.files.is_empty() || !report.unplaced.is_empty() {
+                    log::write(
+                        "info",
+                        "mount.left_unsent",
+                        serde_json::json!({
+                            "provider": key.provider,
+                            "account": key.account,
+                            "files": report.files.len(),
+                            "unplaced": report.unplaced.len(),
+                        }),
+                    );
+                }
+                let _ = self.events.send(Notice::Unsent(report));
+            }
         }
 
         let unmounted = MountStatus {
@@ -410,7 +597,7 @@ impl Mounts {
         {
             let mut table = self.table.lock().unwrap();
             table.entries.remove(&key);
-            let _ = self.events.send(unmounted.clone());
+            let _ = self.events.send(Notice::Mount(unmounted.clone()));
         }
         log_state(&unmounted);
         Ok(())
@@ -441,26 +628,181 @@ impl Mounts {
     /// Shuts down: refuses new mounts and unmounts every mount.
     ///
     /// `closing` is set and the keys are copied under one lock. A mount admitted before that has its entry in the copy, and a mount that arrives after it is refused, so no mount slips past a shutdown. If an unmount fails, the helper takes mounts again: a mount that is still served must not lose its helper.
-    pub async fn close(&self) -> Result<(), MountError> {
+    ///
+    /// The unmounts run together. Each one can wait for uploads, and one slow account must not keep the others mounted.
+    pub async fn close(self: &Arc<Self>) -> Result<(), MountError> {
         let keys: Vec<Key> = {
             let mut table = self.table.lock().unwrap();
             table.closing = true;
             table.entries.keys().cloned().collect()
         };
-        let mut failed = Vec::new();
+        let mut tasks = tokio::task::JoinSet::new();
         for key in keys {
-            if let Err(error) = self.unmount(&key.provider, &key.account).await {
-                failed.push(format!("{} {}: {error}", key.provider, key.account));
+            let mounts = Arc::clone(self);
+            tasks.spawn(async move {
+                mounts
+                    .unmount(&key.provider, &key.account)
+                    .await
+                    .map_err(|error| format!("{} {}: {error}", key.provider, key.account))
+            });
+        }
+        let mut failed = Vec::new();
+        while let Some(joined) = tasks.join_next().await {
+            match joined {
+                Ok(Ok(())) => {}
+                Ok(Err(text)) => failed.push(text),
+                // A panic in an unmount reaches the caller.
+                Err(error) => std::panic::resume_unwind(error.into_panic()),
             }
         }
         if failed.is_empty() {
             return Ok(());
         }
+        failed.sort();
         self.table.lock().unwrap().closing = false;
         Err(MountError::Unmount(format!(
             "could not unmount {}",
             failed.join(", ")
         )))
+    }
+
+    /// The files of one mount that still have to reach the remote, or `None` when the mount takes no writes.
+    pub fn unsent(&self, provider: &str, account: &str) -> Option<UnsentFiles> {
+        let key = Key {
+            provider: provider.to_string(),
+            account: account.to_string(),
+        };
+        let (vfs, attempt) = {
+            let table = self.table.lock().unwrap();
+            let entry = table.entries.get(&key)?;
+            let Writing::Spooled(writes) = &entry.writing else {
+                return None;
+            };
+            (Arc::clone(&writes.vfs), entry.attempt)
+        };
+        Some(unsent_files(&key, attempt, &vfs))
+    }
+
+    /// Sends a failed file now. A node with no unsent bytes, or a mount id that is not this mount's, is [`MountError::NotUnsent`].
+    pub fn retry_unsent(
+        &self,
+        provider: &str,
+        account: &str,
+        mount_id: &str,
+        node: u64,
+    ) -> Result<(), MountError> {
+        let (_guard, vfs) = self.unsent_call(provider, account, mount_id)?;
+        vfs.retry_now(NodeId(node))
+            .map_err(|_| MountError::NotUnsent)
+    }
+
+    /// Drops one file's unsent bytes. [`MountError::NotUnsent`] when the node has none, and [`MountError::Busy`] when the mount's other changes hold the call up.
+    pub async fn discard_unsent(
+        &self,
+        provider: &str,
+        account: &str,
+        mount_id: &str,
+        node: u64,
+    ) -> Result<(), MountError> {
+        let (_guard, vfs) = self.unsent_call(provider, account, mount_id)?;
+        match vfs.discard_unsent(NodeId(node)).await {
+            Ok(()) => Ok(()),
+            Err(VfsError::NotFound) => Err(MountError::NotUnsent),
+            Err(_) => Err(MountError::Busy),
+        }
+    }
+
+    /// The mount's core, and a guard that keeps the unmount from letting the spool go while this call runs.
+    fn unsent_call(
+        &self,
+        provider: &str,
+        account: &str,
+        mount_id: &str,
+    ) -> Result<(tokio::sync::OwnedRwLockReadGuard<()>, Arc<Vfs>), MountError> {
+        let key = Key {
+            provider: provider.to_string(),
+            account: account.to_string(),
+        };
+        let table = self.table.lock().unwrap();
+        let writes = table
+            .entries
+            .get(&key)
+            .filter(|entry| entry.attempt.to_string() == mount_id)
+            .and_then(|entry| match &entry.writing {
+                Writing::Spooled(writes) => Some(writes),
+                Writing::Off | Writing::ReadOnly(_) => None,
+            })
+            .ok_or(MountError::NotUnsent)?;
+        let guard = Arc::clone(&writes.calls)
+            .try_read_owned()
+            .expect("the unmount turns writing off before it waits for the calls");
+        Ok((guard, Arc::clone(&writes.vfs)))
+    }
+
+    /// Waits until no unsent file of `vfs` is waiting or uploading, or until `hurry`. A failed file and an open file do not hold it: a failed one waits for its retry, and nothing can close an open one after the unmount.
+    async fn finish_uploads(&self, vfs: &Vfs) {
+        let mut hurry = self.hurry.subscribe();
+        loop {
+            let busy = vfs.unsent().iter().any(|file| {
+                matches!(
+                    file.state,
+                    marlin_vfs::UnsentState::Waiting | marlin_vfs::UnsentState::Uploading { .. }
+                )
+            });
+            if *hurry.borrow() || !busy {
+                return;
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(UNSENT_EVERY) => {}
+                _ = hurry.changed() => {}
+            }
+        }
+    }
+
+    /// The account's spool folder and the lock that keeps it this mount's alone.
+    fn open_spool(&self, key: &Key) -> Result<(Spool, File), String> {
+        if key.account.is_empty() {
+            return Err("the account has no name".to_string());
+        }
+        let name = spool_folder_name(&key.account);
+        let folder = self.spool.join(&key.provider).join(&name);
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&folder)
+            .map_err(|error| error.to_string())?;
+        let found = std::fs::symlink_metadata(&folder).map_err(|error| error.to_string())?;
+        if !found.file_type().is_dir() {
+            return Err("the account's spool is not a folder".to_string());
+        }
+        // `mode` only applies to a folder this call makes. The spool holds the user's unsaved work, and the mount needs to write in it.
+        if found.permissions().mode() & 0o777 != 0o700 {
+            std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700))
+                .map_err(|error| error.to_string())?;
+        }
+        // The helper's own lock is per socket, so two helpers on two sockets could both recover and upload one spool.
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .mode(0o600)
+            .open(folder.with_file_name(format!("{name}.lock")))
+            .map_err(|error| error.to_string())?;
+        match lock.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err("another Marlin helper is using this account's spool".to_string());
+            }
+            Err(std::fs::TryLockError::Error(error)) => return Err(error.to_string()),
+        }
+        let limit = Spool::default_limit(&folder).map_err(|error| error.to_string())?;
+        Ok((
+            Spool {
+                folder,
+                limit,
+                stays_local: marlin_fuse::stays_local,
+            },
+            lock,
+        ))
     }
 
     fn operation_lock(&self, key: &Key) -> Arc<tokio::sync::Mutex<()>> {
@@ -469,7 +811,7 @@ impl Mounts {
     }
 
     /// Applies how one provider call ended to its mount's health, and logs the text of an `Other`. The rules are in `docs/mount-helper.md`, under "Health" and "Logs and secrets".
-    fn record(&self, key: &Key, attempt: u64, error: Option<&VfsError>) {
+    fn record(&self, key: &Key, attempt: Uuid, error: Option<&VfsError>) {
         let (to_log, changed) = {
             let mut table = self.table.lock().unwrap();
             let Some(entry) = table.entries.get_mut(key) else {
@@ -547,7 +889,7 @@ impl Mounts {
     /// Builds a mount's status and tells every listener. The caller holds the table's lock, so listeners hear changes in the order the table made them.
     fn announce(&self, key: &Key, entry: &MountEntry) -> MountStatus {
         let status = snapshot(key, entry, &self.root);
-        let _ = self.events.send(status.clone());
+        let _ = self.events.send(Notice::Mount(status.clone()));
         status
     }
 }
@@ -583,5 +925,94 @@ fn snapshot(key: &Key, entry: &MountEntry, root: &Path) -> MountStatus {
         mount_point: root.join(&entry.name).display().to_string(),
         state,
         error,
+        read_only: match &entry.writing {
+            Writing::ReadOnly(reason) => Some(reason.clone()),
+            Writing::Off | Writing::Spooled(_) => None,
+        },
+    }
+}
+
+/// Sends `unsentChanged` for one mount attempt when its unsent files differ from the last ones sent. Looks every [`UNSENT_EVERY`].
+async fn watch_unsent(mounts: std::sync::Weak<Mounts>, key: Key, attempt: Uuid, vfs: Arc<Vfs>) {
+    let mut last = UnsentFiles {
+        provider: key.provider.clone(),
+        account: key.account.clone(),
+        mount_id: attempt.to_string(),
+        files: Vec::new(),
+        unplaced: Vec::new(),
+    };
+    loop {
+        tokio::time::sleep(UNSENT_EVERY).await;
+        let Some(mounts) = mounts.upgrade() else {
+            return;
+        };
+        let report = unsent_files(&key, attempt, &vfs);
+        if report != last {
+            let _ = mounts.events.send(Notice::Unsent(report.clone()));
+            last = report;
+        }
+    }
+}
+
+fn unsent_files(key: &Key, attempt: Uuid, vfs: &Vfs) -> UnsentFiles {
+    UnsentFiles {
+        provider: key.provider.clone(),
+        account: key.account.clone(),
+        mount_id: attempt.to_string(),
+        files: vfs
+            .unsent()
+            .into_iter()
+            .map(|file| UnsentFile {
+                node: file.node.0,
+                name: file.name,
+                size: file.size,
+                state: match file.state {
+                    marlin_vfs::UnsentState::Open => UnsentState::Open,
+                    marlin_vfs::UnsentState::Waiting => UnsentState::Waiting,
+                    marlin_vfs::UnsentState::Uploading { sent } => UnsentState::Uploading { sent },
+                    marlin_vfs::UnsentState::Failed(error) => UnsentState::Failed {
+                        error: redact(&error.to_string()),
+                    },
+                },
+            })
+            .collect(),
+        unplaced: vfs
+            .unplaced_spool_files()
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect(),
+    }
+}
+
+/// The folder name of an account's spool, under `<spool>/<provider>/`.
+///
+/// The name must map each account to its own folder on a filesystem that ignores letter case, so upper-case letters are escaped too. The mount name cannot be used, because a later account can get the name of a removed one.
+fn spool_folder_name(account: &str) -> String {
+    let mut out = String::new();
+    for (index, byte) in account.bytes().enumerate() {
+        let plain = matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'@' | b'.' | b'_' | b'+' | b'-');
+        let leading_dot = index == 0 && byte == b'.';
+        if plain && !leading_dot {
+            out.push(byte as char);
+        } else {
+            out.push('%');
+            out.push_str(&format!("{byte:02X}"));
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::spool_folder_name;
+
+    #[test]
+    fn spool_folder_names_keep_accounts_apart() {
+        assert_eq!(spool_folder_name("ana@example.com"), "ana@example.com");
+        assert_eq!(spool_folder_name("Ana"), "%41na");
+        assert_eq!(spool_folder_name(".x"), "%2Ex");
+        assert_eq!(spool_folder_name("a/b"), "a%2Fb");
+        assert_eq!(spool_folder_name("a%b"), "a%25b");
+        assert_eq!(spool_folder_name("é"), "%C3%A9");
     }
 }

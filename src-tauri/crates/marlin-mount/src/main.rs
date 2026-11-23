@@ -17,6 +17,7 @@ async fn main() {
 
     let mut socket = None;
     let mut root = None;
+    let mut spool = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -32,19 +33,32 @@ async fn main() {
                 };
                 root = Some(PathBuf::from(value));
             }
+            "--spool" => {
+                let Some(value) = args.next() else {
+                    usage();
+                };
+                spool = Some(PathBuf::from(value));
+            }
             _ => usage(),
         }
     }
 
     let socket = socket.or_else(marlin_mount_client::default_socket);
     let root = root.or_else(|| Some(dirs::home_dir()?.join("Marlin")));
-    let (Some(socket), Some(root)) = (socket, root) else {
+    // A data folder, never a cache folder (decision 0005, choice 10). On macOS it is the folder that holds the app's own files and the socket.
+    let spool = spool.or_else(|| Some(dirs::data_dir()?.join("marlin").join("spool")));
+    let (Some(socket), Some(root), Some(spool)) = (socket, root, spool) else {
         log::write("error", "helper.no_home_folder", serde_json::Value::Null);
         std::process::exit(1);
     };
 
     let server = match Server::bind(
-        Config { socket, root },
+        Config {
+            socket,
+            root,
+            spool,
+            options: marlin_vfs::Options::default(),
+        },
         Arc::new(OsAdapter),
         Arc::new(LinkedProviders::new(
             marlin_gdrive::Config::default(),
@@ -81,6 +95,6 @@ async fn main() {
 
 #[cfg(unix)]
 fn usage() -> ! {
-    eprintln!("usage: marlin-mount [--socket <path>] [--root <path>]");
+    eprintln!("usage: marlin-mount [--socket <path>] [--root <path>] [--spool <path>]");
     std::process::exit(2);
 }

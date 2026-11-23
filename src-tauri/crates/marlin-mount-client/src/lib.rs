@@ -17,4 +17,4 @@ pub fn default_socket() -> Option<PathBuf> {
 mod client;
 
 #[cfg(unix)]
-pub use client::{shutdown, Client, ClientError, Event, Start};
+pub use client::{ask_to_stop, shutdown, Client, ClientError, Event, Start};

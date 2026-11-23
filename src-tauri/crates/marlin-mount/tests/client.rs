@@ -116,6 +116,61 @@ async fn the_helper_keeps_running_after_its_client_is_dropped() {
 }
 
 #[tokio::test]
+async fn ask_to_stop_returns_once_sent_and_the_helper_still_exits() {
+    let dir = tempfile::tempdir().unwrap();
+    let start = start_for(dir.path(), helper_binary());
+    let socket = start.socket.clone();
+    assert!(!marlin_mount_client::ask_to_stop(&socket).await.unwrap());
+
+    drop(Client::connect(&start, |_| {}).await.unwrap());
+    assert!(marlin_mount_client::ask_to_stop(&socket).await.unwrap());
+    // The request outlives the connection that sent it.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while socket.exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the helper did not exit");
+    assert!(!marlin_mount_client::ask_to_stop(&socket).await.unwrap());
+}
+
+#[tokio::test]
+async fn ask_to_stop_does_not_wait_for_the_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("mount.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let (read, got) = tokio::sync::oneshot::channel();
+    let fake = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+        let hello = read_json(&mut reader).await;
+        write_json(
+            &mut writer,
+            &answered(
+                hello["id"].as_u64().unwrap(),
+                json!({"protocol": PROTOCOL_VERSION, "version": "fake"}),
+            ),
+        )
+        .await;
+        // A helper waiting for its uploads answers `shutdown` only when they end.
+        let _ = read.send(read_json(&mut reader).await);
+        std::future::pending::<()>().await;
+    });
+
+    let sent = tokio::time::timeout(
+        Duration::from_secs(2),
+        marlin_mount_client::ask_to_stop(&socket),
+    )
+    .await
+    .expect("ask_to_stop waited for the answer");
+    assert!(sent.unwrap());
+    assert_eq!(got.await.unwrap()["method"], "shutdown");
+    fake.abort();
+}
+
+#[tokio::test]
 async fn shutdown_stops_the_helper_and_removes_the_socket_and_returns_false_when_no_helper_runs() {
     let dir = tempfile::tempdir().unwrap();
     let start = start_for(dir.path(), helper_binary());

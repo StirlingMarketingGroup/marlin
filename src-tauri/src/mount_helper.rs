@@ -1,6 +1,8 @@
 //! The mount commands, and the request that stops the mount helper when the user quits.
 
-use marlin_mount_client::protocol::{methods, AccountParams, DeadMount, MountParams, MountStatus};
+use marlin_mount_client::protocol::{
+    methods, AccountParams, DeadMount, MountParams, MountStatus, UnsentFiles, UnsentParams,
+};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use tauri::AppHandle;
@@ -66,6 +68,9 @@ async fn call<T: DeserializeOwned>(
                 let client = Client::connect(&start, move |event| match event {
                     Event::Changed(status) => {
                         let _ = app.emit("mount-changed", status);
+                    }
+                    Event::Unsent(files) => {
+                        let _ = app.emit("unsent-changed", files);
                     }
                     Event::Closed => {
                         let _ = app.emit("mount-helper-closed", ());
@@ -145,9 +150,52 @@ pub async fn list_dead_mounts(app: AppHandle) -> Result<Vec<DeadMount>, MountCom
     call(&app, methods::DEAD_MOUNTS, ()).await
 }
 
+#[tauri::command]
+pub async fn list_unsent_files(
+    app: AppHandle,
+    provider: String,
+    account: String,
+) -> Result<Option<UnsentFiles>, MountCommandError> {
+    call(&app, methods::UNSENT, AccountParams { provider, account }).await
+}
+
+#[tauri::command]
+pub async fn retry_unsent_file(
+    app: AppHandle,
+    provider: String,
+    account: String,
+    mount_id: String,
+    node: u64,
+) -> Result<(), MountCommandError> {
+    let params = UnsentParams {
+        provider,
+        account,
+        mount_id,
+        node,
+    };
+    call(&app, methods::RETRY_UNSENT, params).await
+}
+
+#[tauri::command]
+pub async fn discard_unsent_file(
+    app: AppHandle,
+    provider: String,
+    account: String,
+    mount_id: String,
+    node: u64,
+) -> Result<(), MountCommandError> {
+    let params = UnsentParams {
+        provider,
+        account,
+        mount_id,
+        node,
+    };
+    call(&app, methods::DISCARD_UNSENT, params).await
+}
+
 /// Asks the helper to unmount everything and exit. Never starts one.
 ///
-/// The wait gives the request time to reach the helper, which answers `hello` first. Once the helper has the request, it finishes the shutdown even when the app has gone.
+/// It returns once the request is sent. The helper then finishes its uploads and unmounts even when the app has gone, so a quit never waits for an upload.
 pub fn stop_at_quit() {
     #[cfg(unix)]
     if let Some(socket) = marlin_mount_client::default_socket() {
@@ -158,24 +206,18 @@ pub fn stop_at_quit() {
 /// `stop_at_quit` for the helper on `socket`. Apart so that a test can name a socket of its own.
 #[cfg(unix)]
 fn stop(socket: &std::path::Path) {
-    use marlin_mount_client::ClientError;
-
     // The timer is made inside `block_on`: it needs the runtime, and this runs on the main thread, outside it.
-    let finished = tauri::async_runtime::block_on(async {
+    let sent = tauri::async_runtime::block_on(async {
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            marlin_mount_client::shutdown(socket),
+            marlin_mount_client::ask_to_stop(socket),
         )
         .await
     });
-    match finished {
+    match sent {
         Ok(Ok(_)) => {}
-        Ok(Err(ClientError::Rpc(error))) => log::warn!(
-            "The mount helper could not unmount: {}. It keeps serving that mount, and the next start of Marlin finds it.",
-            error.message
-        ),
         Ok(Err(error)) => log::warn!("The mount helper could not be stopped: {error}"),
-        Err(_) => log::warn!("The mount helper did not answer the request to stop in time."),
+        Err(_) => log::warn!("The mount helper did not take the request to stop in time."),
     }
 }
 

@@ -397,6 +397,8 @@ export interface MountError {
   message: string;
 }
 
+export type MountReadOnly = { reason: 'provider' } | { reason: 'spool'; message: string };
+
 export interface MountStatus {
   provider: string;
   account: string;
@@ -404,6 +406,23 @@ export interface MountStatus {
   mountPoint: string;
   state: MountState;
   error?: MountError;
+  readOnly?: MountReadOnly;
+}
+
+export type UnsentFileState =
+  | { state: 'open' }
+  | { state: 'waiting' }
+  | { state: 'uploading'; sent: number }
+  | { state: 'failed'; error: string };
+
+export type UnsentFile = { node: number; name: string; size: number } & UnsentFileState;
+
+export interface UnsentFiles {
+  provider: string;
+  account: string;
+  mountId: string;
+  files: UnsentFile[];
+  unplaced: string[];
 }
 
 // What a failed mount command rejects with. `code` is the helper's error code, when the helper answered.

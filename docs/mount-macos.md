@@ -70,7 +70,7 @@ The callbacks are the Linux adapter's, through libfuse's low-level API: see [Wri
 
 macFUSE keeps every extended attribute in a `._name` file beside the item, because the adapter has no extended attribute calls. It writes one for every new file and folder: macOS gives each new file a `com.apple.provenance` attribute. Answering `ENOTSUP` to the extended attribute calls does not change this: macFUSE asks, then writes the `._name` file anyway. Finder writes `.DS_Store` files too.
 
-- Both stay on this computer ([decision 0005](decisions/0005-mount-writes.md), choice 14): `marlin_fuse::stays_local` is `marlin_vfs::finder_files` on macOS, for the helper to pass as `Spool::stays_local` once it gives mounts a spool (#602). The write tests pass it today. A test checks that a Finder copy puts no `._name` or `.DS_Store` file on the provider.
+- Both stay on this computer ([decision 0005](decisions/0005-mount-writes.md), choice 14): `marlin_fuse::stays_local` is `marlin_vfs::finder_files` on macOS. The helper passes it as `Spool::stays_local`. The write tests pass it too. A test checks that a Finder copy puts no `._name` or `.DS_Store` file on the provider.
 - A `._name` file stays behind when its file is renamed or removed. macFUSE does not move or remove it. It lives in the spool until the mount ends.
 - Removing a folder that holds only `._name` files works. The core answers "not empty", and macOS removes the `._name` files and tries again.
 - **Finder copies through placeholders.** It makes an empty file for each item first, then removes each one and writes the real file. When the copy takes longer than the settle time, a placeholder uploads empty, is removed on the remote, and the real file uploads under a new ID (#629).

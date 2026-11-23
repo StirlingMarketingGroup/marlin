@@ -18,8 +18,8 @@ use tokio::process::Command;
 use tokio::sync::oneshot;
 
 use crate::protocol::{
-    methods, HelloParams, HelloResult, MountStatus, Request, Response, RpcError, JSONRPC_VERSION,
-    PROTOCOL_VERSION,
+    methods, HelloParams, HelloResult, MountStatus, Request, Response, RpcError, UnsentFiles,
+    JSONRPC_VERSION, PROTOCOL_VERSION,
 };
 
 /// How long to wait for a helper that was just started to take a connection.
@@ -50,6 +50,8 @@ pub struct Start {
 pub enum Event {
     /// A mount changed state.
     Changed(MountStatus),
+    /// A mount's unsent files changed.
+    Unsent(UnsentFiles),
     /// The connection ended. Every mount's state is unknown until the next `list`.
     Closed,
 }
@@ -200,6 +202,22 @@ pub async fn shutdown(socket: &Path) -> Result<bool, ClientError> {
     Ok(true)
 }
 
+/// Asks the helper on `socket` to stop, and returns once the request is sent. Does not start one.
+///
+/// The helper reads a request that was sent before the connection closed, and finishes a shutdown, uploads included, after its client has gone. So a quitting app need not wait for the answer. `Ok(false)` means nothing is listening.
+pub async fn ask_to_stop(socket: &Path) -> Result<bool, ClientError> {
+    let Some(mut connection) = Connection::open(socket).await? else {
+        return Ok(false);
+    };
+    connection.hello().await?;
+    connection
+        .writer
+        .write_all(&encode(connection.next_id, methods::SHUTDOWN, &()))
+        .await
+        .map_err(|_| ClientError::Closed)?;
+    Ok(true)
+}
+
 /// A connection in its first steps, before a `Client` takes it over. It sends one request at a time.
 struct Connection {
     reader: BufReader<OwnedReadHalf>,
@@ -235,7 +253,7 @@ impl Connection {
         }
     }
 
-    /// Sends one request and reads lines until the one with its `id`. After a matching `hello` the helper mixes `mountChanged` notifications in with its answers, so one can sit in front of the answer.
+    /// Sends one request and reads lines until the one with its `id`. After a matching `hello` the helper mixes notifications in with its answers, so one can sit in front of the answer.
     async fn request(
         &mut self,
         method: &str,
@@ -400,13 +418,19 @@ async fn read_incoming(
             }
             continue;
         }
-        if value.get("method").and_then(Value::as_str) == Some(methods::MOUNT_CHANGED) {
-            let Some(params) = value.get("params").cloned() else {
-                continue;
-            };
-            if let Ok(status) = serde_json::from_value::<MountStatus>(params) {
-                on_event(Event::Changed(status));
+        let params = value.get("params").cloned().unwrap_or_default();
+        match value.get("method").and_then(Value::as_str) {
+            Some(methods::MOUNT_CHANGED) => {
+                if let Ok(status) = serde_json::from_value::<MountStatus>(params) {
+                    on_event(Event::Changed(status));
+                }
             }
+            Some(methods::UNSENT_CHANGED) => {
+                if let Ok(files) = serde_json::from_value::<UnsentFiles>(params) {
+                    on_event(Event::Unsent(files));
+                }
+            }
+            _ => {}
         }
     }
     // Closes the connection. Dropping the senders makes every waiting call return `Closed`.
