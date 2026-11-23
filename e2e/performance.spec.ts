@@ -217,7 +217,6 @@ function getPerformanceMockScript(fileCount: number): string {
         update_hidden_files_menu: () => undefined,
         update_folders_first_menu: () => undefined,
         update_sort_menu_state: () => undefined,
-        update_selection_menu_state: () => undefined,
         get_pinned_directories: () => [],
         load_pinned_directories: () => [],
         get_system_drives: () => [],

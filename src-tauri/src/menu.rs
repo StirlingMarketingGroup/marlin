@@ -6,6 +6,16 @@ use tauri_plugin_opener::OpenerExt;
 
 const GITHUB_REPO_URL: &str = "https://github.com/StirlingMarketingGroup/marlin";
 
+/// The permanent delete's name in the File menu and the file context menu. macOS uses
+/// Finder's, which ends in "…" because it asks first.
+pub fn delete_permanently_label() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Delete Immediately…"
+    } else {
+        "Delete Permanently"
+    }
+}
+
 /// Create a minimal menu with native Edit items for child/utility windows.
 /// Uses PredefinedMenuItem so Cmd+C/X/V/A work natively in text inputs
 /// without being intercepted by the main window's custom accelerators.
@@ -119,6 +129,23 @@ pub fn create_menu<R: Runtime>(
         .accelerator("CmdOrCtrl+I")
         .build(app)?;
 
+    // Finder's keys. On macOS the page sees a key before the menu, so a text field keeps
+    // Cmd+Backspace. On Windows and Linux the menu sees a key first (the accelerator table,
+    // GTK's window accelerators), and a plain Delete there would take the key from the rename
+    // box. So those items show no key, and App.tsx handles Delete and Shift+Delete.
+    let trash_item = MenuItemBuilder::with_id("menu:trash_selected", "Move to Trash");
+    let delete_permanently_item = MenuItemBuilder::with_id(
+        "menu:delete_selected_permanently",
+        delete_permanently_label(),
+    );
+    #[cfg(target_os = "macos")]
+    let (trash_item, delete_permanently_item) = (
+        trash_item.accelerator("Cmd+Backspace"),
+        delete_permanently_item.accelerator("Cmd+Alt+Backspace"),
+    );
+    let trash_item = trash_item.build(app)?;
+    let delete_permanently_item = delete_permanently_item.build(app)?;
+
     // Create File submenu
     #[cfg(target_os = "macos")]
     let file_submenu = SubmenuBuilder::new(app, "File")
@@ -129,6 +156,9 @@ pub fn create_menu<R: Runtime>(
         .separator()
         .item(&open_selected_item)
         .item(&get_info_item)
+        .separator()
+        .item(&trash_item)
+        .item(&delete_permanently_item)
         .separator()
         .text("menu:refresh", "Refresh")
         .separator()
@@ -146,6 +176,9 @@ pub fn create_menu<R: Runtime>(
         .separator()
         .item(&open_selected_item)
         .item(&get_info_item)
+        .separator()
+        .item(&trash_item)
+        .item(&delete_permanently_item)
         .separator()
         .text("menu:refresh", "Refresh")
         .separator()
@@ -526,6 +559,12 @@ pub fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, event: &tauri::menu::Me
         }
         "menu:open_selected" | "ctx:open_selected" => {
             let _ = app.emit("menu:open_selected", ());
+        }
+        "menu:trash_selected" | "ctx:trash_selected" => {
+            let _ = app.emit("menu:trash_selected", ());
+        }
+        "menu:delete_selected_permanently" | "ctx:delete_selected_permanently" => {
+            let _ = app.emit("menu:delete_selected_permanently", ());
         }
         "ctx:calculate_total_size" => {
             let _ = app.emit("menu:calculate_total_size", ());

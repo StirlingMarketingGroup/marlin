@@ -932,9 +932,16 @@ function App() {
       toggleHiddenFiles(value);
     };
 
-    // Menu bindings - properly await async registration
+    // A text field owns the keys typed into it: the rename box, the path bar, the filter box.
+    const textFieldHasFocus = () => {
+      const active = document.activeElement as HTMLElement | null;
+      return (
+        !!active &&
+        (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)
+      );
+    };
 
-    // Register all listeners asynchronously
+    // Menu listeners. `register` awaits each one so the cleanup can unlisten it.
     (async () => {
       const handleToggleHidden = async (event?: Event<boolean>) => {
         const nextValue = typeof event?.payload === 'boolean' ? event.payload : undefined;
@@ -1028,6 +1035,15 @@ function App() {
       });
       await registerFocused('menu:open_selected', () => {
         void useAppStore.getState().openSelected();
+      });
+      // macOS hands the File menu any key the page leaves alone, and a text field leaves
+      // Cmd+Option+Backspace alone. The right-click menu sends the same events, and a
+      // right-click on a file blurs the text field first; one inside the rename box does not.
+      await registerFocused('menu:trash_selected', () => {
+        if (!textFieldHasFocus()) void useAppStore.getState().trashSelected();
+      });
+      await registerFocused('menu:delete_selected_permanently', () => {
+        if (!textFieldHasFocus()) void useAppStore.getState().deleteSelectedPermanently();
       });
       await registerFocused('menu:compress_to_zip', () => {
         const state = useAppStore.getState();
@@ -1199,15 +1215,13 @@ function App() {
       void state.openSelected();
     };
 
-    // Keyboard shortcuts as fallback (mac-like)
+    // The window's keyboard shortcuts, on every platform.
     const onKey = (e: KeyboardEvent) => {
       const uaUpper = navigator.userAgent.toUpperCase();
       const isMac = uaUpper.includes('MAC');
       const isLinux = uaUpper.includes('LINUX');
       const active = document.activeElement as HTMLElement | null;
-      const inEditable =
-        !!active &&
-        (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable);
+      const inEditable = textFieldHasFocus();
 
       if (
         ((isMac && e.metaKey) || (!isMac && e.ctrlKey)) &&
@@ -1287,6 +1301,29 @@ function App() {
       if (e.key === 'Escape' && useAppStore.getState().showFilterInput) {
         e.preventDefault();
         useAppStore.getState().clearFilter();
+        return;
+      }
+
+      // Delete keys follow each platform's file manager. macOS, as in Finder: Cmd+Backspace
+      // moves the selection to the Trash, and Cmd+Option+Backspace asks, then deletes it for good.
+      // Windows and Linux: Delete and Shift+Delete.
+      let deleteKey: 'trash' | 'permanent' | null = null;
+      if (isMac && e.key === 'Backspace' && e.metaKey && !e.ctrlKey && !e.shiftKey) {
+        deleteKey = e.altKey ? 'permanent' : 'trash';
+      } else if (!isMac && e.key === 'Delete' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        deleteKey = e.shiftKey ? 'permanent' : 'trash';
+      }
+      if (deleteKey && !inEditable) {
+        // macOS hands the File menu any key the page leaves alone, so take every match, even
+        // with nothing selected or on a repeat, or the menu runs the action a second time.
+        // A repeat does nothing, so holding the keys cannot trash the same paths twice.
+        e.preventDefault();
+        if (e.repeat) return;
+        if (deleteKey === 'permanent') {
+          void useAppStore.getState().deleteSelectedPermanently();
+        } else {
+          void useAppStore.getState().trashSelected();
+        }
         return;
       }
 
@@ -1657,22 +1694,6 @@ function App() {
             useAppStore.getState().beginRenameSelected();
           } else {
             openSelectionFromKey(e);
-          }
-          return;
-        }
-      }
-
-      if (!inEditable) {
-        const isDeleteKey =
-          e.key === 'Delete' ||
-          (isMac && !e.metaKey && !e.ctrlKey && !e.altKey && e.key === 'Backspace');
-
-        if (isDeleteKey && useAppStore.getState().selectedFiles.length > 0) {
-          e.preventDefault();
-          if (e.shiftKey) {
-            void useAppStore.getState().deleteSelectedPermanently();
-          } else {
-            void useAppStore.getState().trashSelected();
           }
           return;
         }
