@@ -4254,6 +4254,7 @@ dependencies = [
  "dirs",
  "dotenvy",
  "fastrand",
+ "futures-util",
  "keyring",
  "marlin-test-keychain",
  "marlin-vfs",
