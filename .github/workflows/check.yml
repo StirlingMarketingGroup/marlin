@@ -9,7 +9,18 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Every Rust build in this workflow uses the same flags, so the real-app test build
+  # reuses most of the crates the Rust tests compiled in the runner's build folder.
+  RUSTFLAGS: '-D warnings'
+  # A fraction of the disk of full debug info. A backtrace (RUST_BACKTRACE=1) still
+  # names file and line.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
 jobs:
+  # Every step that needs Rust is in this job. The runners on one machine share one
+  # ~/.cargo, and two jobs of one run that install the toolchain in the same second
+  # can fail with "Text file busy" (#648).
   lint-typecheck-rust:
     runs-on: [self-hosted, medium]
     steps:
@@ -19,9 +30,16 @@ jobs:
 
       - name: Setup persistent cargo target dir
         run: |
-          # Use persistent target dir outside workspace so it survives between different repo checkouts
-          echo "CARGO_TARGET_DIR=$HOME/.cache/cargo-target/marlin-check" >> $GITHUB_ENV
-          mkdir -p "$HOME/.cache/cargo-target/marlin-check"
+          # One folder per runner. Cargo judges a workspace crate fresh by file times, so a
+          # folder shared by two checkouts can hand one PR's build of a crate to another PR.
+          # A runner runs one job at a time, so no two jobs write its folder at once.
+          dir="$HOME/.cache/cargo-target/$RUNNER_NAME/marlin-check"
+          # Old builds pile up with each toolchain or dependency change. Start over past 25 GB.
+          if [ -d "$dir" ] && [ "$(du -s --block-size=1G "$dir" | cut -f1)" -gt 25 ]; then
+            rm -rf "$dir"
+          fi
+          mkdir -p "$dir"
+          echo "CARGO_TARGET_DIR=$dir" >> "$GITHUB_ENV"
 
       - name: Detect files requiring checks
         id: changes
@@ -37,6 +55,13 @@ jobs:
               - 'vite.config.ts'
               - 'vitest.config.ts'
               - 'vitest.app.config.ts'
+              - 'index.html'
+              - 'public/**'
+              - 'postcss.config.js'
+              - 'LICENSE'
+              - 'THIRD-PARTY-NOTICES.md'
+              - '.prettierrc.json'
+              - '.prettierignore'
               - 'app-tests/**'
               - 'scripts/**'
               - 'src/**'
@@ -73,6 +98,7 @@ jobs:
 
           # Fail on a mirror that does not answer, so the retry loop sees it.
           apt_retry update -o APT::Update::Error-Mode=any
+          # xvfb and xauth give the real-app tests a display; their SFTP test runs sshd.
           apt_retry install -y \
             build-essential \
             clang \
@@ -87,6 +113,9 @@ jobs:
             librsvg2-dev \
             pkg-config \
             patchelf \
+            xvfb \
+            xauth \
+            openssh-server \
             libglib2.0-bin \
             libgdk-pixbuf2.0-bin \
             desktop-file-utils \
@@ -117,6 +146,17 @@ jobs:
         # A test that hangs would otherwise hold the runner for six hours.
         timeout-minutes: 45
         run: npm run test:rust
+
+      - name: Run real-app tests
+        if: steps.changes.outputs.check == 'true'
+        # A hung test or build would otherwise hold the runner for six hours.
+        timeout-minutes: 30
+        run: |
+          # The harness builds and starts the app in src-tauri/target/app-test. Point that
+          # at this runner's build folder.
+          mkdir -p src-tauri/target
+          ln -sfn "$CARGO_TARGET_DIR" src-tauri/target/app-test
+          xvfb-run -a npm run test:app
 
       - name: Check dependency licenses
         if: steps.changes.outputs.check == 'true'
