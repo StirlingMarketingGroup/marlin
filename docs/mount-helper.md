@@ -83,7 +83,7 @@ A request is `{jsonrpc, id, method, params?}`. The `id` must be an unsigned inte
 | `shutdown`      | none                                 | `null`, then the helper exits.                                                                           |
 | `deadMounts`    | none                                 | Every [dead mount](#dead-mounts) in the mount folder right now, as `{name, mountPoint}`, sorted by name. |
 | `unsent`        | `{provider, account}`                | The mount's [unsent files](#unsent-files), or `null` when the mount takes no writes.                     |
-| `retryUnsent`   | `{provider, account, mountId, node}` | `null`. Sends one failed file now.                                                                       |
+| `retryUnsent`   | `{provider, account, mountId, node}` | `null`. Sends one failed or refused file now.                                                            |
 | `discardUnsent` | `{provider, account, mountId, node}` | `null`. Drops one file's unsent bytes.                                                                   |
 
 A status is `{provider, account, name, mountPoint, state, error?, readOnly?}`. `error` is `{code, message}` and is there only when the state is `failed`. `readOnly` is there only when the mount takes no writes: see [Unsent files](#unsent-files).
@@ -96,7 +96,7 @@ What a client must know:
 - **Notifications start after the `hello` response and are not replayed.** Call `list` after `hello`, then `unsent` for each mount. A client that falls 64 notifications behind loses the oldest ones, and those two calls are how it catches up. Drop every unsent list and its `mountId` when the connection closes. The notifications a client does get arrive in the order the changes happened.
 - **A failed `mount` answers with an error, not a status.** The codes -1001, -1002, and -1009 are refusals: they make no entry, keep an entry that is already there, and send no notification. Any other failure leaves a `failed` entry, which keeps its name until the next attempt or an `unmount`.
 
-**Version rules.** The protocol number is 5 (`PROTOCOL_VERSION` in `marlin-mount-client/src/protocol.rs`).
+**Version rules.** The protocol number is 6 (`PROTOCOL_VERSION` in `marlin-mount-client/src/protocol.rs`).
 
 - The first request on a connection must be `hello`. The helper answers it before it reads anything else.
 - A `hello` with a valid `protocol` succeeds whatever the number is, and returns the helper's own number.
@@ -208,7 +208,7 @@ Rules the table keeps:
 - **Mounting twice is safe.** A mount request for an account that is already mounted returns its status, and the adapter is not called again. A live mount keeps its name, whatever name the new request asks for.
 - **A failed mount can be retried.** The next `mount` tries again. An `unmount` removes the failed entry.
 - **Unmounting twice is safe.**
-- **An unmount waits until no file is waiting or uploading.** A failed file does not hold it: it waits for its retry. An open file does not hold it: nothing can close one after the unmount. There is no fixed time limit. An upload that stops moving fails after the core's stall time.
+- **An unmount waits until no file is waiting or uploading.** A failed file does not hold it: it waits for its retry. A refused file does not hold it: no try comes by itself. An open file does not hold it: nothing can close one after the unmount. There is no fixed time limit. An upload that stops moving fails after the core's stall time.
 - **The last `unsentChanged` before `unmounted` lists what stays in the spool.** An unmount never deletes spooled bytes. The next mount of the account that takes writes uploads them, except unplaced files, which stay on the disk for the user.
 - **A failed unmount keeps the mount.** The mount comes back with its current health, and the request gets the error. Uploads keep running.
 - **An operation finishes even when its client has gone.**
@@ -341,12 +341,13 @@ A read-only mount uploads nothing and deletes no unsent bytes. The user can stil
 
 Each file is `{node, name, size, state}`. `name` is the file's name as the remote gets it, with no folder. `node` is the core's node number. It only means something together with `mountId`. The list has no folder path: two files of one name in two folders show apart only by node and size. #377 has to live with that or add the path.
 
-| `state`     | Meaning                                                                                                   |
-| ----------- | --------------------------------------------------------------------------------------------------------- |
-| `open`      | A writer has the file open.                                                                               |
-| `waiting`   | No writer has it open, and no upload of it runs. It waits for the settle time, or for a free upload slot. |
-| `uploading` | An upload of its current bytes runs. `sent` is how far the provider has reported.                         |
-| `failed`    | The last try failed. `error` is the text. The next try comes by itself.                                   |
+| `state`     | Meaning                                                                                                                                                                                                                                                                                                                    |
+| ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `open`      | A writer has the file open.                                                                                                                                                                                                                                                                                                |
+| `waiting`   | No writer has it open, and no upload of it runs. It waits for the settle time, or for a free upload slot.                                                                                                                                                                                                                  |
+| `uploading` | An upload of its current bytes runs. `sent` is how far the provider has reported.                                                                                                                                                                                                                                          |
+| `failed`    | The last try failed for a reason that can pass. `error` is the text. The next try comes by itself.                                                                                                                                                                                                                         |
+| `refused`   | The remote refused the last try: the account may not change the file, or the remote cannot take it. `error` is the text. No try comes by itself: `retryUnsent`, a new edit, a new modified time, or a rename starts one. The next mount of the account tries it once ([decision 0008](decisions/0008-read-only-files.md)). |
 
 While a retry runs, the file shows `uploading` and its last error is gone. A failed retry shows the new error. The app does not need the old one.
 
@@ -354,7 +355,7 @@ A file whose record says an earlier run may have sent it checks the remote first
 
 The helper looks at each mount's unsent files every 500 ms (`UNSENT_EVERY` in `mounts.rs`) and sends `unsentChanged` when they changed. An unmount also sends one last `unsentChanged` before `unmounted`, which can repeat the one before it. The body is the same shape as an `unsent` answer. A client that falls behind calls `unsent`.
 
-`retryUnsent` sends a failed file now. `discardUnsent` drops the unsent bytes. An item shows the remote's bytes again. A new file is never uploaded. A discard that waits too long for the mount's other changes is -1016. Both calls work while the mount is up, and while an unmount waits for uploads.
+`retryUnsent` sends a failed or refused file now. `discardUnsent` drops the unsent bytes. An item shows the remote's bytes again. A new file is never uploaded. A discard that waits too long for the mount's other changes is -1016. Both calls work while the mount is up, and while an unmount waits for uploads.
 
 `unplaced` lists spool files from an earlier run that have no readable record. They are kept and never uploaded. The user can open them at those paths.
 
@@ -387,7 +388,7 @@ No secret crosses the socket or the command line. The text inside a `MountError`
 
 `cd src-tauri && cargo test -p marlin-mount` needs no kernel driver, no network, and no account. It compiles the helper against the half of `marlin-fuse` for the machine it runs on. From a Mac, `src-tauri/crates/marlin-fuse/test-in-docker.sh` covers the Linux half.
 
-- `tests/control.rs` runs the server on a real socket in a temporary folder, with a fake adapter and the core's `MemoryProvider`. The fake adapter can hold a mount or an unmount open, so the tests for two requests at once do not depend on timing. The fake adapter keeps each mount's `Vfs`, so a test writes a file through it and sets failures with `MemoryProvider::fail_with`. The harness gives each mount a spool in the temp folder and a settle time of 50 ms. The spool tests cover a private folder, a failed upload, retry, discard, a wrong `mountId`, an unmount that leaves a failed file, an unmount that waits for an upload, a discard that ends that wait, a shutdown that waits, a mount sent during that wait (-1009 at once), a signal that ends an unmount's wait, a spool path that is a file, a folder with mode 0755 or 0500, a symbolic link, two helpers on one spool, an unmount that waits for a discard held up by a folder being made, and a spool file with no record. No test covers a provider that cannot write.
+- `tests/control.rs` runs the server on a real socket in a temporary folder, with a fake adapter and the core's `MemoryProvider`. The fake adapter can hold a mount or an unmount open, so the tests for two requests at once do not depend on timing. The fake adapter keeps each mount's `Vfs`, so a test writes a file through it and sets failures with `MemoryProvider::fail_with`. The harness gives each mount a spool in the temp folder and a settle time of 50 ms. The spool tests cover a private folder, a failed upload, a refused upload, retry, discard, a wrong `mountId`, an unmount that leaves a failed file, an unmount that waits for an upload, a discard that ends that wait, a shutdown that waits, a mount sent during that wait (-1009 at once), a signal that ends an unmount's wait, a spool path that is a file, a folder with mode 0755 or 0500, a symbolic link, two helpers on one spool, an unmount that waits for a discard held up by a folder being made, and a spool file with no record. No test covers a provider that cannot write.
 - One test starts the built binary and checks its flags, a refused mount, and a clean exit. **A test never sends provider `gdrive` to the built binary.** On a developer's machine that would read the real keychain. Those tests use the provider name `memory`, which the binary does not know.
 - One test reads the log. The server runs inside the test process, so the test points the process's stderr at a file while it makes the failed calls. It moves tokio's clock a minute ahead to see the same text logged again.
 - `tests/gdrive.rs` runs the real server with `OsAdapter` and `LinkedProviders` against a fake Google: one `wiremock` server that is the Drive API and the token endpoint, and the in-memory keychain. It talks to the server through `Client`. Four tests run on any Unix: a sign-in that is gone (-1013), Google out of reach (-1014), a Drive API that answers 503 or 403 (-1005), and a missing OAuth client (-1005). Each fails and leaves no folder. Two tests mount through FUSE and run only in `test-in-docker.sh` and `test-on-mac.sh`. The first lists a folder that Google sends in two pages, with a duplicate name, a `/` in a name, and a Google Doc, reads a file whole and at an offset, reads the Doc's link file and checks its size, checks that a write, a delete, and a rename fail with `EROFS` because the spool path is a file, and checks that the fake Google got nothing but GETs and one token request, and mounts the account a second time, which asks Google again though the helper still holds a token. The second rejects the sign-in, waits for `auth-required`, signs in again, and waits for `mounted`. Its first status takes writes.

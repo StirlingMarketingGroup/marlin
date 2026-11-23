@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 pub const JSONRPC_VERSION: &str = "2.0";
 
 /// Protocol number the helper and the app speak. Raised when the control API changes.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// JSON-RPC and helper error codes.
 pub mod error_codes {
@@ -206,6 +206,7 @@ pub enum UnsentState {
     Waiting,
     Uploading { sent: u64 },
     Failed { error: String },
+    Refused { error: String },
 }
 
 /// Body of `retryUnsent` and `discardUnsent`.
@@ -243,6 +244,9 @@ mod tests {
                 UnsentState::Failed {
                     error: "offline".into(),
                 },
+                UnsentState::Refused {
+                    error: "access denied".into(),
+                },
             ]
             .into_iter()
             .enumerate()
@@ -267,6 +271,7 @@ mod tests {
                     {"node": 1, "name": "a.txt", "size": 5, "state": "waiting"},
                     {"node": 2, "name": "a.txt", "size": 5, "state": "uploading", "sent": 3},
                     {"node": 3, "name": "a.txt", "size": 5, "state": "failed", "error": "offline"},
+                    {"node": 4, "name": "a.txt", "size": 5, "state": "refused", "error": "access denied"},
                 ],
                 "unplaced": ["/spool/7"],
             })

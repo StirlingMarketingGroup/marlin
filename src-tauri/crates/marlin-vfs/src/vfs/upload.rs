@@ -47,8 +47,30 @@ pub enum UnsentState {
     /// An upload of its current bytes runs. `sent` is how far the provider has reported.
     Uploading { sent: u64 },
 
-    /// The last try failed. The next one comes by itself, later.
+    /// The last try failed for a reason that can pass. The next one comes by itself, later.
     Failed(VfsError),
+
+    /// The remote refused the last try: the account may not change the file, or the remote cannot take it. No try comes by itself. It waits for [`Vfs::retry_now`], a new edit, a new modified time, a rename, or [`Vfs::discard_unsent`]. The next mount of the spool tries it once again.
+    Refused(VfsError),
+}
+
+/// Why a spool file's last try did not land.
+pub(super) enum Failure {
+    /// A reason that can pass. The next try is queued after a wait that grows with `tries`, the failures in a row.
+    Passing { error: VfsError, tries: u32 },
+
+    /// The remote said no for good: the account may not change the file, or the remote cannot take it. The uploader starts no try until [`try_again`] or an edit clears it.
+    Refused(VfsError),
+}
+
+/// Something gave a new reason to send the file: the user asked, or the file has a new name. A refusal is cleared, and the file is queued for `at`. A failure that can pass keeps its count.
+pub(super) fn try_again(state: &mut State, uploads: &Notify, spool_id: SpoolId, at: Instant) {
+    if let Some(spool) = state.spools.get_mut(&spool_id) {
+        if matches!(spool.failure, Some(Failure::Refused(_))) {
+            spool.failure = None;
+        }
+    }
+    schedule(state, uploads, spool_id, at);
 }
 
 /// The one try a spool file has running. It stays until the try's task ends, so a second try never starts while the first one's answer may still be applied.
@@ -221,7 +243,7 @@ impl Vfs {
                         break;
                     }
                     state.queue.remove(&(at, spool_id));
-                    // An entry that cannot start is dropped. Whatever holds the file back queues it again when it lets go.
+                    // An entry that cannot start is dropped. Whatever holds the file back queues it again when it lets go: for a refused file, that is `try_again` or an edit.
                     let Some((target, _)) = self.sends(&state, spool_id) else {
                         continue;
                     };
@@ -229,6 +251,7 @@ impl Vfs {
                     if spool.attempt.is_some()
                         || spool.editing
                         || state.nodes[&spool.node].writers > 0
+                        || matches!(spool.failure, Some(Failure::Refused(_)))
                     {
                         continue;
                     }
@@ -292,7 +315,8 @@ impl Vfs {
                     }
                     _ if state.nodes[&node].writers > 0 => UnsentState::Open,
                     _ => match &file.failure {
-                        Some((error, _)) => UnsentState::Failed(error.clone()),
+                        Some(Failure::Passing { error, .. }) => UnsentState::Failed(error.clone()),
+                        Some(Failure::Refused(error)) => UnsentState::Refused(error.clone()),
                         None => UnsentState::Waiting,
                     },
                 };
@@ -309,14 +333,14 @@ impl Vfs {
         found
     }
 
-    /// Sends a failed file now, without waiting for its retry. Any other unsent file is left as it is. A node with no unsent bytes is [`VfsError::NotFound`].
+    /// Sends a failed or refused file now, without waiting. Any other unsent file is left as it is. A node with no unsent bytes is [`VfsError::NotFound`].
     pub fn retry_now(&self, node: NodeId) -> Result<(), VfsError> {
         let mut state = self.state.lock().unwrap();
         let Some((spool_id, _)) = self.unsent_spool(&state, node) else {
             return Err(VfsError::NotFound);
         };
         if state.spools[&spool_id].failure.is_some() {
-            schedule(&mut state, &self.uploads, spool_id, Instant::now());
+            try_again(&mut state, &self.uploads, spool_id, Instant::now());
         }
         Ok(())
     }
@@ -420,7 +444,7 @@ impl Vfs {
         }
     }
 
-    /// Sends the spool file as a new item named `name` in `folder`. `None` when the try was stopped or failed; a failure is kept for the retry.
+    /// Sends the spool file as a new item named `name` in `folder`. `None` when the try was stopped or failed; `fail_try` keeps the failure.
     async fn send_new(self: &Arc<Self>, job: &Job, folder: &ItemId, name: &str) -> Option<Item> {
         let progress = self.progress(job);
         let sent = self
@@ -658,7 +682,7 @@ impl Vfs {
         }
     }
 
-    /// The try failed. It is tried again after a wait that doubles with each failure in a row. Whatever stopped a try has already set the next one.
+    /// The try failed. A refusal is kept, and the uploader starts no try for it. Any other failure is tried again after a wait that doubles with each failure in a row. Whatever stopped a try has already set the next one.
     fn fail_try(&self, job: &Job, error: VfsError) {
         let mut state = self.state.lock().unwrap();
         let Some(spool) = state.spools.get_mut(&job.spool_id) else {
@@ -667,8 +691,19 @@ impl Vfs {
         if !matches!(&spool.attempt, Some(attempt) if !attempt.stopped) {
             return;
         }
-        let tries = spool.failure.as_ref().map_or(0, |(_, tries)| *tries);
-        spool.failure = Some((error, tries + 1));
+        // Waiting does not change these answers.
+        if matches!(error, VfsError::AccessDenied | VfsError::NotSupported) {
+            spool.failure = Some(Failure::Refused(error));
+            return;
+        }
+        let tries = match spool.failure {
+            Some(Failure::Passing { tries, .. }) => tries,
+            _ => 0,
+        };
+        spool.failure = Some(Failure::Passing {
+            error,
+            tries: tries + 1,
+        });
         let wait = RETRY_START.saturating_mul(1 << tries.min(6)).min(RETRY_MAX);
         schedule(
             &mut state,

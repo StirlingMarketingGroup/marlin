@@ -38,6 +38,9 @@ pub struct Attributes {
 
     /// The revision of a file's bytes. `None` for a folder, and for a provider without the byte calls.
     pub revision: Option<Revision>,
+
+    /// The provider knows the account may not give this file new bytes. `false` when the provider does not know, and always `false` for a folder. The core refuses what would put bytes in the spool for such a file. Name changes still go to the provider, whose answer decides.
+    pub read_only: bool,
 }
 
 /// Hears how many bytes of an upload the provider has sent so far.

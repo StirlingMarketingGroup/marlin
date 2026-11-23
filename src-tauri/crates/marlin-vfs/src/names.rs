@@ -199,6 +199,7 @@ mod tests {
                     size: 0,
                     modified: UNIX_EPOCH,
                     revision: None,
+                    read_only: false,
                 },
             })
             .collect()

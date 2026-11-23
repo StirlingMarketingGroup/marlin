@@ -22,9 +22,9 @@ const FOLDER_TYPE: &str = "application/vnd.google-apps.folder";
 
 /// The fields `item`, the change calls, and an upload's answer ask for: what an item is built from, plus `trashed` and `driveId` for their checks.
 ///
-/// `headRevisionId` changes only when the bytes change. `version` also changes on a rename or a share, so it is not here.
+/// `headRevisionId` changes only when the bytes change. `version` also changes on a rename or a share, so it is not here. `canModifyContent` says whether the account may give a file new bytes. `canEdit` is wider, and other things can limit it.
 pub(crate) const ITEM_FIELDS: &str =
-    "id,name,mimeType,size,modifiedTime,headRevisionId,trashed,driveId,shortcutDetails(targetId)";
+    "id,name,mimeType,size,modifiedTime,headRevisionId,trashed,driveId,shortcutDetails(targetId),capabilities(canModifyContent)";
 
 /// Gives the provider an access token for one Google account.
 #[async_trait::async_trait]
@@ -152,6 +152,7 @@ fn made_up_folder(id: &ItemId, name: &str) -> Item {
             size: 0,
             modified: UNIX_EPOCH,
             revision: None,
+            read_only: false,
         },
     }
 }
@@ -199,16 +200,18 @@ fn item_from(drive: Option<&str>, id: String, file: DriveFile) -> Item {
     let modified = modified(file.modified_time.as_deref());
     let (place, ending) = shown(drive, &id, &file);
     let item_id = place.id();
-    // A folder has no bytes, and a link file's bytes are its page, which never changes, so neither has a revision.
-    let (kind, size, revision) = match place {
-        _ if file.mime_type == FOLDER_TYPE => (Kind::Folder, 0, None),
-        Place::Link { opens, .. } => (Kind::File, link_page(opens).len() as u64, None),
+    // A folder has no bytes, and a link file's bytes are its page, which never changes, so neither has a revision. A link file has no bytes on Drive to replace, so it is always read-only.
+    let (kind, size, revision, read_only) = match place {
+        _ if file.mime_type == FOLDER_TYPE => (Kind::Folder, 0, None, false),
+        Place::Link { opens, .. } => (Kind::File, link_page(opens).len() as u64, None, true),
         _ => {
             let size = file.size.as_deref().and_then(|size| size.parse().ok());
+            let read_only = file.read_only();
             (
                 Kind::File,
                 size.unwrap_or(0),
                 file.head_revision_id.map(Revision),
+                read_only,
             )
         }
     };
@@ -224,6 +227,7 @@ fn item_from(drive: Option<&str>, id: String, file: DriveFile) -> Item {
             size,
             modified,
             revision,
+            read_only,
         },
     }
 }
@@ -256,6 +260,7 @@ fn shared_drive_item(drive: SharedDrive) -> Item {
             size: 0,
             modified: modified(drive.created_time.as_deref()),
             revision: None,
+            read_only: false,
         },
     }
 }
@@ -409,7 +414,7 @@ impl DriveProvider {
         Ok(found)
     }
 
-    /// The Drive file the core holds as `id`, once it is checked to still hold the bytes of revision `base`. Bytes based on another revision would overwrite a change the core never saw, so that is `Conflict`. A file with no revision is `NotSupported`, a folder `IsAFolder`, and a trashed or gone file `NotFound`.
+    /// The Drive file the core holds as `id`, once it is checked to still hold the bytes of revision `base`. Bytes based on another revision would overwrite a change the core never saw, so that is `Conflict`. A file with no revision is `NotSupported`, a folder `IsAFolder`, a file the account may only view is `AccessDenied`, and a trashed or gone file `NotFound`.
     pub(crate) async fn replaceable(
         &self,
         id: &ItemId,
@@ -418,6 +423,10 @@ impl DriveProvider {
         let found = self.file_of(id, ITEM_FIELDS).await?;
         if found.mime_type == FOLDER_TYPE {
             return Err(VfsError::IsAFolder);
+        }
+        // No upload session opens for a file the account may only view.
+        if found.read_only() {
+            return Err(VfsError::AccessDenied);
         }
         match &found.head_revision_id {
             None => Err(VfsError::NotSupported),

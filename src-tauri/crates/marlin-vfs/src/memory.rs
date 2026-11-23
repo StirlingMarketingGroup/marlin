@@ -57,6 +57,7 @@ impl MemoryProvider {
                     size: 0,
                     modified: UNIX_EPOCH,
                     revision: None,
+                    read_only: false,
                 },
             },
             parent: None,
@@ -111,6 +112,14 @@ impl MemoryProvider {
         let stored = stored.expect("no item has this ID");
         stored.item.name = new_name.to_string();
         stored.parent = Some(new_parent.clone());
+    }
+
+    /// While on, `replace_bytes` of the file answers [`VfsError::AccessDenied`], as Google Drive does for a file the account may only view. `item` and `list` report it. The other calls do not look at it.
+    pub fn set_read_only(&self, id: &ItemId, on: bool) {
+        let mut inner = self.inner.lock().unwrap();
+        let stored = inner.stored.iter_mut().find(|stored| stored.item.id == *id);
+        let stored = stored.expect("no item has this ID");
+        stored.item.attributes.read_only = on;
     }
 
     /// Removes one item behind the mount's back. No provider call is counted.
@@ -262,6 +271,7 @@ fn allocate(
             size: contents.len() as u64,
             modified: UNIX_EPOCH + Duration::from_secs(number),
             revision: (kind == Kind::File).then(|| next_revision(inner)),
+            read_only: false,
         },
     };
     inner.stored.push(Stored {
@@ -468,6 +478,9 @@ impl Provider for MemoryProvider {
             let stored = find(&inner.stored, id)?;
             if stored.item.attributes.kind != Kind::File {
                 return Err(VfsError::IsAFolder);
+            }
+            if stored.item.attributes.read_only {
+                return Err(VfsError::AccessDenied);
             }
             if stored.item.attributes.revision.as_ref() != Some(base) {
                 return Err(VfsError::Conflict);

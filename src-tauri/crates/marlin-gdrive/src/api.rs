@@ -25,6 +25,26 @@ pub(crate) struct DriveFile {
     pub(crate) parents: Vec<String>,
     /// Set for a file in a shared drive. My Drive leaves it out.
     pub(crate) drive_id: Option<String>,
+    /// Set when the request asked for it.
+    pub(crate) capabilities: Option<Capabilities>,
+}
+
+impl DriveFile {
+    /// Whether Google says the account may not give this file new bytes. No answer is not a no.
+    pub(crate) fn read_only(&self) -> bool {
+        self.capabilities
+            .as_ref()
+            .and_then(|capabilities| capabilities.can_modify_content)
+            == Some(false)
+    }
+}
+
+/// What the account may do with a file.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Capabilities {
+    /// Whether the account may give the file new bytes.
+    pub(crate) can_modify_content: Option<bool>,
 }
 
 #[derive(Deserialize)]

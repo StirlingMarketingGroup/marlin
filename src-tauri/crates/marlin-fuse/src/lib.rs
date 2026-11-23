@@ -33,7 +33,7 @@ pub fn stays_local(name: &str) -> bool {
     cfg!(target_os = "macos") && marlin_vfs::finder_files(name)
 }
 
-/// How the mount shows every node: the mounting user owns it, and its mode says whether the mount takes writes.
+/// How the mount shows every node: the mounting user owns it, and its mode follows whether the mount takes writes and whether the provider marks it read-only.
 #[derive(Clone, Copy)]
 pub(crate) struct Shown {
     pub(crate) uid: u32,
@@ -89,13 +89,16 @@ pub(crate) async fn set_attributes(
     vfs.attributes(node).await
 }
 
-/// The mode and link count a mount shows. A writable mount gives a folder mode `0o700` and a file mode `0o600`. A read-only mount gives a folder mode `0o500` and a file mode `0o400`. A folder has 2 links. A file has 1.
-pub(crate) fn mode_and_links(kind: Kind, writable: bool) -> (u16, u32) {
-    match (kind, writable) {
-        (Kind::Folder, true) => (0o700, 2),
-        (Kind::Folder, false) => (0o500, 2),
-        (Kind::File, true) => (0o600, 1),
-        (Kind::File, false) => (0o400, 1),
+impl Shown {
+    /// The mode and link count of a node. A node has write permission when the mount takes writes and the provider has not marked it read-only: a folder `0o700` or `0o500`, a file `0o600` or `0o400`. A folder has 2 links. A file has 1.
+    pub(crate) fn mode_and_links(self, attributes: &Attributes) -> (u16, u32) {
+        let writable = self.writable && !attributes.read_only;
+        match (attributes.kind, writable) {
+            (Kind::Folder, true) => (0o700, 2),
+            (Kind::Folder, false) => (0o500, 2),
+            (Kind::File, true) => (0o600, 1),
+            (Kind::File, false) => (0o400, 1),
+        }
     }
 }
 

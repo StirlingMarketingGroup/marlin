@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
 
 use marlin_vfs::{
-    finder_files, Access, Attributes, IfExists, Item, ItemId, Kind, MemoryProvider, Options,
-    Provider, Space, Spool, UnsentState, Vfs, VfsError, POSIX,
+    finder_files, Access, Attributes, IfExists, Item, ItemId, Kind, MemoryProvider, NodeId,
+    Options, Provider, Space, Spool, UnsentState, Vfs, VfsError, POSIX,
 };
 
 fn never_local(_name: &str) -> bool {
@@ -1553,6 +1553,7 @@ impl Provider for ReadOnlyProvider {
                 size: 0,
                 modified: UNIX_EPOCH,
                 revision: None,
+                read_only: false,
             },
         }])
     }
@@ -3069,12 +3070,19 @@ async fn an_item_with_no_revision_is_never_overwritten() {
     yield_until("the try did not fail", || {
         matches!(
             vfs.unsent().first().map(|unsent| unsent.state.clone()),
-            Some(UnsentState::Failed(VfsError::NotSupported))
+            Some(UnsentState::Refused(VfsError::NotSupported))
         )
     })
     .await;
     assert_eq!(provider.uploads(), 0);
     assert_eq!(provider.contents(&id), b"remote");
+    let calls = provider.calls();
+    advance(Duration::from_secs(10 * 60)).await;
+    assert_eq!(provider.calls(), calls);
+    assert!(matches!(
+        vfs.unsent().first().map(|unsent| unsent.state.clone()),
+        Some(UnsentState::Refused(VfsError::NotSupported))
+    ));
 }
 
 #[tokio::test(start_paused = true)]
@@ -3836,4 +3844,316 @@ async fn a_first_write_whose_record_cannot_be_written_leaves_the_file_clean() {
     assert!(vfs.write(handle, 0, b"new").await.is_err());
     assert_eq!(spool_files(&dir), 0);
     assert_eq!(vfs.read(handle, 0, 3).await.unwrap(), b"old");
+}
+
+fn refused(vfs: &Vfs, error: VfsError) -> bool {
+    matches!(
+        vfs.unsent().first().map(|unsent| unsent.state.clone()),
+        Some(UnsentState::Refused(found)) if found == error
+    )
+}
+
+#[tokio::test]
+async fn a_read_only_file_cannot_be_opened_for_write_or_cut() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    let id = provider.add_file(&provider.root(), "theirs.txt", b"theirs");
+    provider.set_read_only(&id, true);
+    provider.add_file(&provider.root(), "mine.txt", b"mine");
+    let theirs = vfs.lookup(Vfs::ROOT, "theirs.txt").await.unwrap();
+    let mine = vfs.lookup(Vfs::ROOT, "mine.txt").await.unwrap();
+    assert!(theirs.attributes.read_only);
+    assert!(!mine.attributes.read_only);
+    assert_eq!(
+        vfs.open(theirs.node, Access::Write).await,
+        Err(VfsError::AccessDenied)
+    );
+    assert_eq!(
+        vfs.truncate(theirs.node, 0).await,
+        Err(VfsError::AccessDenied)
+    );
+    let handle = vfs.open(theirs.node, Access::Read).await.unwrap();
+    assert_eq!(vfs.read(handle, 0, 100).await.unwrap(), b"theirs");
+    vfs.release(handle);
+    assert_eq!(spool_files(&dir), 0);
+    assert!(vfs.unsent().is_empty());
+    assert_eq!(provider.uploads(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_new_file_renamed_over_a_read_only_file_is_refused() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    let id = provider.add_file(&provider.root(), "theirs.txt", b"theirs");
+    provider.set_read_only(&id, true);
+    let (made, handle) = vfs
+        .create(Vfs::ROOT, "new.txt", Access::Write)
+        .await
+        .unwrap();
+    vfs.write(handle, 0, b"new").await.unwrap();
+    vfs.release(handle);
+    assert_eq!(
+        vfs.rename(
+            Vfs::ROOT,
+            "new.txt",
+            Vfs::ROOT,
+            "theirs.txt",
+            IfExists::Replace
+        )
+        .await,
+        Err(VfsError::AccessDenied)
+    );
+    let new_file = vfs.lookup(Vfs::ROOT, "new.txt").await.unwrap();
+    let theirs = vfs.lookup(Vfs::ROOT, "theirs.txt").await.unwrap();
+    assert_eq!(new_file.node, made.node);
+    assert_ne!(theirs.node, made.node);
+    advance(settle()).await;
+    yield_until("the new file did not upload", || spool_files(&dir) == 0).await;
+    assert_eq!(provider.contents(&id), b"theirs");
+    let items = root_items(&provider).await;
+    let new_item = items.iter().find(|item| item.name == "new.txt").unwrap();
+    assert_eq!(provider.contents(&new_item.id), b"new");
+    assert_ne!(new_item.id, id);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_newest_answer_decides_whether_a_rename_over_a_file_is_refused() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    let id = provider.add_file(&provider.root(), "theirs.txt", b"theirs");
+    let looked = vfs.lookup(Vfs::ROOT, "theirs.txt").await.unwrap();
+    assert!(!looked.attributes.read_only);
+    provider.set_read_only(&id, true);
+    vfs.refresh();
+    let (_made, handle) = vfs
+        .create(Vfs::ROOT, "new.txt", Access::Write)
+        .await
+        .unwrap();
+    vfs.write(handle, 0, b"NEW").await.unwrap();
+    vfs.release(handle);
+    assert_eq!(
+        vfs.rename(
+            Vfs::ROOT,
+            "new.txt",
+            Vfs::ROOT,
+            "theirs.txt",
+            IfExists::Replace
+        )
+        .await,
+        Err(VfsError::AccessDenied)
+    );
+    provider.set_read_only(&id, false);
+    vfs.refresh();
+    vfs.rename(
+        Vfs::ROOT,
+        "new.txt",
+        Vfs::ROOT,
+        "theirs.txt",
+        IfExists::Replace,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        vfs.lookup(Vfs::ROOT, "new.txt").await.unwrap_err(),
+        VfsError::NotFound
+    );
+    let _uploads = start_uploads(&vfs);
+    advance(settle()).await;
+    yield_until("the renamed file did not upload", || spool_files(&dir) == 0).await;
+    assert_eq!(provider.contents(&id), b"NEW");
+    let items = root_items(&provider).await;
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].id, id);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_refused_upload_stops_until_it_is_asked_again() {
+    let (provider, vfs, _dir) = spooled_mount(Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    let (id, node) = refused_edit(&provider, &vfs).await;
+    advance(Duration::from_secs(10 * 60)).await;
+    assert_eq!(provider.uploads(), 1);
+    assert!(refused(&vfs, VfsError::AccessDenied));
+    let handle = vfs.open(node, Access::Read).await.unwrap();
+    assert_eq!(vfs.read(handle, 0, 100).await.unwrap(), b"LOCAL!");
+    vfs.release(handle);
+    let handle = vfs.open(node, Access::Write).await.unwrap();
+    vfs.release(handle);
+    advance(settle()).await;
+    assert_eq!(provider.uploads(), 1);
+    vfs.retry_now(node).unwrap();
+    yield_until("the retry was not refused", || {
+        provider.uploads() == 2 && refused(&vfs, VfsError::AccessDenied)
+    })
+    .await;
+    provider.set_read_only(&id, false);
+    vfs.retry_now(node).unwrap();
+    yield_until("the file did not upload", || vfs.unsent().is_empty()).await;
+    assert_eq!(provider.contents(&id), b"LOCAL!");
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_edit_retries_a_refused_file() {
+    let (provider, vfs, _dir) = spooled_mount(Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    let (id, node) = refused_edit(&provider, &vfs).await;
+    provider.set_read_only(&id, false);
+    let handle = vfs.open(node, Access::Write).await.unwrap();
+    vfs.write(handle, 6, b"!").await.unwrap();
+    vfs.release(handle);
+    advance(settle()).await;
+    yield_until("the edited file did not upload", || vfs.unsent().is_empty()).await;
+    assert_eq!(provider.contents(&id), b"LOCAL!!");
+}
+
+#[tokio::test(start_paused = true)]
+async fn renaming_a_refused_new_file_tries_it_again() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    // `create` lists the parent first. The refusal is the provider's create, so it is set after the file is local.
+    let (_made, handle) = vfs.create(Vfs::ROOT, "a.txt", Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"hello").await.unwrap();
+    vfs.release(handle);
+    provider.fail_with(Some(VfsError::AccessDenied));
+    advance(settle()).await;
+    yield_until("the create was not refused", || {
+        refused(&vfs, VfsError::AccessDenied)
+    })
+    .await;
+    assert_eq!(provider.uploads(), 1);
+    advance(Duration::from_secs(10 * 60)).await;
+    assert_eq!(provider.uploads(), 1);
+    assert!(refused(&vfs, VfsError::AccessDenied));
+    provider.fail_with(None);
+    vfs.rename(Vfs::ROOT, "a.txt", Vfs::ROOT, "b.txt", IfExists::Refuse)
+        .await
+        .unwrap();
+    advance(settle()).await;
+    yield_until("the renamed file did not upload", || spool_files(&dir) == 0).await;
+    let items = root_items(&provider).await;
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].name, "b.txt");
+    assert_eq!(provider.contents(&items[0].id), b"hello");
+}
+
+#[tokio::test]
+async fn a_spooled_file_is_not_read_only() {
+    let (provider, vfs, _dir) = spooled_mount(Options::default(), 1024, never_local);
+    let id = provider.add_file(&provider.root(), "a.txt", b"remote");
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    let handle = vfs.open(file.node, Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"LOCAL").await.unwrap();
+    provider.set_read_only(&id, true);
+    assert!(!vfs.attributes(file.node).await.unwrap().read_only);
+    vfs.release(handle);
+}
+
+/// A file whose edit the remote refused, as `a_refused_upload_stops_until_it_is_asked_again` makes it.
+async fn refused_edit(provider: &MemoryProvider, vfs: &Vfs) -> (ItemId, NodeId) {
+    let id = provider.add_file(&provider.root(), "a.txt", b"remote");
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    let handle = vfs.open(file.node, Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"LOCAL!").await.unwrap();
+    provider.set_read_only(&id, true);
+    vfs.release(handle);
+    advance(settle()).await;
+    yield_until("the try was not refused", || {
+        refused(vfs, VfsError::AccessDenied)
+    })
+    .await;
+    assert_eq!(provider.uploads(), 1);
+    (id, file.node)
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_refused_item_renamed_while_a_writer_is_open_is_sent_when_it_closes() {
+    let (provider, vfs, _dir) = spooled_mount(Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    let (id, node) = refused_edit(&provider, &vfs).await;
+    provider.set_read_only(&id, false);
+    // The open writer holds back the try the rename asks for, and its close carries no edit.
+    let writer = vfs.open(node, Access::Write).await.unwrap();
+    vfs.rename(Vfs::ROOT, "a.txt", Vfs::ROOT, "b.txt", IfExists::Refuse)
+        .await
+        .unwrap();
+    advance(settle()).await;
+    assert_eq!(provider.uploads(), 1);
+    vfs.release(writer);
+    advance(settle()).await;
+    yield_until("the renamed file was not sent", || vfs.unsent().is_empty()).await;
+    assert_eq!(provider.contents(&id), b"LOCAL!");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_new_modified_time_sends_a_refused_file_again() {
+    let (provider, vfs, _dir) = spooled_mount(Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    let (id, node) = refused_edit(&provider, &vfs).await;
+    provider.set_read_only(&id, false);
+    // `touch`, `cp -p`, and `rsync -t` set only the time.
+    vfs.set_modified(node, UNIX_EPOCH + Duration::from_secs(5))
+        .await
+        .unwrap();
+    advance(settle()).await;
+    yield_until("the file was not sent again", || vfs.unsent().is_empty()).await;
+    assert_eq!(provider.contents(&id), b"LOCAL!");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_denied_remove_does_not_send_a_refused_file() {
+    let (provider, vfs, _dir) = spooled_mount(Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    refused_edit(&provider, &vfs).await;
+    // A fresh listing, so the remove reaches the provider's own call.
+    vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    provider.fail_with(Some(VfsError::AccessDenied));
+    assert_eq!(
+        vfs.remove(Vfs::ROOT, "a.txt", Kind::File).await,
+        Err(VfsError::AccessDenied)
+    );
+    provider.fail_with(None);
+    advance(Options::default().call_timeout + settle()).await;
+    assert_eq!(provider.uploads(), 1);
+    assert!(refused(&vfs, VfsError::AccessDenied));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_first_write_after_the_remote_marks_the_file_read_only_is_refused() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    let id = provider.add_file(&provider.root(), "a.txt", b"remote");
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    let handle = vfs.open(file.node, Access::Write).await.unwrap();
+    provider.set_read_only(&id, true);
+    // The first write asks for the item again once the answer the open used is stale.
+    advance(Options::default().attributes_ttl).await;
+    assert_eq!(
+        vfs.write(handle, 0, b"LOCAL").await,
+        Err(VfsError::AccessDenied)
+    );
+    assert_eq!(spool_files(&dir), 0);
+    assert!(vfs.unsent().is_empty());
+    vfs.release(handle);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_first_write_refuses_a_mark_a_fresh_listing_brought() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    let id = provider.add_file(&provider.root(), "a.txt", b"remote");
+    let file = vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    let handle = vfs.open(file.node, Access::Write).await.unwrap();
+    provider.set_read_only(&id, true);
+    vfs.refresh();
+    assert!(
+        vfs.lookup(Vfs::ROOT, "a.txt")
+            .await
+            .unwrap()
+            .attributes
+            .read_only
+    );
+    let calls = provider.calls();
+    assert_eq!(
+        vfs.write(handle, 0, b"LOCAL").await,
+        Err(VfsError::AccessDenied)
+    );
+    assert_eq!(provider.calls(), calls);
+    assert_eq!(spool_files(&dir), 0);
+    vfs.release(handle);
 }

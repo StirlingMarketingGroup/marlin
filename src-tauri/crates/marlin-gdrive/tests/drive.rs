@@ -16,7 +16,7 @@ use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 const MODIFIED: &str = "2020-01-02T03:04:05.678Z";
 
 const ITEM_FIELDS: &str =
-    "id,name,mimeType,size,modifiedTime,headRevisionId,trashed,driveId,shortcutDetails(targetId)";
+    "id,name,mimeType,size,modifiedTime,headRevisionId,trashed,driveId,shortcutDetails(targetId),capabilities(canModifyContent)";
 
 const FOLDER: &str = "application/vnd.google-apps.folder";
 const DOC: &str = "application/vnd.google-apps.document";
@@ -2548,6 +2548,71 @@ async fn replace_bytes_with_a_stale_revision_uploads_nothing() {
         )
         .await;
     assert_eq!(replaced, Err(VfsError::Conflict));
+    assert!(sent(&server, "PATCH").await.is_empty());
+    assert!(sent(&server, "PUT").await.is_empty());
+}
+
+#[tokio::test]
+async fn a_listing_marks_a_view_only_file_and_a_link_file_read_only() {
+    let server = MockServer::start().await;
+    let mut view_only = file_json("view", "View", PLAIN, "4");
+    view_only["capabilities"] = json!({"canModifyContent": false});
+    let mut owned = file_json("owned", "Owned", PLAIN, "4");
+    owned["capabilities"] = json!({"canModifyContent": true});
+    let unknown = file_json("unknown", "Unknown", PLAIN, "4");
+    let mut folder = folder_json("folder", "Folder");
+    folder["capabilities"] = json!({"canModifyContent": false});
+    let mut doc = file_json("doc", "Notes", DOC, "0");
+    doc["capabilities"] = json!({"canModifyContent": true});
+    mount_path(
+        &server,
+        "/files",
+        ok_json(file_page(
+            vec![view_only, owned, unknown, folder, doc],
+            None,
+        )),
+    )
+    .await;
+    let items = drive(&server)
+        .list(&ItemId("parent".to_string()))
+        .await
+        .unwrap();
+    let read_only: Vec<_> = items.iter().map(|item| item.attributes.read_only).collect();
+    assert_eq!(read_only, [true, false, false, false, true]);
+}
+
+#[tokio::test]
+async fn item_of_a_view_only_file_is_read_only_and_an_owned_one_is_not() {
+    let server = MockServer::start().await;
+    let mut view_only = with_revision(file_json("view", "View", PLAIN, "4"), "rev-1");
+    view_only["capabilities"] = json!({"canModifyContent": false});
+    let mut owned = with_revision(file_json("owned", "Owned", PLAIN, "4"), "rev-1");
+    owned["capabilities"] = json!({"canModifyContent": true});
+    mount_path(&server, "/files/view", ok_json(view_only)).await;
+    mount_path(&server, "/files/owned", ok_json(owned)).await;
+    let drive = drive(&server);
+    let view_only = drive.item(&id("view")).await.unwrap();
+    let owned = drive.item(&id("owned")).await.unwrap();
+    assert!(view_only.attributes.read_only);
+    assert!(!owned.attributes.read_only);
+}
+
+#[tokio::test]
+async fn replace_bytes_of_a_view_only_file_is_access_denied_and_uploads_nothing() {
+    let server = MockServer::start().await;
+    let mut current = with_revision(file_json("f", "notes.txt", PLAIN, "1"), "rev-1");
+    current["capabilities"] = json!({"canModifyContent": false});
+    mount_path(&server, "/files/f", ok_json(current)).await;
+    let replaced = drive(&server)
+        .replace_bytes(
+            &id("f"),
+            Path::new("/no/such/file"),
+            &Revision("rev-1".to_string()),
+            stamp(),
+            &|_| {},
+        )
+        .await;
+    assert_eq!(replaced, Err(VfsError::AccessDenied));
     assert!(sent(&server, "PATCH").await.is_empty());
     assert!(sent(&server, "PUT").await.is_empty());
 }

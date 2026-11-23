@@ -209,8 +209,8 @@ struct SpoolFile {
     /// The try that is running, if one is.
     attempt: Option<Attempt>,
 
-    /// The last failed try's error, and how many tries in a row have failed.
-    failure: Option<(VfsError, u32)>,
+    /// Why the last try did not land, until a try lands, an edit clears it, or `upload::try_again` clears a refusal.
+    failure: Option<upload::Failure>,
 
     /// Whether a byte call of this file may have reached the remote.
     sent: Sent,
@@ -601,7 +601,7 @@ impl Vfs {
         Ok(entries[start..end].to_vec())
     }
 
-    /// Opens a file for `access`. A folder is [`VfsError::IsAFolder`]. A write on a mount with no spool is [`VfsError::ReadOnly`]. Opening for write asks the provider nothing: it decides the kind from what the node holds.
+    /// Opens a file for `access`. A folder is [`VfsError::IsAFolder`]. A write on a mount with no spool is [`VfsError::ReadOnly`]. A file the provider marks read-only is [`VfsError::AccessDenied`], and nothing is spooled. Opening for write asks the provider nothing: it decides the kind from what the node holds.
     pub async fn open(&self, node: NodeId, access: Access) -> Result<HandleId, VfsError> {
         if access == Access::Write {
             self.check_writable(node)?;
@@ -674,7 +674,7 @@ impl Vfs {
         }
     }
 
-    /// Writes `data` at `offset`. A handle that is not open for write is [`VfsError::AccessDenied`]: a mount with no spool has none. An empty write changes nothing. An adapter that already owns the bytes passes a `Vec`, which is not copied again.
+    /// Writes `data` at `offset`. A handle that is not open for write is [`VfsError::AccessDenied`]: a mount with no spool has none. So is the first write to a clean file when the answer it fetches, or holds fresh, marks the file read-only, and nothing is spooled. An empty write changes nothing. An adapter that already owns the bytes passes a `Vec`, which is not copied again.
     pub async fn write(
         &self,
         handle: HandleId,
@@ -701,7 +701,7 @@ impl Vfs {
         self.edit(node, Edit::Write { offset, data }).await
     }
 
-    /// Cuts or grows a file. A mount with no spool answers [`VfsError::ReadOnly`], and a folder is [`VfsError::IsAFolder`]. Cutting a clean file to zero reads nothing from the provider.
+    /// Cuts or grows a file. A mount with no spool answers [`VfsError::ReadOnly`], a folder is [`VfsError::IsAFolder`], and a file the provider marks read-only is [`VfsError::AccessDenied`]. Nothing is spooled for that file. Cutting a clean file to zero reads nothing from the provider.
     pub async fn truncate(&self, node: NodeId, size: u64) -> Result<Attributes, VfsError> {
         self.check_writable(node)?;
         self.edit(node, Edit::SetLen(size)).await?;
@@ -1002,7 +1002,7 @@ impl Vfs {
         Ok(())
     }
 
-    /// Renames `name` in `parent` to `new_name` in `new_parent`. The names are the names the OS sent, and the provider gets `new_name` unescaped: moving a duplicate shown as `a (2).txt` names the remote item `a (2).txt`. `if_exists` says what to do when `new_name` is taken. A rename of an item onto a name that another item in the destination also holds on the remote is [`VfsError::Conflict`]. A new file renamed over an item keeps its own node and bytes and takes that item's id. Replacing a folder that holds a new file is [`VfsError::NotEmpty`].
+    /// Renames `name` in `parent` to `new_name` in `new_parent`. The names are the names the OS sent, and the provider gets `new_name` unescaped: moving a duplicate shown as `a (2).txt` names the remote item `a (2).txt`. `if_exists` says what to do when `new_name` is taken. A rename of an item onto a name that another item in the destination also holds on the remote is [`VfsError::Conflict`]. A new file renamed over an item keeps its own node and bytes and takes that item's id. A new file renamed over an item the provider marks read-only is [`VfsError::AccessDenied`], and nothing is spooled for that item. Replacing a folder that holds a new file is [`VfsError::NotEmpty`].
     pub async fn rename(
         &self,
         parent: NodeId,
@@ -1044,8 +1044,7 @@ impl Vfs {
         }
         let source = match source {
             Holder::New { node, .. } => {
-                self.rename_new(node, &to, new_name, target, destination.asked);
-                return Ok(());
+                return self.rename_new(node, &to, new_name, target, destination.asked);
             }
             Holder::Item(item) => item,
         };
@@ -1136,9 +1135,9 @@ impl Vfs {
             set_place(&mut state, node, &to, remote_name);
             let found = state.nodes.get_mut(&node).unwrap();
             remember(&mut found.attributes, asked, moved.attributes);
-            // The new name can move the file into or out of the names that stay local, so the uploader looks at it again.
+            // The new name can move the file into or out of the names that stay local, so the uploader looks at it again. It is also a reason to send a refused file again.
             if let Bytes::Spooled(spool_id) = found.bytes {
-                upload::schedule(
+                upload::try_again(
                     &mut state,
                     &self.uploads,
                     spool_id,
@@ -1249,7 +1248,7 @@ impl Vfs {
         Ok(listing)
     }
 
-    /// Whether `node` may be opened for write or cut: the mount has a spool, and the node is a file by [`held_kind`]. A node with no answer is [`VfsError::StaleHandle`]: this asks the provider nothing.
+    /// Whether `node` may be opened for write or cut: the mount has a spool, the node is a file by [`held_kind`], and the provider has not marked that file read-only. A node with no answer is [`VfsError::StaleHandle`]: this asks the provider nothing. A read-only file is [`VfsError::AccessDenied`].
     fn check_writable(&self, node: NodeId) -> Result<(), VfsError> {
         self.spool()?;
         let state = self.state.lock().unwrap();
@@ -1258,6 +1257,7 @@ impl Vfs {
         };
         // Every node but the root came from a listing, a lookup, or a change, which each store an answer.
         match held_kind(node, found) {
+            Some(Kind::File) if read_only(found) => Err(VfsError::AccessDenied),
             Some(Kind::File) => Ok(()),
             Some(Kind::Folder) => Err(VfsError::IsAFolder),
             None => Err(VfsError::StaleHandle),
@@ -1356,6 +1356,13 @@ impl Vfs {
             }
             fresh => fresh,
         };
+        // The answer can be newer than the one the open checked, and the remote would refuse these bytes.
+        if fresh
+            .as_ref()
+            .is_some_and(|attributes| attributes.read_only)
+        {
+            return Err(VfsError::AccessDenied);
+        }
         // A cut to zero copies nothing, so it keeps the revision the node holds, however old.
         let base = match needed {
             0 => held_revision,
@@ -1535,7 +1542,7 @@ impl Vfs {
         }
     }
 
-    /// Renames a new file. Nothing reaches the provider. A new file renamed over an item takes that item's id, so its bytes become the item's next bytes and the item keeps its id (decision 0005, choice 9). The node the item had is retired. A handle still open on it reads the old bytes until the new ones upload: once they have, that handle reads the item's id, and the id has the new bytes.
+    /// Renames a new file. Nothing reaches the provider. A new file renamed over an item takes that item's id, so its bytes become the item's next bytes and the item keeps its id (decision 0005, choice 9). The node the item had is retired. A handle still open on it reads the old bytes until the new ones upload: once they have, that handle reads the item's id, and the id has the new bytes. An item the provider marks read-only is [`VfsError::AccessDenied`]: the new file stays as it is.
     fn rename_new(
         &self,
         node: NodeId,
@@ -1543,7 +1550,7 @@ impl Vfs {
         new_name: &str,
         target: Option<Holder>,
         asked: Asked,
-    ) {
+    ) -> Result<(), VfsError> {
         let mut state = self.state.lock().unwrap();
         // A new file is always spooled.
         let Bytes::Spooled(spool_id) = state.nodes[&node].bytes else {
@@ -1551,11 +1558,16 @@ impl Vfs {
         };
         match target {
             Some(Holder::Item(item)) => {
-                // The latest answer the core holds about the item: its node's own, or the listing's when that is newer. The new file goes on from those facts (choice 9: the revision the core holds at the rename).
+                // The latest answer the core holds about the item: its node's own, or the listing's when that is newer. The new file goes on from those facts (choice 9: the revision the core holds at the rename). The same answer decides a read-only refusal.
                 let target_node = node_for(&mut state, item.id.clone());
                 let held = &mut state.nodes.get_mut(&target_node).unwrap().attributes;
                 remember(held, asked, item.attributes.clone());
                 let held = held.clone();
+                if read_only(&state.nodes[&target_node]) {
+                    // `node_for` may have just made this node. It must not stay behind a refusal that changed nothing.
+                    drop_unreferenced(&mut state, &self.room, target_node);
+                    return Err(VfsError::AccessDenied);
+                }
                 mark_removed(&mut state, &self.room, item.id.clone());
                 unlist(&mut state, &self.rules, node);
                 state.nodes.get_mut(&node).unwrap().identity = Identity::Item {
@@ -1579,15 +1591,16 @@ impl Vfs {
                 list(&mut state, &self.rules, node, to, new_name);
             }
         }
-        // The name is part of what a create sends, so a try that already started stops and the file waits again.
+        // The name is part of what a create sends, so a try that already started stops and the file waits again. A new name is also a reason to send a refused file again.
         upload::stop_attempt(&mut state, spool_id);
         let _ = save_record(&mut state, spool_id);
-        upload::schedule(
+        upload::try_again(
             &mut state,
             &self.uploads,
             spool_id,
             Instant::now() + self.options.settle,
         );
+        Ok(())
     }
 }
 
@@ -1716,6 +1729,7 @@ fn spool_attributes(state: &State, node: NodeId) -> Option<Attributes> {
         size: spool.size,
         modified: spool.modified,
         revision: None,
+        read_only: false,
     })
 }
 
@@ -2013,6 +2027,15 @@ fn remember<T: Clone>(held: &mut Option<(Asked, T)>, asked: Asked, answer: T) ->
     }
     *held = Some((asked, answer.clone()));
     answer
+}
+
+/// Whether the provider's latest answer about this node marks it read-only. A file whose bytes are in the spool is not: the spool is the file. A node with no answer is not: the provider's own answer decides when the bytes reach it.
+fn read_only(found: &Node) -> bool {
+    !matches!(found.bytes, Bytes::Spooled(_))
+        && found
+            .attributes
+            .as_ref()
+            .is_some_and(|(_, attributes)| attributes.read_only)
 }
 
 /// The kind `node` holds, with no provider call. The root is a folder. A spooled node, and a new file, is a file. An item uses the kind it already holds, however old that answer is. `None` when the node holds no answer.

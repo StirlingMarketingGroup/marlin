@@ -5,7 +5,7 @@
 The helper mounts a Google account through it: see [Providers](mount-helper.md#providers). No part of the UI asks for a mount yet (#377).
 
 **Covers:** `src-tauri/crates/marlin-fuse/` except its macOS half (`src/macos.rs`, `src/macos/`, `test-on-mac.sh`), and the adapter wiring in `src-tauri/crates/marlin-mount/src/adapter.rs`
-**Checked against the code:** 2026-11-20
+**Checked against the code:** 2026-11-23
 
 The design is in [decision 0001](decisions/0001-mount-architecture.md), choices 2 and 6.
 
@@ -38,7 +38,7 @@ The `.deb` and `.rpm` packages depend on `fuse3` (`src-tauri/tauri.conf.json`). 
 
 - **Mount options:** `rw` when the mount takes writes, and `ro` when it does not. Also `default_permissions`, file system name `marlin`, subtype `marlin`. The mount shows in `/proc/self/mountinfo` with the type `fuse.marlin`.
 - **Only the mounting user can open it.** The adapter never passes `allow_other`, so the kernel refuses every other user, root included.
-- **Made-up permissions.** The mounting user owns everything. A mount that takes writes shows a folder as mode 0700 and a file as mode 0600. A read-only mount shows 0500 and 0400. `default_permissions` makes the kernel enforce them, so the adapter has no access callback.
+- **Made-up permissions.** The mounting user owns everything. A mount that takes writes shows a folder as mode 0700 and a file as mode 0600. A read-only mount shows 0500 and 0400. A file that the provider marks read-only shows 0400 on a writable mount too ([decision 0008](decisions/0008-read-only-files.md)). `default_permissions` makes the kernel enforce the modes, so the adapter has no access callback. The kernel does not enforce the modes for root on a mount that root made, and a rename over a 0400 file needs write permission on the folder only. So the core also refuses an open for writing of a read-only file, and a rename of a new file over one, and the adapter answers `EACCES`.
 - **Times.** Access and change times repeat the modified time. A Linux FUSE reply has no creation time.
 - **Caching.** The kernel may reuse a name and its attributes for 1 second.
 - **File bytes stay cached across opens.** The adapter answers each open with `FOPEN_KEEP_CACHE`, so a preview and a thumbnailer that open the same file fetch it once. It also asks the kernel for `FUSE_AUTO_INVAL_DATA` when the mount starts. With that flag the kernel checks a file's size and modified time before it serves cached bytes, and drops them when either changed. `fuser` 0.18.0 does not ask for that flag by itself. On a kernel without it, the adapter does not keep the bytes. An open within about 6 seconds of a change on the remote can still get the old bytes: the core reuses a listing and a node's attributes for up to 5 seconds, and the kernel keeps its answer for 1 second. The kernel asks for the attributes of a file that is being read at most once a second. The core asks the provider for them at most once in 5 seconds ([Rules the core keeps](mount-core.md#rules-the-core-keeps)).
@@ -130,7 +130,7 @@ These runs use `MemoryProvider`, which uploads at once. They say nothing about t
 
 | What                                                                           | State                                                     |
 | ------------------------------------------------------------------------------ | --------------------------------------------------------- |
-| Debian 12 container (`fuse3` 3.14), a user who is not root                     | Tested by `test-in-docker.sh`, 2026-11-20                 |
+| Debian 12 container (`fuse3` 3.14), a user who is not root                     | Tested by `test-in-docker.sh`, 2026-11-23                 |
 | A CI runner                                                                    | Not tested. Risk 9 in decision 0001 is still open (#485). |
 | A bare Linux desktop: file managers, drag and drop, file dialogs, thumbnailers | Not tested (#486).                                        |
 | Flatpak, Snap, AppImage                                                        | Not tested (#486).                                        |
@@ -142,6 +142,6 @@ Known limits:
 - The adapter does not handle the kernel's interrupt request. A call that an app gave up on still runs until the core's time limit ends it.
 - An append uses the size the kernel holds. When another client grows the file, an append through a descriptor that has not seen the new size lands at the old end, over the other client's bytes. An open descriptor that does not stat keeps the old size. A new open can be up to about 6 seconds behind. NFS has the same limit.
 - `mknod` answers `ENOSYS`, so no FIFO, socket, or device can be made. An app that makes a file with `open` reaches `create`.
-- No item shows as read-only on its own. No provider reports that yet.
+- A folder never shows as read-only on its own, only a file (#639).
 - A modified time set on a folder, or on a file that is not in the spool, succeeds and changes nothing. So `touch` on a file that has uploaded keeps its old time: see `set_modified` in [Mount core](mount-core.md#what-an-adapter-calls).
 - Run as root, `fuser` mounts without `fusermount3`, and the mount's type is `fuse` with no subtype. The helper is a per-user process and is not meant to run as root.
