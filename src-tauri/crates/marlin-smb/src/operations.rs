@@ -8,6 +8,7 @@ use marlin_smb_client::protocol::{
     FileMetadataResult, GetFileMetadataParams, ListSharesParams, ListSharesResult,
     ReadDirectoryParams, ReadDirectoryResult, ReadParams, ReadResult, RenameParams, ShareEntry,
     SmbCredentials, SpaceParams, SpaceResult, UploadFileParams, UploadFileResult, READ_MAX,
+    SMBCLIENT_MISSING,
 };
 use pavao::{SmbClient, SmbCredentials as PavaoCredentials, SmbMode, SmbOpenOptions, SmbOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -74,6 +75,7 @@ fn error_code(error: &pavao::SmbError) -> i32 {
     match error.kind() {
         ErrorKind::NotFound => error_codes::SMB_PATH_NOT_FOUND,
         ErrorKind::IsADirectory => error_codes::SMB_IS_A_FOLDER,
+        ErrorKind::NotADirectory => error_codes::SMB_NOT_A_FOLDER,
         ErrorKind::PermissionDenied => error_codes::SMB_PERMISSION_DENIED,
         ErrorKind::ConnectionRefused
         | ErrorKind::ConnectionReset
@@ -97,15 +99,18 @@ fn is_hidden_file(name: &str) -> bool {
 pub fn read_directory(params: ReadDirectoryParams) -> Result<ReadDirectoryResult, (i32, String)> {
     let share = Share::open(&params.credentials, &params.share)?;
 
-    // pavao drops opendir's errno (it answers BadFileDescriptor), so a stat of the same path finds out why the listing failed. A folder that is there and still cannot be listed was refused: the stat proves the sign-in works.
-    let entries = share.client.list_dirplus(&params.path).map_err(|e| {
+    // pavao drops opendir's errno (it answers BadFileDescriptor), so a stat of the same path finds out why the listing failed. A folder that is there and still cannot be listed was refused: the stat proves the sign-in works. A path that is there and is not a folder answers SMB_NOT_A_FOLDER.
+    let entries = share.client.list_dirplus(&params.path).map_err(|_| {
         match share.client.stat(&params.path) {
             Err(cause) => share.failure("Failed to list directory", cause),
             Ok(stat) if stat.mode.is_dir() => (
                 error_codes::SMB_PERMISSION_DENIED,
                 "Failed to list directory: permission denied".to_string(),
             ),
-            Ok(_) => share.failure("Failed to list directory", e),
+            Ok(_) => (
+                error_codes::SMB_NOT_A_FOLDER,
+                "Failed to list directory: not a folder".to_string(),
+            ),
         }
     })?;
 
@@ -373,7 +378,10 @@ pub fn list_shares(params: ListSharesParams) -> Result<ListSharesResult, (i32, S
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err((error_codes::SMB_LIBRARY_MISSING, "smbclient not found. Install Samba (macOS: `brew install samba`, Linux: `sudo apt-get install smbclient`).".to_string()));
+            return Err((
+                error_codes::SMB_LIBRARY_MISSING,
+                SMBCLIENT_MISSING.to_string(),
+            ));
         }
         Err(e) => {
             return Err((
@@ -411,39 +419,37 @@ pub fn list_shares(params: ListSharesParams) -> Result<ListSharesResult, (i32, S
         return Err((smbclient_code(&reported), text));
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(ListSharesResult {
+        shares: shares_from(&String::from_utf8_lossy(&output.stdout))?,
+    })
+}
 
-    // Parse the -g (grep-friendly) output format: type|name|comment
-    let shares: Vec<ShareEntry> = stdout
-        .lines()
-        .filter_map(|line| {
-            let parts: Vec<&str> = line.split('|').collect();
-            if parts.len() < 2 {
-                return None;
-            }
-
-            let share_type = parts[0];
-            let name = parts[1];
-            let comment = parts.get(2).map(|s| s.to_string());
-
-            // Only include Disk shares, skip IPC$, ADMIN$, etc.
-            if share_type != "Disk" {
-                return None;
-            }
-
-            // Skip hidden shares (ending in $)
-            if name.ends_with('$') {
-                return None;
-            }
-
-            Some(ShareEntry {
+/// The disk shares in `smbclient -L -g` output, one `type|name|comment` line each for a share, beside `Server|` and `Workgroup|` lines from browsing. Every SMB server lists `IPC$`, so output with no share line is a listing that failed, even when `smbclient` exited 0. Samba's test server does that when its RPC service does not answer: it prints only `SMB1 disabled -- no workgroup available`.
+fn shares_from(stdout: &str) -> Result<Vec<ShareEntry>, (i32, String)> {
+    let mut listed_any = false;
+    let mut shares = Vec::new();
+    for line in stdout.lines() {
+        // The comment is the rest of the line, `|` and all.
+        let mut parts = line.splitn(3, '|');
+        let (Some(kind), Some(name)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        listed_any |= matches!(kind, "Disk" | "IPC" | "Printer");
+        // Only disk shares, and none whose name ends in `$`: that leaves out `IPC$`, `ADMIN$`, `C$`, and printers.
+        if kind == "Disk" && !name.ends_with('$') {
+            shares.push(ShareEntry {
                 name: name.to_string(),
-                comment,
-            })
-        })
-        .collect();
-
-    Ok(ListSharesResult { shares })
+                comment: parts.next().map(|comment| comment.to_string()),
+            });
+        }
+    }
+    if !listed_any {
+        return Err((
+            error_codes::SMB_ERROR,
+            "Failed to list shares: the server listed none".to_string(),
+        ));
+    }
+    Ok(shares)
 }
 
 /// Download a file to a local path.
@@ -645,7 +651,7 @@ fn resolve_smbclient_command() -> (std::ffi::OsString, Option<std::ffi::OsString
 
 #[cfg(test)]
 mod tests {
-    use super::{error_code, smbclient_code, space_from, split_port};
+    use super::{error_code, shares_from, smbclient_code, space_from, split_port};
     use marlin_smb_client::protocol::error_codes;
     use std::io::{Error, ErrorKind};
 
@@ -685,6 +691,10 @@ mod tests {
         assert_eq!(code(ErrorKind::NotFound), error_codes::SMB_PATH_NOT_FOUND);
         assert_eq!(code(ErrorKind::IsADirectory), error_codes::SMB_IS_A_FOLDER);
         assert_eq!(
+            code(ErrorKind::NotADirectory),
+            error_codes::SMB_NOT_A_FOLDER
+        );
+        assert_eq!(
             code(ErrorKind::PermissionDenied),
             error_codes::SMB_PERMISSION_DENIED
         );
@@ -710,6 +720,30 @@ mod tests {
         assert_eq!(split_port("nas:4450"), ("nas", Some("4450")));
         assert_eq!(split_port("nas:abc"), ("nas:abc", None));
         assert_eq!(split_port("fe80::1"), ("fe80::1", None));
+    }
+
+    /// `smbclient -L -g` output, as smbclient 4.23.4 prints it.
+    #[test]
+    fn shares_from_the_listing() {
+        let listed = shares_from(
+            "Disk|data|\nDisk|denied|Team files | read only\nIPC|IPC$|IPC Service (Samba 4.23.4)\nDisk|C$|Default share\nSMB1 disabled -- no workgroup available\n",
+        )
+        .unwrap();
+        let names: Vec<&str> = listed.iter().map(|share| share.name.as_str()).collect();
+        assert_eq!(names, ["data", "denied"]);
+        assert_eq!(listed[1].comment.as_deref(), Some("Team files | read only"));
+
+        // A server whose only share is `IPC$` listed fine, and shows no folder.
+        assert!(shares_from("IPC|IPC$|IPC Service\n").unwrap().is_empty());
+
+        // No line at all is a listing that failed, though smbclient exited 0.
+        for failed in [
+            "SMB1 disabled -- no workgroup available\n",
+            "Workgroup|WORKGROUP|NAS\n",
+            "",
+        ] {
+            assert_eq!(shares_from(failed).unwrap_err().0, error_codes::SMB_ERROR);
+        }
     }
 
     /// These are lines smbclient 4.23.4 prints.

@@ -1,10 +1,12 @@
 #![cfg(all(unix, feature = "client"))]
 
+mod common;
+
+use common::{answer_line, shell_quote, wait_for_file, wait_until_exited, write_script};
 use marlin_smb_client::{CallError, Sidecar, StartError};
 use std::fs;
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 fn script(body: &str) -> (tempfile::TempDir, PathBuf) {
@@ -12,10 +14,6 @@ fn script(body: &str) -> (tempfile::TempDir, PathBuf) {
     let path = dir.path().join("marlin-smb");
     write_script(&path, body);
     (dir, path)
-}
-
-fn answer_line() -> &'static str {
-    r#"id=$(printf '%s\n' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')"#
 }
 
 fn call<R: serde::de::DeserializeOwned>(
@@ -109,6 +107,104 @@ fi
 
     let result: i64 = call(&sidecar, Some(Duration::from_secs(2))).unwrap();
     assert_eq!(result, 1);
+}
+
+#[test]
+fn a_stopped_call_ends_its_process_and_the_next_call_starts_a_new_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("ran");
+    let pid_file = dir.path().join("pid");
+    let path = dir.path().join("marlin-smb");
+    write_script(
+        &path,
+        &format!(
+            r#"
+marker={marker}
+pid={pid}
+if [ -f "$marker" ]; then
+  read line
+  {id}
+  printf '%s\n' "{{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":1}}"
+else
+  touch "$marker"
+  read line
+  echo $$ > "$pid"
+  sleep 600
+fi
+"#,
+            marker = shell_quote(&marker),
+            pid = shell_quote(&pid_file),
+            id = answer_line()
+        ),
+    );
+
+    let sidecar = Sidecar::new(Some(path));
+    let stop = AtomicBool::new(false);
+    let (err, pid) = std::thread::scope(|scope| {
+        // The stop comes once the script has the request, so it ends a call in flight.
+        let stopper = scope.spawn(|| {
+            let pid = wait_for_file(&pid_file);
+            stop.store(true, Ordering::Relaxed);
+            (pid, Instant::now())
+        });
+        // A limit of its own, so a stop that does not work fails as `TimedOut` and never waits out the script.
+        let err = sidecar
+            .call_until::<serde_json::Value, i64>(
+                "ping",
+                serde_json::json!({}),
+                Some(Duration::from_secs(10)),
+                &stop,
+            )
+            .unwrap_err();
+        let (pid, stopped) = stopper.join().unwrap();
+        assert!(
+            stopped.elapsed() < Duration::from_secs(3),
+            "stopped too slowly: {:?}",
+            stopped.elapsed()
+        );
+        (err, pid)
+    });
+    assert_eq!(err, CallError::Stopped);
+    assert_eq!(err.to_string(), "The SMB call was stopped.");
+    wait_until_exited(&pid);
+
+    let result: i64 = call(&sidecar, Some(Duration::from_secs(2))).unwrap();
+    assert_eq!(result, 1);
+}
+
+#[test]
+fn a_call_stopped_before_it_is_sent_keeps_the_process() {
+    let dir = tempfile::tempdir().unwrap();
+    let requests = dir.path().join("requests");
+    let path = dir.path().join("marlin-smb");
+    // Each answer is the pid of the process that read the request.
+    write_script(
+        &path,
+        &format!(
+            r#"
+while read line; do
+  printf '%s\n' "$line" >> {requests}
+  {id}
+  printf '%s\n' "{{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":$$}}"
+done
+"#,
+            requests = shell_quote(&requests),
+            id = answer_line()
+        ),
+    );
+
+    let sidecar = Sidecar::new(Some(path));
+    let first: i64 = call(&sidecar, Some(Duration::from_secs(2))).unwrap();
+    let stopped = sidecar.call_until::<serde_json::Value, i64>(
+        "ping",
+        serde_json::json!({}),
+        Some(Duration::from_secs(2)),
+        &AtomicBool::new(true),
+    );
+    assert_eq!(stopped.unwrap_err(), CallError::Stopped);
+    let third: i64 = call(&sidecar, Some(Duration::from_secs(2))).unwrap();
+    assert_eq!(third, first);
+    assert_eq!(fs::read_to_string(&requests).unwrap().lines().count(), 2);
 }
 
 #[test]
@@ -247,55 +343,4 @@ sleep 600
 
     // A killed child that its new parent has not reaped yet still answers `kill -0`.
     wait_until_exited(&wait_for_file(&child_pid));
-}
-
-/// A `sh` child writes the script, so this test process never holds it open for writing.
-/// On Linux a process that another test is starting at that moment would inherit the
-/// handle, and running the script would then fail with "Text file busy".
-fn write_script(path: &Path, body: &str) {
-    let mut writer = Command::new("/bin/sh")
-        .args(["-c", r#"cat > "$1" && chmod 755 "$1""#, "sh"])
-        .arg(path)
-        .stdin(Stdio::piped())
-        .spawn()
-        .unwrap();
-    write!(writer.stdin.take().unwrap(), "#!/bin/sh\n{body}").unwrap();
-    assert!(
-        writer.wait().unwrap().success(),
-        "could not write {}",
-        path.display()
-    );
-}
-
-fn shell_quote(path: &Path) -> String {
-    format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
-}
-
-fn wait_for_file(path: &Path) -> String {
-    for _ in 0..50 {
-        if let Ok(text) = fs::read_to_string(path) {
-            let text = text.trim().to_string();
-            if !text.is_empty() {
-                return text;
-            }
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    panic!("nothing was written to {}", path.display());
-}
-
-/// A dead child stays visible to `kill -0` until its parent waits. `ps` shows `Z` once it has exited.
-fn wait_until_exited(pid: &str) {
-    for _ in 0..50 {
-        let output = Command::new("ps")
-            .args(["-o", "stat=", "-p", pid])
-            .output()
-            .unwrap();
-        let stat = String::from_utf8_lossy(&output.stdout);
-        if !output.status.success() || stat.trim().is_empty() || stat.contains('Z') {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    panic!("process {pid} did not exit");
 }

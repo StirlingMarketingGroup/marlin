@@ -161,7 +161,35 @@ impl Server {
             );
             std::thread::sleep(Duration::from_millis(50));
         }
-        server
+
+        // smbd lists shares through samba-dcerpcd, which it starts at the first listing. On a busy machine that listing can come back with no share at all, so wait for one that names the share before a test starts.
+        let smbclient = tool(
+            "MARLIN_TEST_SMBCLIENT",
+            &[
+                "/opt/homebrew/bin/smbclient",
+                "/usr/local/bin/smbclient",
+                "/usr/bin/smbclient",
+            ],
+            "smbclient",
+        );
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let listed = Command::new(&smbclient)
+                .args(["-L", "//127.0.0.1", "-g", "-p", &port.to_string(), "-U"])
+                .arg(format!("{}%{PASSWORD}", server.user))
+                .stdin(Stdio::null())
+                .output()
+                .expect("smbclient");
+            let listed = String::from_utf8_lossy(&listed.stdout);
+            if listed.contains(&format!("Disk|{SHARE}|")) {
+                return server;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "smbd did not list its shares\n{listed}"
+            );
+            std::thread::sleep(Duration::from_millis(200));
+        }
     }
 
     /// `127.0.0.1:<port>`: the host as a saved server holds it.

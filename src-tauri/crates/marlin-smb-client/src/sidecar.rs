@@ -3,10 +3,10 @@ use serde::{de::DeserializeOwned, Serialize};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Mutex, TryLockError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Why `marlin-smb` could not start. Each text is what the user reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +44,8 @@ pub enum CallError {
     Unavailable(StartError),
     /// The call passed its time limit. The process was ended.
     TimedOut,
+    /// The caller set the call's stop flag. A request already sent ends its process. One not yet sent is never sent, and the process stays.
+    Stopped,
     /// The process died or a pipe broke during the call.
     Lost,
     /// The answer could not be read, or it was for another request. The process was ended,
@@ -57,11 +59,11 @@ pub enum CallError {
 }
 
 impl CallError {
-    /// True when the process cannot serve another call.
+    /// True when `exchange` returned this error and left the process unable to serve another call.
     fn ends_process(&self) -> bool {
         matches!(
             self,
-            CallError::TimedOut | CallError::Lost | CallError::BadReply(_)
+            CallError::TimedOut | CallError::Stopped | CallError::Lost | CallError::BadReply(_)
         )
     }
 }
@@ -71,6 +73,7 @@ impl std::fmt::Display for CallError {
         match self {
             CallError::Unavailable(error) => error.fmt(f),
             CallError::TimedOut => f.write_str("The SMB server did not answer in time."),
+            CallError::Stopped => f.write_str("The SMB call was stopped."),
             CallError::Lost => f.write_str("SMB connection lost. Please try again."),
             CallError::BadReply(text) | CallError::Encoding(text) => f.write_str(text),
             CallError::Failed { message, .. } => f.write_str(message),
@@ -139,10 +142,25 @@ impl Sidecar {
         params: P,
         limit: Option<Duration>,
     ) -> Result<R, CallError> {
+        self.call_until(method, params, limit, &AtomicBool::new(false))
+    }
+
+    /// Like [`Self::call`], and another thread can stop it with `stop`. Stopped before the request is sent, the call sends nothing and the process stays. Stopped while it waits for the answer, the call ends within 50 ms, and so does its process.
+    pub fn call_until<P: Serialize, R: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: P,
+        limit: Option<Duration>,
+        stop: &AtomicBool,
+    ) -> Result<R, CallError> {
         let mut process = self.process.lock().unwrap_or_else(|err| err.into_inner());
         let running = self.running(&mut process).map_err(CallError::Unavailable)?;
+        // A stop can come before the request is sent: while the process starts, or while the caller waited for something else, such as the provider's sign-in. Nothing is sent, and the healthy process stays.
+        if stop.load(Ordering::Relaxed) {
+            return Err(CallError::Stopped);
+        }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let result = exchange(running, id, method, params, limit);
+        let result = exchange(running, id, method, params, limit, stop);
         if result.as_ref().is_err_and(CallError::ends_process) {
             // Dropping the `Running` ends its process group.
             *process = None;
@@ -250,6 +268,9 @@ impl Sidecar {
     }
 }
 
+/// A stop takes effect within this time.
+const STOP_SLICE: Duration = Duration::from_millis(50);
+
 /// Sends one request to a live process and reads its answer.
 fn exchange<P: Serialize, R: DeserializeOwned>(
     running: &mut Running,
@@ -257,6 +278,7 @@ fn exchange<P: Serialize, R: DeserializeOwned>(
     method: &str,
     params: P,
     limit: Option<Duration>,
+    stop: &AtomicBool,
 ) -> Result<R, CallError> {
     let request = Request {
         jsonrpc: JSONRPC_VERSION.to_string(),
@@ -273,19 +295,29 @@ fn exchange<P: Serialize, R: DeserializeOwned>(
         return Err(CallError::Lost);
     }
 
-    let received = match limit {
-        Some(limit) => running.replies.recv_timeout(limit),
-        None => running
-            .replies
-            .recv()
-            .map_err(|_| RecvTimeoutError::Disconnected),
-    };
-    let line = match received {
-        Ok(line) => line,
-        Err(RecvTimeoutError::Timeout) => return Err(CallError::TimedOut),
-        Err(RecvTimeoutError::Disconnected) => {
-            log::warn!("Failed to read from sidecar stdout");
-            return Err(CallError::Lost);
+    let deadline = limit.map(|limit| Instant::now() + limit);
+    let line = loop {
+        let slice = match deadline {
+            Some(deadline) => {
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    return Err(CallError::TimedOut);
+                }
+                left.min(STOP_SLICE)
+            }
+            None => STOP_SLICE,
+        };
+        match running.replies.recv_timeout(slice) {
+            Ok(line) => break line,
+            Err(RecvTimeoutError::Timeout) if stop.load(Ordering::Relaxed) => {
+                return Err(CallError::Stopped);
+            }
+            // The next turn ends the call when the limit has passed.
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                log::warn!("Failed to read from sidecar stdout");
+                return Err(CallError::Lost);
+            }
         }
     };
 

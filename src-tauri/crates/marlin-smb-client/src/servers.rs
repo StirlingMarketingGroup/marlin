@@ -108,8 +108,15 @@ fn get_password(hostname: &str) -> Result<String, CredentialsError> {
         return Ok(password.clone());
     }
 
+    let password = read_password(hostname)?;
+    passwords.insert(hostname.to_string(), password.clone());
+    Ok(password)
+}
+
+/// The keychain's password for `hostname`, read now. It neither reads nor fills the copy this process keeps.
+pub(crate) fn read_password(hostname: &str) -> Result<String, CredentialsError> {
     let entry = keyring_entry(hostname).map_err(CredentialsError::Failed)?;
-    let password = entry.get_password().map_err(|e| {
+    entry.get_password().map_err(|e| {
         let text = format!(
             "[SMB_NO_CREDENTIALS] Failed to read password from keychain: {}",
             e
@@ -119,9 +126,7 @@ fn get_password(hostname: &str) -> Result<String, CredentialsError> {
             // A locked or refused keychain: the password may well be there.
             _ => CredentialsError::Failed(text),
         }
-    })?;
-    passwords.insert(hostname.to_string(), password.clone());
-    Ok(password)
+    })
 }
 
 fn delete_password(hostname: &str) -> Result<(), String> {
@@ -242,8 +247,19 @@ pub fn server_credentials(
     path: &Path,
     hostname: &str,
 ) -> Result<SmbServerCredentials, CredentialsError> {
+    let server = saved_server(path, hostname)?;
+    let password = get_password(&server.hostname)?;
+    Ok(SmbServerCredentials {
+        username: server.username,
+        password,
+        domain: server.domain,
+    })
+}
+
+/// The saved server with this host, in any letter case. Its `hostname` is the stored spelling, which names the keychain entry.
+pub(crate) fn saved_server(path: &Path, hostname: &str) -> Result<SmbServerInfo, CredentialsError> {
     let servers = saved_servers(path).map_err(CredentialsError::Failed)?;
-    let server = servers
+    servers
         .into_iter()
         .find(|server| server.hostname.eq_ignore_ascii_case(hostname))
         .ok_or_else(|| {
@@ -251,14 +267,7 @@ pub fn server_credentials(
                 "[SMB_NO_CREDENTIALS] No credentials stored for server: {}",
                 hostname
             ))
-        })?;
-
-    let password = get_password(&server.hostname)?;
-    Ok(SmbServerCredentials {
-        username: server.username,
-        password,
-        domain: server.domain,
-    })
+        })
 }
 
 /// Add a new SMB server, or replace the one with this host. A host name matches in any letter case.
@@ -331,6 +340,18 @@ mod tests {
 
         marlin_test_keychain::remove(SMB_KEYRING_SERVICE, host);
         assert_eq!(get_password(host).unwrap(), "secret");
+    }
+
+    #[test]
+    fn read_password_reads_the_keychain_and_keeps_nothing() {
+        marlin_test_keychain::install();
+        let host = "Fresh.example";
+        marlin_test_keychain::set(SMB_KEYRING_SERVICE, host, "old");
+        assert_eq!(get_password(host).unwrap(), "old");
+
+        marlin_test_keychain::set(SMB_KEYRING_SERVICE, host, "new");
+        assert_eq!(read_password(host).unwrap(), "new");
+        assert_eq!(get_password(host).unwrap(), "old");
     }
 
     #[test]

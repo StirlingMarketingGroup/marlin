@@ -25,15 +25,20 @@ pub mod error_codes {
     pub const SMB_PATH_NOT_FOUND: i32 = -1003;
     /// SMB permission denied
     pub const SMB_PERMISSION_DENIED: i32 = -1004;
-    /// libsmbclient library missing
+    /// The `smbclient` program is missing. The text is [`super::SMBCLIENT_MISSING`].
     pub const SMB_LIBRARY_MISSING: i32 = -1005;
     /// The server could not be reached, or the connection broke during the call.
     pub const SMB_CONNECTION_LOST: i32 = -1006;
     /// A file was asked for and the path is a folder.
     pub const SMB_IS_A_FOLDER: i32 = -1007;
+    /// A folder was asked for and the path is a file.
+    pub const SMB_NOT_A_FOLDER: i32 = -1008;
     /// Generic SMB error
     pub const SMB_ERROR: i32 = -1000;
 }
+
+/// What `marlin-smb` answers with `SMB_LIBRARY_MISSING`, when `list_shares` cannot find the `smbclient` program.
+pub const SMBCLIENT_MISSING: &str = "smbclient not found. Install Samba (macOS: `brew install samba`, Linux: `sudo apt-get install smbclient`).";
 
 /// The most bytes one `read` may ask for.
 /// A longer request fails with `INVALID_PARAMS`, so a caller that needs more asks again from where the last read ended.
@@ -95,7 +100,7 @@ pub struct RpcError {
 }
 
 /// SMB credentials passed with each request.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SmbCredentials {
     pub hostname: String,
     pub username: String,

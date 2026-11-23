@@ -50,6 +50,8 @@ The text of a `VfsError::Other` holds no secret and no file name. The mount help
 
 An `ItemId` should stay with an item when the remote renames or moves it. Google Drive's file ID does. A provider that only has paths, such as [SFTP](mount-sftp.md), uses the path, and a rename that another client makes there looks like one item removed and another added. For this mount's own rename, see "A rename that changes the item's ID" below.
 
+The [SMB mount provider](mount-smb.md) also uses the path as the ID. It is read-only.
+
 ## What an adapter calls
 
 | Call                                                    | What it does                                                                                                                                                                                                                                                                                                                                                                |
