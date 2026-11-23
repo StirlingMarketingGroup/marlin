@@ -1,9 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { afterAll, beforeAll, expect, test } from 'vitest';
-import { startApp } from './app';
-
-const eventWait = { timeout: 10_000 };
+import { fileRow, openFolder, rowNames, startApp } from './app';
 
 let app: Awaited<ReturnType<typeof startApp>>;
 
@@ -21,36 +19,26 @@ test(
   { timeout: 60_000 },
   async () => {
     const { browser, files } = app;
-    const row = (name: string) => browser.$(`[data-file-item="true"][data-name="${name}"]`);
 
     await fs.writeFile(path.join(files, 'first.txt'), 'first\n');
-
-    const pathInput = browser.$('[data-testid="path-input"]');
-    await pathInput.click();
-    await pathInput.setValue(files);
-    await browser.keys('Enter');
-    await row('first.txt').waitForExist({ timeout: 10_000 });
-
-    // A write that lands before the watcher starts is never reported.
-    await browser.waitUntil(
-      // This string runs in the page.
-      () =>
-        browser.execute(
-          `return window.__TAURI_INTERNALS__.invoke('is_watching_directory', { path: arguments[0] })`,
-          files
-        ),
-      { timeout: 10_000, timeoutMsg: 'the app never started watching the folder' }
-    );
+    await openFolder(browser, files);
+    await fileRow(browser, 'first.txt').waitForExist({
+      timeout: 10_000,
+      timeoutMsg: 'first.txt never appeared',
+    });
 
     await fs.writeFile(path.join(files, 'report.pdf.crdownload'), 'report\n');
-    await row('report.pdf.crdownload').waitForExist(eventWait);
+    await fileRow(browser, 'report.pdf.crdownload').waitForExist({
+      timeout: 10_000,
+      timeoutMsg: 'the temporary download never appeared',
+    });
 
     await fs.rename(path.join(files, 'report.pdf.crdownload'), path.join(files, 'report.pdf'));
-    await row('report.pdf').waitForExist(eventWait);
+    await fileRow(browser, 'report.pdf').waitForExist({
+      timeout: 10_000,
+      timeoutMsg: 'the renamed download never appeared',
+    });
 
-    const names = await browser
-      .$$('[data-file-item="true"]')
-      .map((item) => item.getAttribute('data-name'));
-    expect(names.sort()).toEqual(['first.txt', 'report.pdf']);
+    expect(await rowNames(browser)).toEqual(['first.txt', 'report.pdf']);
   }
 );

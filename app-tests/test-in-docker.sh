@@ -17,10 +17,10 @@ apt-get install -y -qq curl ca-certificates
 # The Node that Debian ships is too old for Vite.
 curl -fsSL https://deb.nodesource.com/setup_24.x | bash - > /dev/null
 # The build packages are the ones check.yml installs. xvfb is the virtual display.
-# The SFTP test runs its own sshd.
+# The SFTP test runs its own sshd. Copy and paste run xclip.
 apt-get install -y -qq nodejs build-essential clang libclang-dev libssl-dev pkg-config \
   libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
-  procps xvfb xauth openssh-server
+  procps xvfb xauth xclip openssh-server
 useradd -m tester
 # The source is mounted read-only, and its node_modules and target folders were built on a Mac. Work on a copy without them.
 tar -C /src --exclude=./node_modules --exclude=./src-tauri/target --exclude=./dist --exclude=./.git -cf - . | tar -C /work -xf -

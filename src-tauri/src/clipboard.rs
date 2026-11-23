@@ -508,7 +508,9 @@ mod linux {
 
         let gnome_format = format!("{}\n{}", prefix, uri_list);
 
-        // Try xclip first (most common)
+        // Try xclip first (most common). xclip and xsel keep running after the app exits to
+        // serve the clipboard, so they must not hold the app's stdout and stderr open: a caller
+        // reading those (a test harness, `marlin | tee`) would wait for them forever.
         let xclip_result = Command::new("xclip")
             .args([
                 "-selection",
@@ -517,6 +519,8 @@ mod linux {
                 "x-special/gnome-copied-files",
             ])
             .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .spawn();
 
         if let Ok(mut child) = xclip_result {
@@ -530,6 +534,8 @@ mod linux {
             if let Ok(mut child2) = Command::new("xclip")
                 .args(["-selection", "clipboard", "-t", "text/uri-list"])
                 .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
                 .spawn()
             {
                 if let Some(stdin) = child2.stdin.as_mut() {
@@ -546,6 +552,8 @@ mod linux {
         let xsel_result = Command::new("xsel")
             .args(["--clipboard", "--input"])
             .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .spawn();
 
         if let Ok(mut child) = xsel_result {

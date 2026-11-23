@@ -99,6 +99,7 @@ jobs:
           # Fail on a mirror that does not answer, so the retry loop sees it.
           apt_retry update -o APT::Update::Error-Mode=any
           # xvfb and xauth give the real-app tests a display; their SFTP test runs sshd.
+          # The copy and paste test runs xclip.
           apt_retry install -y \
             build-essential \
             clang \
@@ -115,6 +116,7 @@ jobs:
             patchelf \
             xvfb \
             xauth \
+            xclip \
             openssh-server \
             libglib2.0-bin \
             libgdk-pixbuf2.0-bin \
@@ -157,6 +159,15 @@ jobs:
           mkdir -p src-tauri/target
           ln -sfn "$CARGO_TARGET_DIR" src-tauri/target/app-test
           xvfb-run -a npm run test:app
+
+      - name: Upload real-app test screenshots
+        if: failure() && steps.changes.outputs.check == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: app-test-screenshots
+          path: test-results/app/
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Check dependency licenses
         if: steps.changes.outputs.check == 'true'

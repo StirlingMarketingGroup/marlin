@@ -2,9 +2,34 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
-import { remote, type Browser } from 'webdriverio';
+import { afterEach } from 'vitest';
+import { Key, remote, type Browser } from 'webdriverio';
 
 const appBinary = path.join(import.meta.dirname, '../src-tauri/target/app-test/debug/marlin');
+
+// The browser of the app this file started. Vitest loads this module once per test file.
+let runningBrowser: Browser | undefined;
+
+// A failed test's window is the evidence. This must not throw, or it would hide the failure.
+afterEach(async ({ task }) => {
+  if (task.result?.state !== 'fail' || runningBrowser === undefined) return;
+  try {
+    const base = path.basename(task.file.filepath, '.test.ts');
+    const testName = task.name.replace(/[^a-zA-Z0-9]+/g, '-');
+    const file = path.join(
+      import.meta.dirname,
+      '..',
+      'test-results',
+      'app',
+      `${base}--${testName}.png`
+    );
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await runningBrowser.saveScreenshot(file);
+    console.error(`Screenshot of the failed test: ${file}`);
+  } catch (error) {
+    console.error(error);
+  }
+});
 
 /** A local TCP port that nothing listens on right now. */
 export function freePort(): Promise<number> {
@@ -34,6 +59,45 @@ export function runCommand(
   );
 }
 
+// The key the app's shortcuts use with letters.
+export const commandOrControl = process.platform === 'darwin' ? Key.Command : Key.Ctrl;
+
+export function fileRow(browser: Browser, name: string) {
+  return browser.$(`[data-file-item="true"][data-name="${name}"]`);
+}
+
+// One script, not a request per row: rows come and go while the view scrolls, and on Linux a
+// burst of parallel requests for 30 or so rows crashed the test build ("malloc(): unaligned
+// tcache chunk detected").
+export function rowNames(browser: Browser): Promise<string[]> {
+  return browser.execute(() =>
+    Array.from(document.querySelectorAll('[data-file-item="true"]'), (row) =>
+      row.getAttribute('data-name')!
+    ).sort()
+  );
+}
+
+// A change made before the watcher starts is never reported.
+export async function openFolder(browser: Browser, folder: string): Promise<void> {
+  const pathInput = browser.$('[data-testid="path-input"]');
+  await pathInput.click();
+  await pathInput.setValue(folder);
+  await browser.keys('Enter');
+  await browser.waitUntil(
+    async () => (await runCommand(browser, 'is_watching_directory', { path: folder })) === true,
+    { timeout: 10_000, timeoutMsg: `the app never started watching ${folder}` }
+  );
+}
+
+// The title looks like "1.2 KB (1,234 B)". The exact count is the digits in the last parentheses.
+export async function sizeBytes(browser: Browser): Promise<number> {
+  // The list view's Size column header is a span too, but its parent has no title.
+  const title = await browser.$('//div[@title][span[text()="Size"]]').getAttribute('title');
+  const groups = title?.match(/\([^()]*\)/g);
+  const last = groups?.[groups.length - 1] ?? '';
+  return Number(last.replace(/\D/g, ''));
+}
+
 /**
  * Starts the test build of the app with its own home folder and WebDriver port.
  * `files` is an empty folder for the files a test wants the app to show.
@@ -60,6 +124,7 @@ export async function startApp(): Promise<{
   let browser: Browser | undefined;
 
   const stop = async () => {
+    runningBrowser = undefined;
     try {
       await browser?.deleteSession();
     } finally {
@@ -136,6 +201,7 @@ export async function startApp(): Promise<{
       logLevel: 'warn',
       capabilities: { 'wdio:enforceWebDriverClassic': true },
     });
+    runningBrowser = browser;
     // A new session starts on whichever window the plugin lists first, and on macOS
     // the permissions window can be open beside the file browser.
     await browser.switchWindow('main');
