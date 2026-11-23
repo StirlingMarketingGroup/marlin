@@ -616,7 +616,6 @@ jobs:
               - 'LICENSE'
               - 'THIRD-PARTY-NOTICES.md'
               - 'vite.config.ts'
-              - 'tailwind.config.js'
               - 'postcss.config.js'
               - 'tsconfig.json'
               - 'tsconfig.node.json'
