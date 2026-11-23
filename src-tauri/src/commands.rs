@@ -5471,18 +5471,6 @@ pub fn update_sort_menu_state(
     Ok(())
 }
 
-#[tauri::command]
-pub fn update_selection_menu_state(
-    _app: tauri::AppHandle,
-    menu_state: tauri::State<crate::state::MenuState<tauri::Wry>>,
-    has_selection: bool,
-) -> Result<(), String> {
-    if let Ok(mut sel) = menu_state.has_selection.lock() {
-        *sel = has_selection;
-    }
-    Ok(())
-}
-
 #[derive(serde::Serialize)]
 pub struct SystemDrive {
     pub name: String,
@@ -6771,6 +6759,24 @@ pub fn show_native_context_menu(
         let rename_item = MenuItemBuilder::with_id("ctx:rename", "Rename")
             .build(&app)
             .map_err(|e| e.to_string())?;
+        // Deleting, Show in Finder/Explorer, and Get Info need a local path (not archive://,
+        // smb://, etc.). A selection is one folder's items, so the first path speaks for all.
+        let first_path_is_local = file_paths
+            .as_ref()
+            .and_then(|paths| paths.first())
+            .map(|p| !p.contains("://"))
+            .unwrap_or(false);
+        let trash_item = MenuItemBuilder::with_id("ctx:trash_selected", "Move to Trash")
+            .enabled(first_path_is_local)
+            .build(&app)
+            .map_err(|e| e.to_string())?;
+        let delete_permanently_item = MenuItemBuilder::with_id(
+            "ctx:delete_selected_permanently",
+            crate::menu::delete_permanently_label(),
+        )
+        .enabled(first_path_is_local)
+        .build(&app)
+        .map_err(|e| e.to_string())?;
 
         let copy_files_item = MenuItemBuilder::with_id("menu:copy_files", "Copy")
             .enabled(!has_directory_selection)
@@ -6814,12 +6820,6 @@ pub fn show_native_context_menu(
         let copy_full_name_item = MenuItemBuilder::with_id("ctx:copy_full_name", "Copy Full Path")
             .build(&app)
             .map_err(|e| e.to_string())?;
-        // Only show "Show in Finder/Explorer" for local filesystem paths (not archive://, smb://, etc.)
-        let first_path_is_local = file_paths
-            .as_ref()
-            .and_then(|paths| paths.first())
-            .map(|p| !p.contains("://"))
-            .unwrap_or(false);
         let reveal_in_browser_item = if first_path_is_local {
             Some(
                 MenuItemBuilder::with_id(
@@ -6860,7 +6860,12 @@ pub fn show_native_context_menu(
         } else {
             None
         };
-        builder = builder.item(&open_item).item(&rename_item).separator();
+        builder = builder
+            .item(&open_item)
+            .item(&rename_item)
+            .item(&trash_item)
+            .item(&delete_permanently_item)
+            .separator();
         builder = builder
             .item(&copy_files_item)
             .item(&cut_files_item)

@@ -483,6 +483,11 @@ export function getTauriMockScript(viewMode: 'list' | 'grid' = 'list'): string {
           };
         },
         cancel_directory_stream: () => undefined,
+        trash_paths: (args) => ({
+          trashed: args.paths,
+          undoToken: 'mock-undo-token',
+          fallbackToPermanent: false,
+        }),
         read_preferences: () => JSON.stringify({
           globalPreferences: {
             viewMode: '${viewMode}',

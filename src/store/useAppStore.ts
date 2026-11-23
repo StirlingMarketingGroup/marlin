@@ -663,19 +663,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   setFiles: (files) => set((state) => ({ files: uniqueFilesByPath(files, state.files) })),
   setLoading: (loading) => set({ loading }),
   setError: (error) => set({ error }),
-  setSelectedFiles: (files) => {
-    set({ selectedFiles: files });
-    // Update native menu selection state (ignore errors in dev)
-    (async () => {
-      try {
-        await invoke('update_selection_menu_state', {
-          hasSelection: Array.isArray(files) && files.length > 0,
-        });
-      } catch {
-        /* ignore */
-      }
-    })();
-  },
+  setSelectedFiles: (files) => set({ selectedFiles: files }),
   setSelectionAnchor: (path?: string) => set({ selectionAnchor: path }),
   setSelectionLead: (path?: string) => set({ selectionLead: path }),
   setShiftBaseSelection: (paths: string[] | null) => set({ shiftBaseSelection: paths }),

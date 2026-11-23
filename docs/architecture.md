@@ -3,7 +3,7 @@
 Marlin is one Tauri 2 desktop app: a Rust backend that owns all file access, and a React frontend that draws the UI in a webview. The frontend never touches the disk. It calls a Rust command and gets data back.
 
 **Covers:** `src-tauri/src/lib.rs`, `src-tauri/src/commands.rs`, `src-tauri/src/menu.rs`, `src-tauri/Cargo.toml`, `src-tauri/crates/`, `src-tauri/src/fs_watcher.rs`, `src/main.tsx`, `src/App.tsx`, `src/store/`, `src/windows/`, `src/components/PathBar.tsx`, `src/components/FilterInput.tsx`, `src/hooks/useDirectoryWatcher.ts`, `src/hooks/useFileAnimations.ts`, `src/hooks/useRevealTarget.ts`, `src/components/MainPanel.tsx`, `src/components/FileGrid.tsx`, `src/components/FileList.tsx`, `src/utils/filterMatch.ts`, `src/components/FileNameDisplay.tsx`
-**Checked against the code:** 2026-11-19
+**Checked against the code:** 2026-11-23
 
 ## Processes
 
@@ -59,6 +59,20 @@ The workspace has seven library-only crates under `src-tauri/crates/`. `marlin-v
 - More than 10 items asks first.
 - Enter belongs to a focused button or link, not to the selection. The arrow keys blur a clicked button, so Enter reaches the files again.
 - A new window gets its folder as `index.html?path=`, encoded once by `new_window`. `App.tsx` reads it with `URLSearchParams`, which decodes it. Do not decode it again: an archive URI holds an encoded part of its own.
+
+**Deleting items.** Two store actions in `useAppStore` delete the selection. `trashSelected` moves it to the trash, with undo. `deleteSelectedPermanently` asks first, then deletes it for good ([decision 0007](decisions/0007-permanent-delete.md)). The File menu, the file context menu, and these keys call them:
+
+| Action                       | macOS, as in Finder  | Windows and Linux |
+| ---------------------------- | -------------------- | ----------------- |
+| Move to the trash            | Cmd+Backspace        | Delete            |
+| Delete permanently, with ask | Cmd+Option+Backspace | Shift+Delete      |
+
+- Both menus name the items Move to Trash and Delete Permanently. On macOS the second is Delete Immediately…, as in Finder, and the File menu shows Finder's keys. The right-click menu shows no keys, as in Finder.
+- A delete key with any other modifier does nothing to files. On macOS a plain Backspace and the forward Delete key also do nothing.
+- The right-click menu greys out both items for an item inside an archive or on a remote (a path with `://`). The keys and the File menu still try, and the backend refuses the path.
+- The keys and the File menu do nothing while a text field has the focus: the rename box, the path bar, or the filter box. `textFieldHasFocus` in `App.tsx` is the one check for both. The right-click menu sends the same events as the File menu. A right-click on a file blurs a text field first, but a right-click inside the rename box opens the file menu with the focus still in the box, and its two delete items then do nothing.
+- The window key handler in `App.tsx` reads these keys on every platform. On macOS the page gets a key before the app menu does, and the menu runs its own key only when the page left the key alone. So the handler takes every delete key outside a text field, which keeps the menu from running the action a second time. Inside a text field the key goes on to the field. A field has no use for Cmd+Option+Backspace, so macOS then hands it to the menu, and the File menu listener refuses it.
+- On Windows and Linux the menu items show no key. There the menu would get a plain Delete before a text field does, and the rename box would lose its Delete key.
 
 **Revealing an item.** `pendingRevealTarget` in `useAppStore` names an item to select and scroll to once it is listed. `navigateTo(path, { reveal })` sets it for the folder being opened. Creating, pasting, or extracting an item sets it for the current folder. `navigateTo` without `reveal`, back, and forward clear it. `useRevealTarget` acts on it once the item is listed and the listing has its sizes and dates (`isMetadataComplete`), because those can reorder the list. A row that is not rendered is reached through the virtualizer. A file path typed into the path bar uses `pendingFileSelectionRef` in `App.tsx` instead.
 
