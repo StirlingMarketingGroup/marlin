@@ -153,7 +153,7 @@ jobs:
         timeout-minutes: 30
         run: |
           # The harness builds and starts the app in src-tauri/target/app-test. Point that
-          # at this runner's folder, so the build reuses what the Rust tests compiled.
+          # at this runner's build folder.
           mkdir -p src-tauri/target
           ln -sfn "$CARGO_TARGET_DIR" src-tauri/target/app-test
           xvfb-run -a npm run test:app
