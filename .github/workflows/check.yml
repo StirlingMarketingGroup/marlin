@@ -11,7 +11,7 @@ concurrency:
 
 env:
   # Every Rust build in this workflow uses the same flags, so the real-app test build
-  # reuses the crates the Rust tests compiled in the runner's build folder.
+  # reuses most of the crates the Rust tests compiled in the runner's build folder.
   RUSTFLAGS: '-D warnings'
   # A fraction of the disk of full debug info. A backtrace (RUST_BACKTRACE=1) still
   # names file and line.
@@ -58,6 +58,8 @@ jobs:
               - 'postcss.config.js'
               - 'LICENSE'
               - 'THIRD-PARTY-NOTICES.md'
+              - '.prettierrc.json'
+              - '.prettierignore'
               - 'app-tests/**'
               - 'scripts/**'
               - 'src/**'
@@ -143,9 +145,9 @@ jobs:
         timeout-minutes: 45
         run: npm run test:rust
 
-      # A step of this job, not a job of its own: two jobs that start together on one
-      # machine run rustup at once in its shared ~/.cargo, and one fails with
-      # "Text file busy".
+      # Every step that needs Rust is in this job. The runners on one machine share one
+      # ~/.cargo, and two jobs of one run that install the toolchain in the same second
+      # can fail with "Text file busy" (#648).
       - name: Run real-app tests
         if: steps.changes.outputs.check == 'true'
         # A hung test or build would otherwise hold the runner for six hours.
