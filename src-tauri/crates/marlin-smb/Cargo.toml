@@ -16,3 +16,8 @@ marlin-smb-client = { path = "../marlin-smb-client", default-features = false }
 [dev-dependencies]
 marlin-test-samba = { path = "../marlin-test-samba" }
 libc = "0.2"
+marlin-smb-client = { path = "../marlin-smb-client" }
+marlin-vfs = { path = "../marlin-vfs" }
+marlin-test-keychain = { path = "../marlin-test-keychain" }
+tempfile = "3.27"
+tokio = { version = "1.50", features = ["macros", "rt-multi-thread"] }
