@@ -98,6 +98,9 @@ export async function startApp(): Promise<{
       // socket to stop when it quits. GTK also looks here for a Wayland display, so use X11.
       XDG_RUNTIME_DIR: run,
       GDK_BACKEND: 'x11',
+      // On Linux, WebKit's helper processes write Mesa's shader cache under HOME as they
+      // exit, after `stop` has removed the folder. With no cache, nothing is left behind.
+      MESA_SHADER_CACHE_DISABLE: 'true',
       TAURI_WEBDRIVER_PORT: String(port),
     };
 
