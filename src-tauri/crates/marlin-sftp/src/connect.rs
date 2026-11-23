@@ -1,5 +1,5 @@
 use russh::keys::PublicKey;
-use russh::{client, ChannelId};
+use russh::{client, ChannelId, ChannelMsg, ChannelStream};
 use russh_sftp::client::SftpSession;
 use std::path::Path;
 use std::sync::Arc;
@@ -9,6 +9,9 @@ use crate::host_key::{self, HostKeyRejection};
 use crate::servers::{Passphrase, SftpServerCredentials, SignIn, NO_CREDENTIALS_TAG};
 
 const CONNECT_TIMEOUT_SECS: u64 = 15;
+
+/// How long the server has to answer the request for its SFTP subsystem.
+const SUBSYSTEM_ANSWER_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Why a connection failed. Each text is what the user reads.
 #[derive(Debug)]
@@ -48,7 +51,7 @@ impl std::fmt::Display for ConnectError {
 impl std::error::Error for ConnectError {}
 
 #[derive(Debug)]
-enum HandshakeError {
+pub(crate) enum HandshakeError {
     Ssh(russh::Error),
     HostKey(PublicKey, HostKeyRejection),
 }
@@ -60,7 +63,7 @@ impl From<russh::Error> for HandshakeError {
 }
 
 /// SSH client handler that accepts only a server key saved in `known_hosts`.
-struct SshHandler {
+pub(crate) struct SshHandler {
     saved_host_keys: Vec<PublicKey>,
 }
 
@@ -136,6 +139,19 @@ pub async fn connect(
     creds: &SftpServerCredentials,
     known_hosts: &Path,
 ) -> Result<SftpSession, ConnectError> {
+    let (_session, stream) = open_sftp_channel(hostname, port, creds, known_hosts).await?;
+    SftpSession::new(stream)
+        .await
+        .map_err(|e| ConnectError::Failed(format!("Failed to initialize SFTP session: {}", e)))
+}
+
+/// Signs in and opens the SFTP channel. The connection lasts while the channel's stream or the session's handle is held.
+pub(crate) async fn open_sftp_channel(
+    hostname: &str,
+    port: u16,
+    creds: &SftpServerCredentials,
+    known_hosts: &Path,
+) -> Result<(client::Handle<SshHandler>, ChannelStream<client::Msg>), ConnectError> {
     let saved_host_keys =
         host_key::saved_host_keys(hostname, port, known_hosts).map_err(ConnectError::Failed)?;
     let config = client::Config {
@@ -336,7 +352,7 @@ pub async fn connect(
         }
     }
 
-    let channel = session
+    let mut channel = session
         .channel_open_session()
         .await
         .map_err(|e| ConnectError::Failed(format!("Failed to open SSH channel: {}", e)))?;
@@ -346,11 +362,21 @@ pub async fn connect(
         .await
         .map_err(|e| ConnectError::Failed(format!("Failed to request SFTP subsystem: {}", e)))?;
 
-    let sftp = SftpSession::new(channel.into_stream())
-        .await
-        .map_err(|e| ConnectError::Failed(format!("Failed to initialize SFTP session: {}", e)))?;
-
-    Ok(sftp)
+    // The request only goes out, and the stream drops the server's answer, so it is read here: a server with SFTP turned off says no at once. A server that never answers gets the 10 seconds that the app's first SFTP request gives it.
+    let answer = tokio::time::timeout(SUBSYSTEM_ANSWER_TIMEOUT, async {
+        loop {
+            match channel.wait().await {
+                Some(ChannelMsg::Success) => return Ok(()),
+                Some(ChannelMsg::Failure) => return Err("The server refused the SFTP subsystem"),
+                Some(_) => {}
+                None => return Err("The server closed the SSH channel before SFTP started"),
+            }
+        }
+    })
+    .await
+    .unwrap_or(Err("The server did not answer the request for SFTP"));
+    answer.map_err(|text| ConnectError::Failed(text.to_string()))?;
+    Ok((session, channel.into_stream()))
 }
 
 #[cfg(test)]
@@ -475,6 +501,76 @@ mod tests {
 
         fn new_client(&mut self, _: Option<std::net::SocketAddr>) -> Self::Handler {
             ClosesOnPassword
+        }
+    }
+
+    /// Takes any password and opens the session, but has no SFTP: it says no to every subsystem, or never answers, and keeps the connection.
+    struct NoSftp {
+        says_no: bool,
+        channels: Vec<russh::Channel<russh::server::Msg>>,
+    }
+
+    impl Handler for NoSftp {
+        type Error = russh::Error;
+
+        async fn auth_password(
+            &mut self,
+            _user: &str,
+            _password: &str,
+        ) -> Result<Auth, Self::Error> {
+            Ok(Auth::Accept)
+        }
+
+        async fn channel_open_session(
+            &mut self,
+            channel: russh::Channel<russh::server::Msg>,
+            _session: &mut russh::server::Session,
+        ) -> Result<bool, Self::Error> {
+            self.channels.push(channel);
+            Ok(true)
+        }
+
+        async fn subsystem_request(
+            &mut self,
+            channel: ChannelId,
+            _name: &str,
+            session: &mut russh::server::Session,
+        ) -> Result<(), Self::Error> {
+            if self.says_no {
+                session.channel_failure(channel)?;
+            }
+            Ok(())
+        }
+    }
+
+    impl Server for NoSftp {
+        type Handler = Self;
+
+        fn new_client(&mut self, _: Option<std::net::SocketAddr>) -> Self::Handler {
+            NoSftp {
+                says_no: self.says_no,
+                channels: Vec::new(),
+            }
+        }
+    }
+
+    /// The error `connect` returns from a server with no SFTP, within 20 seconds.
+    async fn no_sftp_error(says_no: bool) -> String {
+        let server = NoSftp {
+            says_no,
+            channels: Vec::new(),
+        };
+        let (port, _dir, known_hosts) = trusted(server).await;
+        let connected = tokio::time::timeout(
+            Duration::from_secs(20),
+            connect("127.0.0.1", port, &password_creds(), &known_hosts),
+        )
+        .await
+        .expect("the connect waited past its limit for the subsystem");
+        match connected {
+            Err(ConnectError::Failed(text)) => text,
+            Err(other) => panic!("expected a failed start, got {other:?}"),
+            Ok(_) => panic!("expected the connection to fail"),
         }
     }
 
@@ -633,5 +729,27 @@ mod tests {
             }
             other => panic!("expected an unreachable server, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn a_server_that_refuses_sftp_fails_at_once() {
+        let started = std::time::Instant::now();
+        assert_eq!(
+            no_sftp_error(true).await,
+            "The server refused the SFTP subsystem"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_server_that_never_answers_for_sftp_fails_after_its_limit() {
+        assert_eq!(
+            no_sftp_error(false).await,
+            "The server did not answer the request for SFTP"
+        );
     }
 }
