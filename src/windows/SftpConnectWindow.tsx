@@ -47,6 +47,26 @@ export default function SftpConnectWindow() {
           setError(undefined);
           setIsConnecting(false);
           setConnected(false);
+
+          const savedHostname = p?.initialHostname;
+          if (!savedHostname) return;
+          const savedPort = p?.initialPort ?? 22;
+          // The app opens this window to ask a saved server for its secret. Start on that server's sign-in method, so a key's passphrase is never sent as a password. A host matches in any letter case, as `position` in marlin-sftp's servers.rs matches it.
+          void invoke<SftpServerInfo[]>('get_sftp_servers')
+            .then((servers) => {
+              const saved = servers.find(
+                (server) =>
+                  server.hostname.toLowerCase() === savedHostname.toLowerCase() &&
+                  server.port === savedPort
+              );
+              if (!saved) return;
+              setUsername((typed) => typed || saved.username);
+              setAuthMethod(saved.authMethod);
+              setKeyPath(saved.keyPath ?? '');
+            })
+            .catch((err) => {
+              console.warn('Failed to read saved SFTP servers:', err);
+            });
         });
       } catch (listenErr) {
         console.warn('Failed to listen for SFTP connect init payload:', listenErr);
@@ -158,7 +178,8 @@ export default function SftpConnectWindow() {
       }, 450);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      setError(message);
+      // The tag tells the main window to open this form. Here the user is already in it.
+      setError(message.replace(/^\[SFTP_NO_CREDENTIALS\] /, ''));
       setIsConnecting(false);
     }
   }, [closeWindow, hostname, port, username, authMethod, password, keyPath, targetPath]);
@@ -272,7 +293,11 @@ export default function SftpConnectWindow() {
             <select
               id="sftp-auth-method"
               value={authMethod}
-              onChange={(e) => setAuthMethod(e.target.value)}
+              onChange={(e) => {
+                setAuthMethod(e.target.value);
+                // Password and key passphrase share one field. A secret typed for one method is never sent for another.
+                setPassword('');
+              }}
               className="w-full px-3 py-2 text-sm bg-app-gray border border-app-border rounded-md focus:outline-none focus:ring-2 focus:ring-accent/50 focus:border-accent disabled:opacity-70"
               disabled={isConnecting}
               data-tauri-drag-region={false}

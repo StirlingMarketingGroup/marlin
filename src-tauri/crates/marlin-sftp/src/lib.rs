@@ -9,5 +9,5 @@ pub use connect::{connect, ConnectError};
 pub use host_key::{known_hosts_path, trust_host_key};
 pub use servers::{
     add_server, remove_server, saved_servers, server_credentials, servers_path, CredentialsError,
-    SftpServerCredentials, SftpServerInfo,
+    Passphrase, SftpServerCredentials, SftpServerInfo, SignIn,
 };

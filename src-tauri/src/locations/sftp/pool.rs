@@ -7,7 +7,7 @@ use std::time::Instant;
 use tokio::sync::{Mutex, Semaphore};
 
 use super::host_key;
-use marlin_sftp::SftpServerCredentials;
+use marlin_sftp::{Passphrase, SftpServerCredentials, SignIn};
 
 type PoolKey = (String, u16); // (hostname, port)
 
@@ -146,11 +146,24 @@ pub async fn test_connection(
     auth_method: &str,
     key_path: Option<&str>,
 ) -> Result<bool, String> {
+    let sign_in = match auth_method {
+        "password" => SignIn::Password(
+            password
+                .ok_or_else(|| "Password auth selected but no password available".to_string())?
+                .to_string(),
+        ),
+        "key" => SignIn::Key {
+            path: key_path
+                .ok_or_else(|| "Key auth selected but no key path available".to_string())?
+                .to_string(),
+            passphrase: password.map_or(Passphrase::None, |s| Passphrase::Given(s.to_string())),
+        },
+        "agent" => SignIn::Agent,
+        other => return Err(format!("Unknown auth method: {}", other)),
+    };
     let creds = SftpServerCredentials {
         username: username.to_string(),
-        auth_method: auth_method.to_string(),
-        password: password.map(|s| s.to_string()),
-        key_path: key_path.map(|s| s.to_string()),
+        sign_in,
     };
 
     let known_hosts = marlin_sftp::known_hosts_path()?;

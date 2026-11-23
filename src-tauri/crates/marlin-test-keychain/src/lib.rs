@@ -12,6 +12,9 @@ static STORE: Lazy<Mutex<HashMap<(String, String), String>>> =
 static FAIL_WRITES: Lazy<Mutex<HashSet<(String, String)>>> =
     Lazy::new(|| Mutex::new(HashSet::new()));
 
+static FAIL_READS: Lazy<Mutex<HashSet<(String, String)>>> =
+    Lazy::new(|| Mutex::new(HashSet::new()));
+
 struct TestCredential {
     service: String,
     user: String,
@@ -38,10 +41,20 @@ impl CredentialApi for TestCredential {
     }
 
     fn get_secret(&self) -> keyring::Result<Vec<u8>> {
+        let key = (self.service.clone(), self.user.clone());
+        if FAIL_READS
+            .lock()
+            .expect("test keychain lock")
+            .contains(&key)
+        {
+            return Err(keyring::Error::NoStorageAccess(
+                "test keychain read failed".into(),
+            ));
+        }
         STORE
             .lock()
             .expect("test keychain lock")
-            .get(&(self.service.clone(), self.user.clone()))
+            .get(&key)
             .map(|secret| secret.as_bytes().to_vec())
             .ok_or(keyring::Error::NoEntry)
     }
@@ -108,6 +121,13 @@ pub fn remove(service: &str, user: &str) {
 
 pub fn fail_writes_for(service: &str, user: &str) {
     FAIL_WRITES
+        .lock()
+        .expect("test keychain lock")
+        .insert((service.to_string(), user.to_string()));
+}
+
+pub fn fail_reads_for(service: &str, user: &str) {
+    FAIL_READS
         .lock()
         .expect("test keychain lock")
         .insert((service.to_string(), user.to_string()));
