@@ -464,12 +464,13 @@ jobs:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '-' }}
         with:
           tagName: ${{ env.RELEASE_TAG }}
-          releaseName: Marlin ${{ env.RELEASE_TAG }}
+          releaseName: ${{ env.RELEASE_TAG }}
           releaseBody: |
             Automated binaries for Marlin. Download the file matching your platform.
 
             **macOS**: `macos_arm64` for Apple Silicon (M1/M2/M3) or `macos_amd64` for Intel.
             **Linux**: `linux_amd64` or `linux_arm64`.
+          generateReleaseNotes: true
           releaseDraft: false
           prerelease: false
           releaseAssetNamePattern: 'marlin_[version]_${{ matrix.friendly_os }}_${{ matrix.friendly_arch }}[_setup][ext]'
