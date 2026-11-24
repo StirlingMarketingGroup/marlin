@@ -351,6 +351,11 @@ The [mount core](mount-core.md) runs at most 16 provider calls at once and ends 
 - **One request takes a quarter to half a second.** In six runs, a listing of 150 items took 287 to 512 ms, and a read of 14 KiB took 254 to 528 ms.
 - **Google accepts `capabilities(canModifyContent)`, in a listing and in `files.get`.** A run on 2026-11-23 listed 151 items at the top of My Drive. All 88 link files were read-only, and 1 of the other 63 items was a file the account may not change.
 
+`a_real_account_locates_items_where_the_listing_shows_them` ran on 2026-11-24 against the same account:
+
+- **`locate` puts each item where the listing shows it.** It located six items by their Drive IDs: an item and a folder at the top of My Drive, an item in that folder, a link file, the top folder of the first shared drive, and an item in that drive. Each chain matched the listing. So `files.get` names an item's parent and its drive, names the top of My Drive by its real ID, and gives a shared drive's top folder the drive's ID, with no parent.
+- **One `locate` took 165 to 360 ms,** for an item two or three levels down.
+
 `tests/live_changes.rs` is a manual test of the three change calls. It changes the account: it makes a folder `Marlin live test {time}` at the top of My Drive, works inside it, moves one folder to the top of My Drive and back, and trashes the test folder at the end. It never touches a shared drive. Its header has the command. It ran on 2026-11-20 against the same account:
 
 - **A listing right after a change holds the change.** Five folders were made one after another, and the listing sent right after each one held it, 5 of 5. A listing right after a rename, a remove, and a move each showed the change. So the core needs no list of its own recent changes to lay over a new listing (risk 3 of [decision 0005](decisions/0005-mount-writes.md)). One run on one account is not a promise from Google.
@@ -377,7 +382,7 @@ Every automated test runs against the fake server, so these still rest on Google
 
 - That `corpora=drive` with `driveId` lists every child of a folder in a shared drive. The live test lists a shared drive, but it cannot tell whether the listing is complete.
 - That every child of a folder is in the folder's own drive.
-- **What `locate` walks.** That `files.get` names an item's one parent in `parents`, names the top of My Drive by its real ID, and gives the top of a shared drive the drive's ID as its own, with no parent. That an item shared with the account, outside its My Drive and its shared drives, has no parent it can see, or one Google answers with 404 or 403. A check of the first part in `tests/live.rs` has not run yet.
+- **`locate` of an item shared with the account.** That an item outside the account's My Drive and its shared drives has no parent the account can see, or one Google answers with 404 or 403, so `locate` answers no place. The live run located only items the account holds.
 - That Google answers a read of an empty file with 416. The account had no empty file at the top of My Drive.
 - **An upload that fails partway.** `tests/live_uploads.rs` uploads with no failure. What a session answers after a dropped connection, a 308 with no `Range`, a new session after a 429, a 409 on a session, and an upload into a shared drive rest on Google's guide.
 - How long a page of 1,000 items takes, and so how big a folder can be before its listing passes the core's 30 seconds.
