@@ -330,8 +330,9 @@ export default function FileList({ files, preferences }: FileListProps) {
       return;
     }
     await renameFile(name);
-    // Clear to avoid flashing previous value on next rename
-    setRenameText('');
+    // A refused rename leaves the box open with the name still in it. Clear the box only once it
+    // closed, so the next rename does not flash this name.
+    if (!useAppStore.getState().renameTargetPath) setRenameText('');
   };
   const cancelRename = () => {
     const el = renameInputRef.current;

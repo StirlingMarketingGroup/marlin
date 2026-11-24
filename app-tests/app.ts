@@ -73,9 +73,9 @@ export function fileRow(browser: Browser, name: string) {
   return browser.$(`[data-file-item="true"][data-name="${name}"]`);
 }
 
-// The names of the rows a person can see: the view hides its rows while it loads. One script,
-// not a request per row: rows come and go while the view scrolls, and on Linux a burst of
-// parallel requests for about 30 rows crashes the test build (#655).
+// The names of the rows the view has drawn: the view hides its rows while it loads, and those
+// do not count. One script, not a request per row: rows come and go while the view scrolls,
+// and on Linux a burst of parallel requests for about 30 rows crashes the test build (#655).
 export function rowNames(browser: Browser): Promise<string[]> {
   return browser.execute(() =>
     Array.from(document.querySelectorAll('[data-file-item="true"]'))

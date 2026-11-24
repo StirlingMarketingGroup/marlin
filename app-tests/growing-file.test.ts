@@ -68,7 +68,7 @@ describe.skipIf(process.platform !== 'linux')('a file that is still being writte
     try {
       while (writing) {
         const size = await rowSize();
-        if (writing && size !== emptySize) partialSizes.add(size);
+        if (writing && size !== emptySize && size !== '') partialSizes.add(size);
       }
     } finally {
       await writer;

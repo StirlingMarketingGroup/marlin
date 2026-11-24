@@ -631,8 +631,9 @@ export default function FileGrid({ files, preferences }: FileGridProps) {
       return;
     }
     await renameFile(name);
-    // Clear local value to avoid flashing on next rename session
-    setRenameText('');
+    // A refused rename leaves the box open with the name still in it. Clear the box only once it
+    // closed, so the next rename does not flash this name.
+    if (!useAppStore.getState().renameTargetPath) setRenameText('');
   };
   const cancelRename = () => {
     // Preserve scroll position of the main scroller to prevent jump-to-top

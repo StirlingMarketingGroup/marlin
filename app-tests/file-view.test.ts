@@ -4,7 +4,6 @@ import { afterAll, beforeAll, expect, test } from 'vitest';
 import type { Browser } from 'webdriverio';
 import {
   drawsFrames,
-  fileRow,
   openFolder,
   rowNames,
   showView,
@@ -148,6 +147,11 @@ test("a grid whose folder empties and fills again follows the window's width", a
   await fs.writeFile(path.join(dir, 'seed.txt'), 'x');
   await openFolder(browser, dir);
   await showView(browser, 'grid');
+  // The grid of the folder this test left may still show; wait for this folder's own tile.
+  await browser.waitUntil(async () => (await namesInView(browser)).includes('seed.txt'), {
+    timeout: 10_000,
+    timeoutMsg: 'the grid never showed seed.txt',
+  });
 
   await fs.rm(path.join(dir, 'seed.txt'));
   await browser.waitUntil(
@@ -196,14 +200,20 @@ test('a narrow list has no sideways overflow', async () => {
   await browser.setWindowSize(1200, 800);
 
   const dir = path.join(files, 'narrow');
-  const longName = `${'alpha'.repeat(10)}.txt`;
+  const names = [
+    `${'alpha'.repeat(10)}.txt`,
+    `${'bravo'.repeat(10)}.txt`,
+    `${'charlie'.repeat(8)}.txt`,
+  ];
   await fs.mkdir(dir);
-  await fs.writeFile(path.join(dir, longName), 'a');
-  await fs.writeFile(path.join(dir, `${'bravo'.repeat(10)}.txt`), 'bb');
-  await fs.writeFile(path.join(dir, `${'charlie'.repeat(8)}.txt`), 'ccc');
+  await Promise.all(
+    names.map((name, index) => fs.writeFile(path.join(dir, name), 'x'.repeat(index + 1)))
+  );
   await openFolder(browser, dir);
   await showView(browser, 'list');
-  await fileRow(browser, longName).waitForExist({
+  // Every width must still show all three files: an empty list has no overflow either.
+  const showsAll = async () => (await namesInView(browser)).join('\n') === names.join('\n');
+  await browser.waitUntil(showsAll, {
     timeout: 10_000,
     timeoutMsg: 'the list never showed its files',
   });
@@ -211,15 +221,15 @@ test('a narrow list has no sideways overflow', async () => {
   // Each wait also checks the page got narrow: a window that refused the size would pass at 1200.
   await browser.setWindowSize(700, 800);
   await browser.waitUntil(
-    () =>
-      browser.execute(() => {
+    async () =>
+      (await showsAll()) &&
+      (await browser.execute(() => {
         const rows = Array.from(document.querySelectorAll('[data-file-item="true"]'));
         return (
           document.documentElement.clientWidth <= 700 &&
-          rows.length > 0 &&
           rows.every((row) => row.scrollWidth <= row.clientWidth)
         );
-      }),
+      })),
     { timeout: 10_000, timeoutMsg: 'a list row stayed wider than its box at 700 wide' }
   );
 
@@ -228,6 +238,7 @@ test('a narrow list has no sideways overflow', async () => {
   await browser.setWindowSize(360, 800);
   await browser.waitUntil(
     async () =>
+      (await showsAll()) &&
       (await browser.execute(() => document.documentElement.clientWidth <= 360)) &&
       (await sidewaysOverflow(browser)) === 0,
     { timeout: 10_000, timeoutMsg: 'the list still stuck out past the window at 360 wide' }
