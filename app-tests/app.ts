@@ -2,9 +2,32 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
-import { remote, type Browser } from 'webdriverio';
+import { afterEach, expect } from 'vitest';
+import { Key, remote, type Browser } from 'webdriverio';
 
 const appBinary = path.join(import.meta.dirname, '../src-tauri/target/app-test/debug/marlin');
+
+// The browser of the app this file started. Vitest loads this module once per test file.
+let runningBrowser: Browser | undefined;
+
+// The window of a failure is the evidence. This must not throw, or it would hide the failure.
+async function saveFailureScreenshot(browser: Browser, testFile: string, what: string) {
+  try {
+    const name = `${path.basename(testFile, '.test.ts')}--${what.replace(/[^a-zA-Z0-9]+/g, '-')}`;
+    const file = path.join(import.meta.dirname, '..', 'test-results', 'app', `${name}.png`);
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await browser.saveScreenshot(file);
+    console.error(`Screenshot of the failure: ${file}`);
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+afterEach(async ({ task }) => {
+  if (task.result?.state === 'fail' && runningBrowser !== undefined) {
+    await saveFailureScreenshot(runningBrowser, task.file.filepath, task.name);
+  }
+});
 
 /** A local TCP port that nothing listens on right now. */
 export function freePort(): Promise<number> {
@@ -34,6 +57,83 @@ export function runCommand(
   );
 }
 
+// The modifier of the app's shortcuts: Cmd on macOS, Ctrl elsewhere.
+export const commandOrControl = process.platform === 'darwin' ? Key.Command : Key.Ctrl;
+
+// Switches the file view with the app's shortcut, and waits until the view shows.
+export async function showView(browser: Browser, view: 'grid' | 'list'): Promise<void> {
+  await browser.keys([commandOrControl, view === 'grid' ? '1' : '2']);
+  await browser.$(`[data-testid="file-${view}"]`).waitForExist({
+    timeout: 10_000,
+    timeoutMsg: `the ${view} view never appeared`,
+  });
+}
+
+export function fileRow(browser: Browser, name: string) {
+  return browser.$(`[data-file-item="true"][data-name="${name}"]`);
+}
+
+// The names of the rows the view has drawn: the view hides its rows while it loads, and those
+// do not count. One script, not a request per row: rows come and go while the view scrolls,
+// and on Linux a burst of parallel requests for about 30 rows crashes the test build (#655).
+export function rowNames(browser: Browser): Promise<string[]> {
+  return browser.execute(() =>
+    Array.from(document.querySelectorAll('[data-file-item="true"]'))
+      .filter((row) => getComputedStyle(row).visibility === 'visible')
+      .map((row) => row.getAttribute('data-name')!)
+      .sort()
+  );
+}
+
+// Whether the window runs animation frames. A hidden window (a locked or covered Mac) runs
+// none, so what the app does on a frame (the rename box's fill, a row's fade) never happens.
+export function drawsFrames(browser: Browser): Promise<boolean> {
+  return browser.execute(() => document.visibilityState === 'visible');
+}
+
+// Types a new name into an open rename box. On the frame after the box opens the app fills it
+// with the current name, and on the next it focuses it (the grid view writes the name again).
+// Either one replaces anything typed before it.
+export async function typeNewName(
+  browser: Browser,
+  input: ReturnType<Browser['$']>,
+  name: string
+): Promise<void> {
+  if (await drawsFrames(browser)) {
+    await browser.waitUntil(
+      async () => (await input.isFocused()) && (await input.getValue()) !== '',
+      { timeout: 10_000, timeoutMsg: 'the rename box never filled with the current name' }
+    );
+  }
+  await input.setValue(name);
+}
+
+// A change made before the watcher starts is never reported.
+export async function openFolder(browser: Browser, folder: string): Promise<void> {
+  const pathInput = browser.$('[data-testid="path-input"]');
+  await pathInput.click();
+  await pathInput.setValue(folder);
+  await browser.keys('Enter');
+  await browser.waitUntil(
+    async () => (await runCommand(browser, 'is_watching_directory', { path: folder })) === true,
+    { timeout: 10_000, timeoutMsg: `the app never started watching ${folder}` }
+  );
+}
+
+// The title of a status bar segment: the Files count, or the Size, like "1.2 KiB (1,234 B)".
+// The list view's column headers repeat the labels in spans too, but their parents have no
+// title. Read as an attribute: on Linux, getText on the value span returns the whole segment.
+export async function statusTitle(browser: Browser, label: 'Files' | 'Size'): Promise<string> {
+  return (await browser.$(`//div[@title][span[text()="${label}"]]`).getAttribute('title')) ?? '';
+}
+
+// The exact byte count: the digits in the Size title's last parentheses.
+export async function sizeBytes(browser: Browser): Promise<number> {
+  const groups = (await statusTitle(browser, 'Size')).match(/\([^()]*\)/g);
+  const last = groups?.[groups.length - 1] ?? '';
+  return Number(last.replace(/\D/g, ''));
+}
+
 /**
  * Starts the test build of the app with its own home folder and WebDriver port.
  * `files` is an empty folder for the files a test wants the app to show.
@@ -60,6 +160,7 @@ export async function startApp(): Promise<{
   let browser: Browser | undefined;
 
   const stop = async () => {
+    runningBrowser = undefined;
     try {
       await browser?.deleteSession();
     } finally {
@@ -136,6 +237,7 @@ export async function startApp(): Promise<{
       logLevel: 'warn',
       capabilities: { 'wdio:enforceWebDriverClassic': true },
     });
+    runningBrowser = browser;
     // A new session starts on whichever window the plugin lists first, and on macOS
     // the permissions window can be open beside the file browser.
     await browser.switchWindow('main');
@@ -149,6 +251,10 @@ export async function startApp(): Promise<{
 
     return { browser, files, home, stop };
   } catch (error) {
+    // A window that started but never got ready shows why.
+    if (browser !== undefined) {
+      await saveFailureScreenshot(browser, expect.getState().testPath ?? 'unknown', 'startup');
+    }
     await stop().catch((cleanupError) => console.error(cleanupError));
     throw error;
   }
