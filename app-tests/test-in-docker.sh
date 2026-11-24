@@ -27,8 +27,8 @@ apt-get install -y -qq nodejs build-essential clang libclang-dev libssl-dev pkg-
   libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
   procps xvfb xauth xclip openssh-server
 useradd -m tester
-# The source is mounted read-only, and its node_modules and target folders were built on a Mac. Work on a copy without them.
-tar -C /src --exclude=./node_modules --exclude=./src-tauri/target --exclude=./dist --exclude=./.git \
+# The source is mounted read-only. Work on a copy without the host dependencies and build output, and without the agent worktrees in .claude.
+tar -C /src --exclude=./node_modules --exclude=./src-tauri/target --exclude=./dist --exclude=./.git --exclude=./.claude \
   --exclude=./test-results -cf - . | tar -C /work -xf -
 chown -R tester /work /usr/local/cargo/registry
 cat > /tmp/as-tester.sh << 'TEST'

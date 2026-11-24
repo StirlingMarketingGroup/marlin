@@ -1370,14 +1370,6 @@ pub struct DropOperationInfo {
 
 const SAME_LOCATION_DROP_REASON: &str = "NO_OP_SAME_LOCATION";
 
-fn is_remote_fs(fs_type: &str) -> bool {
-    let lower = fs_type.to_lowercase();
-    lower.contains("smb")
-        || lower.contains("nfs")
-        || lower.contains("afp")
-        || lower.contains("webdav")
-}
-
 #[command]
 pub async fn resolve_drop_operation(
     sources: Vec<String>,
@@ -1450,8 +1442,7 @@ pub async fn resolve_drop_operation(
         }
     }
 
-    let (dest_volume, dest_fs_type) = fs_utils::get_fs_info(dest_path)?;
-    let is_dest_remote = is_remote_fs(&dest_fs_type);
+    let dest = fs_utils::get_fs_info(dest_path)?;
 
     let mut is_source_remote = false;
     let mut different_volume = false;
@@ -1464,17 +1455,17 @@ pub async fn resolve_drop_operation(
             continue;
         }
 
-        let (source_volume, source_fs_type) = fs_utils::get_fs_info(source_path)?;
-        if is_remote_fs(&source_fs_type) {
+        let source = fs_utils::get_fs_info(source_path)?;
+        if source.is_network_or_fuse {
             is_source_remote = true;
         }
 
-        if source_volume != dest_volume {
+        if source.volume != dest.volume {
             different_volume = true;
         }
     }
 
-    let is_remote = is_dest_remote || is_source_remote;
+    let is_remote = dest.is_network_or_fuse || is_source_remote;
 
     let operation = if modifier_option {
         "copy"
@@ -1522,9 +1513,15 @@ pub async fn get_git_status(path: String) -> Result<Option<GitStatusResponse>, S
         return Err("Path does not exist".to_string());
     }
 
-    tauri::async_runtime::spawn_blocking(move || compute_git_status(&path))
-        .await
-        .map_err(|err| format!("Failed to join Git status task: {err}"))?
+    tauri::async_runtime::spawn_blocking(move || {
+        // `git status` checks every file of the repository, and on a network or FUSE filesystem each check is a call to the remote (#677).
+        if !fs_utils::is_on_local_fs(&path) {
+            return Ok(None);
+        }
+        compute_git_status(&path)
+    })
+    .await
+    .map_err(|err| format!("Failed to join Git status task: {err}"))?
 }
 
 #[command]
@@ -7355,8 +7352,8 @@ fn compute_pin_metadata(path: &Path) -> (bool, bool) {
         .map(|m| m.file_type().is_symlink())
         .unwrap_or(false);
 
-    // Check if git repo (has .git dir or file)
-    let is_git_repo = {
+    // Check if git repo (has .git dir or file). On a network or FUSE filesystem each check is a call to the remote (#677).
+    let is_git_repo = fs_utils::is_on_local_fs(path) && {
         let git_path = path.join(".git");
         git_path.is_dir() || git_path.is_file()
     };
