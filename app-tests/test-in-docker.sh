@@ -4,6 +4,8 @@
 set -euo pipefail
 
 src=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+# A screenshot left by an earlier run would read as a failure of this one.
+rm -rf "${src}/test-results/app"
 mkdir -p "${src}/test-results/app"
 
 docker run --rm \

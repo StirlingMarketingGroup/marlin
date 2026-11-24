@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
-import { fileRow, openFolder, showView, sizeBytes, startApp } from './app';
+import { fileRow, openFolder, showView, sizeBytes, sizeTitle, startApp } from './app';
 
 // On macOS the file events for a file written through one open handle come only when it
 // is created and closed, so the list does not change while it grows.
@@ -74,12 +74,10 @@ describe.skipIf(process.platform !== 'linux')('a file that is still being writte
       await writer;
     }
     // The status bar's Size title, like "6.2 MiB (6,488,064 B)", starts with what the row shows.
-    // It is read as an attribute: on Linux, getText on the value span returns the whole segment.
-    const statusTitle = browser.$('//div[@title][span[text()="Size"]]');
     await browser.waitUntil(
       async () =>
         (await sizeBytes(browser)) === written &&
-        ((await statusTitle.getAttribute('title')) ?? '').startsWith(`${await rowSize()} (`),
+        (await sizeTitle(browser)).startsWith(`${await rowSize()} (`),
       { timeout: 5_000, timeoutMsg: 'the list never showed the final size of the file' }
     );
     // Eight seconds of writing gives the cap three or four refreshes. One alone could be a

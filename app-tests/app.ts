@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
-import { afterEach } from 'vitest';
+import { afterEach, expect } from 'vitest';
 import { Key, remote, type Browser } from 'webdriverio';
 
 const appBinary = path.join(import.meta.dirname, '../src-tauri/target/app-test/debug/marlin');
@@ -10,24 +10,22 @@ const appBinary = path.join(import.meta.dirname, '../src-tauri/target/app-test/d
 // The browser of the app this file started. Vitest loads this module once per test file.
 let runningBrowser: Browser | undefined;
 
-// A failed test's window is the evidence. This must not throw, or it would hide the failure.
-afterEach(async ({ task }) => {
-  if (task.result?.state !== 'fail' || runningBrowser === undefined) return;
+// The window of a failure is the evidence. This must not throw, or it would hide the failure.
+async function saveFailureScreenshot(browser: Browser, testFile: string, what: string) {
   try {
-    const base = path.basename(task.file.filepath, '.test.ts');
-    const testName = task.name.replace(/[^a-zA-Z0-9]+/g, '-');
-    const file = path.join(
-      import.meta.dirname,
-      '..',
-      'test-results',
-      'app',
-      `${base}--${testName}.png`
-    );
+    const name = `${path.basename(testFile, '.test.ts')}--${what.replace(/[^a-zA-Z0-9]+/g, '-')}`;
+    const file = path.join(import.meta.dirname, '..', 'test-results', 'app', `${name}.png`);
     await fs.mkdir(path.dirname(file), { recursive: true });
-    await runningBrowser.saveScreenshot(file);
-    console.error(`Screenshot of the failed test: ${file}`);
+    await browser.saveScreenshot(file);
+    console.error(`Screenshot of the failure: ${file}`);
   } catch (error) {
     console.error(error);
+  }
+}
+
+afterEach(async ({ task }) => {
+  if (task.result?.state === 'fail' && runningBrowser !== undefined) {
+    await saveFailureScreenshot(runningBrowser, task.file.filepath, task.name);
   }
 });
 
@@ -97,11 +95,16 @@ export async function openFolder(browser: Browser, folder: string): Promise<void
   );
 }
 
-// The title looks like "1.2 KB (1,234 B)". The exact count is the digits in the last parentheses.
+// The status bar's Size title, like "1.2 KiB (1,234 B)". The list view's Size column header is
+// a span too, but its parent has no title. Read as an attribute: on Linux, getText on the
+// value span returns the whole segment.
+export async function sizeTitle(browser: Browser): Promise<string> {
+  return (await browser.$('//div[@title][span[text()="Size"]]').getAttribute('title')) ?? '';
+}
+
+// The exact byte count: the digits in the title's last parentheses.
 export async function sizeBytes(browser: Browser): Promise<number> {
-  // The list view's Size column header is a span too, but its parent has no title.
-  const title = await browser.$('//div[@title][span[text()="Size"]]').getAttribute('title');
-  const groups = title?.match(/\([^()]*\)/g);
+  const groups = (await sizeTitle(browser)).match(/\([^()]*\)/g);
   const last = groups?.[groups.length - 1] ?? '';
   return Number(last.replace(/\D/g, ''));
 }
@@ -223,6 +226,10 @@ export async function startApp(): Promise<{
 
     return { browser, files, home, stop };
   } catch (error) {
+    // A window that started but never got ready shows why.
+    if (browser !== undefined) {
+      await saveFailureScreenshot(browser, expect.getState().testPath ?? 'unknown', 'startup');
+    }
     await stop().catch((cleanupError) => console.error(cleanupError));
     throw error;
   }

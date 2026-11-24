@@ -255,6 +255,15 @@ for (const view of ['grid', 'list'] as const) {
       if (i % 2 === 1) await fs.rm(path.join(dir, downloads.shift()!));
       expect(await sidewaysOverflow(browser)).toBe(0);
     }
+    // The burst can end before the app reads the folder once. Wait for a view that holds the
+    // downloads beside a vertical scrollbar, so that layout is measured too.
+    const total = seeded.length + bulk.length + downloads.length;
+    await browser.waitUntil(async () => (await fileCount(browser)) === total, {
+      timeout: 10_000,
+      timeoutMsg: `the status bar never counted the ${total} files`,
+    });
+    expect(await canScrollDown(browser)).toBe(true);
+    expect(await sidewaysOverflow(browser)).toBe(0);
 
     await Promise.all(bulk.map((name) => fs.rm(path.join(dir, name))));
     await browser.waitUntil(async () => !(await canScrollDown(browser)), {
