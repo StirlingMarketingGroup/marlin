@@ -88,7 +88,7 @@ Google has not verified the app. Two things follow:
 
 These are the reasons for epic #368. Each one is a place where code outside `locations/` has to know which backend it is talking to.
 
-**1. Copy and move stop at the provider edge.** The `copy_file` and `move_file` commands return "not yet supported" when the two schemes differ.
+**1. Move stops at the provider edge.** The `move_file` command returns "not yet supported" when the two schemes differ.
 
 **2. Paste is a hand-written table of provider pairs.** `paste_items_to_location` in `commands.rs` matches on `(source scheme, destination scheme)` and has a separate block of code for each pair. It also runs every drop, because `useDragDetector.ts` calls it.
 

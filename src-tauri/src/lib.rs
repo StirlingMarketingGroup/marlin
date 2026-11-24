@@ -154,7 +154,6 @@ pub fn run() {
             commands::undo_trash,
             commands::delete_paths_permanently,
             commands::rename_file,
-            commands::copy_file,
             commands::move_file,
             commands::extract_archive,
             commands::extract_archive_entry_to_temp,
@@ -281,7 +280,6 @@ pub fn run() {
             // Clipboard operations
             clipboard::clipboard_copy_files,
             clipboard::clipboard_get_contents,
-            clipboard::clipboard_paste_files,
             clipboard::clipboard_paste_image,
             commands::download_and_copy_to_clipboard,
         ])
