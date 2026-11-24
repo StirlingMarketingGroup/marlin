@@ -99,6 +99,7 @@ export function getTestUtilsScript(): string {
 export function getTauriMockScript(viewMode: 'list' | 'grid' = 'list'): string {
   return `
     (function() {
+      window.__MOCK_ADDED_FILES__ = window.__MOCK_ADDED_FILES__ || {};
       const mockHomeDir = '${MOCK_HOME_DIR}';
       const mockDownloadsDir = '${MOCK_DOWNLOADS_DIR}';
       const mockMissingDir = '${MOCK_MISSING_DIR}';
@@ -369,6 +370,8 @@ export function getTauriMockScript(viewMode: 'list' | 'grid' = 'list'): string {
           return [];
         }
 
+        files = files.concat(window.__MOCK_ADDED_FILES__[normalizedPath] || []);
+
         // Apply mutable file state overrides (for simulating file modifications)
         return files.map(f => {
           const state = window.__MOCK_FILE_STATE__?.[f.path];
@@ -511,6 +514,40 @@ export function getTauriMockScript(viewMode: 'list' | 'grid' = 'list'): string {
           undoToken: 'mock-undo-token',
           fallbackToPermanent: false,
         }),
+        clipboard_get_contents: () =>
+          window.__MOCK_CLIPBOARD__ || { hasFiles: false, hasImage: false, filePaths: [], isCut: false },
+        paste_items_to_location: (args) => {
+          const destination = args.destination;
+          const names = args.sourcePaths.map((sourcePath) => sourcePath.split('/').pop());
+          const pastedPaths = names.map((name) => destination + '/' + name);
+          // A name with no extension pastes as a folder.
+          const added = names.map((name, index) => ({
+            name,
+            path: pastedPaths[index],
+            is_directory: !name.includes('.'),
+            is_hidden: false,
+            is_symlink: false,
+            is_git_repo: false,
+            size: 12,
+            modified: new Date().toISOString(),
+            created: new Date().toISOString(),
+            extension: name.includes('.') ? name.split('.').pop() : null,
+            permissions: { read: true, write: true, execute: false },
+          }));
+          window.__MOCK_ADDED_FILES__[destination] = (window.__MOCK_ADDED_FILES__[destination] || []).concat(added);
+          // The real folder watcher reports the new files.
+          const payload = {
+            path: destination,
+            changeType: 'created',
+            affectedFiles: names,
+            affectedPaths: pastedPaths,
+          };
+          for (const handler of listeners.get('directory-changed') || []) {
+            runCallback(handler, { event: 'directory-changed', payload });
+          }
+          return { pastedPaths, skippedCount: 0, errorMessage: null, cancelled: false };
+        },
+        resolve_drop_operation: () => ({ operation: 'copy', isRemote: false, valid: true }),
         read_preferences: () => JSON.stringify({
           globalPreferences: {
             viewMode: '${viewMode}',

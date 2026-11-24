@@ -52,7 +52,7 @@ interface UndoState {
 const generateId = () => crypto.randomUUID();
 
 // Execute the undo for a specific record (internal helper)
-// Returns paths that were restored/affected for potential selection
+// Returns the paths it put back, for the view to reveal
 async function executeUndoRecordInternal(record: UndoRecord): Promise<string[]> {
   switch (record.type) {
     case 'move': {
@@ -88,7 +88,7 @@ async function executeUndoRecordInternal(record: UndoRecord): Promise<string[]> 
   }
 }
 
-// Shared helper: execute undo record + refresh directory + select restored files
+// Runs the undo, refreshes the open folder, and reveals what came back.
 async function executeUndoRecordAndRefresh(record: UndoRecord): Promise<void> {
   const restoredPaths = await executeUndoRecordInternal(record);
 
@@ -102,15 +102,13 @@ async function executeUndoRecordAndRefresh(record: UndoRecord): Promise<void> {
     await appStore.refreshCurrentDirectoryStreaming();
   }
 
-  if (restoredPaths.length > 0) {
-    appStore.setSelectedFiles(restoredPaths);
-  }
+  appStore.revealInOpenFolder(restoredPaths);
 }
 
 /**
- * Shared helper for building an undo record from paste/drop results and showing
- * a toast with an Undo button. Fixes duplicate-basename matching by consuming
- * matched paths so each source maps to exactly one destination.
+ * Builds the undo record for a paste or a drop and shows a toast with an Undo
+ * button. Each source is matched to one pasted path, so two sources with the
+ * same name never share one.
  */
 export function pushUndoAndShowToast(
   result: { pastedPaths: string[] },

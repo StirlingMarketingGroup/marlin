@@ -7,6 +7,7 @@ import { afterAll, beforeAll, expect, test } from 'vitest';
 import { Key } from 'webdriverio';
 import {
   commandOrControl,
+  drawsFrames,
   fileRow,
   openFolder,
   runCommand,
@@ -163,7 +164,7 @@ test('a file moved to the trash comes back with undo', async () => {
 
 // On macOS the test build copies to a pasteboard of its own. On Linux it uses the display's
 // clipboard, which under CI and test-in-docker.sh is Xvfb's.
-test('a copied file pastes into another folder', async () => {
+test('a copied file pastes into a long folder', async () => {
   const { browser, files } = app;
   const from = path.join(files, 'copy-from');
   const to = path.join(files, 'copy-to');
@@ -171,6 +172,12 @@ test('a copied file pastes into another folder', async () => {
   await fs.mkdir(from);
   await fs.mkdir(to);
   await fs.writeFile(notes, 'notes\n');
+  // notes.txt sorts after these, far below the window.
+  await Promise.all(
+    Array.from({ length: 200 }, (_, index) =>
+      fs.writeFile(path.join(to, `a-${String(index).padStart(3, '0')}.txt`), '')
+    )
+  );
 
   await openFolder(browser, from);
   await fileRow(browser, 'notes.txt').click();
@@ -188,16 +195,35 @@ test('a copied file pastes into another folder', async () => {
   );
 
   await openFolder(browser, to);
-  // The rows of the folder it left show for a moment, and one of them is notes.txt too.
-  await browser.$('//p[text()="This folder is empty"]').waitForExist({
+  // The rows of the folder it left show for a moment. a-000.txt exists only here.
+  await fileRow(browser, 'a-000.txt').waitForExist({
     timeout: 10_000,
-    timeoutMsg: 'the empty destination never showed',
+    timeoutMsg: 'the destination never showed',
   });
   await browser.keys([commandOrControl, 'v']);
-  await fileRow(browser, 'notes.txt').waitForExist({
-    timeout: 10_000,
-    timeoutMsg: 'the pasted file never appeared',
-  });
-  expect(await fs.readFile(path.join(to, 'notes.txt'), 'utf8')).toBe('notes\n');
+  const pasted = path.join(to, 'notes.txt');
+  await browser.waitUntil(
+    async () =>
+      fs.access(pasted).then(
+        () => true,
+        () => false
+      ),
+    {
+      timeout: 10_000,
+      timeoutMsg: 'the paste never wrote the file',
+    }
+  );
+  expect(await fs.readFile(pasted, 'utf8')).toBe('notes\n');
   expect(await fs.readFile(notes, 'utf8')).toBe('notes\n');
+  // A hidden window runs no animation frames, and the view scrolls on a frame.
+  if (await drawsFrames(browser)) {
+    const row = fileRow(browser, 'notes.txt');
+    await browser.waitUntil(
+      async () =>
+        (await row.isExisting()) &&
+        (await row.isDisplayed({ withinViewport: true })) &&
+        ((await row.getAttribute('class')) ?? '').includes('bg-accent-selected'),
+      { timeout: 10_000, timeoutMsg: 'the pasted file never scrolled into view' }
+    );
+  }
 });

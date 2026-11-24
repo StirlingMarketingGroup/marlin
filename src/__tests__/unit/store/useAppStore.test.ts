@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { useAppStore } from '../../../store/useAppStore';
+import { useUndoStore } from '../../../store/useUndoStore';
 import { useToastStore } from '../../../store/useToastStore';
 import { invoke } from '@tauri-apps/api/core';
 import { ask, message } from '@tauri-apps/plugin-dialog';
@@ -45,6 +46,14 @@ function newWindowPaths(): string[] {
     .map((call) => (call[1] as { path: string }).path);
 }
 
+// Answers the named commands, and leaves the rest to the mock already set.
+function answerCommands(answers: Record<string, unknown>) {
+  const fallback = mockInvoke.getMockImplementation()!;
+  mockInvoke.mockImplementation((cmd, payload) =>
+    cmd in answers ? Promise.resolve(answers[cmd]) : fallback(cmd, payload)
+  );
+}
+
 function openPathsCalls(): string[][] {
   return mockInvoke.mock.calls
     .filter((call) => call[0] === 'open_paths')
@@ -68,6 +77,7 @@ describe('useAppStore', () => {
       directoryPreferences: {},
       files: [],
       selectedFiles: [],
+      pendingRevealTargets: undefined,
       loading: false,
       pathHistory: ['/test'],
       historyIndex: 0,
@@ -795,12 +805,12 @@ describe('useAppStore', () => {
     });
 
     it('clears a pending reveal target', () => {
-      useAppStore.setState({ pendingRevealTarget: '/a/b' });
+      useAppStore.setState({ pendingRevealTargets: ['/a/b'] });
 
       useAppStore.getState().navigateTo('/x');
 
       expect(useAppStore.getState().currentPath).toBe('/x');
-      expect(useAppStore.getState().pendingRevealTarget).toBeUndefined();
+      expect(useAppStore.getState().pendingRevealTargets).toBeUndefined();
     });
 
     it('returns to the folder it left, with its list, filter, and history, when the new one fails', () => {
@@ -954,17 +964,17 @@ describe('useAppStore', () => {
         pathHistory: ['/a', '/b', '/c'],
         historyIndex: 1,
         currentPath: '/b',
-        pendingRevealTarget: '/b/child',
+        pendingRevealTargets: ['/b/child'],
       });
 
       useAppStore.getState().goBack();
       expect(useAppStore.getState().currentPath).toBe('/a');
-      expect(useAppStore.getState().pendingRevealTarget).toBeUndefined();
+      expect(useAppStore.getState().pendingRevealTargets).toBeUndefined();
 
-      useAppStore.setState({ pendingRevealTarget: '/a/child' });
+      useAppStore.setState({ pendingRevealTargets: ['/a/child'] });
       useAppStore.getState().goForward();
       expect(useAppStore.getState().currentPath).toBe('/b');
-      expect(useAppStore.getState().pendingRevealTarget).toBeUndefined();
+      expect(useAppStore.getState().pendingRevealTargets).toBeUndefined();
     });
   });
 
@@ -975,7 +985,7 @@ describe('useAppStore', () => {
       useAppStore.getState().goUp();
 
       expect(useAppStore.getState().currentPath).toBe('/a');
-      expect(useAppStore.getState().pendingRevealTarget).toBe('/a/b');
+      expect(useAppStore.getState().pendingRevealTargets).toEqual(['/a/b']);
     });
 
     it('reveals the archive file when leaving an archive root', () => {
@@ -984,7 +994,7 @@ describe('useAppStore', () => {
       useAppStore.getState().goUp();
 
       expect(useAppStore.getState().currentPath).toBe('/a');
-      expect(useAppStore.getState().pendingRevealTarget).toBe('/a/pack.zip');
+      expect(useAppStore.getState().pendingRevealTargets).toEqual(['/a/pack.zip']);
     });
 
     it('reveals the folder left inside an archive', () => {
@@ -994,7 +1004,7 @@ describe('useAppStore', () => {
       useAppStore.getState().goUp();
 
       expect(useAppStore.getState().currentPath).toBe(buildArchiveUri('/a/pack.zip', '/inner'));
-      expect(useAppStore.getState().pendingRevealTarget).toBe(current);
+      expect(useAppStore.getState().pendingRevealTargets).toEqual([current]);
     });
 
     it('leaves a nested archive root for the folder that holds the inner archive', () => {
@@ -1004,17 +1014,17 @@ describe('useAppStore', () => {
       useAppStore.getState().goUp();
 
       expect(useAppStore.getState().currentPath).toBe(buildArchiveUri('/a/outer.zip', '/dir'));
-      expect(useAppStore.getState().pendingRevealTarget).toBe(innerFile);
+      expect(useAppStore.getState().pendingRevealTargets).toEqual([innerFile]);
     });
 
     it('does nothing at a root', () => {
       for (const path of ['/', 'smb://server', 'smb://server/', 'gdrive://me@example.com/']) {
-        useAppStore.setState({ currentPath: path, pendingRevealTarget: '/keep' });
+        useAppStore.setState({ currentPath: path, pendingRevealTargets: ['/keep'] });
 
         useAppStore.getState().goUp();
 
         expect(useAppStore.getState().currentPath).toBe(path);
-        expect(useAppStore.getState().pendingRevealTarget).toBe('/keep');
+        expect(useAppStore.getState().pendingRevealTargets).toEqual(['/keep']);
       }
     });
 
@@ -2141,6 +2151,243 @@ describe('useAppStore', () => {
       expect(mockOpen).toHaveBeenCalledWith(bundle.path);
       expect(useAppStore.getState().currentPath).toBe('/test');
       expect(useAppStore.getState().pathHistory).toEqual(['/test']);
+    });
+  });
+
+  describe('revealInOpenFolder', () => {
+    it('keeps only the items in the open folder', () => {
+      useAppStore.setState({ currentPath: '/test' });
+
+      useAppStore.getState().revealInOpenFolder(['/test/a.txt', '/other/b.txt', '/test/sub/c.txt']);
+
+      expect(useAppStore.getState().pendingRevealTargets).toEqual(['/test/a.txt']);
+    });
+
+    it('asks for nothing when every item is in another folder', () => {
+      useAppStore.setState({ currentPath: '/test', pendingRevealTargets: undefined });
+
+      useAppStore.getState().revealInOpenFolder(['/other/b.txt']);
+
+      expect(useAppStore.getState().pendingRevealTargets).toBeUndefined();
+    });
+
+    it('keeps a file in the root', () => {
+      useAppStore.setState({ currentPath: '/' });
+
+      useAppStore.getState().revealInOpenFolder(['/a.txt']);
+
+      expect(useAppStore.getState().pendingRevealTargets).toEqual(['/a.txt']);
+    });
+
+    it('matches a Windows path', () => {
+      useAppStore.setState({ currentPath: 'C:/Users/me' });
+
+      useAppStore.getState().revealInOpenFolder(['C:\\Users\\me\\a.txt']);
+
+      expect(useAppStore.getState().pendingRevealTargets).toEqual(['C:\\Users\\me\\a.txt']);
+    });
+  });
+
+  describe('renameFile', () => {
+    it('reveals the item under its new name', async () => {
+      useAppStore.setState({
+        currentPath: '/test',
+        renameTargetPath: '/test/old.txt',
+        files: [fileItem({ name: 'old.txt', path: '/test/old.txt' })],
+        selectedFiles: ['/test/old.txt'],
+      });
+
+      await useAppStore.getState().renameFile('new.txt');
+
+      expect(mockInvoke).toHaveBeenCalledWith('rename_file', {
+        fromPath: '/test/old.txt',
+        toPath: '/test/new.txt',
+      });
+      expect(useAppStore.getState().pendingRevealTargets).toEqual(['/test/new.txt']);
+    });
+  });
+
+  describe('pasteFiles', () => {
+    // The OS clipboard holds `filePaths`, and the paste writes `pastedPaths`.
+    function mockPaste(filePaths: string[], isCut: boolean, pastedPaths: string[]) {
+      answerCommands({
+        clipboard_get_contents: { hasFiles: true, hasImage: false, filePaths, isCut },
+        paste_items_to_location: {
+          pastedPaths,
+          skippedCount: filePaths.length - pastedPaths.length,
+          errorMessage: null,
+          cancelled: false,
+        },
+      });
+    }
+
+    beforeEach(() => {
+      useAppStore.setState({ currentPath: '/test' });
+    });
+
+    it('reveals every pasted item', async () => {
+      mockPaste(['/src/a.txt', '/src/b.txt'], false, ['/test/a.txt', '/test/b.txt']);
+
+      await useAppStore.getState().pasteFiles();
+
+      expect(useAppStore.getState().pendingRevealTargets).toEqual(['/test/a.txt', '/test/b.txt']);
+    });
+
+    it('deletes the remote originals of its own cut once the paste is done', async () => {
+      useToastStore.setState({ toasts: [] });
+      useAppStore.setState({
+        clipboardMode: 'cut',
+        clipboardPaths: ['smb://server/share/a.txt'],
+        clipboardTempPaths: ['/tmp/marlin/a.txt'],
+      });
+      mockPaste(['/tmp/marlin/a.txt'], true, ['/test/a.txt']);
+
+      await useAppStore.getState().pasteFiles();
+
+      expect(mockInvoke).toHaveBeenCalledWith('delete_file', { path: 'smb://server/share/a.txt' });
+      // A remote cut has no undo, and its toast still says what happened.
+      expect(useToastStore.getState().toasts.map((toast) => toast.message)).toEqual([
+        'Moved 1 item',
+      ]);
+    });
+
+    it('keeps the remote originals of its own cut when an item was skipped', async () => {
+      useToastStore.setState({ toasts: [] });
+      useAppStore.setState({
+        clipboardMode: 'cut',
+        clipboardPaths: ['smb://server/share/a.txt', 'smb://server/share/b.txt'],
+        clipboardTempPaths: ['/tmp/marlin/a.txt', '/tmp/marlin/b.txt'],
+      });
+      mockPaste(['/tmp/marlin/a.txt', '/tmp/marlin/b.txt'], true, ['/test/a.txt']);
+
+      await useAppStore.getState().pasteFiles();
+
+      expect(mockInvoke).not.toHaveBeenCalledWith('delete_file', expect.anything());
+      expect(useToastStore.getState().toasts.map((toast) => toast.message)).toEqual([
+        'Copied 1 item (1 skipped)',
+      ]);
+    });
+
+    it('says Copied when a remote original could not be deleted', async () => {
+      useToastStore.setState({ toasts: [] });
+      useAppStore.setState({
+        clipboardMode: 'cut',
+        clipboardPaths: ['smb://server/share/a.txt'],
+        clipboardTempPaths: ['/tmp/marlin/a.txt'],
+      });
+      mockPaste(['/tmp/marlin/a.txt'], true, ['/test/a.txt']);
+      const fallback = mockInvoke.getMockImplementation()!;
+      mockInvoke.mockImplementation((cmd, payload) =>
+        cmd === 'delete_file' ? Promise.reject(new Error('denied')) : fallback(cmd, payload)
+      );
+
+      await useAppStore.getState().pasteFiles();
+
+      expect(useToastStore.getState().toasts.map((toast) => toast.message)).toEqual([
+        'Cut complete, but 1 source file could not be deleted.',
+        'Copied 1 item',
+      ]);
+    });
+
+    it('shows the skipped count beside the undo toast of a local paste', async () => {
+      useToastStore.setState({ toasts: [] });
+      mockPaste(['/src/a.txt', '/src/b.txt'], false, ['/test/a.txt']);
+
+      await useAppStore.getState().pasteFiles();
+
+      expect(useToastStore.getState().toasts.map((toast) => toast.message)).toEqual([
+        'Copied 1 item',
+        '1 item skipped',
+      ]);
+    });
+
+    it('keeps remote files it only copied', async () => {
+      useAppStore.setState({
+        clipboardMode: 'copy',
+        clipboardPaths: ['smb://server/share/a.txt'],
+        clipboardTempPaths: ['/tmp/marlin/a.txt'],
+      });
+      mockPaste(['/tmp/marlin/a.txt'], true, ['/test/a.txt']);
+
+      await useAppStore.getState().pasteFiles();
+
+      expect(mockInvoke).not.toHaveBeenCalledWith('delete_file', expect.anything());
+    });
+
+    it('keeps the remote originals of its own cut once another app cut a file', async () => {
+      useAppStore.setState({
+        clipboardMode: 'cut',
+        clipboardPaths: ['smb://server/share/a.txt'],
+        clipboardTempPaths: ['/tmp/marlin/a.txt'],
+      });
+      mockPaste(['/home/me/b.txt'], true, ['/test/b.txt']);
+
+      await useAppStore.getState().pasteFiles();
+
+      expect(mockInvoke).not.toHaveBeenCalledWith('delete_file', expect.anything());
+    });
+  });
+
+  describe('undo', () => {
+    it('reveals what Cmd+Z restores from the Trash', async () => {
+      useUndoStore.setState({ stack: [], undoInProgress: false });
+      useUndoStore
+        .getState()
+        .pushUndo(
+          { type: 'trash', undoToken: 'token', trashedPaths: ['/test/a.txt', '/test/b.txt'] },
+          'Trash 2 items'
+        );
+      answerCommands({ undo_trash: { restored: ['/test/a.txt', '/test/b.txt'] } });
+      useAppStore.setState({ currentPath: '/test' });
+
+      await useUndoStore.getState().executeUndo();
+
+      expect(useAppStore.getState().pendingRevealTargets).toEqual(['/test/a.txt', '/test/b.txt']);
+    });
+
+    it("reveals what the trash toast's Undo restores", async () => {
+      useToastStore.setState({ toasts: [] });
+      useAppStore.setState({
+        currentPath: '/test',
+        files: [fileItem({ name: 'a.txt', path: '/test/a.txt' })],
+        selectedFiles: ['/test/a.txt'],
+      });
+      answerCommands({
+        trash_paths: { trashed: ['/test/a.txt'], undoToken: 'token', fallbackToPermanent: false },
+        undo_trash: { restored: ['/test/a.txt'] },
+      });
+      await useAppStore.getState().trashSelected();
+
+      const toast = useToastStore.getState().toasts.find((t) => t.action?.label === 'Undo');
+      toast!.action!.onClick();
+
+      await vi.waitFor(() =>
+        expect(useAppStore.getState().pendingRevealTargets).toEqual(['/test/a.txt'])
+      );
+    });
+  });
+
+  describe('compressSelectedToZip', () => {
+    it('reveals the new zip', async () => {
+      useAppStore.setState({ currentPath: '/test', selectedFiles: ['/test/a.txt'] });
+      answerCommands({ compress_to_zip: { path: '/test/a.zip' } });
+
+      await useAppStore.getState().compressSelectedToZip('a.zip');
+
+      expect(useAppStore.getState().pendingRevealTargets).toEqual(['/test/a.zip']);
+    });
+  });
+
+  describe('extractArchive', () => {
+    it('reveals the folder it extracts into', async () => {
+      useAppStore.setState({ currentPath: '/test' });
+      answerCommands({ extract_archive: { folderPath: '/test/a', format: 'zip' } });
+
+      await useAppStore
+        .getState()
+        .extractArchive(fileItem({ name: 'a.zip', path: '/test/a.zip', extension: 'zip' }));
+
+      expect(useAppStore.getState().pendingRevealTargets).toEqual(['/test/a']);
     });
   });
 });
