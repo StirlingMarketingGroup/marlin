@@ -18,6 +18,9 @@ use crate::protocol::{
     UnsentState,
 };
 
+/// The file that marks the mount folder as the helper's. The helper sweeps, and mounts in, only a mount folder that has it, so a folder of the user's with the same name is never changed: on a Mac's disk, which ignores letter case, a checkout of Marlin at `~/marlin` is `~/Marlin` (#541).
+pub const MOUNT_FOLDER_MARKER: &str = ".marlin-mount-folder";
+
 /// What an OS adapter gives the helper. `marlin-fuse` is the one for Linux and macOS. Issue #375 adds Windows.
 #[async_trait::async_trait]
 pub trait Adapter: Send + Sync + 'static {
@@ -72,6 +75,8 @@ pub enum MountError {
     NotUnsent,
     /// A discard waited too long for the mount's other changes.
     Busy,
+    /// The mount folder holds things the helper did not put there, and no marker.
+    MountFolderTaken(PathBuf),
 }
 
 impl fmt::Display for MountError {
@@ -93,6 +98,11 @@ impl fmt::Display for MountError {
             Self::Unreachable => f.write_str("the account's storage could not be reached"),
             Self::NotUnsent => f.write_str("that file has no unsent bytes in this mount"),
             Self::Busy => f.write_str("the mount is busy with another change; try again"),
+            Self::MountFolderTaken(root) => write!(
+                f,
+                "{} holds files that Marlin did not put there; move or rename it, and Marlin makes a new one",
+                redact(&root.to_string_lossy())
+            ),
         }
     }
 }
@@ -124,6 +134,7 @@ impl From<MountError> for RpcError {
                 MountError::Unreachable => error_codes::UNREACHABLE,
                 MountError::NotUnsent => error_codes::NOT_UNSENT,
                 MountError::Busy => error_codes::BUSY,
+                MountError::MountFolderTaken(_) => error_codes::MOUNT_FOLDER_TAKEN,
             },
         }
     }
@@ -290,9 +301,25 @@ impl Mounts {
         self.hurry.send_replace(true);
     }
 
+    /// Whether the mount folder is the helper's: it holds the marker.
+    fn owns_root(&self) -> bool {
+        std::fs::symlink_metadata(self.root.join(MOUNT_FOLDER_MARKER))
+            .is_ok_and(|found| found.is_file())
+    }
+
+    /// Removes an empty mount point. An empty folder at a mount point is the helper's to remove, but only while the mount folder holds the marker: the marker can be deleted, or a linked mount folder pointed elsewhere, while a mount is up. This fails, and changes nothing, on a file, a symlink, a live mount, or a folder with something in it.
+    fn remove_mount_point(&self, mount_point: &Path) {
+        if self.owns_root() {
+            let _ = std::fs::remove_dir(mount_point);
+        }
+    }
+
     /// The real folders in the mount folder. The type comes from the mount folder's own listing, so a symbolic link is never handed to the adapter or removed.
     fn folders(&self) -> Vec<PathBuf> {
-        // No mount folder yet means nothing was ever mounted.
+        // A mount folder without the marker, or none at all, holds no mount of the helper's, so the sweep and `deadMounts` leave it alone.
+        if !self.owns_root() {
+            return Vec::new();
+        }
         let Ok(found) = std::fs::read_dir(&self.root) else {
             return Vec::new();
         };
@@ -322,7 +349,7 @@ impl Mounts {
         dead
     }
 
-    /// Clears what a killed helper left under the mount folder: dead mounts and empty folders. The server runs this once, before it takes a request, so no mount of this helper exists yet.
+    /// Clears what a killed helper left under the mount folder: dead mounts and empty folders. It does nothing in a mount folder without the marker, which is not the helper's. The server runs this once, before it takes a request, so no mount of this helper exists yet.
     pub async fn sweep(&self) {
         for mount_point in self.folders() {
             if self.adapter.is_dead_mount(&mount_point).await {
@@ -335,8 +362,7 @@ impl Mounts {
                     continue;
                 }
             }
-            // An empty folder here is the helper's to remove. This fails, and changes nothing, on a folder with something in it and on a live mount.
-            let _ = std::fs::remove_dir(&mount_point);
+            self.remove_mount_point(&mount_point);
         }
     }
 
@@ -426,6 +452,15 @@ impl Mounts {
                 error => MountError::Provider(error.to_string()),
             })?;
             std::fs::create_dir_all(&self.root)?;
+            // An empty mount folder has nothing to lose, so it becomes the helper's. A mount running at the same time writes the marker before it makes its mount point, so it never makes this folder look taken.
+            if std::fs::read_dir(&self.root)?.next().is_none() {
+                std::fs::write(
+                    self.root.join(MOUNT_FOLDER_MARKER),
+                    "Marlin keeps its mounts in this folder. It mounts here, and clears empty folders here when it starts, only while this file is here.\n",
+                )?;
+            } else if !self.owns_root() {
+                return Err(MountError::MountFolderTaken(self.root.clone()));
+            }
             // A dead mount can still be here: one the sweep could not clear, or one left after the helper started. This comes before the checks below because they fail on a dead mount, the first of them included, with an error that says nothing.
             if self.adapter.is_dead_mount(&mount_point).await {
                 self.adapter.unmount_dead(&mount_point).await?;
@@ -510,8 +545,7 @@ impl Mounts {
                 Ok(status)
             }
             Err(error) => {
-                // An empty folder at a mount point is the helper's to remove. This fails, and changes nothing, on a file, a symlink, or a folder with something in it.
-                let _ = std::fs::remove_dir(&mount_point);
+                self.remove_mount_point(&mount_point);
                 self.transition(&key, Lifecycle::Failed(error.clone()));
                 Err(error)
             }
@@ -550,7 +584,7 @@ impl Mounts {
                 return Err(MountError::Unmount(error.to_string()));
             }
             // The folder goes before the entry does, so no other account can be given this name while the folder is being removed.
-            let _ = std::fs::remove_dir(self.root.join(&unmounting.name));
+            self.remove_mount_point(&self.root.join(&unmounting.name));
 
             let spooled = {
                 let table = self.table.lock().unwrap();

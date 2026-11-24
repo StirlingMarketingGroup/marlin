@@ -4307,7 +4307,6 @@ name = "marlin-mount"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "dirs",
  "libc",
  "marlin-fuse",
  "marlin-gdrive",

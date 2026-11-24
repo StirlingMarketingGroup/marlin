@@ -1,11 +1,11 @@
 # Mount helper (`marlin-mount`)
 
-`marlin-mount` is the process that owns every native mount. It runs once per user, apart from the app, so a mount outlives a hot reload, an app crash, and every window. The app tells it what to mount over a local socket.
+`marlin-mount` is the process that owns every native mount. It runs once per socket, apart from the app, so a mount outlives a hot reload, an app crash, and every window. A dev build runs a helper of its own: see [Running it](#running-it). The app tells it what to mount over a local socket.
 
 On Linux and macOS it can mount a Google account: see [Providers](#providers), the [Linux mount adapter](mount-linux.md), and the [macOS mount adapter](mount-macos.md). The helper does not run on Windows (#375). The app starts the helper on the first mount command: see [The app side](#the-app-side). No part of the UI sends one yet (#377). The app bundle holds the helper: see [Building and bundling](#building-and-bundling).
 
 **Covers:** `src-tauri/crates/marlin-mount/`, `src-tauri/crates/marlin-mount-client/`, `src-tauri/src/mount_helper.rs`, `src-tauri/build.rs`, `scripts/run-tauri.mjs`, `scripts/check-bundled-mount-helper.mjs`
-**Checked against the code:** 2026-11-23
+**Checked against the code:** 2026-11-24
 
 The design is in [decision 0001](decisions/0001-mount-architecture.md), choices 3 to 6. The helper builds each mount on the [mount core](mount-core.md).
 
@@ -13,8 +13,8 @@ The design is in [decision 0001](decisions/0001-mount-architecture.md), choices 
 
 | File           | Holds                                                                                                |
 | -------------- | ---------------------------------------------------------------------------------------------------- |
-| `main.rs`      | The binary: the flags, the default paths, and the signals.                                           |
-| `server.rs`    | The socket, the lock that allows one helper per user, the connections, and the request dispatch.     |
+| `main.rs`      | The binary: the flags, the default paths from `marlin-mount-client`, and the signals.                |
+| `server.rs`    | The socket, the lock that allows one helper per socket, the connections, and the request dispatch.   |
 | `mounts.rs`    | The mount table and its rules, the three traits that adapters and providers plug into, `MountError`. |
 | `adapter.rs`   | `OsAdapter`, the mount adapter this OS has.                                                          |
 | `providers.rs` | `LinkedProviders`, the storage providers the helper links.                                           |
@@ -22,12 +22,12 @@ The design is in [decision 0001](decisions/0001-mount-architecture.md), choices 
 
 The wire types and the client are in a second crate, `marlin-mount-client`. The helper and the app both link it, so the app never links the helper's provider and adapter code.
 
-| File            | Holds                                                                                           |
-| --------------- | ----------------------------------------------------------------------------------------------- |
-| `protocol.rs`   | The wire types. The helper exports them again as `marlin_mount::protocol`.                      |
-| `client.rs`     | `Client`, which connects to the helper or starts one, `shutdown`, and `ask_to_stop`. Unix only. |
-| `lib.rs`        | `default_socket`, the one definition of the socket path that the helper and the app share.      |
-| `mount_name.rs` | `build`, the folder name an account mounts at.                                                  |
+| File            | Holds                                                                                                                                                           |
+| --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `protocol.rs`   | The wire types. The helper exports them again as `marlin_mount::protocol`.                                                                                      |
+| `client.rs`     | `Client`, which connects to the helper or starts one, `shutdown`, and `ask_to_stop`. Unix only.                                                                 |
+| `lib.rs`        | `default_socket`, `default_root`, and `default_spool`: the helper's default paths, and the one definition of the socket path that the helper and the app share. |
+| `mount_name.rs` | `build`, the folder name an account mounts at.                                                                                                                  |
 
 `marlin-mount` and `Client` are Unix only. A Windows named pipe comes with the Windows adapter (#375). On Windows the mount commands fail with the message "Marlin cannot mount on this OS yet."
 
@@ -54,14 +54,16 @@ Not checked: the `rpm` and the AppImage (#486), and a helper started by an insta
 
 `marlin-mount [--socket <path>] [--root <path>] [--spool <path>]`
 
-| Path             | Default                                                                                                                                                           |
-| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| The socket       | `marlin/mount.sock` under the runtime folder (`$XDG_RUNTIME_DIR` on Linux), or under the local data folder when there is none, as on macOS.                       |
-| The mount folder | `~/Marlin`                                                                                                                                                        |
-| The spool        | `marlin/spool` under the data folder: `~/Library/Application Support` on macOS, `$XDG_DATA_HOME` or `~/.local/share` on Linux. See [Unsent files](#unsent-files). |
+| Path             | A release build                                                                                                                                                   | A dev build                                |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| The socket       | `marlin/mount.sock` under the runtime folder (`$XDG_RUNTIME_DIR` on Linux), or under the local data folder when there is none, as on macOS.                       | `marlin-dev/mount.sock` in the same folder |
+| The mount folder | `~/Marlin`                                                                                                                                                        | `~/Marlin Dev`                             |
+| The spool        | `marlin/spool` under the data folder: `~/Library/Application Support` on macOS, `$XDG_DATA_HOME` or `~/.local/share` on Linux. See [Unsent files](#unsent-files). | `marlin-dev/spool` in the same folder      |
 
-- **One helper per socket.** The default socket path gives each user one helper. The helper takes a lock on `<socket>.lock` and holds it while it lives. A second helper that finds the lock taken logs that and exits with status 0. The OS drops the lock when a process dies, so a crashed helper never blocks the next one. The next one removes the socket file that was left. It removes nothing else: if the socket path holds any other kind of file, the helper fails to start and leaves the file alone.
-- **Starting.** Before it takes a request, the helper clears what a killed helper left in the mount folder: see [Dead mounts](#dead-mounts). A client can connect during that sweep, and its `hello` is answered when the sweep is done.
+- **A dev build has a helper of its own.** A dev build is one with debug assertions: `npm run tauri dev`, `cargo test`, and `target/debug/marlin-mount` run by hand. Its own socket, mount folder, and spool keep a developer's mounts apart from those of an installed Marlin. They also keep mounts out of a checkout at `~/marlin` on a Mac, where the disk ignores letter case, so that folder is `~/Marlin` (#541). The app and the helper it starts are built with one profile, so they agree on the paths. Saved accounts and sign-ins stay shared: they are the app's files, not the helper's. `default_socket`, `default_root`, and `default_spool` in `marlin-mount-client` pick the paths.
+- **The helper sweeps and mounts only in a mount folder that holds its marker.** See [The mount folder](#the-mount-folder).
+- **One helper per socket.** The default socket path gives each user one helper, and one more for dev builds. The helper takes a lock on `<socket>.lock` and holds it while it lives. A second helper that finds the lock taken logs that and exits with status 0. The OS drops the lock when a process dies, so a crashed helper never blocks the next one. The next one removes the socket file that was left. It removes nothing else: if the socket path holds any other kind of file, the helper fails to start and leaves the file alone.
+- **Starting.** Before it takes a request, the helper clears what a killed helper left in its mount folder: see [Dead mounts](#dead-mounts). A client can connect during that sweep, and its `hello` is answered when the sweep is done.
 - **Open to that user only.** The socket file and the lock file have mode 0600, and the helper drops a connection from any other user ID.
 - **Stopping.** A `shutdown` request unmounts everything, and each unmount waits for its uploads. The unmounts run together. The helper then removes the socket file and exits with status 0. If an unmount fails, it returns -1007 and the helper keeps running. `SIGTERM` and `SIGINT` stop every upload wait at once, unmount what they can, remove the socket file, and exit with status 0 even if an unmount failed. The spool keeps what was still uploading, for the next start.
 - **Replacing a helper.** After a `shutdown` response, wait for the helper to close the connection before you start another one. The lock is free by then. A helper started earlier finds the lock taken and exits with status 0.
@@ -96,7 +98,7 @@ What a client must know:
 - **Notifications start after the `hello` response and are not replayed.** Call `list` after `hello`, then `unsent` for each mount. A client that falls 64 notifications behind loses the oldest ones, and those two calls are how it catches up. Drop every unsent list and its `mountId` when the connection closes. The notifications a client does get arrive in the order the changes happened.
 - **A failed `mount` answers with an error, not a status.** The codes -1001, -1002, and -1009 are refusals: they make no entry, keep an entry that is already there, and send no notification. Any other failure leaves a `failed` entry, which keeps its name until the next attempt or an `unmount`.
 
-**Version rules.** The protocol number is 6 (`PROTOCOL_VERSION` in `marlin-mount-client/src/protocol.rs`).
+**Version rules.** The protocol number is 7 (`PROTOCOL_VERSION` in `marlin-mount-client/src/protocol.rs`).
 
 - The first request on a connection must be `hello`. The helper answers it before it reads anything else.
 - A `hello` with a valid `protocol` succeeds whatever the number is, and returns the helper's own number.
@@ -104,27 +106,28 @@ What a client must know:
 
 **Error codes.**
 
-| Code   | Meaning                                                                                    |
-| ------ | ------------------------------------------------------------------------------------------ |
-| -32700 | The line is not a request.                                                                 |
-| -32601 | Unknown method.                                                                            |
-| -32602 | Wrong params.                                                                              |
-| -1001  | The mount name is not one plain folder name.                                               |
-| -1002  | Another account's mount has this name, ignoring letter case.                               |
-| -1003  | The mount point exists and is not an empty folder.                                         |
-| -1004  | Unknown provider.                                                                          |
-| -1005  | The provider could not open the account, or the account's [first call](#providers) failed. |
-| -1006  | The adapter could not mount.                                                               |
-| -1007  | The adapter could not unmount.                                                             |
-| -1008  | A folder could not be made or read.                                                        |
-| -1009  | The helper is shutting down and takes no new mount.                                        |
-| -1010  | `hello` must come first.                                                                   |
-| -1011  | The protocol versions differ, and the request was not a `shutdown`.                        |
-| -1012  | A dead mount is at the mount point, and the helper could not clear it.                     |
-| -1013  | The account's first call said the sign-in is gone. The user must sign in again.            |
-| -1014  | The account's first call could not reach the remote. Try again later.                      |
-| -1015  | That file has no unsent bytes in this mount, or the `mountId` is not this mount's.         |
-| -1016  | A discard waited too long for the mount's other changes. Try again.                        |
+| Code   | Meaning                                                                                                                                            |
+| ------ | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| -32700 | The line is not a request.                                                                                                                         |
+| -32601 | Unknown method.                                                                                                                                    |
+| -32602 | Wrong params.                                                                                                                                      |
+| -1001  | The mount name is not one plain folder name.                                                                                                       |
+| -1002  | Another account's mount has this name, ignoring letter case.                                                                                       |
+| -1003  | The mount point exists and is not an empty folder.                                                                                                 |
+| -1004  | Unknown provider.                                                                                                                                  |
+| -1005  | The provider could not open the account, or the account's [first call](#providers) failed.                                                         |
+| -1006  | The adapter could not mount.                                                                                                                       |
+| -1007  | The adapter could not unmount.                                                                                                                     |
+| -1008  | A folder could not be made or read.                                                                                                                |
+| -1009  | The helper is shutting down and takes no new mount.                                                                                                |
+| -1010  | `hello` must come first.                                                                                                                           |
+| -1011  | The protocol versions differ, and the request was not a `shutdown`.                                                                                |
+| -1012  | A dead mount is at the mount point, and the helper could not clear it.                                                                             |
+| -1013  | The account's first call said the sign-in is gone. The user must sign in again.                                                                    |
+| -1014  | The account's first call could not reach the remote. Try again later.                                                                              |
+| -1015  | That file has no unsent bytes in this mount, or the `mountId` is not this mount's.                                                                 |
+| -1016  | A discard waited too long for the mount's other changes. Try again.                                                                                |
+| -1017  | The mount folder holds files the helper did not put there, and no marker. The message names the folder. See [The mount folder](#the-mount-folder). |
 
 The protocol has no `health` request. A helper that answers `hello` is alive, and a machine that cannot mount says why in the error of a `mount`.
 
@@ -173,11 +176,20 @@ The types are in `src/types/index.ts`. A failed command rejects with a `MountCom
 - The app waits for the answer to `hello`, sends `shutdown` with `ask_to_stop`, and quits. It does not wait for the answer, which comes only after the uploads end. The helper reads a request sent before the connection closed, and finishes its uploads and unmounts, then exits, even when the app has gone. The app gives the helper 5 seconds to answer `hello`. A dev build logs a failure. A release build has no logger.
 - The app tells the user nothing at quit. It has no window left. #377 shows unsent files before a quit.
 - **If an unmount fails at quit, the app quits anyway and shows nothing.** The helper keeps running and keeps serving that mount, because a program still has a file open in it. The next start of Marlin finds that helper and uses it.
-- **Limit: two Marlin processes share one helper.** When one of them quits, it stops the helper under the other (#508).
+- **Limit: two Marlin processes on one socket share one helper.** When one of them quits, it stops the helper under the other (#508). A dev build and an installed Marlin have a socket each.
 
 ## Mounts
 
 A mount is keyed by provider and account. Its mount point is the mount folder plus `name`.
+
+### The mount folder
+
+**The mount folder is the helper's only while it holds the marker,** a file named `.marlin-mount-folder` (`MOUNT_FOLDER_MARKER` in `mounts.rs`).
+
+- At a mount, the helper makes a missing mount folder and writes the marker in it. An empty folder at that path gets the marker too: it holds nothing to lose.
+- Any other folder without the marker fails the `mount` with -1017 and stays as it was. The helper checks this after the provider's [first call](#providers), so a provider error (-1004, -1005, -1013, -1014) comes first. The helper makes no mount point in such a folder, removes nothing from it, and its [sweep](#dead-mounts) and `deadMounts` skip it.
+- This keeps a user's own `~/Marlin` folder that holds anything as it was. On a Mac it also keeps a checkout of this repo at `~/marlin` as it was, because the disk ignores letter case (#541). When a mount fails with -1017, move or rename the folder the error names. The next mount makes a new one.
+- Inside a folder with the marker, every folder is a mount point, whoever made it. The sweep removes each empty one when the helper starts, and an unmount or a failed mount removes its own mount point when it is empty. So nothing can be written into a mount point that is not mounted ([decision 0001](decisions/0001-mount-architecture.md), choice 5). Each removal checks the marker first: a mount folder that lost it while a mount was up keeps that mount's folder after the unmount. The next `mount` then fails with -1017 until that folder is removed or the mount folder is moved.
 
 **The caller sends the name.** Decision 0001 says a mount's name is built once and stored with the account. So the helper checks the name and never invents one. The app builds it with `mount_name::build` in `marlin-mount-client` when an account is added, and for each stored account that has none.
 
@@ -213,7 +225,7 @@ Rules the table keeps:
 - **A failed unmount keeps the mount.** The mount comes back with its current health, and the request gets the error. Uploads keep running.
 - **An operation finishes even when its client has gone.**
 - **The helper never mounts over anything.** A mount point must be absent or an empty real folder. A file, a folder with something in it, or a symbolic link fails with -1003 and is left as it was. The one thing the helper clears first is a [dead mount](#dead-mounts). This guards the user's files against a mistake. It is not a defense against another process of the same user.
-- **Folders.** The helper opens the account and makes [the first call](#providers) before it makes any folder, so a mount the provider refuses leaves nothing behind. It makes the mount point with mode 0700. It removes it after an unmount and after a failed mount. It only ever removes an empty folder, and an empty folder at a mount point counts as the helper's own.
+- **Folders.** The helper opens the account and makes [the first call](#providers) before it makes any folder, so a mount the provider refuses leaves nothing behind. It makes the mount point with mode 0700. It removes it after an unmount and after a failed mount. It only ever removes an empty folder, and an empty folder at a mount point counts as the helper's own. It removes nothing in a mount folder without the marker: see [The mount folder](#the-mount-folder).
 - **Shutdown.** From the moment a shutdown starts, a new `mount` gets -1009. The unmounts run together, and each one waits for its uploads. The helper stays until they end, even after the app quit. If any unmount fails, `shutdown` returns -1007, the helper keeps running, and it takes mounts again: a mount that is still served must not lose its helper. The mounts that did unmount stay unmounted, so call `list`. A signal is different. It is an order to exit, so every unmount stops waiting for uploads at once. The spool keeps the rest for the next start. The helper then unmounts what it can and exits anyway. A mount it could not unmount is then dead, and the next helper clears it when it starts: see [Dead mounts](#dead-mounts). On Linux the adapter may detach it as the helper exits instead: see [Linux mount adapter](mount-linux.md).
 
 ## Providers
@@ -247,17 +259,17 @@ Rules the table keeps:
 
 A dead mount is a mount whose server was killed. The OS still lists it, and nothing answers it. A helper that crashes or is killed with `kill -9` leaves one for each mount it served. A restart of the machine clears them all.
 
-| OS      | A listing of a dead mount fails with                 | What clears it                |
-| ------- | ---------------------------------------------------- | ----------------------------- |
-| Linux   | "Transport endpoint is not connected" (`ENOTCONN`)   | `fusermount3 -u -z <folder>`  |
-| macOS   | "Device not configured" (`ENXIO`)                    | `umount -f <folder>`          |
-| Windows | Nothing: the mount folder goes away with the helper. | Nothing. The adapter is #375. |
+| OS      | A listing of a dead mount fails with                | What clears it                |
+| ------- | --------------------------------------------------- | ----------------------------- |
+| Linux   | "Transport endpoint is not connected" (`ENOTCONN`)  | `fusermount3 -u -z <folder>`  |
+| macOS   | "Device not configured" (`ENXIO`)                   | `umount -f <folder>`          |
+| Windows | Nothing: the mount point goes away with the helper. | Nothing. The adapter is #375. |
 
 `stat` proves nothing: on both systems it can still succeed on a dead mount. A plain unmount (`fusermount3 -u`, `umount`) fails with "busy" while any process has its working folder inside, for example a terminal the user left there. So the helper uses the lazy form on Linux and the forced form on macOS. Nothing serves a dead mount, so no open file is lost.
 
 The helper clears dead mounts at two moments:
 
-- **The sweep, when the helper starts.** It looks at each real folder in the mount folder. It unmounts a dead mount, then removes the folder if it is empty. A folder that holds anything, a file, a symbolic link, and a live mount are left as they were. It never deletes anything but an empty folder.
+- **The sweep, when the helper starts.** It does nothing when the mount folder has no marker: see [The mount folder](#the-mount-folder). Otherwise it looks at each real folder in the mount folder. It unmounts a dead mount, then removes the folder if it is empty. A folder that holds anything, a file, a symbolic link, and a live mount are left as they were. It never deletes anything but an empty folder.
 - **A `mount` request.** If a dead mount is at the mount point, the helper unmounts it and then mounts. The provider is opened and asked first, so a provider error (-1004, -1005, -1013, -1014) comes before this.
 
 **A dead mount the helper cannot clear** does not stop the helper. It shows in three places:
@@ -270,7 +282,7 @@ The user can then run the command from the table by hand. If that fails too, a r
 
 **Limits.**
 
-- The mount folder is the helper's. The helper treats any folder there whose listing fails with the error in the table as a dead mount, whoever mounted it. Neither OS offers a surer sign that a server is gone.
+- A mount folder with the marker is the helper's. The helper treats any folder there whose listing fails with the error in the table as a dead mount, whoever mounted it. Neither OS offers a surer sign that a server is gone.
 - The checks have no time limit. A mount in the mount folder that another program serves, and that never answers a listing, holds up the start of the helper, a `deadMounts` request, and a `mount` at that folder. A mount of Marlin's own cannot do this: the core puts a time limit on every call.
 
 **Tested (risk 6 in [decision 0001](decisions/0001-mount-architecture.md)).** On 2026-11-13 the sweep cleared a real dead mount with a process sitting inside it, on Linux (a Debian 12 container, `fuse3` 3.14) and on macOS 27.2 (macFUSE 5.5.0, FSKit backend). No restart was needed on either. Windows waits for its adapter (#375).
@@ -312,7 +324,7 @@ Results count in the order the calls finish. A call that finishes later is later
 
 A file's new bytes go into a spool folder on this computer. The upload runs after the last writer closes. [Decision 0005](decisions/0005-mount-writes.md), choices 5, 8, and 10, says what that means. This section is the helper's part.
 
-The spool root is `marlin/spool` under the data folder: see [Running it](#running-it). On macOS that folder also holds the app's own files and the socket. It is not a cache folder, which the OS and cleanup tools may empty. `--spool` replaces the root.
+The spool root is `marlin/spool` under the data folder, and `marlin-dev/spool` in a dev build: see [Running it](#running-it). On macOS the `marlin` folder also holds the app's own files, and each folder holds its build's socket. It is not a cache folder, which the OS and cleanup tools may empty. `--spool` replaces the root.
 
 Each account has one folder: `<spool>/<provider>/<account folder>`, mode 0700.
 
@@ -393,7 +405,9 @@ No secret crosses the socket or the command line. The text inside a `MountError`
 - One test reads the log. The server runs inside the test process, so the test points the process's stderr at a file while it makes the failed calls. It moves tokio's clock a minute ahead to see the same text logged again.
 - `tests/gdrive.rs` runs the real server with `OsAdapter` and `LinkedProviders` against a fake Google: one `wiremock` server that is the Drive API and the token endpoint, and the in-memory keychain. It talks to the server through `Client`. Four tests run on any Unix: a sign-in that is gone (-1013), Google out of reach (-1014), a Drive API that answers 503 or 403 (-1005), and a missing OAuth client (-1005). Each fails and leaves no folder. Two tests mount through FUSE and run only in `test-in-docker.sh` and `test-on-mac.sh`. The first lists a folder that Google sends in two pages, with a duplicate name, a `/` in a name, and a Google Doc, reads a file whole and at an offset, reads the Doc's link file and checks its size, checks that a write, a delete, and a rename fail with `EROFS` because the spool path is a file, and checks that the fake Google got nothing but GETs and one token request, and mounts the account a second time, which asks Google again though the helper still holds a token. The second rejects the sign-in, waits for `auth-required`, signs in again, and waits for `mounted`. Its first status takes writes.
 - The fake adapter can call a folder a dead mount, and can refuse to clear it. Two tests cover the sweep, `deadMounts`, and error -1012 that way. A unit test in `marlin-fuse` (`src/lib.rs`) checks the real rule on a folder, a missing path, and a symbolic link.
-- `src-tauri/crates/marlin-mount/test-sweep.sh` makes a real dead mount and a live one with the spike programs in `spikes/mount-hello/`, starts the built helper, and checks that only the dead mount and the empty folder are gone. Run it on a Mac with macFUSE, both of its switches on: `test-on-mac.sh` runs it there. `test-in-docker.sh` runs it on Linux.
+- A test gives the helper a mount folder without the marker that looks like a checkout, with a dead mount and empty folders in it: the sweep, `deadMounts`, and a failed `mount` (-1017) leave it as it was. The first mount test checks that a new mount folder gets the marker, and another checks that an empty one does. One more deletes the marker while a mount is up and checks that the unmount leaves the mount's folder.
+- A unit test in `marlin-mount-client` checks that a build with debug assertions picks the dev build's socket, mount folder, and spool. It runs only in such a build, so no test covers a release build's paths.
+- `src-tauri/crates/marlin-mount/test-sweep.sh` makes a real dead mount and a live one with the spike programs in `spikes/mount-hello/`, in a mount folder with the marker. It starts the built helper and checks that only the dead mount and the empty folder are gone. Run it on a Mac with macFUSE, both of its switches on: `test-on-mac.sh` runs it there. `test-in-docker.sh` runs it on Linux.
 - `tests/client.rs` tests `Client` against the built helper: the first connect starts it, a second one reuses it, it outlives its client, it runs in its own process group, `shutdown` stops it, and `ask_to_stop` returns at once and the helper still exits. A fake helper, a plain socket listener in the test, covers another protocol version, a refused shutdown, and a notification in front of an answer.
 - The Tauri layer in `src-tauri/src/mount_helper.rs` has one test: the request at quit runs outside the async runtime, with no helper. No real-app test covers mounts yet (#580), so the `Exit` event, the eight commands, and the three events are untested.
 - A signal is tested through the future that `Server::run` takes, not with a real `SIGTERM`.

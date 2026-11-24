@@ -1,4 +1,4 @@
-//! One helper process per user that owns every mount.
+//! One helper process per socket that owns every mount in its mount folder.
 //!
 //! The app talks to it over a Unix socket with JSON-RPC 2.0. OS adapters and storage providers plug into the traits in `mounts`.
 
@@ -12,6 +12,6 @@ pub use marlin_mount_client::protocol;
 mod server;
 
 pub use adapter::OsAdapter;
-pub use mounts::{Adapter, MountError, Providers, Session};
+pub use mounts::{Adapter, MountError, Providers, Session, MOUNT_FOLDER_MARKER};
 pub use providers::LinkedProviders;
 pub use server::{BindError, Config, Server};

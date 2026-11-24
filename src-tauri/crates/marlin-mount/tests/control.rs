@@ -10,7 +10,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use marlin_mount::protocol::PROTOCOL_VERSION;
-use marlin_mount::{Adapter, BindError, Config, MountError, Providers, Server, Session};
+use marlin_mount::{
+    Adapter, BindError, Config, MountError, Providers, Server, Session, MOUNT_FOLDER_MARKER,
+};
 use marlin_vfs::{Access, ItemId, MemoryProvider, Options, Provider, Vfs, VfsError};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -346,6 +348,7 @@ async fn mount_makes_the_folder_and_reports_each_state() {
         harness.root.join("drive").to_str().unwrap()
     );
     assert!(harness.root.join("drive").is_dir());
+    assert!(harness.root.join(MOUNT_FOLDER_MARKER).is_file());
     let status = client.call("status", account("ana")).await;
     assert_eq!(status["result"]["state"], "mounted");
     watcher.event("starting").await;
@@ -450,6 +453,7 @@ async fn a_mount_point_that_holds_a_file_is_left_alone() {
     let harness = start();
     let mount_point = harness.root.join("drive");
     std::fs::create_dir_all(&mount_point).unwrap();
+    std::fs::write(harness.root.join(MOUNT_FOLDER_MARKER), "").unwrap();
     std::fs::write(mount_point.join("keep.txt"), b"keep me").unwrap();
     let mut client = Client::connect(&harness.socket).await;
     let failed = client.call("mount", mount("ana", "drive")).await;
@@ -477,6 +481,7 @@ async fn a_mount_point_that_is_a_symlink_is_refused_and_left_in_place() {
     let target = harness.dir.path().join("elsewhere");
     std::fs::create_dir(&target).unwrap();
     std::fs::create_dir_all(&harness.root).unwrap();
+    std::fs::write(harness.root.join(MOUNT_FOLDER_MARKER), "").unwrap();
     let link = harness.root.join("drive");
     std::os::unix::fs::symlink(&target, &link).unwrap();
     let mut client = Client::connect(&harness.socket).await;
@@ -1027,6 +1032,7 @@ async fn a_call_from_an_earlier_mount_of_the_account_changes_nothing() {
 async fn the_sweep_clears_dead_mounts_and_empty_folders_and_leaves_the_rest() {
     let harness = start_after(|root, fake| {
         std::fs::create_dir_all(root).unwrap();
+        std::fs::write(root.join(MOUNT_FOLDER_MARKER), "").unwrap();
         let dead = root.join("dead");
         std::fs::create_dir(&dead).unwrap();
         std::fs::create_dir(root.join("empty")).unwrap();
@@ -1059,6 +1065,7 @@ async fn the_sweep_clears_dead_mounts_and_empty_folders_and_leaves_the_rest() {
         .file_type()
         .is_symlink());
     assert!(std::fs::read_link(&link).unwrap().is_dir());
+    assert!(harness.root.join(MOUNT_FOLDER_MARKER).is_file());
     {
         let dead = harness.fake.dead.lock().unwrap();
         assert_eq!(dead.len(), 1);
@@ -1076,6 +1083,7 @@ async fn a_dead_mount_that_cannot_be_cleared_is_reported_and_fails_its_mount_unt
     let harness = start_after(|root, fake| {
         let drive = root.join("drive");
         std::fs::create_dir_all(&drive).unwrap();
+        std::fs::write(root.join(MOUNT_FOLDER_MARKER), "").unwrap();
         fake.dead.lock().unwrap().insert(drive);
         fake.stuck.store(true, Ordering::SeqCst);
     });
@@ -1104,6 +1112,77 @@ async fn a_dead_mount_that_cannot_be_cleared_is_reported_and_fails_its_mount_unt
         client.call("deadMounts", Value::Null).await["result"],
         json!([])
     );
+}
+
+#[tokio::test]
+async fn a_mount_folder_the_helper_did_not_make_is_left_alone() {
+    let harness = start_after(|root, fake| {
+        std::fs::create_dir_all(root).unwrap();
+        std::fs::write(root.join("README.md"), b"the checkout").unwrap();
+        std::fs::create_dir(root.join(".worktrees")).unwrap();
+        std::fs::create_dir(root.join("drive")).unwrap();
+        let dead = root.join("dead");
+        std::fs::create_dir(&dead).unwrap();
+        fake.dead.lock().unwrap().insert(dead);
+    });
+
+    let mut client = Client::connect(&harness.socket).await;
+    assert!(harness.root.join(".worktrees").is_dir());
+    assert!(harness.root.join("drive").is_dir());
+    assert!(harness
+        .fake
+        .dead
+        .lock()
+        .unwrap()
+        .contains(&harness.root.join("dead")));
+    assert_eq!(
+        client.call("deadMounts", Value::Null).await["result"],
+        json!([])
+    );
+
+    let failed = client.call("mount", mount("ana", "drive")).await;
+    assert_eq!(code(&failed), -1017);
+    assert!(failed["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains(&harness.root.display().to_string()));
+    let status = client.call("status", account("ana")).await;
+    assert_eq!(status["result"]["state"], "failed");
+    assert_eq!(status["result"]["error"]["code"], -1017);
+    assert!(harness.root.join("drive").is_dir());
+    assert!(!harness.root.join(MOUNT_FOLDER_MARKER).exists());
+    assert_eq!(
+        std::fs::read(harness.root.join("README.md")).unwrap(),
+        b"the checkout"
+    );
+    assert_eq!(*harness.fake.mounts.borrow(), 0);
+}
+
+#[tokio::test]
+async fn an_empty_mount_folder_becomes_the_helpers() {
+    let harness = start_after(|root, _fake| {
+        std::fs::create_dir_all(root).unwrap();
+    });
+    let mut client = Client::connect(&harness.socket).await;
+    let mounted = client.call("mount", mount("ana", "drive")).await;
+    assert_eq!(mounted["result"]["state"], "mounted");
+    assert!(harness.root.join(MOUNT_FOLDER_MARKER).is_file());
+}
+
+#[tokio::test]
+async fn an_unmount_leaves_its_folder_when_the_mount_folder_lost_its_marker() {
+    let harness = start();
+    let mut client = Client::connect(&harness.socket).await;
+    let mounted = client.call("mount", mount("ana", "drive")).await;
+    assert_eq!(mounted["result"]["state"], "mounted");
+    std::fs::remove_file(harness.root.join(MOUNT_FOLDER_MARKER)).unwrap();
+    let unmounted = client.call("unmount", account("ana")).await;
+    assert!(unmounted.get("error").is_none(), "{unmounted}");
+    assert_eq!(
+        client.call("status", account("ana")).await["result"],
+        Value::Null
+    );
+    assert!(harness.root.join("drive").is_dir());
 }
 
 /// Sends this process's stderr to a file until it is dropped. The helper's log is its stderr, and a server that runs inside the test process has no other place a test can read it. Every test in the process logs there, so match on a text only one test writes. Drop this before any assertion: a panic's message would land in the file.
