@@ -252,6 +252,11 @@ async fn running_with(
                 retry_delay: Duration::from_millis(1),
             },
             oauth_client,
+            marlin_sftp::Config {
+                servers: dir.path().join("sftp-servers.json"),
+                known_hosts: dir.path().join("known_hosts"),
+                retry_after: Duration::from_secs(60),
+            },
         )),
     )
     .unwrap();

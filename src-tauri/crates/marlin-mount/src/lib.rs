@@ -12,6 +12,6 @@ pub use marlin_mount_client::protocol;
 mod server;
 
 pub use adapter::OsAdapter;
-pub use mounts::{Adapter, MountError, Providers, Session, MOUNT_FOLDER_MARKER};
+pub use mounts::{Adapter, MountError, Opened, Providers, Session, MOUNT_FOLDER_MARKER};
 pub use providers::LinkedProviders;
 pub use server::{BindError, Config, Server};

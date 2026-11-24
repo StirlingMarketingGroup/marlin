@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use marlin_mount::protocol::PROTOCOL_VERSION;
 use marlin_mount::{
-    Adapter, BindError, Config, MountError, Providers, Server, Session, MOUNT_FOLDER_MARKER,
+    Adapter, BindError, Config, MountError, Opened, Providers, Server, Session, MOUNT_FOLDER_MARKER,
 };
 use marlin_vfs::{Access, ItemId, MemoryProvider, Options, Provider, Vfs, VfsError};
 use serde_json::{json, Value};
@@ -52,6 +52,9 @@ struct Fake {
 
     /// Each account's provider, keyed by account. A test sets its failures here.
     providers: Mutex<HashMap<String, Arc<MemoryProvider>>>,
+
+    /// The call limit the next `open` gives the mount. `None` leaves the helper's own limit.
+    max_calls: Mutex<Option<usize>>,
 }
 
 async fn wait<T>(value: &watch::Sender<T>, check: impl FnMut(&T) -> bool) {
@@ -114,7 +117,7 @@ struct MemoryProviders(Arc<Fake>);
 
 #[async_trait::async_trait]
 impl Providers for MemoryProviders {
-    async fn open(&self, provider: &str, account: &str) -> Result<Arc<dyn Provider>, MountError> {
+    async fn open(&self, provider: &str, account: &str) -> Result<Opened, MountError> {
         if provider != "memory" {
             return Err(MountError::UnknownProvider);
         }
@@ -124,7 +127,11 @@ impl Providers for MemoryProviders {
             .lock()
             .unwrap()
             .insert(account.to_string(), Arc::clone(&memory));
-        Ok(memory)
+        let max_calls = *self.0.max_calls.lock().unwrap();
+        Ok(Opened {
+            provider: memory,
+            max_calls,
+        })
     }
 }
 
@@ -736,6 +743,48 @@ async fn a_token_in_an_adapter_error_never_reaches_the_client() {
         client.event("failed").await["error"]["message"],
         "401 for Bearer [redacted]"
     );
+}
+
+#[tokio::test]
+async fn a_providers_own_call_limit_replaces_the_helpers() {
+    let harness = start();
+    let mut client = Client::connect(&harness.socket).await;
+    // The helper's own limit is the default 16. A provider's number replaces it, above or below.
+    for (account, limit, peak) in [
+        ("few", Some(2), 2),
+        ("default", None, 16),
+        ("many", Some(20), 20),
+    ] {
+        *harness.fake.max_calls.lock().unwrap() = limit;
+        client.call("mount", mount(account, account)).await;
+        let provider = harness.fake.providers.lock().unwrap()[account].clone();
+        let vfs = harness.fake.vfs.lock().unwrap()[account].clone();
+        let root = provider.root();
+        for index in 0..24 {
+            provider.add_file(&root, &format!("f{index}.txt"), b"x");
+        }
+        let mut nodes = Vec::new();
+        for index in 0..24 {
+            let entry = vfs
+                .lookup(Vfs::ROOT, &format!("f{index}.txt"))
+                .await
+                .unwrap();
+            nodes.push(entry.node);
+        }
+        vfs.refresh();
+        provider.set_delay(Duration::from_millis(200));
+        let mut calls = Vec::new();
+        for node in nodes {
+            let vfs = Arc::clone(&vfs);
+            calls.push(tokio::spawn(async move {
+                vfs.attributes(node).await.unwrap();
+            }));
+        }
+        for call in calls {
+            call.await.unwrap();
+        }
+        assert_eq!(provider.peak_calls(), peak, "{account}");
+    }
 }
 
 /// Stops the helper process when a failed assertion ends the test early.

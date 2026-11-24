@@ -7,7 +7,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -140,13 +140,14 @@ impl Drop for Sshd {
     }
 }
 
-/// A TCP relay, so a test can count connections, cut them, or freeze them.
+/// A TCP relay, so a test can count connections, cut them, freeze them, or refuse new ones.
 pub struct Proxy {
     port: u16,
     accepted: Arc<AtomicUsize>,
     relays: Arc<Mutex<Vec<JoinHandle<()>>>>,
     listening: JoinHandle<()>,
     frozen: Arc<Notify>,
+    refuse: Arc<AtomicBool>,
 }
 
 impl Proxy {
@@ -157,15 +158,20 @@ impl Proxy {
         let accepted = Arc::new(AtomicUsize::new(0));
         let relays = Arc::new(Mutex::new(Vec::new()));
         let frozen = Arc::new(Notify::new());
+        let refuse = Arc::new(AtomicBool::new(false));
         let listening = tokio::spawn({
-            let (accepted, relays, frozen) = (
+            let (accepted, relays, frozen, refuse) = (
                 Arc::clone(&accepted),
                 Arc::clone(&relays),
                 Arc::clone(&frozen),
+                Arc::clone(&refuse),
             );
             async move {
                 while let Ok((mut client, _)) = listener.accept().await {
                     accepted.fetch_add(1, Ordering::SeqCst);
+                    if refuse.load(Ordering::SeqCst) {
+                        continue;
+                    }
                     let frozen = Arc::clone(&frozen);
                     relays.lock().unwrap().push(tokio::spawn(async move {
                         let mut server = TcpStream::connect(("127.0.0.1", to)).await.unwrap();
@@ -187,6 +193,7 @@ impl Proxy {
             relays,
             listening,
             frozen,
+            refuse,
         }
     }
 
@@ -217,6 +224,11 @@ impl Proxy {
         for relay in self.relays.lock().unwrap().drain(..) {
             relay.abort();
         }
+    }
+
+    /// While on, a new connection is accepted and closed at once, as by a server that is going away.
+    pub fn refuse(&self, on: bool) {
+        self.refuse.store(on, Ordering::SeqCst);
     }
 
     /// Stops listening, so a new connection is refused.

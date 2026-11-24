@@ -1,6 +1,6 @@
 # SFTP mount provider (`marlin-sftp`)
 
-`SftpProvider` shows one saved SFTP server to the [mount core](mount-core.md) as a `Provider`. It only reads: `can_write` is false, so a mount of it is read-only. Writes are #603. The [mount helper](mount-helper.md) does not link it yet: #477 does that.
+`SftpProvider` shows one saved SFTP server to the [mount core](mount-core.md) as a `Provider`. It only reads: `can_write` is false, so a mount of it is read-only. Writes are #603. The [mount helper](mount-helper.md#providers) opens it as the provider `sftp`.
 
 The same crate holds the saved servers, the host key check, and the connect that the app's `sftp://` view uses: see [Location providers](location-providers.md).
 
@@ -32,14 +32,15 @@ The mount core knows files and folders only. A link shows as what it points to, 
 
 - **`item`** asks for the path's attributes, following links.
 - **`list`** reads the folder, then looks up its links, at most 8 at once. OpenSSH answers "no such file" for a file it is asked to list, and other servers answer a generic "failure" for a file or a missing folder. So after either answer the provider asks what the path is. A file is `NotAFolder`, and the ask's own "no such file" or "permission denied" gives the error.
-- **`read`** opens the file and asks for the range in pieces, at most 8 at once, in order. A piece is the largest read the server names in `limits@openssh.com`, up to 256 KiB, or 32 KiB from a server that names none. A server may answer a piece short. The piece then asks for only the bytes it still lacks, while the pieces after it go on. The end of the file, or an empty answer, ends a piece. Memory holds the asked range plus the pieces in flight. The file is never read whole. Each `read` opens and closes the file, which costs one more round trip per read: #477 measures what that does to a copy.
+- **`read`** opens the file and asks for the range in pieces, at most 8 at once, in order. A piece is the largest read the server names in `limits@openssh.com`, up to 256 KiB, or 32 KiB from a server that names none. A server may answer a piece short. The piece then asks for only the bytes it still lacks, while the pieces after it go on. The end of the file, or an empty answer, ends a piece. Memory holds the asked range plus the pieces in flight. The file is never read whole. Each `read` opens and closes the file, which costs one more round trip per read. Nobody has measured what that does to a copy over a slow link.
 - **`space`** asks `statvfs@openssh.com` about `/`. A server without that extension, or one that answers it with an error status, gets 1 PiB as both total and free: zero free would make file managers refuse to copy. The space is that of the disk that holds `/`, which can differ from the disk of a folder the user browses.
-- **`MAX_CALLS` is 4.** The helper is to set a mount's `max_calls` to it (#477). The app downloads one file at a time per server, because some servers fail on parallel reads, and one read here already keeps 8 requests going. Nobody has measured how fast either number is.
+- **`MAX_CALLS` is 4.** The helper sets an SFTP mount's `max_calls` to it. The app downloads one file at a time per server, because some servers fail on parallel reads, and one read here already keeps 8 requests going. Nobody has measured how fast either number is.
 
 ## The account
 
 `SftpAccount` is one account: a user on a saved server's host and port, with the sign-in attempts that failed. It holds no connection. A caller keeps one per account for its whole run, and builds each provider on it with `SftpProvider::new`. So what the server refused stays refused across mounts, and each mount's connection closes with its provider. The account tells its sign-ins apart by the password, the local key path with its passphrase, or the use of the SSH agent.
 
+- **An agent sign-in reads `SSH_AUTH_SOCK`** from the process that connects. Without it, an agent server answers `SignInNeeded`.
 - **The provider signs in as the account's user only.** When the saved server for the host and port now holds another user, the call is `SignInNeeded`, and no connection is opened.
 - **One attempt at a time per account.** An attempt holds the account's lock from its check to the moment it records how it ended. An attempt outlives the call that started it (see [The connection](#the-connection)). Without the lock, a second mount could send a password while the server is still judging the first try of it.
 - **Each attempt reads `sftp-servers.json` again, and the keychain for a password or a key's passphrase**, so a changed sign-in works with no unmount. Once the saved user matches the account, it reads `known_hosts` once and passes those keys to the handshake.
@@ -87,13 +88,6 @@ The mount core knows files and folders only. A link shows as what it points to, 
 
 No `Other` text holds a path or a secret.
 
-## For the helper (#477)
-
-- Build each `SftpAccount` with `Config { servers: servers_path(), known_hosts: known_hosts_path(), retry_after: 60 seconds }`.
-- Keep one `SftpAccount` per account for the life of the helper, as `LinkedProviders` keeps one saved sign-in per Google account, and give each mount a new `SftpProvider` on it. A host name matches a saved server in any letter case, so key the accounts by the host in lower case.
-- An agent sign-in reads `SSH_AUTH_SOCK` from the process that connects. A helper started without it answers `SignInNeeded` for an agent server.
-- `parse_authority` in this crate parses the account the way the app's `sftp://` views do: `user@host`, or `user@host:port`.
-
 ## Testing
 
 `cargo test -p marlin-sftp` runs the tests, and `npm run test:rust` includes them. `tests/provider.rs` needs `/usr/sbin/sshd` and `ssh-keygen`: a Mac has both, and CI installs `openssh-server`.
@@ -101,4 +95,6 @@ No `Other` text holds a path or a secret.
 - **Against OpenSSH:** each test starts `sshd` as the user on 127.0.0.1, with key sign-in only, as `app-tests/sftp.test.ts` does. A TCP relay sits between the provider and `sshd`, so a test can count connections, see which are still open, and cut them all at once. Both come from the test-only crate `marlin-test-sshd`. The keys are an Ed25519 key, an RSA key, and a key the server does not accept. The tests cover listings, a FIFO, reads at an offset, the link rules with a walk that would never end without them, the errors, an RSA sign-in, unknown and changed host keys, a refused key and its wait, an unknown host key that opens one connection until `known_hosts` changes, a key file that does not load and its wait, an account for another user than the saved one, a dropped provider that closes its connection, a cut connection, and a connection that goes silent, which the relay keeps open and quiet.
 - **Against a server inside the test:** a russh server with password sign-in, whose SFTP server has no extensions and answers one request at a time. It covers a refused password, also when the call that sent it was cancelled, and across two providers on one account, also when the second starts while the server still judges the first; an agent that cannot sign, free space from a server without `statvfs` or one that answers it with an error, reads that come back short, a path the user may not read, a generic failure to list, a connection lost during a call, and an open cancelled before its answer.
 
-Not tested: a sign-in with a real SSH agent, a slow link where file data holds up the answer to the provider's ask, SFTP servers other than OpenSSH and the one in the test, and a real remote server.
+**Checked against a real server** on 2026-11-24: a read-only mount of the public demo server `test.rebex.net` (Rebex's own SFTP server) through the helper, in the `marlin-fuse` Docker container, with a password sign-in. It mounted in 1.1 seconds, listed a folder of 16 entries in 0.8 seconds, read 15 files of 409 KB in all in 8.4 seconds, about half a second a file, and refused a write with `EROFS`. The time goes to round trips: a lookup, an open, the reads, and a close for each file.
+
+Not tested: a sign-in with a real SSH agent (the helper's tests use a private `ssh-agent`), a slow link where file data holds up the answer to the provider's ask, and SFTP servers other than OpenSSH, Rebex's, and the one in the test.

@@ -2,10 +2,10 @@
 
 `marlin-fuse` serves one [mount core](mount-core.md) `Vfs` to macOS through macFUSE. The [mount helper](mount-helper.md) uses it on macOS. The same crate serves Linux: see [Linux mount adapter](mount-linux.md). A mount takes writes when its core can write: see [Writes](#writes). [Decision 0005](decisions/0005-mount-writes.md) is the design.
 
-The helper mounts a Google account through it: see [Providers](mount-helper.md#providers). No part of the UI asks for a mount yet (#377).
+The helper mounts a Google account or a saved SFTP server through it: see [Providers](mount-helper.md#providers). No part of the UI asks for a mount yet (#377).
 
 **Covers:** `src-tauri/crates/marlin-fuse/src/lib.rs`, `src-tauri/crates/marlin-fuse/src/macos.rs`, `src-tauri/crates/marlin-fuse/src/macos/`, `src-tauri/crates/marlin-fuse/test-on-mac.sh`
-**Checked against the code:** 2026-11-23
+**Checked against the code:** 2026-11-24
 
 The design is in [decision 0001](decisions/0001-mount-architecture.md), choices 2 and 6.
 
@@ -106,7 +106,7 @@ The table in [Linux mount adapter](mount-linux.md#errors) holds for macOS: both 
 
 Run `src-tauri/crates/marlin-fuse/test-on-mac.sh` on a Mac that has macFUSE 5 with both switches on. CI does not run it: the runners have no macFUSE.
 
-- It runs the `marlin-fuse` tests with the ignored ones, the `marlin-mount` tests with the ignored ones, and `crates/marlin-mount/test-sweep.sh`. The helper's ignored tests mount a Google account against a fake Google with the in-memory keychain: see [Mount helper](mount-helper.md#testing). No test touches a real account or the real keychain.
+- It runs the `marlin-fuse` tests with the ignored ones, the `marlin-mount` tests with the ignored ones, and `crates/marlin-mount/test-sweep.sh`. The helper's ignored tests mount a Google account against a fake Google, and an SFTP server against an `sshd` the test starts, with the in-memory keychain: see [Mount helper](mount-helper.md#testing). No test touches a real account or the real keychain. One SFTP test drives Finder, which can take the focus from whoever works at the Mac.
 - The mount tests are the Linux ones: see [Testing](mount-linux.md#testing). These differ:
   - `editor_saves_keep_one_file` runs `sed -i ''` and `/usr/bin/vim` instead of `sed -i` and `vim.tiny`, and leaves `._name` files out of its listing check. `names_change_through_the_mount` checks the macOS errnos: `EPERM` for `unlink` of a folder, which `unlink(2)` documents, `ENOTSUP` for a link, and the `renamex_np` answers above.
   - `a_cocoa_safe_save_keeps_the_item` is macOS only. It saves through a real `NSDocument`, from `osascript -l JavaScript`, and checks that the file keeps its ID.
