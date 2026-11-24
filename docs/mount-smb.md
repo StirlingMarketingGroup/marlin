@@ -5,7 +5,7 @@
 This is not the code behind `smb://` paths. The app handles those through its own location provider and its own `marlin-smb` process: see [Location providers](location-providers.md).
 
 **Covers:** `src-tauri/crates/marlin-smb-client/src/provider.rs`, `src-tauri/crates/marlin-smb-client/tests/provider.rs`, `src-tauri/crates/marlin-smb/tests/provider.rs`
-**Checked against the code:** 2026-11-23
+**Checked against the code:** 2026-11-24
 
 ## The parts
 
@@ -120,4 +120,4 @@ The provider goes by the error code `marlin-smb` answers, never by the text: `ma
 ## Testing
 
 - `cargo test -p marlin-smb-client` runs the provider's tests against fake `marlin-smb` scripts. They need no Samba, and `npm run test:rust` and CI run them. They cover the shares, a folder listing, the item IDs, a split read, a call the core drops, all 4 processes busy, a process that dies, each error code, the sign-in states, and free space. One test runs the provider under a real `Vfs`.
-- `cargo test -p marlin-smb` runs the provider against a real Samba server (`marlin-test-samba`), with the in-memory keychain. It covers the shares, a listing with a dot name, a read across a 16 MiB piece, the errors, a changed password after `SignInNeeded`, free space, and a server that stops. CI does not run it. See [Testing](testing.md).
+- `cargo test -p marlin-smb` runs the provider against a real Samba server (`marlin-test-samba`), with the in-memory keychain. It covers the shares, a listing with a dot name, a read across a 16 MiB piece, the errors, a changed password after `SignInNeeded`, free space, a server that stops, and names with `%XX` in a file and a share. CI does not run it. See [Testing](testing.md).
