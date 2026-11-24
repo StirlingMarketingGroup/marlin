@@ -6,7 +6,7 @@ authors = ["Marlin Team"]
 license = "MIT"
 repository = "https://github.com/StirlingMarketingGroup/marlin"
 edition = "2021"
-rust-version = "1.92"
+rust-version = "1.99"
 default-run = "marlin"
 
 [workspace]
@@ -82,7 +82,6 @@ flate2 = "1.1"
 bzip2 = "0.6"
 xz2 = { version = "0.1", features = ["static"] }
 zstd = "0.14"
-filetime = "0.2"
 ab_glyph = "0.2"
 async-trait = "0.1"
 trash = "5.2.6"

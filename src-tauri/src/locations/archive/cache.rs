@@ -116,25 +116,15 @@ fn is_fresh(path: &Path, max_age: Duration) -> bool {
 }
 
 /// Returns true if the cache entry exists and is still fresh (within TTL).
-/// Note: This only returns true for fresh entries, not stale ones.
 /// If fresh, also touches the file to update mtime for LRU behavior.
 pub fn is_cache_fresh(path: &Path) -> bool {
     if path.exists() && is_fresh(path, CACHE_TTL) {
-        // Touch the file to update mtime - this makes the cache behave like LRU
-        // so frequently accessed entries aren't evicted just because they're old
-        touch_file(path);
+        // A hit counts as a use: the age prune and the size prune both read this mtime.
+        let _ = fs::set_times(path, fs::FileTimes::new().set_modified(SystemTime::now()));
         true
     } else {
         false
     }
-}
-
-/// Update the mtime of a file to now (for LRU cache behavior)
-fn touch_file(path: &Path) {
-    // Use filetime crate to update mtime without reading file contents
-    // This avoids loading potentially large cache entries (up to 500MB) into memory
-    let now = filetime::FileTime::now();
-    let _ = filetime::set_file_mtime(path, now);
 }
 
 pub fn prune_cache_dir(max_age: Duration) -> Result<(), String> {
