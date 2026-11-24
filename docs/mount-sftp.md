@@ -86,6 +86,8 @@ The mount core knows files and folders only. A link shows as what it points to, 
 | The server sends an answer the provider cannot read                                                                                                              | `Other("the SFTP server sent an answer Marlin could not read")`                                  |
 | A connection attempt, or a request, passes its 60 seconds                                                                                                        | `TimedOut`                                                                                       |
 
+On macOS the connection first waits up to 20 seconds for a Local Network answer ([macOS Local Network access](location-providers.md#macos-local-network-access)), and it is still `Offline` when it gets none.
+
 No `Other` text holds a path or a secret.
 
 ## Testing

@@ -20,7 +20,7 @@ pub enum ConnectError {
     UnknownHostKey(PublicKey),
     /// `known_hosts` holds another key for the host. The text is `changed_host_key_warning`, which names a local path.
     ChangedHostKey(String),
-    /// The server could not be reached: the 15-second connect limit ran out, the SSH connection failed, or the connection closed during sign-in before any refusal (`"SSH connection to … timed out after …s"`, `"SSH connection failed: …"`, `"The server closed the connection during sign-in"`). A server that closes at once on a wrong password, rather than saying no, lands here too: the two cannot be told apart.
+    /// The server could not be reached: the TCP connect or the SSH start passed its 15-second limit, the SSH connection failed, or the connection closed during sign-in before any refusal (`"SSH connection to … timed out after …s"`, `"SSH connection failed: …"`, `"The server closed the connection during sign-in"`). After a wait for macOS's Local Network answer, the failure also names the setting (the text is in `marlin_local_network`). A server that closes at once on a wrong password, rather than saying no, lands here too: the two cannot be told apart.
     Unreachable(String),
     /// The server said no to the password, the key, or every agent key it was offered (`"Password authentication rejected by server"`, `"Key authentication rejected by server"`, `"No SSH agent key was accepted by the server"`). A server that closes the connection after refusing agent keys has said no too.
     SignInRejected(String),
@@ -164,21 +164,38 @@ pub(crate) async fn open_sftp_channel(
         ..Default::default()
     };
 
-    let connect_result = tokio::time::timeout(
-        Duration::from_secs(CONNECT_TIMEOUT_SECS),
-        client::connect(
-            Arc::new(config),
-            (hostname, port),
-            SshHandler { saved_host_keys },
-        ),
-    )
-    .await
-    .map_err(|_| {
+    let timed_out = || {
         ConnectError::Unreachable(format!(
             "SSH connection to {}:{} timed out after {}s",
             hostname, port, CONNECT_TIMEOUT_SECS
         ))
+    };
+    let failed = |error: &dyn std::fmt::Display| {
+        ConnectError::Unreachable(format!("SSH connection failed: {}", error))
+    };
+
+    // The TCP connect waits out macOS's Local Network prompt. It runs apart from the SSH start, so a retry never repeats SSH bytes.
+    let host = hostname.to_owned();
+    let stream = tokio::task::spawn_blocking(move || {
+        marlin_local_network::connect(&host, port, Duration::from_secs(CONNECT_TIMEOUT_SECS))
+    })
+    .await
+    .map_err(|e| failed(&e))?
+    .map_err(|e| match e.io.kind() {
+        std::io::ErrorKind::TimedOut => timed_out(),
+        _ => failed(&e),
     })?;
+    let socket = stream
+        .set_nonblocking(true)
+        .and_then(|()| tokio::net::TcpStream::from_std(stream))
+        .map_err(|e| failed(&e))?;
+
+    let connect_result = tokio::time::timeout(
+        Duration::from_secs(CONNECT_TIMEOUT_SECS),
+        client::connect_stream(Arc::new(config), socket, SshHandler { saved_host_keys }),
+    )
+    .await
+    .map_err(|_| timed_out())?;
 
     let mut session = match connect_result {
         Ok(session) => session,
@@ -196,12 +213,7 @@ pub(crate) async fn open_sftp_channel(
                 ),
             ));
         }
-        Err(HandshakeError::Ssh(error)) => {
-            return Err(ConnectError::Unreachable(format!(
-                "SSH connection failed: {}",
-                error
-            )));
-        }
+        Err(HandshakeError::Ssh(error)) => return Err(failed(&error)),
     };
 
     // How the sign-in ended, and the text the server's "no" gets.

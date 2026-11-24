@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+        macOS shows this text in its Local Network prompt, the first time Marlin
+        (or a helper it starts) reaches a device on the local network.
+    -->
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Marlin connects to the SFTP and SMB servers you open on your local network.</string>
+</dict>
+</plist>

@@ -1,0 +1,10 @@
+[package]
+name = "marlin-local-network"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Waits out macOS's Local Network prompt on a TCP connect."
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31", default-features = false, features = ["net"] }

@@ -15,6 +15,7 @@ use pavao::{
     SmbOptions, SmbResult, SmbStat, SmbStatVfs,
 };
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::sync::{Mutex, PoisonError};
 
 /// Sidecar version string.
 pub const SIDECAR_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -29,6 +30,7 @@ struct Share<'a> {
 
 impl<'a> Share<'a> {
     fn open(credentials: &'a SmbCredentials, share: &str) -> Result<Self, (i32, String)> {
+        wait_for_local_network(&credentials.hostname)?;
         // pavao adds the `/` before the share when it is missing.
         let mut server = PavaoCredentials::default()
             .server(format!("smb://{}", credentials.hostname))
@@ -339,6 +341,33 @@ fn space_from(stat: &pavao::SmbStatVfs) -> Option<SpaceResult> {
     })
 }
 
+/// libsmbclient and smbclient fail at once while macOS waits for the user's Local Network answer. So a call to a server waits for that answer here, before any SMB call, and no call runs twice. A mount makes many calls, so a server this process has reached is not tried again.
+fn wait_for_local_network(hostname: &str) -> Result<(), (i32, String)> {
+    static REACHED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    if !cfg!(target_os = "macos") {
+        return Ok(());
+    }
+    let mut reached = REACHED.lock().unwrap_or_else(PoisonError::into_inner);
+    if reached.iter().any(|server| server == hostname) {
+        return Ok(());
+    }
+    let (host, port) = split_port(hostname);
+    let port = port.and_then(|port| port.parse().ok()).unwrap_or(445);
+    // A probe slower than `AT_ONCE` cannot be the block, so it gets no more time.
+    match marlin_local_network::connect(host, port, marlin_local_network::AT_ONCE) {
+        Ok(_) => {
+            reached.push(hostname.to_string());
+            Ok(())
+        }
+        Err(error) if error.waited => Err((
+            error_codes::SMB_CONNECTION_LOST,
+            format!("Failed to connect to SMB server: {error}"),
+        )),
+        // libsmbclient or smbclient reports any other failure. The server stays unreached, so a later call waits if the user moved onto its network.
+        Err(_) => Ok(()),
+    }
+}
+
 /// The other methods put the port in the URL, which libsmbclient reads. `smbclient` takes it only as `-p`. An IPv6 address stays whole: it has colons of its own, and neither tool takes one with a port (#642).
 fn split_port(hostname: &str) -> (&str, Option<&str>) {
     match hostname.rsplit_once(':') {
@@ -378,6 +407,8 @@ fn smbclient_code(reported: &str) -> i32 {
 /// List available shares on a server.
 pub fn list_shares(params: ListSharesParams) -> Result<ListSharesResult, (i32, String)> {
     use std::process::{Command, Stdio};
+
+    wait_for_local_network(&params.credentials.hostname)?;
 
     // Use smbclient -L to enumerate shares (pavao doesn't support this well)
     let (smbclient_program, augmented_path) = resolve_smbclient_command();

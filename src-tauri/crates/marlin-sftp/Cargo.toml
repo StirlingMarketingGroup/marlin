@@ -14,8 +14,9 @@ keyring = { version = "3.6.3", default-features = false, features = ["apple-nati
 dirs = "7.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tokio = { version = "1.50", features = ["time", "sync", "rt", "macros", "io-util"] }
+tokio = { version = "1.50", features = ["time", "sync", "rt", "macros", "io-util", "net"] }
 marlin-vfs = { path = "../marlin-vfs" }
+marlin-local-network = { path = "../marlin-local-network" }
 async-trait = "0.1"
 futures-util = "0.3"
 tokio-util = "0.7"
