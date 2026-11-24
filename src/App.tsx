@@ -108,18 +108,12 @@ async function requestFolderAccessForPath(path: string): Promise<boolean> {
   return true;
 }
 
-async function retryCurrentDirectoryAfterAccessGrant(path: string) {
-  const state = useAppStore.getState();
-  if (path.includes('://')) {
-    await state.refreshCurrentDirectory();
-  } else {
-    await state.refreshCurrentDirectoryStreaming();
-  }
-
-  return !useAppStore.getState().error;
+async function retryCurrentDirectoryAfterAccessGrant() {
+  const read = await useAppStore.getState().refreshCurrentDirectoryStreaming();
+  return read.outcome === 'listed';
 }
 
-// Grid zoom constants (for keyboard shortcuts - wheel handler moved to MainPanel)
+// Grid zoom steps for keyboard shortcuts.
 import {
   GRID_SIZE_MIN,
   GRID_SIZE_MAX,
@@ -182,6 +176,9 @@ function App() {
   const currentDirectoryPreference = directoryPreferences[currentPath];
   const pendingFileSelectionRef = useRef<string | null>(null);
   const smartDefaultsPathRef = useRef<string | null>(null);
+  // The folder a failed navigation returned to, with its list still on screen, so it is not
+  // read again. Any load clears it.
+  const restoredPathRef = useRef<string | null>(null);
   // Apply smart default view and sort preferences based on folder name or contents
   const applySmartViewDefaults = async (path: string, files?: FileItem[]) => {
     try {
@@ -510,16 +507,10 @@ function App() {
         const tryLoadPath = async (path: string): Promise<boolean> => {
           try {
             setCurrentPath(path);
-            // Use non-streaming refresh for remote paths since streaming isn't supported there.
-            if (hasUriScheme(path)) {
-              await useAppStore.getState().refreshCurrentDirectory();
-            } else {
-              await useAppStore.getState().refreshCurrentDirectoryStreaming();
-            }
-
-            const refreshFailure = useAppStore.getState().error;
-            if (refreshFailure) {
-              throw new Error(refreshFailure);
+            // The streaming read hands a remote folder to `refreshCurrentDirectory`.
+            const read = await useAppStore.getState().refreshCurrentDirectoryStreaming();
+            if (read.outcome === 'failed') {
+              throw new Error(read.reason);
             }
 
             if (hasUriScheme(path)) {
@@ -692,16 +683,16 @@ function App() {
     })();
   }, [currentPath]);
 
-  // Note: Menu checkbox sync is now handled directly in the centralized toggleHiddenFiles function
-
   // Load directory preferences and files when currentPath changes
   useEffect(() => {
     // Skip if not initialized yet or if this is the first load (already handled in init)
     if (!initializedRef.current || firstLoadRef.current) return;
+    if (restoredPathRef.current === currentPath) return;
 
     async function loadDirectory() {
       // A visit to a folder starts here. Its defaults have not been applied yet.
       smartDefaultsPathRef.current = null;
+      restoredPathRef.current = null;
       try {
         setLoading(true);
         setError(undefined);
@@ -727,21 +718,16 @@ function App() {
           console.warn('Failed to load directory preferences:', error);
         }
 
-        // Try to load the directory using streaming for better performance
-        // Note: Remote paths (gdrive://, smb://) don't support streaming, use non-streaming method
-        const isRemotePath = currentPath.includes('://');
-        if (isRemotePath) {
-          await useAppStore.getState().refreshCurrentDirectory();
-        } else {
-          await useAppStore.getState().refreshCurrentDirectoryStreaming();
+        // The streaming read hands a remote folder to `refreshCurrentDirectory`.
+        const read = await useAppStore.getState().refreshCurrentDirectoryStreaming();
+        // Another folder's load owns the window now, or a sign-in window opens instead.
+        if (read.outcome === 'superseded' || read.outcome === 'signInRequested') return;
+        if (read.outcome === 'failed') {
+          throw new Error(read.reason);
         }
 
-        const refreshFailure = useAppStore.getState().error;
-        if (refreshFailure) {
-          throw new Error(refreshFailure);
-        }
-
-        if (isRemotePath) {
+        // A local listing streams in later; its defaults wait for it (see the effect below).
+        if (currentPath.includes('://')) {
           await applySmartViewDefaults(currentPath, useAppStore.getState().files);
         }
 
@@ -786,13 +772,13 @@ function App() {
           }
         }
 
-        // Show alert for all other directory access errors
+        // A folder the system refuses can ask for access, then be read again.
         const isPermissionError = isPermissionErrorMessage(errorCode, errorMessage);
 
         if (isPermissionError) {
           try {
             const accessGranted = await requestFolderAccessForPath(currentPath);
-            if (accessGranted && (await retryCurrentDirectoryAfterAccessGrant(currentPath))) {
+            if (accessGranted && (await retryCurrentDirectoryAfterAccessGrant())) {
               setError(undefined);
               return;
             }
@@ -805,31 +791,38 @@ function App() {
         setLoading(false);
         setError(undefined);
 
-        // Show native alert dialog. A cancelled sign-in already asked the user.
+        // A failed navigation leaves the window as it was. A typed address goes back to the
+        // path bar with the reason, so the user can fix it; anything else gets a dialog.
+        const { navigation, returnFromFailedNavigation } = useAppStore.getState();
+        if (navigation?.path === currentPath) {
+          restoredPathRef.current = navigation.before.listed ? navigation.before.currentPath : null;
+          returnFromFailedNavigation(errorMessage);
+          if (navigation.typedText !== undefined) return;
+        } else {
+          // Back and Forward start no navigation to undo: step back again, or go home.
+          const { goBack, pathHistory, historyIndex } = useAppStore.getState();
+          if (pathHistory.length > 1 && historyIndex > 0) {
+            goBack();
+          } else {
+            // If no history, replace the failed location with home so we don't leave a dead path around.
+            const { homeDir } = useAppStore.getState();
+            if (homeDir && currentPath !== homeDir) {
+              setCurrentPath(homeDir);
+              useAppStore.setState({
+                pathHistory: [useAppStore.getState().currentPath],
+                historyIndex: 0,
+              });
+            }
+          }
+        }
+
+        // A cancelled sign-in already asked the user.
         if (errorMessage !== GOOGLE_SIGN_IN_CANCELLED) {
           await message(`Cannot access: ${currentPath}\n\n${errorMessage}`, {
             title: 'Directory Error',
             okLabel: 'OK',
             kind: 'error',
           });
-        }
-
-        // Navigate back to previous valid location
-        // Don't change files - keep showing the previous directory's content
-        const { goBack, pathHistory, historyIndex } = useAppStore.getState();
-        if (pathHistory.length > 1 && historyIndex > 0) {
-          // Go back in history (this will restore the previous path in the address bar)
-          goBack();
-        } else {
-          // If no history, replace the failed location with home so we don't leave a dead path around.
-          const { homeDir } = useAppStore.getState();
-          if (homeDir && currentPath !== homeDir) {
-            setCurrentPath(homeDir);
-            useAppStore.setState({
-              pathHistory: [useAppStore.getState().currentPath],
-              historyIndex: 0,
-            });
-          }
         }
       }
       // Note: Don't set loading=false here - streaming handles loading state via appendStreamingBatch
@@ -1652,7 +1645,7 @@ function App() {
             if (isPermissionError) {
               try {
                 const accessGranted = await requestFolderAccessForPath(currentPath);
-                if (accessGranted && (await retryCurrentDirectoryAfterAccessGrant(currentPath))) {
+                if (accessGranted && (await retryCurrentDirectoryAfterAccessGrant())) {
                   setError(undefined);
                   return;
                 }

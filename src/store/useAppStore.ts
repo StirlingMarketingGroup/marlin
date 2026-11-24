@@ -228,6 +228,15 @@ const isPathInsideRepo = (path: string, repoRoot: string): boolean => {
   return normalizedPath.startsWith(rootWithSlash);
 };
 
+// What a read of the current folder came to.
+type FolderRead =
+  | { outcome: 'listed' }
+  | { outcome: 'failed'; reason: string }
+  // A sign-in window opens instead. The folder opens once the user signs in.
+  | { outcome: 'signInRequested' }
+  // The user opened another folder while this one was read.
+  | { outcome: 'superseded' };
+
 interface AppState {
   // Navigation
   currentPath: string;
@@ -236,6 +245,30 @@ interface AppState {
   pathHistory: string[];
   historyIndex: number;
   homeDir?: string;
+  // The navigation `navigateTo` started whose folder has not been listed yet. When that folder
+  // fails to load, `returnFromFailedNavigation` puts `before` back.
+  navigation: {
+    // The location being opened, as `currentPath` holds it.
+    path: string;
+    // The path bar text it came from, when the user typed it.
+    typedText?: string;
+    // The folder on screen when it started, with its list, filter, and history.
+    before: {
+      currentPath: string;
+      currentLocationRaw: string;
+      pathHistory: string[];
+      historyIndex: number;
+      files: FileItem[];
+      filterText: string;
+      showFilterInput: boolean;
+      // Whether its whole listing, sizes and dates included, was on screen. Only then can it
+      // come back without a new read.
+      listed: boolean;
+    };
+  } | null;
+  // A typed address that could not be opened, and why. The path bar shows it until the user
+  // leaves the bar, presses Escape, or opens another location.
+  failedAddress: { text: string; reason: string } | null;
 
   // Files
   files: FileItem[];
@@ -341,7 +374,9 @@ interface AppState {
   appendToFilter: (char: string) => void;
   openFilter: () => void;
   clearFilter: () => void;
-  navigateTo: (path: string, options?: { reveal?: string }) => Promise<void>;
+  navigateTo: (path: string, options?: { reveal?: string; typed?: boolean }) => Promise<void>;
+  returnFromFailedNavigation: (reason: string) => void;
+  clearFailedAddress: () => void;
   goBack: () => void;
   goForward: () => void;
   canGoBack: () => boolean;
@@ -349,8 +384,9 @@ interface AppState {
   goUp: () => void;
   toggleHiddenFiles: (forceValue?: boolean) => Promise<void>;
   toggleFoldersFirst: () => Promise<void>;
-  refreshCurrentDirectory: () => Promise<void>;
-  refreshCurrentDirectoryStreaming: () => Promise<void>;
+  // A failed read also sets `error`. A streamed read counts as listed once its stream starts.
+  refreshCurrentDirectory: () => Promise<FolderRead>;
+  refreshCurrentDirectoryStreaming: () => Promise<FolderRead>;
   appendStreamingBatch: (batch: DirectoryBatch) => void;
   applyMetadataUpdates: (batch: MetadataBatch) => void;
   updateFileDimensions: (path: string, width: number, height: number) => void;
@@ -584,6 +620,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   pathHistory: ['/'],
   historyIndex: 0,
   homeDir: undefined,
+  navigation: null,
+  failedAddress: null,
   files: [],
   selectedFiles: [],
   selectionAnchor: undefined,
@@ -729,6 +767,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   openFilter: () =>
     set({
       showFilterInput: true,
+      // Opening the filter on purpose leaves a failed path bar address behind.
+      failedAddress: null,
     }),
 
   clearFilter: () =>
@@ -741,76 +781,66 @@ export const useAppStore = create<AppState>((set, get) => ({
     // Cancel any in-flight thumbnail generation from the previous directory
     void invoke('cancel_all_thumbnails');
 
-    const { pathHistory, historyIndex, googleAccounts, homeDir } = get();
-    const trimmed = path.trim();
-
-    // Check if this is a Google Drive URL
-    const gdriveId = parseGoogleDriveUrl(trimmed);
+    // A Google Drive folder link opens the folder it names.
+    let location: string;
+    const gdriveId = parseGoogleDriveUrl(path.trim());
     if (gdriveId) {
+      // A typed link that cannot be opened goes back to the path bar with the reason.
+      // Any other gets a dialog.
+      const cannotOpen = async (reason: string) => {
+        if (options?.typed) {
+          set({ failedAddress: { text: path, reason } });
+        } else {
+          await message(reason, { title: 'Cannot Open Folder', kind: 'error' });
+        }
+      };
+
       // Resolve the folder ID to a path
-      const accountEmails = googleAccounts.map((a) => a.email);
+      const accountEmails = get().googleAccounts.map((a) => a.email);
       if (accountEmails.length === 0) {
         console.error('No Google accounts connected');
-        await message(
-          'No Google Drive accounts are connected. Please add an account in the sidebar first.',
-          { title: 'Cannot Open Folder', kind: 'error' }
+        await cannotOpen(
+          'No Google Drive accounts are connected. Please add an account in the sidebar first.'
         );
         return;
       }
 
-      try {
-        const [email, resolvedPath, folderName] = await invoke<[string, string, string]>(
-          'resolve_gdrive_folder_url',
-          { folderId: gdriveId, accounts: accountEmails }
-        );
-        console.info('[navigateTo] Resolved to folder:', folderName);
-
-        const fullPath = `gdrive://${email}${resolvedPath}`;
-        console.info('[navigateTo] Resolved Google Drive URL to:', fullPath);
-
-        // Clear animation state when navigating
-        get().clearAllAnimationState();
-
-        const newHistory = [...pathHistory.slice(0, historyIndex + 1), fullPath];
-        set({
-          currentPath: fullPath,
-          currentLocationRaw: fullPath,
-          pathHistory: newHistory,
-          historyIndex: newHistory.length - 1,
-          filterText: '',
-          showFilterInput: false,
-          justCreatedPath: undefined,
-          renameTargetPath: undefined,
-          pendingRevealTarget: options?.reveal,
-        });
-        // Explicitly refresh the directory for Google Drive URLs
-        await get().refreshCurrentDirectory();
-        void get().refreshGitStatus({ path: fullPath });
-        return;
-      } catch (error) {
+      const startPath = get().currentPath;
+      const resolved = await invoke<[string, string, string]>('resolve_gdrive_folder_url', {
+        folderId: gdriveId,
+        accounts: accountEmails,
+      }).catch((error) => {
         console.error('Failed to resolve Google Drive URL:', error);
-        await message(
-          'Could not access this Google Drive folder. Make sure the folder exists and you have access with one of your connected accounts.',
-          { title: 'Cannot Open Folder', kind: 'error' }
+        return null;
+      });
+      // The link resolves over the network. A folder the user opened meanwhile wins.
+      if (get().currentPath !== startPath) return;
+      if (!resolved) {
+        await cannotOpen(
+          'Could not access this Google Drive folder. Make sure the folder exists and you have access with one of your connected accounts.'
         );
         return;
       }
+      const [email, resolvedPath, folderName] = resolved;
+      console.info('[navigateTo] Resolved to folder:', folderName);
+      location = `gdrive://${email}${resolvedPath}`;
+      console.info('[navigateTo] Resolved Google Drive URL to:', location);
+    } else {
+      // Normalize path (handles URIs like gdrive://, smb://, etc.)
+      location = normalizePath(resolveTypedPath(path, get().homeDir));
     }
+    // For URIs, use the URI as locationRaw; for file paths, convert to file:// URI
+    const isUri = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(location);
 
-    // Normalize path (handles URIs like gdrive://, smb://, etc.)
-    const norm = normalizePath(resolveTypedPath(trimmed, homeDir));
-    // For URIs, use the normalized URI as locationRaw; for file paths, convert to file:// URI
-    const isUri = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(norm);
-    const locationRaw = isUri ? norm : toFileUri(norm);
-
-    const newHistory = [...pathHistory.slice(0, historyIndex + 1), norm];
+    const state = get();
+    const newHistory = [...state.pathHistory.slice(0, state.historyIndex + 1), location];
 
     // Clear animation state when navigating to a new directory
     get().clearAllAnimationState();
 
     set({
-      currentPath: norm,
-      currentLocationRaw: locationRaw,
+      currentPath: location,
+      currentLocationRaw: isUri ? location : toFileUri(location),
       pathHistory: newHistory,
       historyIndex: newHistory.length - 1,
       filterText: '',
@@ -818,6 +848,27 @@ export const useAppStore = create<AppState>((set, get) => ({
       justCreatedPath: undefined,
       renameTargetPath: undefined,
       pendingRevealTarget: options?.reveal,
+      // Opening the folder already open leaves no other folder to return to, so it starts
+      // nothing to undo. A navigation that starts while another is pending keeps the folder
+      // that one left, because the pending folder never reached the screen.
+      navigation:
+        location === state.currentPath
+          ? state.navigation
+          : {
+              path: location,
+              typedText: options?.typed ? path : undefined,
+              before: state.navigation?.before ?? {
+                currentPath: state.currentPath,
+                currentLocationRaw: state.currentLocationRaw,
+                pathHistory: state.pathHistory,
+                historyIndex: state.historyIndex,
+                files: state.files,
+                filterText: state.filterText,
+                showFilterInput: state.showFilterInput,
+                listed: !state.loading && state.isMetadataComplete && !state.error,
+              },
+            },
+      failedAddress: null,
     });
 
     // For URI paths (smb://, gdrive://, archive://, etc.), explicitly refresh the directory
@@ -825,11 +876,47 @@ export const useAppStore = create<AppState>((set, get) => ({
       await get().refreshCurrentDirectory();
     }
 
-    const scheme = getUriScheme(norm);
+    const scheme = getUriScheme(location);
     if (!scheme || scheme === 'file') {
-      void get().refreshGitStatus({ path: norm });
+      void get().refreshGitStatus({ path: location });
     }
   },
+
+  // Puts back the folder that was on screen before a navigation whose folder failed to load,
+  // as it was, so history gets no entry for the failed address. A typed address goes back to
+  // the path bar with the reason.
+  returnFromFailedNavigation: (reason) => {
+    const { navigation } = get();
+    if (!navigation) return;
+    const { before, typedText } = navigation;
+    set({
+      currentPath: before.currentPath,
+      currentLocationRaw: before.currentLocationRaw,
+      pathHistory: before.pathHistory,
+      historyIndex: before.historyIndex,
+      files: before.files,
+      filterText: before.filterText,
+      showFilterInput: before.showFilterInput,
+      pendingRevealTarget: undefined,
+      navigation: null,
+      failedAddress: typedText === undefined ? null : { text: typedText, reason },
+    });
+    const scheme = getUriScheme(before.currentPath);
+    if (!scheme || scheme === 'file') {
+      void get().refreshGitStatus({ path: before.currentPath });
+    } else {
+      // A remote folder has no git status. Dropping the request id drops the late answer for
+      // the failed address too.
+      set({
+        gitStatus: null,
+        gitStatusError: undefined,
+        gitStatusLoading: false,
+        gitStatusRequestId: undefined,
+      });
+    }
+  },
+
+  clearFailedAddress: () => set({ failedAddress: null }),
 
   goBack: () => {
     // Cancel any in-flight thumbnail generation from the current directory
@@ -850,6 +937,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         justCreatedPath: undefined,
         renameTargetPath: undefined,
         pendingRevealTarget: undefined,
+        failedAddress: null,
       });
       const scheme = getUriScheme(newPath);
       if (!scheme || scheme === 'file') {
@@ -877,6 +965,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         justCreatedPath: undefined,
         renameTargetPath: undefined,
         pendingRevealTarget: undefined,
+        failedAddress: null,
       });
       const scheme = getUriScheme(newPath);
       if (!scheme || scheme === 'file') {
@@ -985,7 +1074,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           : await readDirectory();
 
       // The user opened another folder while this one was being read.
-      if (get().currentPath !== currentPath) return;
+      if (get().currentPath !== currentPath) return { outcome: 'superseded' };
 
       // For non-file schemes (gdrive://, smb://, archive://), keep the raw URI directly.
       const useRawPath = listing.location.scheme !== 'file';
@@ -1007,6 +1096,8 @@ export const useAppStore = create<AppState>((set, get) => ({
           currentLocationRaw: listing.location.raw,
           currentProviderCapabilities: listing.capabilities,
           pathHistory: updatedHistory,
+          // A listing of the current folder ends any pending navigation.
+          navigation: null,
         };
       });
 
@@ -1015,12 +1106,13 @@ export const useAppStore = create<AppState>((set, get) => ({
       } else {
         set({ gitStatus: null, gitStatusError: undefined });
       }
+      return { outcome: 'listed' };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error('❌ refreshCurrentDirectory failed:', msg);
 
       // The user opened another folder while this one was being read.
-      if (get().currentPath !== currentPath) return;
+      if (get().currentPath !== currentPath) return { outcome: 'superseded' };
 
       // Check if this is an SMB "no credentials" error
       if (msg.includes('[SMB_NO_CREDENTIALS]')) {
@@ -1033,7 +1125,7 @@ export const useAppStore = create<AppState>((set, get) => ({
             pendingSmbCredentialRequest: { hostname, targetPath: currentPath },
             error: undefined, // Don't show error, we'll show the dialog instead
           });
-          return;
+          return { outcome: 'signInRequested' };
         }
       }
 
@@ -1051,11 +1143,12 @@ export const useAppStore = create<AppState>((set, get) => ({
             },
             error: undefined,
           });
-          return;
+          return { outcome: 'signInRequested' };
         }
       }
 
       setError(msg);
+      return { outcome: 'failed', reason: msg };
     } finally {
       setLoading(false);
     }
@@ -1066,8 +1159,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     // For remote paths (gdrive://), use non-streaming refresh since streaming isn't supported
     if (currentPath?.includes('://')) {
-      await get().refreshCurrentDirectory();
-      return;
+      return get().refreshCurrentDirectory();
     }
 
     // Cancel any existing streaming session
@@ -1098,6 +1190,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         { path: currentPath, sessionId }
       );
 
+      // The user opened another folder while this one was being read.
+      if (get().currentPath !== currentPath) return { outcome: 'superseded' };
+
       // For non-file schemes, keep raw URI directly (streaming is typically local only).
       const useRawPath = response.location.scheme !== 'file';
       const normalized = useRawPath
@@ -1116,6 +1211,8 @@ export const useAppStore = create<AppState>((set, get) => ({
           currentLocationRaw: locationRaw,
           currentProviderCapabilities: response.capabilities,
           pathHistory: updatedHistory,
+          // A listing of the current folder ends any pending navigation.
+          navigation: null,
         };
       });
 
@@ -1124,20 +1221,28 @@ export const useAppStore = create<AppState>((set, get) => ({
       } else {
         set({ gitStatus: null, gitStatusError: undefined });
       }
+      return { outcome: 'listed' };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error('❌ refreshCurrentDirectoryStreaming failed:', msg);
+      // This stream is over. A newer one belongs to another read and keeps its state.
+      if (get().streamingSessionId === sessionId) {
+        set({
+          isStreamingComplete: true,
+          isMetadataComplete: true,
+          streamingSessionId: null,
+          streamingPath: null,
+        });
+      }
+      // The user opened another folder while this one was being read. Its read owns the
+      // loading state and the error.
+      if (get().currentPath !== currentPath) return { outcome: 'superseded' };
       setError(msg);
-      set({
-        isStreamingComplete: true,
-        isMetadataComplete: true,
-        loading: false,
-        streamingSessionId: null,
-        streamingPath: null,
-      });
+      set({ loading: false });
+      return { outcome: 'failed', reason: msg };
     }
-    // Note: We don't set loading=false in finally because streaming continues in background
-    // It will be set to false when isStreamingComplete becomes true via appendStreamingBatch
+    // `loading` stays true after a successful start: the first directory batch clears it, so
+    // the rows show while the stream goes on.
   },
 
   appendStreamingBatch: (batch: DirectoryBatch) => {

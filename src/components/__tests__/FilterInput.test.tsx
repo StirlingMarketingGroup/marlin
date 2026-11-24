@@ -25,6 +25,7 @@ describe('FilterInput', () => {
       directoryPreferences: {},
       currentPath: '/',
       isStreamingComplete: true,
+      failedAddress: null,
       setFilterText: mockSetFilterText,
       clearFilter: mockClearFilter,
       openFilter: vi.fn(),
@@ -35,6 +36,7 @@ describe('FilterInput', () => {
         return fullState;
       }
     );
+    Object.assign(useAppStore, { getState: () => fullState });
   };
 
   beforeEach(() => {

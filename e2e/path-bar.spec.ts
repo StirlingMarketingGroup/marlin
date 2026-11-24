@@ -1,5 +1,11 @@
 import { test, expect, type Locator, type Page } from '@playwright/test';
-import { getTauriMockScript, MOCK_HOME_DIR, MOCK_DOWNLOADS_DIR } from './tauri-mocks';
+import {
+  getTauriMockScript,
+  MOCK_DOWN_HOST,
+  MOCK_DOWNLOADS_DIR,
+  MOCK_HOME_DIR,
+  MOCK_MISSING_DIR,
+} from './tauri-mocks';
 
 async function typeAtEnd(pathInput: Locator, text: string, options?: { delay: number }) {
   await pathInput.click();
@@ -299,5 +305,287 @@ test.describe('Path bar', () => {
     await expect(
       page.locator('[data-testid="file-item"][data-name="sample.pdf"]').first()
     ).toBeVisible({ timeout: 5000 });
+  });
+});
+
+test.describe('Path bar: an address that cannot be opened', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.addInitScript(getTauriMockScript());
+    await page.goto('/');
+
+    // The home folder's rows show once the app has opened its first folder.
+    await expect(page.locator('[data-testid="file-item"][data-name="Documents"]')).toBeVisible({
+      timeout: 15000,
+    });
+  });
+
+  async function rowNames(page: Page) {
+    return page
+      .locator('[data-testid="file-item"]')
+      .evaluateAll((rows) => rows.map((row) => row.getAttribute('data-name')));
+  }
+
+  for (const address of [
+    MOCK_MISSING_DIR,
+    `smb://${MOCK_DOWN_HOST}/share`,
+    `sftp://me@${MOCK_DOWN_HOST}/home`,
+    `gdrive://me@${MOCK_DOWN_HOST}/My Drive`,
+  ]) {
+    test(`${address} stays in the bar, and the list and history stay`, async ({ page }) => {
+      const pathInput = page.locator('[data-testid="path-input"]');
+      await pathInput.fill(MOCK_DOWNLOADS_DIR);
+      await pathInput.press('Enter');
+      await expect(page.locator('[data-testid="file-item"][data-name="sample.pdf"]')).toBeVisible();
+
+      const names = await rowNames(page);
+      await pathInput.click();
+      await pathInput.fill(address);
+      await pathInput.press('Enter');
+
+      const failure = page.getByTestId('path-bar-failure');
+      await expect(failure).toBeVisible();
+      await expect(failure).toContainText(
+        address === MOCK_MISSING_DIR
+          ? 'Path does not exist'
+          : `Could not connect to ${MOCK_DOWN_HOST}`
+      );
+      await expect(pathInput).toHaveValue(address);
+      await expect(pathInput).toBeFocused();
+      await expect(page.locator('[data-testid="file-item"][data-name="sample.pdf"]')).toBeVisible();
+      await expect.poll(() => rowNames(page)).toEqual(names);
+      await expect(page.getByTitle(/^Forward/)).toBeDisabled();
+      await page.getByTitle(/^Back/).click();
+      await expect(pathInput).toHaveValue(MOCK_HOME_DIR);
+    });
+  }
+
+  test('fixing one wrong character and pressing Enter opens the folder', async ({ page }) => {
+    const pathInput = page.locator('[data-testid="path-input"]');
+    await pathInput.fill(MOCK_MISSING_DIR);
+    await pathInput.press('Enter');
+    await expect(page.getByTestId('path-bar-failure')).toBeVisible();
+
+    await pathInput.press('Backspace');
+    await pathInput.press('s');
+    await expect(pathInput).toHaveValue(MOCK_DOWNLOADS_DIR);
+    await expect(page.getByTestId('path-bar-failure')).toHaveCount(0);
+
+    await pathInput.press('Enter');
+    await expect(page.locator('[data-testid="file-item"][data-name="sample.pdf"]')).toBeVisible();
+    await expect(pathInput).toHaveValue(MOCK_DOWNLOADS_DIR);
+  });
+
+  test("Escape shows the current folder's path again", async ({ page }) => {
+    const pathInput = page.locator('[data-testid="path-input"]');
+    await pathInput.fill(MOCK_MISSING_DIR);
+    await pathInput.press('Enter');
+    await expect(page.getByTestId('path-bar-failure')).toBeVisible();
+
+    await pathInput.press('Escape');
+    await expect(pathInput).toHaveValue(MOCK_HOME_DIR);
+    await expect(page.getByTestId('path-bar-failure')).toHaveCount(0);
+  });
+
+  test('clicking away drops a failed address', async ({ page }) => {
+    const pathInput = page.locator('[data-testid="path-input"]');
+    await pathInput.fill(MOCK_MISSING_DIR);
+    await pathInput.press('Enter');
+    await expect(page.getByTestId('path-bar-failure')).toBeVisible();
+
+    await page.getByTestId('file-list').click();
+    await expect(page.getByTestId('path-bar-failure')).toHaveCount(0);
+    await pathInput.click();
+    await expect(pathInput).toHaveValue(MOCK_HOME_DIR);
+  });
+
+  test('a pasted Google Drive link that cannot be opened stays in the bar', async ({ page }) => {
+    const link = 'https://drive.google.com/drive/folders/1Buzv1qFiKf79xF_RE91MfAcMxPnu6CWS';
+    const pathInput = page.locator('[data-testid="path-input"]');
+    await pathInput.fill(link);
+    await pathInput.press('Enter');
+
+    await expect(page.getByTestId('path-bar-failure')).toContainText(
+      'No Google Drive accounts are connected'
+    );
+    await expect(pathInput).toHaveValue(link);
+    await expect(pathInput).toBeFocused();
+  });
+
+  test('the filter shortcut leaves a failed address for the filter box', async ({ page }) => {
+    const pathInput = page.locator('[data-testid="path-input"]');
+    await pathInput.fill(MOCK_MISSING_DIR);
+    await pathInput.press('Enter');
+    await expect(page.getByTestId('path-bar-failure')).toBeVisible();
+
+    await page.keyboard.press('ControlOrMeta+f');
+    const filterInput = page.getByTestId('filter-input');
+    await expect(filterInput).toBeFocused();
+    await page.keyboard.type('ments');
+
+    await expect(filterInput).toHaveValue('ments');
+    await expect(page.getByTestId('path-bar-failure')).toHaveCount(0);
+    await expect(pathInput).toHaveValue(MOCK_HOME_DIR);
+  });
+
+  test('an open filter comes back, and the failed address keeps the focus', async ({ page }) => {
+    await page.getByTestId('file-list').click();
+    await page.keyboard.type('ments');
+    const filterInput = page.getByTestId('filter-input');
+    await expect(filterInput).toHaveValue('ments');
+
+    const pathInput = page.locator('[data-testid="path-input"]');
+    await pathInput.click();
+    await pathInput.fill(MOCK_MISSING_DIR);
+    await pathInput.press('Enter');
+
+    await expect(page.getByTestId('path-bar-failure')).toBeVisible();
+    await expect(pathInput).toBeFocused();
+    await expect(pathInput).toHaveValue(MOCK_MISSING_DIR);
+    await expect(filterInput).toHaveValue('ments');
+    await expect(page.locator('[data-testid="file-item"][data-name="Documents"]')).toBeVisible();
+    await expect(page.locator('[data-testid="file-item"][data-name="Downloads"]')).toHaveCount(0);
+  });
+
+  test('a folder opened from the list that fails shows a dialog and keeps the list', async ({
+    page,
+  }) => {
+    // Listing Documents fails, as it does for a folder deleted after the list was read.
+    await page.evaluate((folder: string) => {
+      const w = window as Window & {
+        __TAURI_INTERNALS__: {
+          invoke: (cmd: string, args?: { path?: string }) => Promise<unknown>;
+        };
+      };
+      const original = w.__TAURI_INTERNALS__.invoke.bind(w.__TAURI_INTERNALS__);
+      w.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
+        if (cmd === 'read_directory_streaming_command' && args?.path === folder) {
+          throw 'Path does not exist';
+        }
+        return original(cmd, args);
+      };
+    }, `${MOCK_HOME_DIR}/Documents`);
+    const documents = page.locator('[data-testid="file-item"][data-name="Documents"]');
+    await expect(documents).toBeVisible();
+    const names = await rowNames(page);
+    type LoggingWindow = Window & {
+      __TAURI_INVOKE_LOG__?: {
+        cmd: string;
+        args?: { path?: string; title?: string; message?: string };
+      }[];
+    };
+    const invokeLog = () =>
+      page.evaluate(() => (window as LoggingWindow).__TAURI_INVOKE_LOG__ ?? []);
+    const logBefore = (await invokeLog()).length;
+
+    await documents.dblclick();
+
+    // The failure shows the dialog of a navigation that was not typed.
+    await expect
+      .poll(
+        async () =>
+          (await invokeLog()).slice(logBefore).find(({ cmd }) => cmd === 'plugin:dialog|message')
+            ?.args
+      )
+      .toEqual(
+        expect.objectContaining({
+          title: 'Directory Error',
+          message: expect.stringMatching(/Documents[\s\S]*Path does not exist/),
+        })
+      );
+    const pathInput = page.locator('[data-testid="path-input"]');
+    await expect(pathInput).toHaveValue(MOCK_HOME_DIR);
+    await expect(page.getByTestId('path-bar-failure')).toHaveCount(0);
+    await expect(documents).toBeVisible();
+    await expect.poll(() => rowNames(page)).toEqual(names);
+    // A new read of the home folder would start in the effects of the frame that restored it.
+    // Two frames later it would be in the log. Its list was complete, so none starts.
+    await page.evaluate(
+      () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+    );
+    const homeReads = (await invokeLog())
+      .slice(logBefore)
+      .filter(
+        ({ cmd, args }) =>
+          cmd === 'read_directory_streaming_command' && args?.path === MOCK_HOME_DIR
+      );
+    expect(homeReads).toHaveLength(0);
+    await expect(page.getByTitle(/^Back/)).toBeDisabled();
+    await expect(page.getByTitle(/^Forward/)).toBeDisabled();
+  });
+
+  // Holds each `read_directory` call for `address` until `release` runs, so a test can act while
+  // the address is still loading. `loading` waits until one is held. Suggestion reads of its
+  // server are not held.
+  async function holdReads(page: Page, address: string) {
+    type HoldingWindow = Window & {
+      __HELD_READS__?: number;
+      __RELEASE_READS__?: () => void;
+      __TAURI_INTERNALS__: {
+        invoke: (cmd: string, args?: { path?: string }) => Promise<unknown>;
+      };
+    };
+    await page.evaluate((address: string) => {
+      const w = window as HoldingWindow;
+      const released = new Promise<void>((resolve) => {
+        w.__RELEASE_READS__ = resolve;
+      });
+      w.__HELD_READS__ = 0;
+      const original = w.__TAURI_INTERNALS__.invoke.bind(w.__TAURI_INTERNALS__);
+      w.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
+        if (cmd === 'read_directory' && args?.path === address) {
+          w.__HELD_READS__! += 1;
+          await released;
+        }
+        return original(cmd, args);
+      };
+    }, address);
+    return {
+      loading: () =>
+        expect
+          .poll(() => page.evaluate(() => (window as HoldingWindow).__HELD_READS__ ?? 0))
+          .toBeGreaterThan(0),
+      release: () => page.evaluate(() => (window as HoldingWindow).__RELEASE_READS__?.()),
+    };
+  }
+
+  test('a draft typed while a slow address fails stays', async ({ page }) => {
+    const address = `smb://${MOCK_DOWN_HOST}/share`;
+    const reads = await holdReads(page, address);
+    const pathInput = page.locator('[data-testid="path-input"]');
+    await pathInput.fill(address);
+    await pathInput.press('Enter');
+    await reads.loading();
+    await pathInput.click();
+    await page.keyboard.type('/x');
+    await reads.release();
+
+    // History holds only the home folder again once the failure is handled.
+    await expect(page.getByTitle(/^Back/)).toBeDisabled();
+    await expect(page.locator('[data-testid="file-item"][data-name="Documents"]')).toBeVisible();
+    await expect(pathInput).toHaveValue('/x');
+    await expect(pathInput).toBeFocused();
+    await expect(page.getByTestId('path-bar-failure')).toHaveCount(0);
+  });
+
+  test('a click into the bar while an address loads keeps its failure', async ({ page }) => {
+    const address = `smb://${MOCK_DOWN_HOST}/share`;
+    const reads = await holdReads(page, address);
+    const pathInput = page.locator('[data-testid="path-input"]');
+    await pathInput.fill(address);
+    await pathInput.press('Enter');
+    await reads.loading();
+    // The first click selects the whole path.
+    await pathInput.click();
+    await reads.release();
+
+    await expect(page.getByTestId('path-bar-failure')).toBeVisible();
+    await expect(pathInput).toHaveValue(address);
+    await expect(pathInput).toBeFocused();
+    // The caret sits at the end, so the next key edits the address instead of replacing it.
+    const selection = await pathInput.evaluate((el) => {
+      const input = el as HTMLInputElement;
+      return [input.selectionStart, input.selectionEnd];
+    });
+    expect(selection).toEqual([address.length, address.length]);
   });
 });

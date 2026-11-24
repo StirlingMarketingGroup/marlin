@@ -61,16 +61,25 @@ export function smbServerAndFolders(address: string): string {
 
 /**
  * Turn text a person typed into a location Marlin can open.
+ * Spaces around the text are dropped, so a pasted address reads the same as a typed one.
  * `~` is the home folder, as in a shell.
  * Windows writes a share as \\server\share\folder. Marlin opens it as smb://server/share/folder.
  * An smb: address typed with backslashes means the same thing. On Windows a \\ path is native.
+ * A password in an sftp: address is dropped: Marlin keeps sign-ins in the keychain, not in paths,
+ * logs, or the saved last folder. The user name stays, because it picks the saved server. A user
+ * name may hold an @, so the host starts after the last one.
  */
 export function resolveTypedPath(text: string, homeDir?: string): string {
-  if (homeDir && /^~($|[\\/])/.test(text)) {
-    return homeDir + text.slice(1);
+  const typed = text.trim();
+  if (homeDir && /^~($|[\\/])/.test(typed)) {
+    return homeDir + typed.slice(1);
   }
-  if (/^smb:/i.test(text) || (!getPlatform().isWindows && text.startsWith('\\\\'))) {
-    return `smb://${smbServerAndFolders(text)}`;
+  if (/^smb:/i.test(typed) || (!getPlatform().isWindows && typed.startsWith('\\\\'))) {
+    return `smb://${smbServerAndFolders(typed)}`;
   }
-  return text;
+  const sftp = /^(sftp:\/\/)([^/]*)@(.*)$/i.exec(typed);
+  if (sftp && sftp[2].includes(':')) {
+    return `${sftp[1]}${sftp[2].slice(0, sftp[2].indexOf(':'))}@${sftp[3]}`;
+  }
+  return typed;
 }

@@ -43,7 +43,9 @@ export default function FilterInput() {
   const matchCount = filteredFiles.length;
 
   useEffect(() => {
-    if (showFilterInput && inputRef.current) {
+    // A failed path bar address brings back the box of the folder it left, but the user is
+    // fixing the address, so the path bar keeps the focus.
+    if (showFilterInput && inputRef.current && !useAppStore.getState().failedAddress) {
       inputRef.current.focus();
       // No select: the box opens with one typed character, or empty from the shortcut.
     }

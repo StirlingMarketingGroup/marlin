@@ -14,6 +14,7 @@ import {
   SquaresFour,
   List,
   Folder,
+  WarningCircle,
   ArrowUp,
   ArrowClockwise,
   Minus,
@@ -52,6 +53,8 @@ export default function PathBar() {
   const {
     currentPath,
     navigateTo,
+    failedAddress,
+    clearFailedAddress,
     showZoomSliderNow,
     scheduleHideZoomSlider,
     showZoomSlider,
@@ -90,6 +93,9 @@ export default function PathBar() {
 
   const inputRef = useRef<HTMLInputElement>(null);
   const suggestionListRef = useRef<HTMLDivElement>(null);
+  // True from the user's first change to the text until they leave the bar. A failed address
+  // that comes back meanwhile leaves their draft alone.
+  const editedRef = useRef(false);
   const [currentDirMeta, setCurrentDirMeta] = useState<FileItem | null>(null);
   const windowRef = useRef(getCurrentWindow());
   const startNativeDrag = useDragStore((state) => state.startNativeDrag);
@@ -167,6 +173,13 @@ export default function PathBar() {
     globalPreferences.showHidden,
   ]);
 
+  // The reason belongs to the text that failed, so it hides once the text changes. It sits
+  // where the suggestion list opens, so it also hides while suggestions show.
+  const failure =
+    isFocused && failedAddress?.text === editPath && suggestions.length === 0
+      ? failedAddress
+      : null;
+
   const closeSuggestions = useCallback(() => {
     setQuery(null);
     setActiveSuggestion(-1);
@@ -201,6 +214,7 @@ export default function PathBar() {
   };
 
   const completeWith = (suggestion: PathSuggestion) => {
+    editedRef.current = true;
     setEditPath(suggestion.value);
     suggestFor(suggestion.value);
   };
@@ -217,11 +231,14 @@ export default function PathBar() {
     // Keep the draft for when the user comes back.
     if (document.activeElement === inputRef.current) return;
     setIsFocused(false);
+    editedRef.current = false;
     setEditPath(currentPath);
+    clearFailedAddress();
   };
 
   const handleInputChange = (e: ChangeEvent<HTMLInputElement>) => {
     const text = e.target.value;
+    editedRef.current = true;
     setEditPath(text);
     // A suggestion completes the end of the text, so it can never replace what follows the caret.
     if (e.target.selectionStart === text.length) {
@@ -285,21 +302,32 @@ export default function PathBar() {
     if (e.key === 'Enter') {
       // The path bar owns this Enter. The blur below would let the window handler take it for the files.
       e.stopPropagation();
-      navigateTo(suggestions[activeSuggestion]?.value ?? editPath);
-      // The files the person asked for take the focus. The blur closes the list and shows the real path.
+      const target = suggestions[activeSuggestion]?.value ?? editPath;
+      // The files the person asked for take the focus. The blur closes the list and drops the
+      // draft, so it goes first: a failure puts the text back.
       inputRef.current?.blur();
+      navigateTo(target, { typed: true });
     } else if (e.key === 'Escape') {
       setEditPath(currentPath);
       // A listing still on its way must not open a list under the restored path.
       closeSuggestions();
+      clearFailedAddress();
     }
   };
 
-  // Keep the input in sync if navigation occurs elsewhere
+  // The bar follows the current path. After a typed address fails, it shows that text again,
+  // focused, with the caret at its end, so one wrong character can be fixed without typing the
+  // whole address again. A draft the user started while the address loaded is theirs, and stays.
   useEffect(() => {
-    setEditPath(currentPath);
+    if (failedAddress && editedRef.current) return;
+    setEditPath(failedAddress?.text ?? currentPath);
     closeSuggestions();
-  }, [currentPath, closeSuggestions]);
+    if (!failedAddress) return;
+    const input = inputRef.current;
+    input?.focus();
+    // An input that already had the focus keeps its old selection, so the caret is placed here.
+    input?.setSelectionRange(failedAddress.text.length, failedAddress.text.length);
+  }, [currentPath, failedAddress, closeSuggestions]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -318,9 +346,16 @@ export default function PathBar() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [isMacPlatform]);
 
-  // Typing or pasting right after a click or the shortcut replaces the whole path.
+  // Typing or pasting right after a click or the shortcut replaces the whole path. A failed
+  // address gets the caret at its end instead, so the next key edits it rather than replacing it.
   useEffect(() => {
-    if (isFocused) inputRef.current?.select();
+    const input = inputRef.current;
+    if (!isFocused || !input) return;
+    if (useAppStore.getState().failedAddress) {
+      input.setSelectionRange(input.value.length, input.value.length);
+    } else {
+      input.select();
+    }
   }, [isFocused]);
 
   useEffect(() => {
@@ -594,9 +629,11 @@ export default function PathBar() {
               e.currentTarget.focus();
             }
           }}
-          className="w-full input-field pl-10"
+          className={`w-full input-field pl-10${failure ? ' border-app-red focus:border-app-red' : ''}`}
           placeholder="Enter path..."
           data-testid="path-input"
+          aria-invalid={failure !== null}
+          aria-describedby={failure ? 'path-bar-failure' : undefined}
           data-tauri-drag-region={false}
           autoComplete="off"
           autoCorrect="off"
@@ -628,6 +665,19 @@ export default function PathBar() {
                 {suggestion.display}
               </button>
             ))}
+          </div>
+        )}
+        {failure && (
+          <div
+            id="path-bar-failure"
+            role="alert"
+            data-testid="path-bar-failure"
+            // A press on the message must not take the focus from the input, which would drop the address.
+            onMouseDown={(event) => event.preventDefault()}
+            className="absolute left-0 right-0 top-full mt-1 flex items-start gap-2.5 rounded-md border border-app-red/60 bg-app-gray pl-2.5 pr-3 py-1.5 text-sm text-app-text shadow-lg z-30"
+          >
+            <WarningCircle className="w-5 h-5 shrink-0 text-app-red" weight="fill" />
+            <span className="min-w-0 whitespace-pre-wrap break-words">{failure.reason}</span>
           </div>
         )}
       </div>
