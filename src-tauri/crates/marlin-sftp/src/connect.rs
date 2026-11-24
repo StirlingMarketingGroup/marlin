@@ -139,7 +139,10 @@ pub async fn connect(
     creds: &SftpServerCredentials,
     known_hosts: &Path,
 ) -> Result<SftpSession, ConnectError> {
-    let (_session, stream) = open_sftp_channel(hostname, port, creds, known_hosts).await?;
+    let saved_host_keys =
+        host_key::saved_host_keys(hostname, port, known_hosts).map_err(ConnectError::Failed)?;
+    let (_session, stream) =
+        open_sftp_channel(hostname, port, creds, known_hosts, saved_host_keys).await?;
     SftpSession::new(stream)
         .await
         .map_err(|e| ConnectError::Failed(format!("Failed to initialize SFTP session: {}", e)))
@@ -151,9 +154,8 @@ pub(crate) async fn open_sftp_channel(
     port: u16,
     creds: &SftpServerCredentials,
     known_hosts: &Path,
+    saved_host_keys: Vec<PublicKey>,
 ) -> Result<(client::Handle<SshHandler>, ChannelStream<client::Msg>), ConnectError> {
-    let saved_host_keys =
-        host_key::saved_host_keys(hostname, port, known_hosts).map_err(ConnectError::Failed)?;
     let config = client::Config {
         preferred: russh::Preferred {
             key: host_key::preferred_host_key_algorithms(&saved_host_keys).into(),

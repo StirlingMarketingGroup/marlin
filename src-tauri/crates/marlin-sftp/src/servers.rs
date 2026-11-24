@@ -149,6 +149,37 @@ fn delete_password(hostname: &str, port: u16, username: &str) -> Result<(), Stri
     }
 }
 
+/// Parses `<user>@<host>` or `<user>@<host>:<port>` into the user, the host, and the port (22 when none is given).
+/// This is the authority of an `sftp://` URI and the account of an SFTP mount.
+pub fn parse_authority(authority: &str) -> Result<(String, String, u16), String> {
+    let (user_part, host_part) = authority.rsplit_once('@').ok_or_else(|| {
+        format!(
+            "SFTP authority must include username: user@host (got '{}')",
+            authority
+        )
+    })?;
+
+    let username = user_part.to_string();
+    if username.is_empty() {
+        return Err("SFTP username cannot be empty".to_string());
+    }
+
+    let (hostname, port) = if let Some((h, p)) = host_part.rsplit_once(':') {
+        let port: u16 = p
+            .parse()
+            .map_err(|_| format!("Invalid port number: {}", p))?;
+        (h.to_string(), port)
+    } else {
+        (host_part.to_string(), 22)
+    };
+
+    if hostname.is_empty() {
+        return Err("SFTP hostname cannot be empty".to_string());
+    }
+
+    Ok((username, hostname, port))
+}
+
 /// The default servers file. Reading it creates nothing.
 pub fn servers_path() -> Result<PathBuf, String> {
     let config_dir =
@@ -323,6 +354,27 @@ pub fn remove_server(servers: &Path, hostname: &str, port: u16) -> Result<(), St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_authority_without_a_port_is_port_22() {
+        let (user, host, port) = parse_authority("demo@test.rebex.net").unwrap();
+        assert_eq!(user, "demo");
+        assert_eq!(host, "test.rebex.net");
+        assert_eq!(port, 22);
+    }
+
+    #[test]
+    fn an_authority_with_a_port_keeps_it() {
+        let (user, host, port) = parse_authority("admin@192.168.1.1:2222").unwrap();
+        assert_eq!(user, "admin");
+        assert_eq!(host, "192.168.1.1");
+        assert_eq!(port, 2222);
+    }
+
+    #[test]
+    fn an_authority_without_a_user_is_refused() {
+        assert!(parse_authority("host.com").is_err());
+    }
 
     fn servers_file(dir: &std::path::Path) -> PathBuf {
         dir.join("marlin").join("sftp-servers.json")

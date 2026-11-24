@@ -7,6 +7,7 @@ use crate::locations::{
 };
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
+use marlin_sftp::parse_authority;
 
 #[derive(Default)]
 pub struct SftpProvider;
@@ -29,7 +30,7 @@ impl LocationProvider for SftpProvider {
             .authority()
             .ok_or_else(|| "SFTP path requires server: sftp://user@host:port/path".to_string())?;
 
-        let (username, hostname, port) = parse_sftp_authority(authority)?;
+        let (username, hostname, port) = parse_authority(authority)?;
         let path = location.path().to_string();
         let remote_path = if path.is_empty() || path == "/" {
             "/"
@@ -127,7 +128,7 @@ impl LocationProvider for SftpProvider {
             .authority()
             .ok_or_else(|| "SFTP path requires server".to_string())?;
 
-        let (username, hostname, port) = parse_sftp_authority(authority)?;
+        let (username, hostname, port) = parse_authority(authority)?;
         let remote_path = location.path().to_string();
 
         if remote_path == "/" || remote_path.is_empty() {
@@ -210,7 +211,7 @@ impl LocationProvider for SftpProvider {
         let authority = location
             .authority()
             .ok_or_else(|| "SFTP path requires server".to_string())?;
-        let (_username, hostname, port) = parse_sftp_authority(authority)?;
+        let (_username, hostname, port) = parse_authority(authority)?;
         let remote_path = location.path().to_string();
 
         let sftp = pool::get_sftp_session(&hostname, port).await?;
@@ -225,7 +226,7 @@ impl LocationProvider for SftpProvider {
         let authority = location
             .authority()
             .ok_or_else(|| "SFTP path requires server".to_string())?;
-        let (_username, hostname, port) = parse_sftp_authority(authority)?;
+        let (_username, hostname, port) = parse_authority(authority)?;
         let remote_path = location.path().to_string();
 
         let sftp = pool::get_sftp_session(&hostname, port).await?;
@@ -254,8 +255,8 @@ impl LocationProvider for SftpProvider {
             .authority()
             .ok_or_else(|| "SFTP path requires server".to_string())?;
 
-        let (_from_user, from_host, from_port) = parse_sftp_authority(from_authority)?;
-        let (_to_user, to_host, to_port) = parse_sftp_authority(to_authority)?;
+        let (_from_user, from_host, from_port) = parse_authority(from_authority)?;
+        let (_to_user, to_host, to_port) = parse_authority(to_authority)?;
 
         if from_host != to_host || from_port != to_port {
             return Err("Cannot rename across different servers".to_string());
@@ -277,8 +278,8 @@ impl LocationProvider for SftpProvider {
             .authority()
             .ok_or_else(|| "SFTP path requires server".to_string())?;
 
-        let (_from_user, from_host, from_port) = parse_sftp_authority(from_authority)?;
-        let (_to_user, to_host, to_port) = parse_sftp_authority(to_authority)?;
+        let (_from_user, from_host, from_port) = parse_authority(from_authority)?;
+        let (_to_user, to_host, to_port) = parse_authority(to_authority)?;
 
         if from_host != to_host || from_port != to_port {
             return Err("Copying across different SFTP servers is not supported".to_string());
@@ -338,36 +339,6 @@ async fn recursive_delete(
     Ok(())
 }
 
-/// Parse authority part: "user@host:port" -> (user, host, port)
-pub fn parse_sftp_authority(authority: &str) -> Result<(String, String, u16), String> {
-    let (user_part, host_part) = authority.rsplit_once('@').ok_or_else(|| {
-        format!(
-            "SFTP authority must include username: user@host (got '{}')",
-            authority
-        )
-    })?;
-
-    let username = user_part.to_string();
-    if username.is_empty() {
-        return Err("SFTP username cannot be empty".to_string());
-    }
-
-    let (hostname, port) = if let Some((h, p)) = host_part.rsplit_once(':') {
-        let port: u16 = p
-            .parse()
-            .map_err(|_| format!("Invalid port number: {}", p))?;
-        (h.to_string(), port)
-    } else {
-        (host_part.to_string(), 22)
-    };
-
-    if hostname.is_empty() {
-        return Err("SFTP hostname cannot be empty".to_string());
-    }
-
-    Ok((username, hostname, port))
-}
-
 /// Parse a full SFTP URL: "sftp://user@host:port/path" -> (user, host, port, path)
 pub fn parse_sftp_url(url: &str) -> Result<(String, String, u16, String), String> {
     let remainder = url
@@ -381,7 +352,7 @@ pub fn parse_sftp_url(url: &str) -> Result<(String, String, u16, String), String
         (remainder, "/".to_string())
     };
 
-    let (username, hostname, port) = parse_sftp_authority(authority_part)?;
+    let (username, hostname, port) = parse_authority(authority_part)?;
 
     let path = if path_part.is_empty() {
         "/".to_string()
@@ -514,27 +485,6 @@ pub async fn download_sftp_file_to_temp(sftp_url: &str) -> Result<std::path::Pat
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_parse_sftp_authority_basic() {
-        let (user, host, port) = parse_sftp_authority("demo@test.rebex.net").unwrap();
-        assert_eq!(user, "demo");
-        assert_eq!(host, "test.rebex.net");
-        assert_eq!(port, 22);
-    }
-
-    #[test]
-    fn test_parse_sftp_authority_with_port() {
-        let (user, host, port) = parse_sftp_authority("admin@192.168.1.1:2222").unwrap();
-        assert_eq!(user, "admin");
-        assert_eq!(host, "192.168.1.1");
-        assert_eq!(port, 2222);
-    }
-
-    #[test]
-    fn test_parse_sftp_authority_missing_user() {
-        assert!(parse_sftp_authority("host.com").is_err());
-    }
 
     #[test]
     fn test_parse_sftp_url_basic() {
