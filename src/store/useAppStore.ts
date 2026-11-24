@@ -2411,7 +2411,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     const { selectedFiles, files, currentPath } = get();
     if (!selectedFiles || selectedFiles.length === 0) return;
 
-    // Filter out directories (v1 limitation)
+    // Only files can be copied to the clipboard.
     const fileMap = new Map(files.map((f) => [f.path, f]));
     const filePaths = selectedFiles.filter((path) => {
       const file = fileMap.get(path);
@@ -2472,9 +2472,10 @@ export const useAppStore = create<AppState>((set, get) => ({
     } catch (error) {
       if (downloadToastId) useToastStore.getState().removeToast(downloadToastId);
       console.error('Failed to copy files:', error);
+      const errorMessage = error instanceof Error ? error.message : String(error);
       useToastStore.getState().addToast({
         type: 'error',
-        message: 'Failed to copy files to clipboard.',
+        message: `Failed to copy files to clipboard: ${errorMessage}`,
         duration: 5000,
       });
     }
@@ -2484,7 +2485,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     const { selectedFiles, files, currentPath } = get();
     if (!selectedFiles || selectedFiles.length === 0) return;
 
-    // Filter out directories (v1 limitation)
+    // Only files can be cut to the clipboard.
     const fileMap = new Map(files.map((f) => [f.path, f]));
     const filePaths = selectedFiles.filter((path) => {
       const file = fileMap.get(path);
@@ -2545,9 +2546,10 @@ export const useAppStore = create<AppState>((set, get) => ({
     } catch (error) {
       if (downloadToastId) useToastStore.getState().removeToast(downloadToastId);
       console.error('Failed to cut files:', error);
+      const errorMessage = error instanceof Error ? error.message : String(error);
       useToastStore.getState().addToast({
         type: 'error',
-        message: 'Failed to cut files to clipboard.',
+        message: `Failed to cut files to clipboard: ${errorMessage}`,
         duration: 5000,
       });
     }

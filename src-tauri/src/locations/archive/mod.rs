@@ -63,27 +63,6 @@ fn extension_for_name(name: &str) -> Option<String> {
         .map(|s| s.to_ascii_lowercase())
 }
 
-fn archive_extension_from_path(path: &str) -> Option<String> {
-    let lower = path.to_ascii_lowercase();
-    // Check compound extensions first so nested archives resolve correctly.
-    const PATTERNS: [&str; 11] = [
-        ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tbz", ".tar.xz", ".txz", ".tar.zst", ".tzst",
-        ".tar", ".zip",
-    ];
-    for pattern in PATTERNS.iter() {
-        if lower.ends_with(pattern) {
-            return Some(pattern.trim_start_matches('.').to_string());
-        }
-    }
-    if lower.ends_with(".rar") {
-        return Some("rar".to_string());
-    }
-    Path::new(path)
-        .extension()
-        .and_then(|s| s.to_str())
-        .map(|s| s.to_string())
-}
-
 fn entry_to_file_item(entry: ArchiveEntry, src: &str) -> FileItem {
     let extension = if entry.is_directory {
         None
@@ -142,10 +121,7 @@ async fn resolve_non_archive_source(src: &str) -> Result<PathBuf, String> {
                 .ok_or_else(|| "Google Drive path missing account".to_string())?;
             let path = location.path().to_string();
             let file_id = get_file_id_by_path(email, &path).await?;
-            let file_name = Path::new(&path)
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("archive");
+            let file_name = path.rsplit('/').next().unwrap_or_default();
             let temp_path = download_file_to_temp(email, &file_id, file_name).await?;
             Ok(PathBuf::from(temp_path))
         }
@@ -176,57 +152,49 @@ async fn resolve_archive_source(src: &str) -> Result<PathBuf, String> {
     let mut resolved_path = resolve_non_archive_source(&current_src).await?;
 
     while let Some(nested) = nested_stack.pop() {
-        let extension = archive_extension_from_path(&nested.path);
-        let cache_key = format!("{}::{}", nested.src, nested.path);
-        let cache_path = cache::cached_path_for_key(&cache_key, extension.as_deref())?;
-
-        if cache::is_cache_fresh(&cache_path) {
-            resolved_path = cache_path;
-            continue;
-        }
-
-        let _lock = cache::acquire_lock(&cache_path)?;
-        let archive_clone = resolved_path.clone();
-        let path_clone = nested.path.clone();
-        let cache_clone = cache_path.clone();
-
-        let extracted = spawn_blocking(move || {
-            reader::extract_entry_to_path(&archive_clone, &path_clone, &cache_clone)
-        })
-        .await
-        .map_err(|e| format!("Task join error: {e}"))??;
-
-        let _ = cache::prune_cache_debounced(cache::cache_ttl());
-        resolved_path = extracted;
+        resolved_path = extract_to_cache(resolved_path, &nested).await?;
     }
 
     Ok(resolved_path)
 }
 
-pub async fn extract_archive_entry_to_temp(archive_uri: &str) -> Result<PathBuf, String> {
-    let archive_location = parse_archive_uri(archive_uri)?;
-    let archive_path = resolve_archive_source(&archive_location.src).await?;
-    let extension = archive_extension_from_path(&archive_location.path);
-    let cache_key = format!("{}::{}", archive_location.src, archive_location.path);
-    let cache_path = cache::cached_path_for_key(&cache_key, extension.as_deref())?;
+/// Extract the entry `location` names from the archive file `archive_path` into the cache, or reuse the cached copy while it is fresh.
+async fn extract_to_cache(
+    archive_path: PathBuf,
+    location: &ArchiveLocation,
+) -> Result<PathBuf, String> {
+    let cache_key = format!("{}::{}", location.src, location.path);
+    let cache_path = cache::cached_path_for_key(
+        &cache_key,
+        location.path.rsplit('/').next().unwrap_or_default(),
+    )?;
 
     if cache::is_cache_fresh(&cache_path) {
         return Ok(cache_path);
     }
 
     let _lock = cache::acquire_lock(&cache_path)?;
-    let archive_clone = archive_path.clone();
-    let path_clone = archive_location.path.clone();
-    let cache_clone = cache_path.clone();
-
+    let internal_path = location.path.clone();
     let extracted = spawn_blocking(move || {
-        reader::extract_entry_to_path(&archive_clone, &path_clone, &cache_clone)
+        reader::extract_entry_to_path(&archive_path, &internal_path, &cache_path)
     })
     .await
     .map_err(|e| format!("Task join error: {e}"))??;
+    // RAR extraction keeps the archived time, and the cache judges an entry by its modified time.
+    std::fs::set_times(
+        &extracted,
+        std::fs::FileTimes::new().set_modified(std::time::SystemTime::now()),
+    )
+    .map_err(|e| format!("Failed to date the extracted entry: {e}"))?;
 
     let _ = cache::prune_cache_debounced(cache::cache_ttl());
     Ok(extracted)
+}
+
+pub async fn extract_archive_entry_to_temp(archive_uri: &str) -> Result<PathBuf, String> {
+    let archive_location = parse_archive_uri(archive_uri)?;
+    let archive_path = resolve_archive_source(&archive_location.src).await?;
+    extract_to_cache(archive_path, &archive_location).await
 }
 
 #[derive(Default)]
@@ -315,4 +283,59 @@ impl LocationProvider for ArchiveProvider {
 
 pub fn prune_archive_cache_on_startup() -> Result<(), String> {
     cache::prune_cache_on_startup()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_archive_uri, extract_archive_entry_to_temp};
+    use std::io::Write;
+
+    #[tokio::test]
+    async fn extract_archive_entry_to_temp_keeps_the_entry_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let zip_path = dir.path().join("sample.zip");
+        let file = std::fs::File::create(&zip_path).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        writer.start_file("docs/.env", options).unwrap();
+        writer.write_all(b"SECRET=1\n").unwrap();
+        writer.finish().unwrap();
+
+        let uri = build_archive_uri(zip_path.to_str().unwrap(), "docs/.env");
+        let extracted = extract_archive_entry_to_temp(&uri).await.unwrap();
+        assert_eq!(
+            extracted.file_name().and_then(|name| name.to_str()),
+            Some(".env")
+        );
+        assert_eq!(std::fs::read_to_string(&extracted).unwrap(), "SECRET=1\n");
+
+        let _ = std::fs::remove_dir_all(extracted.parent().unwrap());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn an_extracted_entry_is_dated_now() {
+        // A copy of the fixture, so no earlier run's cache entry answers.
+        let dir = tempfile::tempdir().unwrap();
+        let rar = dir.path().join("sample.rar");
+        std::fs::copy(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rar/sample.rar"),
+            &rar,
+        )
+        .unwrap();
+
+        let uri = build_archive_uri(rar.to_str().unwrap(), "/folder/inner.txt");
+        let extracted = extract_archive_entry_to_temp(&uri).await.unwrap();
+        let modified = std::fs::metadata(&extracted).unwrap().modified().unwrap();
+        let age = std::time::SystemTime::now()
+            .duration_since(modified)
+            .unwrap();
+        assert!(
+            age < std::time::Duration::from_secs(60),
+            "dated {age:?} ago"
+        );
+
+        let _ = std::fs::remove_dir_all(extracted.parent().unwrap());
+    }
 }

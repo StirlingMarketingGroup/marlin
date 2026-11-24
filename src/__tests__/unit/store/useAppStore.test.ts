@@ -2126,6 +2126,49 @@ describe('useAppStore', () => {
     });
   });
 
+  describe('copySelectedFiles', () => {
+    it('shows why a copy failed', async () => {
+      const entry = fileItem({
+        name: 'b.iso',
+        path: buildArchiveUri('/test/bundle.zip', '/b.iso'),
+      });
+      useAppStore.setState({ files: [entry], selectedFiles: [entry.path] });
+      mockInvoke.mockImplementation((cmd: string) =>
+        cmd === 'download_and_copy_to_clipboard'
+          ? Promise.reject('Archive entry too large')
+          : Promise.resolve(undefined)
+      );
+
+      await useAppStore.getState().copySelectedFiles();
+
+      expect(useToastStore.getState().toasts.map((item) => item.message)).toContain(
+        'Failed to copy files to clipboard: Archive entry too large'
+      );
+    });
+  });
+
+  describe('cutSelectedFiles', () => {
+    it('shows why a cut was refused', async () => {
+      const entry = fileItem({
+        name: 'b.txt',
+        path: buildArchiveUri('/test/bundle.zip', '/b.txt'),
+      });
+      useAppStore.setState({ files: [entry], selectedFiles: [entry.path] });
+      mockInvoke.mockImplementation((cmd: string) =>
+        cmd === 'download_and_copy_to_clipboard'
+          ? Promise.reject('Files inside an archive cannot be cut. Copy them instead.')
+          : Promise.resolve(undefined)
+      );
+
+      await useAppStore.getState().cutSelectedFiles();
+
+      expect(useToastStore.getState().toasts.map((item) => item.message)).toContain(
+        'Failed to cut files to clipboard: Files inside an archive cannot be cut. Copy them instead.'
+      );
+      expect(useAppStore.getState().clipboardPaths).toEqual([]);
+    });
+  });
+
   describe('openItem', () => {
     it('opens a macOS bundle with the shell instead of navigating into it', async () => {
       const bundle = fileItem({

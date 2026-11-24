@@ -68,16 +68,12 @@ impl ThumbnailGenerator {
 
         if request.path.starts_with("gdrive://") {
             let (email, path) = parse_gdrive_path(&request.path)?;
-            let file_name = std::path::Path::new(&path)
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("file")
-                .to_string();
+            let file_name = path.rsplit('/').next().unwrap_or_default();
 
             let file_id =
                 crate::locations::gdrive::provider::get_file_id_by_path(&email, &path).await?;
             let temp_path = crate::locations::gdrive::provider::download_file_to_temp(
-                &email, &file_id, &file_name,
+                &email, &file_id, file_name,
             )
             .await?;
 
