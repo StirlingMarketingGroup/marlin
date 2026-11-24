@@ -5,9 +5,9 @@ use std::time::SystemTime;
 
 use fuser::{
     BsdFileFlags, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, Generation,
-    INodeNo, InitFlags, KernelConfig, LockOwner, OpenFlags, RenameFlags, ReplyAttr, ReplyCreate,
-    ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, Request,
-    TimeOrNow, WriteFlags,
+    INodeNo, InitFlags, KernelConfig, LockOwner, OpenFlags, Owner, RenameFlags, ReplyAttr,
+    ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs,
+    ReplyWrite, Request, TimeOrNow, WriteFlags,
 };
 use marlin_vfs::{Attributes, HandleId, IfExists, Kind, NodeId, Vfs};
 
@@ -16,7 +16,7 @@ use crate::Shown;
 /// The core keeps no parent for a node. This is the value libfuse sends (`FUSE_UNKNOWN_INO`) when a filesystem does not know an entry's inode.
 const UNKNOWN_INODE: INodeNo = INodeNo(0xffff_ffff);
 
-/// Serves one `Vfs` to the kernel. A callback that may reach the provider answers from a tokio task, so a slow call never holds up the `fuser` thread. `forget`, `opendir`, `readdir` past offset 0, and the two releases answer in place. They touch the core's own state, and the last writer's release also writes the file's small spool record, with no sync. `flush` is left out: every write is in the spool before it answers, so a close has nothing to flush, and after the first `ENOSYS` the kernel stops sending it. `release` starts the settle time. `mknod` is left out because the kernel uses `create` for a regular file. `fsyncdir`, `fallocate`, `copy_file_range`, `lseek`, `ioctl`, the xattr calls, and `getlk`/`setlk` are left out. `link` and `symlink` stay at `fuser`'s `EPERM`.
+/// Serves one `Vfs` to the kernel. A callback that may reach the provider answers from a tokio task, so a slow call never holds up the `fuser` thread. `forget`, `opendir`, `readdir` past offset 0, and the two releases answer in place. They touch the core's own state, and the last writer's release also writes the file's small spool record, with no sync. `flush` is left out: every write is in the spool before it answers, so a close has nothing to flush, and after the first `ENOSYS` the kernel stops sending it. `release` starts the settle time. `mknod` is left out because the kernel uses `create` for a regular file. `fsyncdir`, `fallocate`, `copy_file_range`, `lseek`, `ioctl`, the xattr calls, `getlk`/`setlk`, `statx`, `tmpfile`, and `syncfs` are left out. `link` and `symlink` stay at `fuser`'s `EPERM`.
 pub(crate) struct Fs {
     pub(crate) vfs: Arc<Vfs>,
     pub(crate) runtime: tokio::runtime::Handle,
@@ -100,6 +100,7 @@ impl Filesystem for Fs {
         _chgtime: Option<SystemTime>,
         _bkuptime: Option<SystemTime>,
         _flags: Option<BsdFileFlags>,
+        _kill_suid_gid: bool,
         reply: ReplyAttr,
     ) {
         // An open with O_TRUNC arrives as a size of 0. The core cuts a clean file to zero
@@ -122,7 +123,14 @@ impl Filesystem for Fs {
         });
     }
 
-    fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
+    fn open(
+        &self,
+        _req: &Request,
+        ino: INodeNo,
+        flags: OpenFlags,
+        _kill_suid_gid: bool,
+        reply: ReplyOpen,
+    ) {
         let access = crate::open_access(flags.0);
         let vfs = Arc::clone(&self.vfs);
         let flags = self.fopen_flags();
@@ -258,6 +266,7 @@ impl Filesystem for Fs {
         name: &OsStr,
         _mode: u32,
         _umask: u32,
+        _owner: Owner,
         reply: ReplyEntry,
     ) {
         let name = match crate::utf8_name(name.as_bytes(), crate::Name::New) {
@@ -313,6 +322,7 @@ impl Filesystem for Fs {
         newparent: INodeNo,
         newname: &OsStr,
         flags: RenameFlags,
+        _owner: Option<Owner>,
         reply: ReplyEmpty,
     ) {
         let if_exists = match if_exists(flags) {
@@ -354,6 +364,8 @@ impl Filesystem for Fs {
         _mode: u32,
         _umask: u32,
         flags: i32,
+        _kill_suid_gid: bool,
+        _owner: Owner,
         reply: ReplyCreate,
     ) {
         let name = match crate::utf8_name(name.as_bytes(), crate::Name::New) {

@@ -48,7 +48,7 @@ pub struct Mount {
     /// The path as the kernel's mount table spells it.
     mount_point: PathBuf,
 
-    /// Held so that a drop detaches the mount. `fuser` 0.18.0 cannot tell that a mount is already gone, so a drop always asks it to detach whatever FUSE mount is at the path. Drop a `Mount` before the path is used again.
+    /// Held so that a drop lazily detaches a mount that is still served. A drop can block while the session ends, for up to 5 seconds while a file is open. While the kernel connection stays open, a drop detaches whatever FUSE mount is at the path, so drop a `Mount` before the path is used again.
     _session: fuser::BackgroundSession,
 }
 
