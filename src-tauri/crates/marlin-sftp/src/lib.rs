@@ -10,6 +10,7 @@ pub use connect::{connect, ConnectError};
 pub use host_key::{known_hosts_path, trust_host_key};
 pub use provider::{Config, SftpAccount, SftpProvider, MAX_CALLS};
 pub use servers::{
-    add_server, parse_authority, remove_server, saved_servers, server_credentials, servers_path,
-    CredentialsError, Passphrase, SftpServerCredentials, SftpServerInfo, SignIn,
+    add_server, parse_authority, parse_host, remove_server, saved_server, saved_servers,
+    server_credentials, servers_path, CredentialsError, Passphrase, SftpServerCredentials,
+    SftpServerInfo, SignIn,
 };

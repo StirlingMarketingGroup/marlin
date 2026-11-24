@@ -306,6 +306,116 @@ test.describe('Path bar', () => {
       page.locator('[data-testid="file-item"][data-name="sample.pdf"]').first()
     ).toBeVisible({ timeout: 5000 });
   });
+
+  test.describe('an SFTP address with no user', () => {
+    type SftpTestWindow = Window & {
+      __SIGNED_IN__?: boolean;
+      __TAURI_INVOKE_LOG__?: { cmd: string; args?: Record<string, unknown> }[];
+      __TAURI_INTERNALS__: {
+        invoke: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
+      };
+    };
+    const invokeLog = (page: Page) =>
+      page.evaluate(() => (window as SftpTestWindow).__TAURI_INVOKE_LOG__ ?? []);
+
+    // No server is saved for 10.5.0.247, so a read of it asks for a sign-in. Once the test sets
+    // `__SIGNED_IN__`, a read lists one file as the saved user, `admin`.
+    test.beforeEach(async ({ page }) => {
+      await page.evaluate(() => {
+        const w = window as SftpTestWindow;
+        const original = w.__TAURI_INTERNALS__.invoke.bind(w.__TAURI_INTERNALS__);
+        w.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
+          const path = String(args?.path ?? '');
+          if (cmd !== 'read_directory' || !path.startsWith('sftp://')) return original(cmd, args);
+          const url = new URL(path);
+          if (url.hostname !== '10.5.0.247') return original(cmd, args);
+          const port = Number(url.port || 22);
+          if (!w.__SIGNED_IN__) {
+            throw `[SFTP_NO_CREDENTIALS] No credentials stored for server: 10.5.0.247:${port}`;
+          }
+          const folder = url.pathname || '/';
+          const raw = `sftp://admin@10.5.0.247:${port}${folder}`;
+          return {
+            entries: [
+              {
+                name: 'report.txt',
+                path: `${raw}/report.txt`,
+                is_directory: false,
+                is_hidden: false,
+                is_symlink: false,
+                is_git_repo: false,
+                size: 128,
+                modified: new Date().toISOString(),
+                created: new Date().toISOString(),
+                extension: 'txt',
+                permissions: { read: true, write: true, execute: false },
+              },
+            ],
+            location: {
+              scheme: 'sftp',
+              authority: `admin@10.5.0.247:${port}`,
+              path: folder,
+              displayPath: raw,
+              raw,
+            },
+            capabilities: { canCreate: true, canDelete: true, canRename: true },
+          };
+        };
+      });
+    });
+
+    test('opens the connect window with the host and port 22, and no dialog', async ({ page }) => {
+      const pathInput = page.locator('[data-testid="path-input"]');
+      await pathInput.fill('sftp://10.5.0.247');
+      await pathInput.press('Enter');
+
+      await expect
+        .poll(
+          async () =>
+            (await invokeLog(page)).find(({ cmd }) => cmd === 'open_sftp_connect_window')?.args
+        )
+        .toEqual({
+          initialHostname: '10.5.0.247',
+          initialPort: 22,
+          initialUsername: undefined,
+          targetPath: 'sftp://10.5.0.247',
+        });
+      expect((await invokeLog(page)).some(({ cmd }) => cmd === 'plugin:dialog|message')).toBe(
+        false
+      );
+      await expect(page.getByTestId('path-bar-failure')).toHaveCount(0);
+      await expect(page.locator('[data-testid="file-item"][data-name="Documents"]')).toBeVisible();
+    });
+
+    test('opens the typed folder after the window connects', async ({ page }) => {
+      const targetPath = 'sftp://10.5.0.247:2222/some/folder';
+      const pathInput = page.locator('[data-testid="path-input"]');
+      await pathInput.fill(targetPath);
+      await pathInput.press('Enter');
+
+      await expect
+        .poll(
+          async () =>
+            (await invokeLog(page)).find(({ cmd }) => cmd === 'open_sftp_connect_window')?.args
+        )
+        .toEqual(expect.objectContaining({ initialPort: 2222, targetPath }));
+
+      await page.evaluate(
+        (payload) => {
+          const w = window as SftpTestWindow;
+          w.__SIGNED_IN__ = true;
+          return w.__TAURI_INTERNALS__.invoke('plugin:event|emit', {
+            event: 'sftp-connect:success',
+            payload,
+          });
+        },
+        { hostname: '10.5.0.247', port: 2222, username: 'admin', targetPath }
+      );
+
+      await expect(page.locator('[data-testid="file-item"][data-name="report.txt"]')).toBeVisible();
+      await expect(pathInput).toHaveValue('sftp://admin@10.5.0.247:2222/some/folder');
+    });
+  });
 });
 
 test.describe('Path bar: an address that cannot be opened', () => {

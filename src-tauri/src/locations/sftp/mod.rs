@@ -15,6 +15,17 @@ use tokio::io::AsyncWriteExt;
 #[derive(Default)]
 pub struct SftpProvider;
 
+/// The user, host, and port of an `sftp://` address. An address with no user (`sftp://host/path`) takes the user of the server saved for its host and port. With none saved, the error carries the `[SFTP_NO_CREDENTIALS]` tag, so the app opens the connect window with the host and port filled in.
+fn address_account(authority: &str) -> Result<(String, String, u16), String> {
+    if authority.contains('@') {
+        return parse_authority(authority);
+    }
+    let (hostname, port) = marlin_sftp::parse_host(authority)?;
+    let server = marlin_sftp::saved_server(&marlin_sftp::servers_path()?, &hostname, port)
+        .map_err(|e| e.to_string())?;
+    Ok((server.username, hostname, port))
+}
+
 #[async_trait]
 impl LocationProvider for SftpProvider {
     fn scheme(&self) -> &'static str {
@@ -31,9 +42,9 @@ impl LocationProvider for SftpProvider {
     ) -> Result<ProviderDirectoryEntries, String> {
         let authority = location
             .authority()
-            .ok_or_else(|| "SFTP path requires server: sftp://user@host:port/path".to_string())?;
+            .ok_or_else(|| "SFTP path requires server: sftp://host/path".to_string())?;
 
-        let (username, hostname, port) = parse_authority(authority)?;
+        let (username, hostname, port) = address_account(authority)?;
         let path = location.path().to_string();
         let remote_path = if path.is_empty() || path == "/" {
             "/"
@@ -131,7 +142,7 @@ impl LocationProvider for SftpProvider {
             .authority()
             .ok_or_else(|| "SFTP path requires server".to_string())?;
 
-        let (username, hostname, port) = parse_authority(authority)?;
+        let (username, hostname, port) = address_account(authority)?;
         let remote_path = location.path().to_string();
 
         if remote_path == "/" || remote_path.is_empty() {

@@ -149,6 +149,24 @@ fn delete_password(hostname: &str, port: u16, username: &str) -> Result<(), Stri
     }
 }
 
+/// Parses `<host>` or `<host>:<port>`, the part of an authority after the user, into the host and the port (22 when none is given).
+pub fn parse_host(host: &str) -> Result<(String, u16), String> {
+    let (hostname, port) = if let Some((h, p)) = host.rsplit_once(':') {
+        let port: u16 = p
+            .parse()
+            .map_err(|_| format!("Invalid port number: {}", p))?;
+        (h.to_string(), port)
+    } else {
+        (host.to_string(), 22)
+    };
+
+    if hostname.is_empty() {
+        return Err("SFTP hostname cannot be empty".to_string());
+    }
+
+    Ok((hostname, port))
+}
+
 /// Parses `<user>@<host>` or `<user>@<host>:<port>` into the user, the host, and the port (22 when none is given).
 /// This is the authority of an `sftp://` URI and the account of an SFTP mount.
 pub fn parse_authority(authority: &str) -> Result<(String, String, u16), String> {
@@ -164,19 +182,7 @@ pub fn parse_authority(authority: &str) -> Result<(String, String, u16), String>
         return Err("SFTP username cannot be empty".to_string());
     }
 
-    let (hostname, port) = if let Some((h, p)) = host_part.rsplit_once(':') {
-        let port: u16 = p
-            .parse()
-            .map_err(|_| format!("Invalid port number: {}", p))?;
-        (h.to_string(), port)
-    } else {
-        (host_part.to_string(), 22)
-    };
-
-    if hostname.is_empty() {
-        return Err("SFTP hostname cannot be empty".to_string());
-    }
-
+    let (hostname, port) = parse_host(host_part)?;
     Ok((username, hostname, port))
 }
 
@@ -237,22 +243,31 @@ fn save_servers(path: &Path, servers: &[SftpServerInfo]) -> Result<(), String> {
     Ok(())
 }
 
-/// Credentials for one saved server.
-pub fn server_credentials(
+/// The saved server for this host and port. A host name matches in any letter case.
+pub fn saved_server(
     servers: &Path,
     hostname: &str,
     port: u16,
-) -> Result<SftpServerCredentials, CredentialsError> {
+) -> Result<SftpServerInfo, CredentialsError> {
     let mut list = saved_servers(servers).map_err(CredentialsError::Failed)?;
 
-    let server = position(&list, hostname, port)
+    position(&list, hostname, port)
         .map(|index| list.swap_remove(index))
         .ok_or_else(|| {
             CredentialsError::NotSaved(format!(
                 "{} No credentials stored for server: {}:{}",
                 NO_CREDENTIALS_TAG, hostname, port
             ))
-        })?;
+        })
+}
+
+/// Credentials for one saved server.
+pub fn server_credentials(
+    servers: &Path,
+    hostname: &str,
+    port: u16,
+) -> Result<SftpServerCredentials, CredentialsError> {
+    let server = saved_server(servers, hostname, port)?;
 
     let sign_in = match server.auth_method.as_str() {
         "password" => SignIn::Password(get_password(
@@ -374,6 +389,55 @@ mod tests {
     #[test]
     fn an_authority_without_a_user_is_refused() {
         assert!(parse_authority("host.com").is_err());
+    }
+
+    #[test]
+    fn a_host_without_a_port_is_port_22() {
+        assert_eq!(
+            parse_host("10.5.0.247").unwrap(),
+            ("10.5.0.247".to_string(), 22)
+        );
+    }
+
+    #[test]
+    fn a_host_with_a_port_keeps_it() {
+        assert_eq!(
+            parse_host("files.example:2222").unwrap(),
+            ("files.example".to_string(), 2222)
+        );
+    }
+
+    #[test]
+    fn an_empty_host_and_a_bad_port_are_refused() {
+        assert!(parse_host("").is_err());
+        assert!(parse_host("host:abc").is_err());
+    }
+
+    #[test]
+    fn saved_server_matches_the_host_in_any_letter_case_and_the_port() {
+        marlin_test_keychain::install();
+        let dir = tempfile::tempdir().unwrap();
+        let path = servers_file(dir.path());
+        add_server(
+            &path,
+            "files.example".to_string(),
+            2222,
+            "deploy".to_string(),
+            None,
+            "agent".to_string(),
+            None,
+        )
+        .unwrap();
+
+        let server = saved_server(&path, "FILES.example", 2222).unwrap();
+        assert_eq!(server.username, "deploy");
+
+        match saved_server(&path, "files.example", 22) {
+            Err(CredentialsError::NotSaved(text)) => {
+                assert!(text.starts_with("[SFTP_NO_CREDENTIALS] "), "{text}");
+            }
+            other => panic!("expected no saved server, got {other:?}"),
+        }
     }
 
     fn servers_file(dir: &std::path::Path) -> PathBuf {
