@@ -41,10 +41,10 @@ function columnCount(browser: Browser): Promise<number> {
   });
 }
 
-// Grouping characters in the count depend on the locale.
+// The status bar's Files title is the count. Grouping characters depend on the locale.
 async function fileCount(browser: Browser): Promise<number> {
-  const text = await browser.$('//span[text()="Files"]/following-sibling::span').getText();
-  return Number(text.replace(/\D/g, ''));
+  const title = await browser.$('//div[@title][span[text()="Files"]]').getAttribute('title');
+  return Number((title ?? '').replace(/\D/g, ''));
 }
 
 // The listing streams in batches of 100 from Rust, and both views are virtual, so a lost or
@@ -275,6 +275,22 @@ for (const view of ['grid', 'list'] as const) {
       timeout: 10_000,
       timeoutMsg: 'the view never matched the folder',
     });
+    // No row may stay faded in or out. The fade runs on animation frames, which a hidden
+    // window (a locked or covered Mac) does not run, so it is checked only while visible.
+    if (await browser.execute(() => document.visibilityState === 'visible')) {
+      await browser.waitUntil(
+        () =>
+          browser.execute(() =>
+            Array.from(document.querySelectorAll('[data-file-item="true"]')).every(
+              (row) =>
+                !row.hasAttribute('data-entering') &&
+                !row.hasAttribute('data-exiting') &&
+                getComputedStyle(row).opacity === '1'
+            )
+          ),
+        { timeout: 10_000, timeoutMsg: 'a row stayed faded in or out' }
+      );
+    }
     expect(await browser.execute(() => window.__MAX_SIDEWAYS_OVERFLOW__ ?? 0)).toBe(0);
   });
 }

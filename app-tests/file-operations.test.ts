@@ -112,7 +112,10 @@ test('a file moved to the trash comes back with undo', async () => {
     if (process.platform === 'darwin') {
       // macOS puts the app's trash in the developer's real Trash, not under the temporary
       // home, so a failed undo would leave the file there.
-      await fs.rm(path.join(os.homedir(), '.Trash', name), { force: true });
+      // Logged, not thrown: an error here would hide the test's own failure.
+      await fs
+        .rm(path.join(os.homedir(), '.Trash', name), { force: true })
+        .catch((error: unknown) => console.error(error));
     }
   }
 });
