@@ -2,7 +2,7 @@
 
 A release is built, signed, and notarized by `.github/workflows/release.yml`. Pushing a `v*` tag, or running the workflow by hand with a tag, starts it. Signing needs six Apple secrets and two Tauri updater secrets in the repository settings. The build also needs Marlin's Google OAuth client.
 
-**Covers:** `.github/workflows/release.yml`, `src-tauri/Entitlements.plist`, `src-tauri/tauri.conf.json`, `scripts/check-linux-package-libraries.mjs`, `scripts/check-bundled-licenses.mjs`, `src-tauri/build.rs`
+**Covers:** `.github/workflows/release.yml`, `src-tauri/Entitlements.plist`, `src-tauri/Info.plist`, `src-tauri/tauri.conf.json`, `scripts/check-linux-package-libraries.mjs`, `scripts/check-bundled-licenses.mjs`, `src-tauri/build.rs`
 **Checked against the code:** 2026-11-24
 
 ## What the workflow does
@@ -39,6 +39,8 @@ Both helpers are Tauri `externalBin` files in `src-tauri/binaries/`. The bundler
 `release` and `release-dry-run` repeat about 200 lines of the same setup steps. Change both when you change one.
 
 Both jobs set `MACOSX_DEPLOYMENT_TARGET` to `10.13`. `tauri build` sets that variable from `bundle.macOS.minimumSystemVersion` (default `10.13`), and the plain `cargo build` for a helper does not. When the two disagree, every crate that compiles C is rebuilt by each step. If you set `minimumSystemVersion` in `tauri.conf.json`, change the workflow value to match.
+
+Tauri merges `src-tauri/Info.plist` into the app's `Info.plist`. It holds the text macOS shows when Marlin first reaches a device on the local network: see [macOS Local Network access](location-providers.md#macos-local-network-access).
 
 A newer push cancels a running PR build, but never a `master` build. Only `master` builds save the Rust cache, and a cancelled one would save a partial cache under a key that is never written again. If a cache does get poisoned, delete it with `gh cache delete <id>` and the next `master` build saves a full one.
 

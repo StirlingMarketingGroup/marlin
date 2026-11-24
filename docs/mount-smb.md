@@ -105,6 +105,7 @@ The provider goes by the error code `marlin-smb` answers, never by the text: `ma
 | The call's thread panics                      | `Other("an SMB call stopped unexpectedly")`                                                                                                                |
 
 - **A process that dies is `Other`, not `Offline`.** A lost network answers `SMB_CONNECTION_LOST`. A process that dies in the middle of a call has crashed, and the helper counts that as `degraded`.
+- **On macOS, a call to a server its `marlin-smb` process has not reached yet waits up to 20 seconds for a Local Network answer** ([macOS Local Network access](location-providers.md#macos-local-network-access)). With no answer it is `Offline`.
 - **No text of an `Other` holds a file name, a path, a share, a host, a user name, or a password**, so the helper logs it ([Logs and secrets](mount-helper.md#logs-and-secrets)).
 - What each code means, and how `marlin-smb` tells a refused sign-in from a refused share, is in [Location providers](location-providers.md).
 
