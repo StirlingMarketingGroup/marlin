@@ -40,7 +40,7 @@ pub struct Start {
     pub binary: PathBuf,
     /// The socket the helper listens on.
     pub socket: PathBuf,
-    /// The mount folder. `None` leaves the helper's default, `~/Marlin`.
+    /// The mount folder. `None` leaves the helper's default: see [`crate::default_root`].
     pub root: Option<PathBuf>,
     /// The file that gets the helper's log lines (its stderr).
     pub log: PathBuf,

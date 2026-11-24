@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 pub const JSONRPC_VERSION: &str = "2.0";
 
 /// Protocol number the helper and the app speak. Raised when the control API changes.
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// JSON-RPC and helper error codes.
 pub mod error_codes {
@@ -33,6 +33,8 @@ pub mod error_codes {
     pub const NOT_UNSENT: i32 = -1015;
     /// A discard waited too long for the mount's other changes.
     pub const BUSY: i32 = -1016;
+    /// The mount folder holds things the helper did not put there, and no marker. The helper does not mount in it.
+    pub const MOUNT_FOLDER_TAKEN: i32 = -1017;
 }
 
 /// Control methods and the notifications the helper sends.

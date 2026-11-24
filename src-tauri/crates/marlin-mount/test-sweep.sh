@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Makes a dead mount and a live one, then checks that the helper clears only the dead one when it starts.
-# Runs on Linux or macOS, as a user who is not root. The helper cannot mount anything real yet,
+# Runs on Linux or macOS, as a user who is not root. The helper's own mounts need a real account,
 # so the mounts come from the spike programs in spikes/mount-hello.
 # Linux needs fuse3. macOS needs macFUSE 5 with both of its file system extensions turned on.
 set -euo pipefail
@@ -51,7 +51,7 @@ cleanup() {
     fi
   done
   # Only the file and the folders this script made, and never a recursive delete next to a mount.
-  rm -f "$root/files/keep.txt"
+  rm -f "$root/files/keep.txt" "$root/.marlin-mount-folder"
   rmdir "$root/dead" "$root/live" "$root/empty" "$root/files" "$root" 2>/dev/null || true
   rm -rf "$work"
 }
@@ -79,6 +79,8 @@ build_hello
 helper="${CARGO_TARGET_DIR:-$repo/src-tauri/target}/debug/marlin-mount"
 
 mkdir "$root/dead" "$root/live" "$root/empty" "$root/files"
+# The marker makes the folder the helper's; it sweeps no other folder.
+touch "$root/.marlin-mount-folder"
 echo "keep me" >"$root/files/keep.txt"
 
 echo "=== set up: a dead mount with a process inside it, and a live mount ==="
@@ -143,6 +145,11 @@ if [[ "$(cat "$root/files/keep.txt")" != "keep me" ]]; then
   exit 1
 fi
 echo "PASS: the folder that holds a file is as it was"
+if [[ ! -f "$root/.marlin-mount-folder" ]]; then
+  echo "FAIL: the marker is gone"
+  exit 1
+fi
+echo "PASS: the marker is still there"
 if ! is_mounted "$root/live" || [[ "$(cat "$root/live/hello.txt")" != "Hello from Marlin" ]]; then
   echo "FAIL: the live mount is gone or does not serve hello.txt"
   exit 1

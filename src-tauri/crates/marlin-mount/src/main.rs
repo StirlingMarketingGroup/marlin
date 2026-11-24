@@ -1,4 +1,4 @@
-//! Mount helper binary. One process per user, spoken to over a Unix socket.
+//! Mount helper binary. One process per socket, spoken to over that Unix socket.
 
 #[cfg(not(unix))]
 fn main() {
@@ -44,9 +44,8 @@ async fn main() {
     }
 
     let socket = socket.or_else(marlin_mount_client::default_socket);
-    let root = root.or_else(|| Some(dirs::home_dir()?.join("Marlin")));
-    // A data folder, never a cache folder (decision 0005, choice 10). On macOS it is the folder that holds the app's own files and the socket.
-    let spool = spool.or_else(|| Some(dirs::data_dir()?.join("marlin").join("spool")));
+    let root = root.or_else(marlin_mount_client::default_root);
+    let spool = spool.or_else(marlin_mount_client::default_spool);
     let (Some(socket), Some(root), Some(spool)) = (socket, root, spool) else {
         log::write("error", "helper.no_home_folder", serde_json::Value::Null);
         std::process::exit(1);
