@@ -142,7 +142,7 @@ The protocol has no `health` request. A helper that answers `hello` is alive, an
 
 ## Refresh and the kernel's cache
 
-`refresh` drops the core's listings and makes its stored attributes and free space stale. The kernel keeps no listing, so the next listing of a folder shows the remote at once. The kernel keeps a name and its attributes for 1 second (`TTL` in `src-tauri/crates/marlin-fuse/src/lib.rs`), so a file's new size or time can show up to 1 second later, on Linux and macOS. On Linux, bytes kept across opens are dropped once the new size or time shows ([Linux mount adapter](mount-linux.md)). The kernel test `a_refresh_shows_a_remote_change_at_once` checks a new file in the next listing, and a file's new size and bytes. It passed on Linux, in a Debian 12 container, on 2026-11-24. It has not run on macOS yet.
+`refresh` drops the core's listings and makes its stored attributes and free space stale. The kernel keeps no listing, so the next listing of a folder shows the remote at once. The kernel keeps a name and its attributes for 1 second (`TTL` in `src-tauri/crates/marlin-fuse/src/lib.rs`), so a file's new size or time can show up to 1 second later, on Linux and macOS. On Linux, bytes kept across opens are dropped once the new size or time shows ([Linux mount adapter](mount-linux.md)). The kernel test `a_refresh_shows_a_remote_change_at_once` checks a new file in the next listing, and a file's new size and bytes. It passed on 2026-11-24 on Linux, in a Debian 12 container, and on macOS 27.2 with macFUSE 5.5.0.
 
 ## The app side
 
