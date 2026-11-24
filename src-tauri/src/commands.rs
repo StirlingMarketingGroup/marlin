@@ -4601,7 +4601,7 @@ fn write_zip_from_smb_entries(
         };
 
         let result = add_to_zip();
-        let _ = fs::remove_file(&temp_path);
+        let _ = crate::locations::remove_temp_copy(&temp_path);
         result?;
 
         completed += 1;
@@ -8514,13 +8514,9 @@ async fn download_single_to_temp(path: &str) -> Result<std::path::PathBuf, Strin
 
     if path.starts_with("gdrive://") {
         let (email, decoded_path) = crate::locations::gdrive::parse_gdrive_uri(path)?;
-        let file_name = std::path::Path::new(&decoded_path)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("file")
-            .to_string();
+        let file_name = decoded_path.rsplit('/').next().unwrap_or_default();
         let file_id = get_file_id_by_path(&email, &decoded_path).await?;
-        let temp_str = download_file_to_temp(&email, &file_id, &file_name).await?;
+        let temp_str = download_file_to_temp(&email, &file_id, file_name).await?;
         Ok(PathBuf::from(temp_str))
     } else if path.starts_with("smb://") {
         let smb_path = path.to_string();
@@ -8531,6 +8527,8 @@ async fn download_single_to_temp(path: &str) -> Result<std::path::PathBuf, Strin
         .map_err(|e| format!("Task join error: {e}"))?
     } else if path.starts_with("sftp://") {
         crate::locations::sftp::download_sftp_file_to_temp(path).await
+    } else if path.starts_with("archive://") {
+        crate::locations::archive::extract_archive_entry_to_temp(path).await
     } else {
         // Already a local path — no download needed
         Ok(PathBuf::from(path))
@@ -8538,7 +8536,7 @@ async fn download_single_to_temp(path: &str) -> Result<std::path::PathBuf, Strin
 }
 
 /// Download remote files to a temp directory and copy the temp paths to the OS clipboard.
-/// This bridges remote file providers (GDrive, SMB, SFTP) with the native clipboard so
+/// This bridges remote file providers (GDrive, SMB, SFTP) and archives with the native clipboard so
 /// paste works across windows and into external apps (Finder/Explorer).
 ///
 /// Downloads run concurrently (up to 4 at a time) for better performance with multiple files.
@@ -8552,6 +8550,10 @@ pub async fn download_and_copy_to_clipboard(
         return Err("No paths provided".into());
     }
 
+    if is_cut && paths.iter().any(|path| path.starts_with("archive://")) {
+        return Err("Files inside an archive cannot be cut. Copy them instead.".into());
+    }
+
     let total = paths.len();
     let _ = app.emit(
         "clipboard:download_progress",
@@ -8560,8 +8562,11 @@ pub async fn download_and_copy_to_clipboard(
 
     // Download all files concurrently (bounded to 4 at a time to avoid overwhelming servers)
     let mut join_set = tokio::task::JoinSet::new();
+    let limit = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
     for (i, path) in paths.into_iter().enumerate() {
+        let limit = limit.clone();
         join_set.spawn(async move {
+            let _permit = limit.acquire_owned().await;
             let result = download_single_to_temp(&path).await;
             (i, result)
         });

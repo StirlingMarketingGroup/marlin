@@ -26,10 +26,8 @@ pub fn is_smb_path(path: &str) -> bool {
 }
 
 /// Parse the SMB URL and load the saved credentials for its host.
-/// Returns (hostname, share, file_path, credentials json).
-fn prepare_smb_request(
-    smb_path: &str,
-) -> Result<(String, String, String, serde_json::Value), String> {
+/// Returns (share, file_path, credentials json).
+fn prepare_smb_request(smb_path: &str) -> Result<(String, String, serde_json::Value), String> {
     use crate::locations::smb::{get_server_credentials, parse_smb_url};
 
     let (hostname, share, file_path) = parse_smb_url(smb_path)?;
@@ -42,64 +40,16 @@ fn prepare_smb_request(
         "domain": creds.domain
     });
 
-    Ok((hostname, share, file_path, creds_json))
+    Ok((share, file_path, creds_json))
 }
 
-/// Build a unique temp file path for an SMB file.
-/// Uses a hash of the SMB path for locality plus a random suffix to avoid
-/// races when multiple thumbnail jobs target the same file concurrently.
-fn smb_temp_path(
-    hostname: &str,
-    share: &str,
-    file_path: &str,
-    suffix: &str,
-) -> Result<std::path::PathBuf, String> {
-    use sha2::{Digest, Sha256};
-
-    let temp_dir = std::env::temp_dir().join("marlin-smb-thumbnails");
-    std::fs::create_dir_all(&temp_dir)
-        .map_err(|e| format!("Failed to create temp directory: {}", e))?;
-
-    let original_name = std::path::Path::new(file_path)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("file");
-
-    let mut hasher = Sha256::new();
-    hasher.update(hostname.as_bytes());
-    hasher.update(b"/");
-    hasher.update(share.as_bytes());
-    hasher.update(file_path.as_bytes());
-    let hash = hex::encode(hasher.finalize());
-    let hash_prefix = hash[..12].to_string();
-
-    let safe_name = original_name
-        .replace(['/', '\\', '\0', ':', '*', '?', '"', '<', '>', '|'], "_")
-        .trim_start_matches('.')
-        .to_string();
-
-    // Unique suffix prevents races between concurrent jobs for the same path.
-    // Combining thread ID and high-resolution timestamp is sufficient since each
-    // thumbnail job runs on its own blocking thread.
-    let unique = {
-        let tid = std::thread::current().id();
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        format!("{:?}_{}", tid, ts)
-    };
-
-    // Hash the unique components to keep the filename short
-    let mut u_hasher = Sha256::new();
-    u_hasher.update(unique.as_bytes());
-    let u_hash = hex::encode(u_hasher.finalize());
-    let unique_suffix = &u_hash[..8];
-
-    Ok(temp_dir.join(format!(
-        "{}{}_{}_{}",
-        hash_prefix, suffix, unique_suffix, safe_name
-    )))
+/// The temp path for a copy of an SMB file, in a new folder for each download, so two jobs for one file never share a copy.
+fn smb_temp_path(file_path: &str) -> Result<std::path::PathBuf, String> {
+    crate::locations::temp_copy_path(
+        "marlin-smb-thumbnails",
+        &uuid::Uuid::new_v4().simple().to_string(),
+        file_path.rsplit('/').next().unwrap_or_default(),
+    )
 }
 
 /// Clone a ThumbnailRequest with a different local file path.
@@ -119,8 +69,8 @@ pub fn download_smb_file_sync(smb_path: &str) -> Result<std::path::PathBuf, Stri
 
     log::debug!("download_smb_file_sync: path={}", smb_path);
 
-    let (hostname, share, file_path, creds_json) = prepare_smb_request(smb_path)?;
-    let temp_path = smb_temp_path(&hostname, &share, &file_path, "")?;
+    let (share, file_path, creds_json) = prepare_smb_request(smb_path)?;
+    let temp_path = smb_temp_path(&file_path)?;
     let temp_path_str = temp_path.to_string_lossy().to_string();
 
     let params = serde_json::json!({
@@ -133,7 +83,7 @@ pub fn download_smb_file_sync(smb_path: &str) -> Result<std::path::PathBuf, Stri
     // A failed download can leave part of the file behind.
     if let Err(error) = client::call_method::<_, serde_json::Value>(methods::DOWNLOAD_FILE, params)
     {
-        let _ = std::fs::remove_file(&temp_path);
+        let _ = crate::locations::remove_temp_copy(&temp_path);
         return Err(error);
     }
 
@@ -155,8 +105,8 @@ fn download_smb_file_partial_sync(
         max_bytes
     );
 
-    let (hostname, share, file_path, creds_json) = prepare_smb_request(smb_path)?;
-    let temp_path = smb_temp_path(&hostname, &share, &file_path, "_partial_")?;
+    let (share, file_path, creds_json) = prepare_smb_request(smb_path)?;
+    let temp_path = smb_temp_path(&file_path)?;
     let temp_path_str = temp_path.to_string_lossy().to_string();
 
     let params = serde_json::json!({
@@ -171,7 +121,7 @@ fn download_smb_file_partial_sync(
     let result: serde_json::Value = match client::call_method(methods::DOWNLOAD_PARTIAL, params) {
         Ok(result) => result,
         Err(error) => {
-            let _ = std::fs::remove_file(&temp_path);
+            let _ = crate::locations::remove_temp_copy(&temp_path);
             return Err(error);
         }
     };
@@ -201,7 +151,7 @@ pub fn get_smb_file_identity(smb_path: &str) -> Result<super::super::FileIdentit
     use crate::locations::smb::client;
     use chrono::{DateTime, Utc};
 
-    let (_hostname, share, file_path, creds_json) = prepare_smb_request(smb_path)?;
+    let (share, file_path, creds_json) = prepare_smb_request(smb_path)?;
 
     let params = serde_json::json!({
         "credentials": creds_json,
@@ -271,7 +221,7 @@ fn generate_smb_video_thumbnail(
     // Step 2: Try FFmpeg on the partial file
     let local_request = request_with_local_path(request, &partial_path);
     let result = super::ThumbnailGenerator::generate_local(&local_request);
-    if let Err(e) = std::fs::remove_file(&partial_path) {
+    if let Err(e) = crate::locations::remove_temp_copy(&partial_path) {
         log::warn!(
             "Failed to remove temp file {}: {}",
             partial_path.display(),
@@ -309,7 +259,7 @@ fn generate_smb_video_thumbnail(
             let full_path = download_smb_file_sync(&request.path)?;
             let full_request = request_with_local_path(request, &full_path);
             let full_result = super::ThumbnailGenerator::generate_local(&full_request);
-            if let Err(e) = std::fs::remove_file(&full_path) {
+            if let Err(e) = crate::locations::remove_temp_copy(&full_path) {
                 log::warn!("Failed to remove temp file {}: {}", full_path.display(), e);
             }
             full_result
@@ -334,8 +284,32 @@ fn generate_smb_nonvideo_thumbnail(
     let temp_path = download_smb_file_sync(&request.path)?;
     let local_request = request_with_local_path(request, &temp_path);
     let result = super::ThumbnailGenerator::generate_local(&local_request);
-    if let Err(e) = std::fs::remove_file(&temp_path) {
+    if let Err(e) = crate::locations::remove_temp_copy(&temp_path) {
         log::warn!("Failed to remove temp file {}: {}", temp_path.display(), e);
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::smb_temp_path;
+
+    #[test]
+    fn smb_temp_path_keeps_the_file_name_in_its_own_folder() {
+        let first = smb_temp_path("/a/.env").unwrap();
+        let second = smb_temp_path("/a/.env").unwrap();
+        let other = smb_temp_path("/b/.env").unwrap();
+
+        assert_ne!(first.parent(), second.parent());
+        assert_ne!(first.parent(), other.parent());
+
+        for path in [&first, &second, &other] {
+            assert_eq!(
+                path.file_name().and_then(|name| name.to_str()),
+                Some(".env")
+            );
+            crate::locations::remove_temp_copy(path).unwrap();
+            assert!(!path.parent().unwrap().exists());
+        }
+    }
 }

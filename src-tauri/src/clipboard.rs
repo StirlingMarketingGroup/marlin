@@ -603,10 +603,12 @@ mod linux {
             if output.status.success() {
                 let content = String::from_utf8_lossy(&output.stdout);
                 let lines: Vec<&str> = content.lines().collect();
+                // The first line is "copy" or "cut". When the clipboard's owner serves only
+                // `text/uri-list`, xclip answers with that list instead, and its first line is a file.
+                let action = lines.first().map(|line| line.trim().to_ascii_lowercase());
 
-                if !lines.is_empty() {
-                    // First line is "copy" or "cut"
-                    is_cut = lines[0].trim().eq_ignore_ascii_case("cut");
+                if matches!(action.as_deref(), Some("copy" | "cut")) {
+                    is_cut = action.as_deref() == Some("cut");
 
                     // Remaining lines are file URIs
                     for line in lines.iter().skip(1) {

@@ -489,16 +489,6 @@ pub async fn download_sftp_file_to_temp(sftp_url: &str) -> Result<std::path::Pat
 
     let (username, hostname, port, remote_path) = parse_sftp_url(sftp_url)?;
 
-    let temp_dir = std::env::temp_dir().join("marlin-sftp-downloads");
-    tokio::fs::create_dir_all(&temp_dir)
-        .await
-        .map_err(|e| format!("Failed to create temp directory: {}", e))?;
-
-    let original_name = std::path::Path::new(&remote_path)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("file");
-
     let mut hasher = Sha256::new();
     hasher.update(username.as_bytes());
     hasher.update(b"@");
@@ -507,14 +497,9 @@ pub async fn download_sftp_file_to_temp(sftp_url: &str) -> Result<std::path::Pat
     hasher.update(port.to_string().as_bytes());
     hasher.update(remote_path.as_bytes());
     let hash = hex::encode(hasher.finalize());
-    let hash_prefix = hash[..12].to_string();
 
-    let safe_name = original_name
-        .replace(['/', '\\', '\0', ':', '*', '?', '"', '<', '>', '|'], "_")
-        .trim_start_matches('.')
-        .to_string();
-
-    let temp_path = temp_dir.join(format!("{}_{}", hash_prefix, safe_name));
+    let name = remote_path.rsplit('/').next().unwrap_or_default();
+    let temp_path = crate::locations::temp_copy_path("marlin-sftp-downloads", &hash[..12], name)?;
 
     download_file_from_sftp(&hostname, port, &remote_path, &temp_path).await?;
 

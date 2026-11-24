@@ -3,6 +3,7 @@ use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use crate::fs_utils::FileItem;
@@ -339,6 +340,86 @@ pub fn resolve_location(input: LocationInput) -> Result<(ProviderRef, Location),
     Ok((provider, location))
 }
 
+/// The path for a temp copy of the file `name`: `<temp dir>/<area>/<key>/<name>`. Makes the folder.
+/// The key keeps two files with one name apart, so the copy keeps the exact name, and a paste, an open, or a drag out shows it.
+pub fn temp_copy_path(area: &str, key: &str, name: &str) -> Result<PathBuf, String> {
+    // The key is one folder name: a hash, or an ID that came from the frontend.
+    let mut parts = Path::new(key).components();
+    if !matches!(
+        (parts.next(), parts.next()),
+        (Some(Component::Normal(_)), None)
+    ) {
+        return Err(format!("Invalid temp folder name: {key}"));
+    }
+
+    // Replace only what one file name cannot hold on this system.
+    let forbidden: &[char] = if cfg!(windows) {
+        &['/', '\\', ':', '*', '?', '"', '<', '>', '|']
+    } else {
+        &['/']
+    };
+    let mut name: String = name
+        .chars()
+        .map(|c| {
+            if c == '\0' || forbidden.contains(&c) || (cfg!(windows) && c.is_control()) {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    if name.is_empty() || name == "." || name == ".." {
+        name = "file".to_string();
+    }
+    if cfg!(windows) {
+        // Windows drops a final dot or space from a name.
+        if name.ends_with(['.', ' ']) {
+            name.pop();
+            name.push('_');
+        }
+        // Windows opens a device, not a file, for these names, with or without an extension.
+        let stem = name
+            .split('.')
+            .next()
+            .unwrap_or("")
+            .trim_end()
+            .to_uppercase();
+        let device = matches!(
+            stem.as_str(),
+            "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+        ) || ((stem.starts_with("COM") || stem.starts_with("LPT"))
+            && ["1", "2", "3", "4", "5", "6", "7", "8", "9", "¹", "²", "³"].contains(&&stem[3..]));
+        if device {
+            name.insert(0, '_');
+        }
+    }
+
+    // Only this user may open the folder: a shared /tmp holds other users' files too.
+    let folder = std::env::temp_dir().join(area).join(key);
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder
+        .create(&folder)
+        .map_err(|e| format!("Failed to create temp directory: {}", e))?;
+    Ok(folder.join(name))
+}
+
+/// Delete a temp copy that has a folder of its own, and that folder.
+/// Only for a copy no other caller can reach: one under a key made for it alone, such as a random ID.
+/// A copy whose download never made the file still has its folder removed.
+pub fn remove_temp_copy(path: &Path) -> std::io::Result<()> {
+    let removed = match std::fs::remove_file(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    };
+    if let Some(folder) = path.parent() {
+        let _ = std::fs::remove_dir(folder);
+    }
+    removed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,5 +463,112 @@ mod tests {
 
         // Triple slash reduces to double (network path prefix)
         assert_eq!(sanitize_path("///"), "//");
+    }
+
+    const AREA: &str = "marlin-test-temp-copy";
+
+    fn file_name(path: &Path) -> String {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn temp_copy_path_keeps_the_file_name() {
+        let key = uuid::Uuid::new_v4().to_string();
+        let env = temp_copy_path(AREA, &key, ".env").unwrap();
+        let notes = temp_copy_path(AREA, &key, "名前 ü.txt").unwrap();
+        assert_eq!(file_name(&env), ".env");
+        assert_eq!(file_name(&notes), "名前 ü.txt");
+        assert!(env.parent().unwrap().is_dir());
+        assert_eq!(env.parent(), notes.parent());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(env.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o700);
+
+            let colon = temp_copy_path(AREA, &key, "notes: draft.txt").unwrap();
+            let slash = temp_copy_path(AREA, &key, "back\\slash.txt").unwrap();
+            assert_eq!(file_name(&colon), "notes: draft.txt");
+            assert_eq!(file_name(&slash), "back\\slash.txt");
+        }
+
+        assert_eq!(
+            file_name(&temp_copy_path(AREA, &key, "a/b").unwrap()),
+            "a_b"
+        );
+        assert_eq!(
+            file_name(&temp_copy_path(AREA, &key, "x\0y").unwrap()),
+            "x_y"
+        );
+        let empty = temp_copy_path(AREA, &key, "").unwrap();
+        assert_eq!(file_name(&empty), "file");
+        assert_eq!(temp_copy_path(AREA, &key, ".").unwrap(), empty);
+        assert_eq!(temp_copy_path(AREA, &key, "..").unwrap(), empty);
+
+        let other = uuid::Uuid::new_v4().to_string();
+        let same_name = temp_copy_path(AREA, &other, ".env").unwrap();
+        assert_ne!(env.parent(), same_name.parent());
+        assert_eq!(temp_copy_path(AREA, &key, ".env").unwrap(), env);
+
+        let _ = std::fs::remove_dir_all(env.parent().unwrap());
+        let _ = std::fs::remove_dir_all(same_name.parent().unwrap());
+    }
+
+    #[test]
+    fn temp_copy_path_refuses_a_key_that_is_not_one_folder_name() {
+        for key in ["", ".", "..", "a/b", "../x", "/abs"] {
+            assert!(
+                temp_copy_path(AREA, key, "file.txt").is_err(),
+                "key {key:?} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn remove_temp_copy_removes_the_file_and_its_folder() {
+        let path = temp_copy_path(AREA, &uuid::Uuid::new_v4().to_string(), "hello.txt").unwrap();
+        let folder = path.parent().unwrap().to_path_buf();
+        std::fs::write(&path, b"hi").unwrap();
+        remove_temp_copy(&path).unwrap();
+        assert!(!path.exists());
+        assert!(!folder.exists());
+    }
+
+    #[test]
+    fn remove_temp_copy_removes_the_folder_when_the_file_was_never_made() {
+        let path = temp_copy_path(AREA, &uuid::Uuid::new_v4().to_string(), "missing.txt").unwrap();
+        let folder = path.parent().unwrap().to_path_buf();
+        assert!(!path.exists());
+        assert!(folder.is_dir());
+        remove_temp_copy(&path).unwrap();
+        assert!(!folder.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn temp_copy_path_replaces_windows_only_characters() {
+        let key = uuid::Uuid::new_v4().to_string();
+        let cases = [
+            ("a:b*c?.txt", "a_b_c_.txt"),
+            ("name.", "name_"),
+            ("CON", "_CON"),
+            ("con.txt", "_con.txt"),
+            ("COM1", "_COM1"),
+            ("LPT²", "_LPT²"),
+            ("console.txt", "console.txt"),
+            ("COM0", "COM0"),
+        ];
+        for (raw, expected) in cases {
+            let path = temp_copy_path(AREA, &key, raw).unwrap();
+            assert_eq!(file_name(&path), expected, "{raw}");
+        }
+        let _ = std::fs::remove_dir_all(std::env::temp_dir().join(AREA).join(&key));
     }
 }

@@ -5,7 +5,7 @@ import fs from 'node:fs/promises';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { promisify } from 'node:util';
+import { isDeepStrictEqual, promisify } from 'node:util';
 import { afterAll, beforeAll, expect, test } from 'vitest';
 import { freePort, runCommand, startApp } from './app';
 
@@ -219,6 +219,54 @@ test(
       path: `${remote}/hello.txt`,
     });
     expect(await fs.readFile(String(downloaded), 'utf8')).toBe('hello over sftp\n');
+    expect(path.basename(String(downloaded))).toBe('hello.txt');
+
+    // A copy keeps each file's exact name, and two files with one name stay apart (#672).
+    await fs.mkdir(path.join(served, 'one'));
+    await fs.mkdir(path.join(served, 'two'));
+    await fs.writeFile(path.join(served, 'one', '.env'), 'one\n');
+    await fs.writeFile(path.join(served, 'two', '.env'), 'two\n');
+    await fs.writeFile(path.join(served, 'one', 'notes: draft.txt'), 'draft\n');
+    const clipboardCopies = (await runCommand(browser, 'download_and_copy_to_clipboard', {
+      paths: [`${remote}/one/.env`, `${remote}/two/.env`, `${remote}/one/notes: draft.txt`],
+      isCut: false,
+    })) as string[];
+    expect(clipboardCopies.map((file) => path.basename(file))).toEqual([
+      '.env',
+      '.env',
+      'notes: draft.txt',
+    ]);
+    expect(clipboardCopies[0]).not.toBe(clipboardCopies[1]);
+    // A paste reads the OS clipboard, so the copies must be there under their own names.
+    await browser.waitUntil(
+      async () =>
+        isDeepStrictEqual(await runCommand(browser, 'clipboard_get_contents'), {
+          hasFiles: true,
+          hasImage: false,
+          filePaths: clipboardCopies,
+          isCut: false,
+        }),
+      { timeout: 10_000, timeoutMsg: 'the copies never reached the clipboard' }
+    );
+    expect(await fs.readFile(clipboardCopies[0], 'utf8')).toBe('one\n');
+    expect(await fs.readFile(clipboardCopies[1], 'utf8')).toBe('two\n');
+    expect(await fs.readFile(clipboardCopies[2], 'utf8')).toBe('draft\n');
+
+    const pasted = path.join(files, 'pasted');
+    await fs.mkdir(pasted);
+    const paste = await runCommand(browser, 'paste_items_to_location', {
+      destination: pasted,
+      sourcePaths: [clipboardCopies[0], clipboardCopies[2]],
+      isCut: false,
+    });
+    expect(paste).toEqual({
+      pastedPaths: [path.join(pasted, '.env'), path.join(pasted, 'notes: draft.txt')],
+      skippedCount: 0,
+      errorMessage: null,
+      cancelled: false,
+    });
+    expect(await fs.readFile(path.join(pasted, '.env'), 'utf8')).toBe('one\n');
+    expect(await fs.readFile(path.join(pasted, 'notes: draft.txt'), 'utf8')).toBe('draft\n');
 
     // A paste of the same local file twice: the second takes the next free name (#671).
     const notes = path.join(files, 'notes.txt');
