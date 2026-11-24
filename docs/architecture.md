@@ -129,14 +129,15 @@ A folder with no saved preferences gets a smart default when its listing is comp
 
 ## Where settings live
 
-| Data                                  | Place                                                                                                            |
-| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| Preferences, per-folder view settings | `<config dir>/Marlin/preferences.json`, through `read_preferences` and `write_preferences`                       |
-| SMB servers                           | `<config dir>/marlin/smb-servers.json`, passwords in the OS keychain                                             |
-| SFTP servers                          | `<config dir>/marlin/sftp-servers.json`, passwords in the OS keychain, trusted host keys in `~/.ssh/known_hosts` |
-| Google accounts                       | `<config dir>/marlin/gdrive-accounts.json`, refresh tokens in the OS keychain                                    |
-| Thumbnails                            | `<cache dir>/marlin_thumbnails`                                                                                  |
-| User themes                           | The themes folder listed in `README.md`                                                                          |
+| Data                                                   | Place                                                                                                                                                                                                                                                                                        |
+| ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Preferences, per-folder view settings, the last folder | `<config dir>/Marlin/preferences.json`. `read_preferences` reads the whole file. `set_global_prefs` writes the preferences. `get_dir_prefs` reads one folder's view settings, `set_dir_prefs` writes them, and `clear_all_dir_prefs` clears them all. `set_last_dir` writes the last folder. |
+| Pinned folders                                         | `<config dir>/Marlin/pinned_directories.json`, through the pinned-directory commands in `commands.rs`                                                                                                                                                                                        |
+| SMB servers                                            | `<config dir>/marlin/smb-servers.json`, passwords in the OS keychain                                                                                                                                                                                                                         |
+| SFTP servers                                           | `<config dir>/marlin/sftp-servers.json`, passwords in the OS keychain, trusted host keys in `~/.ssh/known_hosts`                                                                                                                                                                             |
+| Google accounts                                        | `<config dir>/marlin/gdrive-accounts.json`, refresh tokens in the OS keychain                                                                                                                                                                                                                |
+| Thumbnails                                             | `<cache dir>/marlin_thumbnails`                                                                                                                                                                                                                                                              |
+| User themes                                            | The themes folder listed in `README.md`                                                                                                                                                                                                                                                      |
 
 ## Known rough spots
 
