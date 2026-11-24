@@ -3,7 +3,7 @@
 A release is built, signed, and notarized by `.github/workflows/release.yml`. Pushing a `v*` tag, or running the workflow by hand with a tag, starts it. Signing needs six Apple secrets and two Tauri updater secrets in the repository settings.
 
 **Covers:** `.github/workflows/release.yml`, `src-tauri/Entitlements.plist`, `src-tauri/tauri.conf.json`, `scripts/check-linux-package-libraries.mjs`, `scripts/check-bundled-licenses.mjs`, `src-tauri/build.rs`
-**Checked against the code:** 2026-11-18
+**Checked against the code:** 2026-11-24
 
 ## What the workflow does
 
@@ -13,6 +13,8 @@ A release is built, signed, and notarized by `.github/workflows/release.yml`. Pu
 | `release`         | after `sync-version`, never on a PR                             | Builds the helpers, builds and publishes installers, and on macOS signs, makes a DMG, and notarizes it.                                                   |
 | `dry-run-changes` | every PR and every push to `master`                             | Checks which files changed and decides whether the dry run needs to build.                                                                                |
 | `release-dry-run` | a PR or a push to `master` that changes something in the bundle | Builds the bundle without publishing, and checks its mount helper, the Linux package libraries, and the license texts. It also keeps the Rust cache warm. |
+
+The first `release` job to publish creates the GitHub release. Its title is the tag. Its notes are the download line from the workflow, then GitHub's generated notes: the PRs merged since the previous release (`generateReleaseNotes` in "Build and publish installers").
 
 Build targets:
 
