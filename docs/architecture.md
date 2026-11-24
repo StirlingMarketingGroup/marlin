@@ -2,8 +2,8 @@
 
 Marlin is one Tauri 2 desktop app: a Rust backend that owns all file access, and a React frontend that draws the UI in a webview. The frontend never touches the disk. It calls a Rust command and gets data back.
 
-**Covers:** `src-tauri/src/lib.rs`, `src-tauri/src/commands.rs`, `src-tauri/src/menu.rs`, `src-tauri/Cargo.toml`, `src-tauri/crates/`, `src-tauri/src/fs_watcher.rs`, `src/main.tsx`, `src/App.tsx`, `src/store/`, `src/windows/`, `src/components/PathBar.tsx`, `src/components/FilterInput.tsx`, `src/hooks/useDirectoryWatcher.ts`, `src/hooks/useFileAnimations.ts`, `src/hooks/useRevealTarget.ts`, `src/components/MainPanel.tsx`, `src/components/FileGrid.tsx`, `src/components/FileList.tsx`, `src/utils/filterMatch.ts`, `src/components/FileNameDisplay.tsx`
-**Checked against the code:** 2026-11-23
+**Covers:** `src-tauri/src/lib.rs`, `src-tauri/src/commands.rs`, `src-tauri/src/menu.rs`, `src-tauri/Cargo.toml`, `src-tauri/crates/`, `src-tauri/src/fs_watcher.rs`, `src-tauri/src/fs_utils.rs`, `src/main.tsx`, `src/App.tsx`, `src/store/`, `src/windows/`, `src/components/PathBar.tsx`, `src/components/FilterInput.tsx`, `src/hooks/useDirectoryWatcher.ts`, `src/hooks/useFileAnimations.ts`, `src/hooks/useRevealTarget.ts`, `src/components/MainPanel.tsx`, `src/components/FileGrid.tsx`, `src/components/FileList.tsx`, `src/utils/filterMatch.ts`, `src/components/FileNameDisplay.tsx`
+**Checked against the code:** 2026-11-24
 
 ## Processes
 
@@ -22,7 +22,7 @@ The workspace has eight library-only crates under `src-tauri/crates/`. `marlin-v
 ## How the frontend and backend talk
 
 - **Commands.** The frontend calls `invoke('command_name', args)`. The backend registers about 130 commands in the `generate_handler!` list in `lib.rs`. Almost all of them live in `commands.rs`, which is 8,600 lines and the first place to look for any backend behavior.
-- **Events.** The backend pushes data with `emit`. Two matter most: `directory-batch` streams a folder listing in chunks, and `directory-changed` reports a change on disk from the file watcher.
+- **Events.** The backend pushes data with `emit`. Three matter most. `directory-batch` sends the names in a local folder, and `metadata-batch` then sends their sizes and dates. `directory-changed` reports a change on disk from the file watcher.
 - **Types.** Shared shapes are hand-written twice: Rust structs with `serde(rename_all = "camelCase")`, and TypeScript types in `src/types/index.ts`. Nothing generates one from the other, so change both.
 
 ## Backend modules (`src-tauri/src/`)
@@ -103,7 +103,7 @@ The workspace has eight library-only crates under `src-tauri/crates/`. `marlin-v
 | `useToastStore`                           | Toast messages.                                                                                                       |
 | `use*ProgressStore`, `useFolderSizeStore` | State for one progress window each.                                                                                   |
 
-**Hooks worth knowing.** `useDirectoryStream` consumes `directory-batch`. `useDirectoryWatcher` reacts to `directory-changed`. `useThumbnail` requests thumbnails. `useDragDetector` handles files dropped onto the window.
+**Hooks worth knowing.** `useDirectoryStream` consumes `directory-batch` and `metadata-batch`. `useDirectoryWatcher` reacts to `directory-changed`. `useThumbnail` requests thumbnails. `useDragDetector` handles files dropped onto the window.
 
 **How a change on disk reaches the list.** `fs_watcher.rs` collects watcher events for 300 ms and emits one `directory-changed`. `useDirectoryWatcher` treats that event only as a signal. It waits for 400 ms with no new event, reads the whole folder again with `read_directory`, and replaces the list. When events keep coming, it reads anyway 2 seconds after the first event it has not acted on. A folder that is still loading, or a read that is still running, puts the next read off until it is done. The 2-second cap matters on Linux: inotify reports every write, so a file that is still downloading sends an event about every 300 ms. macOS reports a file written through one open handle only when it is created and when it is closed or renamed.
 
@@ -120,6 +120,8 @@ The workspace has eight library-only crates under `src-tauri/crates/`. `marlin-v
 | An image reports its size                                                                                                            | `updateFileDimensions` sets the width and height of one file.                                                                                                                            |
 
 A writer that adds files goes through `uniqueFilesByPath`, so a path is in the list once. Every writer gives `files` a new array, so a view that reacts to `files` runs again on each one. An open rename box fills with the name when its target appears in `files`, in both `FileList` and `FileGrid`, so a watcher write while it is open keeps what the person typed. A streaming refresh empties `files` first, so the box fills again after it. A refused rename leaves the box open with the typed name in it. `useFileAnimations` marks a new file as entering for two animation frames, so it fades in. `e2e/file-view-width.spec.ts` checks that the view matches the folder after a burst of changes.
+
+`read_directory_streaming` in `src-tauri/src/fs_utils.rs` sends a local folder's listing as two events: one `directory-batch` with the names and types it can read, then one `metadata-batch` with the size and dates of each entry it can read. Do not split them: each new `files` array makes the file view and the filter box sort the whole list again, so smaller batches make the time a folder takes to show grow with the square of its file count (#654).
 
 A folder with no saved preferences gets a smart default when its listing is complete. Grid is the default when at least half the files have thumbnails, and Downloads, Documents, Desktop and the like get a sort rule. `applySmartViewDefaults` in `src/App.tsx` applies these. The default is saved as the folder's preferences, so it is worked out once per folder.
 
@@ -140,4 +142,5 @@ A folder with no saved preferences gets a smart default when its listing is comp
 
 - Preferences use the folder `Marlin` and everything else uses `marlin`. That is one folder on macOS and two on Linux.
 - `commands.rs` and `useAppStore.ts` are each one very large file that mixes unrelated concerns.
+- A local folder's names go to the page as one event, so a folder of several hundred thousand files makes an event of 100 MB or more. Nobody has measured that. A folder of 50,000 files shows in about 2 seconds on a Mac and 3 on Linux.
 - Code decides what to do by matching on the URI scheme string (`gdrive://`, `smb://`, ...) in many files on both sides. See [Location providers](location-providers.md) for why, and epic #368 for the plan to remove it.

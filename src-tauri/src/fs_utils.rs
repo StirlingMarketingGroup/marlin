@@ -633,104 +633,49 @@ pub fn expand_path(path: &str) -> Result<PathBuf, String> {
     }
 }
 
-/// Batch size for streaming directory reads
-const STREAMING_BATCH_SIZE: usize = 100;
-/// Batch size for metadata updates (smaller for more responsive updates)
-const METADATA_BATCH_SIZE: usize = 50;
-
-/// Read directory contents in streaming fashion with instant UI display.
-///
-/// Phase 1: Emits skeleton FileItems immediately (just names, no stat calls)
-/// Phase 2: Processes metadata in parallel and emits updates via emit_metadata
-///
-/// Returns the total number of files processed.
+/// Reads a folder in two steps and sends each step as one batch: first the names and types,
+/// then the metadata of each entry it can read. Every batch makes the page sort the whole
+/// list again, so a step split into smaller batches makes the time a folder takes to show
+/// grow with the square of its size (#654).
 pub fn read_directory_streaming<F, M>(
     path: &Path,
     session_id: String,
     cancel_flag: Arc<AtomicBool>,
-    mut emit_batch: F,
-    mut emit_metadata: M,
-) -> Result<u32, String>
+    emit_batch: F,
+    emit_metadata: M,
+) -> Result<(), String>
 where
-    F: FnMut(DirectoryBatch) + Send,
-    M: FnMut(MetadataBatch) + Send,
+    F: FnOnce(DirectoryBatch) + Send,
+    M: FnOnce(MetadataBatch) + Send,
 {
     #[cfg(target_os = "macos")]
     let _scope_guard = crate::macos_security::retain_access(path)?;
 
-    // Phase 1: Read directory entries and emit skeleton items IMMEDIATELY
-    // This uses readdir which is very fast - just reads directory entries without stat
     let dir_entries: Vec<std::fs::DirEntry> = fs::read_dir(path)
         .map_err(|e| format!("Failed to read directory: {}", e))?
         .filter_map(|entry| entry.ok())
         .collect();
 
-    let total_count = dir_entries.len() as u32;
-
-    // Check for cancellation
-    if cancel_flag.load(Ordering::Relaxed) {
-        return Ok(0);
-    }
-
-    // If empty directory, emit a single empty final batch
-    if dir_entries.is_empty() {
-        emit_batch(DirectoryBatch {
-            session_id: session_id.clone(),
-            batch_index: 0,
-            entries: vec![],
-            is_final: true,
-            total_count: Some(0),
-        });
-        emit_metadata(MetadataBatch {
-            session_id,
-            updates: vec![],
-            is_final: true,
-        });
-        return Ok(0);
-    }
-
-    // Build skeleton items (very fast - no stat calls, just uses DirEntry info)
     let skeleton_items: Vec<FileItem> = dir_entries
         .iter()
+        .take_while(|_| !cancel_flag.load(Ordering::Relaxed))
         .filter_map(build_file_item_skeleton)
         .collect();
 
-    // Collect paths for metadata processing
-    let entry_paths: Vec<PathBuf> = dir_entries.iter().map(|e| e.path()).collect();
-
-    // Emit skeleton batches IMMEDIATELY - this is what makes the UI instant
-    let mut batch_index = 0u32;
-    for chunk in skeleton_items.chunks(STREAMING_BATCH_SIZE) {
-        if cancel_flag.load(Ordering::Relaxed) {
-            return Ok(0);
-        }
-
-        let is_final =
-            batch_index as usize * STREAMING_BATCH_SIZE + chunk.len() >= skeleton_items.len();
-
-        emit_batch(DirectoryBatch {
-            session_id: session_id.clone(),
-            batch_index,
-            entries: chunk.to_vec(),
-            is_final,
-            total_count: if batch_index == 0 {
-                Some(total_count)
-            } else {
-                None
-            },
-        });
-
-        batch_index += 1;
-    }
-
-    // Check for cancellation before metadata phase
     if cancel_flag.load(Ordering::Relaxed) {
-        return Ok(total_count);
+        return Ok(());
     }
 
-    // Phase 2: Process metadata in parallel and emit updates
-    // This runs after skeletons are displayed, so UI is already responsive
-    let metadata_updates: Vec<FileMetadataUpdate> = entry_paths
+    emit_batch(DirectoryBatch {
+        session_id: session_id.clone(),
+        batch_index: 0,
+        entries: skeleton_items,
+        is_final: true,
+        total_count: Some(dir_entries.len() as u32),
+    });
+
+    let entry_paths: Vec<PathBuf> = dir_entries.iter().map(|e| e.path()).collect();
+    let updates: Vec<FileMetadataUpdate> = entry_paths
         .par_iter()
         .filter_map(|entry_path| {
             if cancel_flag.load(Ordering::Relaxed) {
@@ -740,29 +685,20 @@ where
         })
         .collect();
 
-    // Emit metadata updates in batches
-    let mut meta_batch_index = 0;
-    for chunk in metadata_updates.chunks(METADATA_BATCH_SIZE) {
-        if cancel_flag.load(Ordering::Relaxed) {
-            return Ok(total_count);
-        }
-
-        let is_final =
-            meta_batch_index * METADATA_BATCH_SIZE + chunk.len() >= metadata_updates.len();
-
-        emit_metadata(MetadataBatch {
-            session_id: session_id.clone(),
-            updates: chunk.to_vec(),
-            is_final,
-        });
-
-        meta_batch_index += 1;
+    if cancel_flag.load(Ordering::Relaxed) {
+        return Ok(());
     }
+
+    emit_metadata(MetadataBatch {
+        session_id,
+        updates,
+        is_final: true,
+    });
 
     #[cfg(target_os = "macos")]
     crate::macos_security::persist_bookmark(path, "reading directory contents streaming");
 
-    Ok(total_count)
+    Ok(())
 }
 
 /// Generate a unique path for a file in a directory, avoiding collisions.
