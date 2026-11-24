@@ -100,11 +100,8 @@ test(
     for (const view of ['list', 'grid'] as const) {
       await showView(browser, view);
 
-      // Half a screen per step, so each step overlaps the one before it.
-      const step = await browser.execute(() => {
-        const scroller = document.querySelector('[data-main-content]')!;
-        scroller.scrollTop = 0;
-        return scroller.clientHeight / 2;
+      await browser.execute(() => {
+        document.querySelector('[data-main-content]')!.scrollTop = 0;
       });
       // The view keeps the rows it showed until the scroll is drawn. Rows from the bottom of
       // the last view would end the walk before the top files were collected.
@@ -125,11 +122,18 @@ test(
           { timeout: 10_000, timeoutMsg: `no file after ${last} appeared while scrolling` }
         );
         expect(new Set(names).size).toBe(names.length);
+        if (last) {
+          expect(names[0] <= last, `the walk skipped from ${last} to ${names[0]}`).toBe(true);
+        }
         for (const name of names) seen.add(name);
         last = names[names.length - 1];
-        await browser.execute((by: number) => {
-          document.querySelector('[data-main-content]')!.scrollTop += by;
-        }, step);
+        // Half a screen per step, so each step overlaps the one before it. Measured at each step,
+        // once the view shows its rows: a height read before that can be far taller than the
+        // screen, and the walk then skips most of the files.
+        await browser.execute(() => {
+          const scroller = document.querySelector('[data-main-content]')!;
+          scroller.scrollTop += scroller.clientHeight / 2;
+        });
       }
       expect([...seen].sort()).toEqual(expected);
     }

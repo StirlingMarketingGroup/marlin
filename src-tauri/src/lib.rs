@@ -117,7 +117,7 @@ pub fn run() {
     // Registered on the builder, not in `setup`: the plugin adds a script to each webview as it is created.
     #[cfg(feature = "app-test")]
     let builder = builder.plugin(tauri_plugin_wdio_webdriver::init());
-    builder
+    let app = builder
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_shell::init())
@@ -404,11 +404,18 @@ pub fn run() {
             }
         })
         .build(tauri::generate_context!())
-        .expect("error while building tauri application")
-        .run(|_app, event| {
-            // Fires when the user quits. A rebuild under `npm run tauri dev` kills the process, so the helper outlives that.
-            if let tauri::RunEvent::Exit = event {
-                mount_helper::stop_at_quit();
-            }
-        });
+        .expect("error while building tauri application");
+    // A test run must never take the keyboard from the app the developer is using. macOS never activates a prohibited app: not at launch, and not on `set_focus`. Set here, not in `setup`: tao activates the app at launch, and `setup` runs after that.
+    #[cfg(all(feature = "app-test", target_os = "macos"))]
+    let app = {
+        let mut app = app;
+        app.set_activation_policy(tauri::ActivationPolicy::Prohibited);
+        app
+    };
+    app.run(|_app, event| {
+        // Fires when the user quits. A rebuild under `npm run tauri dev` kills the process, so the helper outlives that.
+        if let tauri::RunEvent::Exit = event {
+            mount_helper::stop_at_quit();
+        }
+    });
 }
