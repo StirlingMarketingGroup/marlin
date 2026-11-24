@@ -10,7 +10,7 @@ use std::time::Duration;
 use marlin_gdrive::{OAuthClient, KEYRING_SERVICE};
 use marlin_mount::protocol::MountState;
 use marlin_mount::protocol::{error_codes, MountStatus, ReadOnly};
-use marlin_mount::{Config, LinkedProviders, OsAdapter, Server};
+use marlin_mount::{Config, LinkedProviders, OsAdapter, Server, SmbConfig};
 use marlin_mount_client::Event;
 use marlin_mount_client::{Client, ClientError, Start};
 use marlin_vfs::Options;
@@ -256,6 +256,10 @@ async fn running_with(
                 servers: dir.path().join("sftp-servers.json"),
                 known_hosts: dir.path().join("known_hosts"),
                 retry_after: Duration::from_secs(60),
+            },
+            SmbConfig {
+                binary: None,
+                servers: dir.path().join("smb-servers.json"),
             },
         )),
     )

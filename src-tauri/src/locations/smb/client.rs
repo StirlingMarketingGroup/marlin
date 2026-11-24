@@ -1,10 +1,11 @@
 //! The app's one `marlin-smb` process: this module finds the binary and picks each
 //! method's time limit. `marlin-smb-client` starts the process and talks to it.
 
+use marlin_smb_client::is_installed;
 use marlin_smb_client::protocol::methods;
 use once_cell::sync::Lazy;
 use serde::{de::DeserializeOwned, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 static SIDECAR: Lazy<marlin_smb_client::Sidecar> =
@@ -85,12 +86,6 @@ fn find_sidecar_binary() -> Option<PathBuf> {
     }
 
     None
-}
-
-/// A release without SMB (the Intel Mac) and a fresh clone ship an empty placeholder
-/// file (`build.rs`), which is not a helper.
-fn is_installed(path: &Path) -> bool {
-    std::fs::metadata(path).is_ok_and(|file| file.is_file() && file.len() > 0)
 }
 
 /// Get the target triple for the current platform.
