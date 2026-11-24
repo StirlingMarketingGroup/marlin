@@ -14,4 +14,6 @@ pub use memory::MemoryProvider;
 pub use names::{escape, finder_files, unescape, unique_names, NameRules, POSIX};
 pub use provider::{Attributes, Item, ItemId, Kind, Progress, Provider, Revision, Space};
 pub use spool::Spool;
-pub use vfs::{Access, Entry, HandleId, IfExists, NodeId, Options, Unsent, UnsentState, Vfs};
+pub use vfs::{
+    Access, Entry, HandleId, Identified, IfExists, NodeId, Options, Unsent, UnsentState, Vfs,
+};

@@ -37,7 +37,7 @@ The workspace has nine library-only crates under `src-tauri/crates/`. `marlin-vf
 | `fs_utils.rs`            | Local path expansion, a path's filesystem facts, `FileItem` building, local copy helpers.                 |
 | `delete_entry.rs`        | Deletes a local file, link, or folder. See [decision 0007](decisions/0007-permanent-delete.md).           |
 | `fs_watcher.rs`          | Watches local folders and emits `directory-changed`.                                                      |
-| `mount_helper.rs`        | The eight mount commands and the request to stop the helper at quit. See [Mount helper](mount-helper.md). |
+| `mount_helper.rs`        | Mount commands, the app's mount table, and the stop request at quit. See [Mount helper](mount-helper.md). |
 | `state.rs`               | Shared state types: directory streams, folder-size jobs, menu state, trash undo.                          |
 | `menu.rs`                | The native menu bar.                                                                                      |
 | `native_drag.rs`         | macOS only. Starts a native drag of files out of the app.                                                 |

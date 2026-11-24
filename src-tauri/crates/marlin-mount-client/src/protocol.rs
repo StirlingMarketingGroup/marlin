@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 pub const JSONRPC_VERSION: &str = "2.0";
 
 /// Protocol number the helper and the app speak. Raised when the control API changes.
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// JSON-RPC and helper error codes.
 pub mod error_codes {
@@ -35,6 +35,10 @@ pub mod error_codes {
     pub const BUSY: i32 = -1016;
     /// The mount folder holds things the helper did not put there, and no marker. The helper does not mount in it.
     pub const MOUNT_FOLDER_TAKEN: i32 = -1017;
+    /// The account has no mount that is up: none, or one that is starting, unmounting, or failed.
+    pub const NOT_MOUNTED: i32 = -1018;
+    /// The mount shows no item at that path, or the account has no item with that ID.
+    pub const NO_SUCH_ITEM: i32 = -1019;
 }
 
 /// Control methods and the notifications the helper sends.
@@ -49,6 +53,9 @@ pub mod methods {
     pub const UNSENT: &str = "unsent";
     pub const RETRY_UNSENT: &str = "retryUnsent";
     pub const DISCARD_UNSENT: &str = "discardUnsent";
+    pub const LOCATE: &str = "locate";
+    pub const IDENTIFY: &str = "identify";
+    pub const REFRESH: &str = "refresh";
     pub const MOUNT_CHANGED: &str = "mountChanged";
     pub const UNSENT_CHANGED: &str = "unsentChanged";
 }
@@ -150,6 +157,16 @@ pub enum MountState {
     Unmounted,
 }
 
+impl MountState {
+    /// Whether the mount is up: the OS serves its folder, whatever its remote's health. Decision 0009, choice 4, names the same four states.
+    pub fn is_up(self) -> bool {
+        matches!(
+            self,
+            Self::Mounted | Self::Degraded | Self::Offline | Self::AuthRequired
+        )
+    }
+}
+
 /// One mount as the helper reports it. `error` is set only when the state is `failed`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -221,6 +238,38 @@ pub struct UnsentParams {
     pub node: u64,
 }
 
+/// Body of a `locate` request. `ref` is the remote's own ID for an item, such as the file ID in a Google Drive link.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocateParams {
+    pub provider: String,
+    pub account: String,
+    #[serde(rename = "ref")]
+    pub reference: String,
+}
+
+/// Body of an `identify` request. `path` is mount-relative: names as the mount shows them, joined with `/`. The empty path is the top of the mount.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IdentifyParams {
+    pub provider: String,
+    pub account: String,
+    pub path: String,
+}
+
+/// The answer to `identify`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "item", rename_all = "kebab-case")]
+pub enum Identified {
+    /// The remote has the item. `ref` is the remote's own ID for it, absent when it has none: the top of the mount, and a folder only the mount shows.
+    Remote {
+        #[serde(rename = "ref", default, skip_serializing_if = "Option::is_none")]
+        reference: Option<String>,
+    },
+    /// A file that is only in the spool. It has not reached the remote yet.
+    New,
+}
+
 /// A dead mount under the mount folder: its server was killed, and the OS still lists it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -279,5 +328,42 @@ mod tests {
             })
         );
         assert_eq!(serde_json::from_value::<UnsentFiles>(wire).unwrap(), files);
+    }
+
+    #[test]
+    fn identified_and_locate_keep_their_shape_on_the_wire() {
+        use super::{Identified, LocateParams};
+
+        let remote = Identified::Remote {
+            reference: Some("abc".into()),
+        };
+        let wire = serde_json::to_value(&remote).unwrap();
+        assert_eq!(wire, serde_json::json!({"item": "remote", "ref": "abc"}));
+        assert_eq!(serde_json::from_value::<Identified>(wire).unwrap(), remote);
+
+        let bare = Identified::Remote { reference: None };
+        let wire = serde_json::to_value(&bare).unwrap();
+        assert_eq!(wire, serde_json::json!({"item": "remote"}));
+        assert_eq!(serde_json::from_value::<Identified>(wire).unwrap(), bare);
+
+        let new = Identified::New;
+        let wire = serde_json::to_value(&new).unwrap();
+        assert_eq!(wire, serde_json::json!({"item": "new"}));
+        assert_eq!(serde_json::from_value::<Identified>(wire).unwrap(), new);
+
+        let params = LocateParams {
+            provider: "gdrive".into(),
+            account: "ana".into(),
+            reference: "abc".into(),
+        };
+        let wire = serde_json::to_value(&params).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({"provider": "gdrive", "account": "ana", "ref": "abc"})
+        );
+        assert_eq!(
+            serde_json::from_value::<LocateParams>(wire).unwrap(),
+            params
+        );
     }
 }

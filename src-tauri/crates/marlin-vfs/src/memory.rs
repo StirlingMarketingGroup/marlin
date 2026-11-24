@@ -346,6 +346,28 @@ impl Provider for MemoryProvider {
         .await
     }
 
+    async fn locate(&self, reference: &str) -> Result<Option<Vec<ItemId>>, VfsError> {
+        self.answer(|inner| {
+            let mut at = find(&inner.stored, &ItemId(reference.to_string()))?;
+            let mut chain = Vec::new();
+            while let Some(parent) = &at.parent {
+                chain.push(at.item.id.clone());
+                // A folder removed behind the mount's back leaves what it held in no folder.
+                let Ok(found) = find(&inner.stored, parent) else {
+                    return Ok(None);
+                };
+                at = found;
+            }
+            chain.reverse();
+            Ok(Some(chain))
+        })
+        .await
+    }
+
+    fn reference(&self, id: &ItemId) -> Option<String> {
+        (*id != self.root()).then(|| id.0.clone())
+    }
+
     fn can_write(&self) -> bool {
         true
     }

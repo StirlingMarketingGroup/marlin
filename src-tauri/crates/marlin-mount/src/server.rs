@@ -17,8 +17,8 @@ use tokio::sync::{mpsc, oneshot, Notify};
 use crate::log;
 use crate::mounts::{Adapter, Mounts, Notice, Providers};
 use crate::protocol::{
-    error_codes, methods, AccountParams, HelloParams, HelloResult, MountParams, Request, Response,
-    RpcError, UnsentParams, JSONRPC_VERSION, PROTOCOL_VERSION,
+    error_codes, methods, AccountParams, HelloParams, HelloResult, IdentifyParams, LocateParams,
+    MountParams, Request, Response, RpcError, UnsentParams, JSONRPC_VERSION, PROTOCOL_VERSION,
 };
 
 /// The longest request line a client may send, in bytes.
@@ -350,6 +350,28 @@ async fn answer(
             mounts
                 .discard_unsent(&provider, &account, &mount_id, node)
                 .await?;
+            Value::Null
+        }
+        methods::LOCATE => {
+            let LocateParams {
+                provider,
+                account,
+                reference,
+            } = serde_json::from_value(params).map_err(invalid_params)?;
+            json!(mounts.locate(&provider, &account, &reference).await?)
+        }
+        methods::IDENTIFY => {
+            let IdentifyParams {
+                provider,
+                account,
+                path,
+            } = serde_json::from_value(params).map_err(invalid_params)?;
+            json!(mounts.identify(&provider, &account, &path).await?)
+        }
+        methods::REFRESH => {
+            let AccountParams { provider, account } =
+                serde_json::from_value(params).map_err(invalid_params)?;
+            mounts.refresh(&provider, &account)?;
             Value::Null
         }
         _ => {

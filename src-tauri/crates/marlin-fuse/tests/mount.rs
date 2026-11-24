@@ -1605,6 +1605,56 @@ async fn a_new_file_shows_in_the_next_listing() {
     mount.unmount().await.unwrap();
 }
 
+#[ignore = "mounts for real: run crates/marlin-fuse/test-in-docker.sh on Linux, crates/marlin-fuse/test-on-mac.sh on a Mac"]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refresh_shows_a_remote_change_at_once() {
+    let provider = Arc::new(MemoryProvider::new());
+    let a = provider.add_file(&provider.root(), "a.txt", b"a");
+    // The default options keep the listing cache. `vfs()` turns it off.
+    let vfs = Arc::new(Vfs::new(
+        Arc::clone(&provider) as Arc<dyn Provider>,
+        marlin_vfs::POSIX,
+        Options::default(),
+    ));
+    let (_dir, point) = empty_dir();
+    let mut mount = marlin_fuse::mount(vfs.clone(), &point).await.unwrap();
+
+    let file = point.join("a.txt");
+    let size = || {
+        let file = file.clone();
+        tokio::task::spawn_blocking(move || std::fs::metadata(file).unwrap().len())
+    };
+    assert_eq!(names(&point).await.unwrap(), ["a.txt"]);
+    assert_eq!(size().await.unwrap(), 1);
+    // Bytes the kernel may keep across opens, which the new size must drop.
+    assert_eq!(read_file(&file).await.unwrap(), b"a");
+
+    provider.add_file(&provider.root(), "b.txt", b"b");
+    provider.write(&a, b"abc");
+    assert_eq!(names(&point).await.unwrap(), ["a.txt"]);
+
+    let started = Instant::now();
+    vfs.refresh();
+    // The kernel keeps no listing.
+    assert_eq!(names(&point).await.unwrap(), ["a.txt", "b.txt"]);
+    // The kernel keeps a name's attributes for `TTL`, 1 second.
+    while size().await.unwrap() != 3 {
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the new size never showed"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let shown = started.elapsed();
+    assert!(
+        shown < Duration::from_millis(1500),
+        "the new size showed after {shown:?}"
+    );
+    assert_eq!(read_file(&file).await.unwrap(), b"abc");
+
+    mount.unmount().await.unwrap();
+}
+
 #[cfg(target_os = "macos")]
 fn rename_flag(from: &Path, to: &Path, flags: libc::c_uint) -> i32 {
     let from = CString::new(from.as_os_str().as_bytes()).unwrap();

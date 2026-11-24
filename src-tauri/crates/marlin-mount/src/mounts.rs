@@ -14,8 +14,8 @@ use uuid::Uuid;
 
 use crate::log::{self, redact};
 use crate::protocol::{
-    error_codes, DeadMount, MountState, MountStatus, ReadOnly, RpcError, UnsentFile, UnsentFiles,
-    UnsentState,
+    error_codes, DeadMount, Identified, MountState, MountStatus, ReadOnly, RpcError, UnsentFile,
+    UnsentFiles, UnsentState,
 };
 
 /// The file that marks the mount folder as the helper's. The helper sweeps, and mounts in, only a mount folder that has it, so a folder of the user's with the same name is never changed: on a Mac's disk, which ignores letter case, a checkout of Marlin at `~/marlin` is `~/Marlin` (#541).
@@ -77,6 +77,10 @@ pub enum MountError {
     Busy,
     /// The mount folder holds things the helper did not put there, and no marker.
     MountFolderTaken(PathBuf),
+    /// The account has no mount that is up.
+    NotMounted,
+    /// The mount has no such item.
+    NoSuchItem,
 }
 
 impl fmt::Display for MountError {
@@ -103,6 +107,8 @@ impl fmt::Display for MountError {
                 "{} holds files that Marlin did not put there; move or rename it, and Marlin makes a new one",
                 redact(&root.to_string_lossy())
             ),
+            Self::NotMounted => f.write_str("the account has no mount that is up"),
+            Self::NoSuchItem => f.write_str("the mount has no such item"),
         }
     }
 }
@@ -135,6 +141,8 @@ impl From<MountError> for RpcError {
                 MountError::NotUnsent => error_codes::NOT_UNSENT,
                 MountError::Busy => error_codes::BUSY,
                 MountError::MountFolderTaken(_) => error_codes::MOUNT_FOLDER_TAKEN,
+                MountError::NotMounted => error_codes::NOT_MOUNTED,
+                MountError::NoSuchItem => error_codes::NO_SUCH_ITEM,
             },
         }
     }
@@ -171,10 +179,16 @@ enum Health {
     AuthRequired,
 }
 
+/// A mount that is up: its OS session, and the core it serves, for the requests about its items.
+struct Live {
+    session: Box<dyn Session>,
+    vfs: Arc<Vfs>,
+}
+
 /// Where one mount is in its life, with what that state holds. Between operations a mount is `Mounted` or `Failed`.
 enum Lifecycle {
     Starting,
-    Mounted(Box<dyn Session>),
+    Mounted(Live),
     Unmounting,
     Failed(MountError),
 }
@@ -444,12 +458,10 @@ impl Mounts {
             let vfs = build();
             // A mount starts as `mounted`, and its health only changes at a provider call. So the remote answers one call before the mount comes up, and before any folder is made. A provider that kept a token from an earlier mount cannot hide a remote that is out of reach.
             vfs.space().await.map_err(|error| match error {
-                VfsError::SignInNeeded => MountError::SignInNeeded,
-                VfsError::Offline | VfsError::TimedOut => MountError::Unreachable,
                 VfsError::AccessDenied => {
                     MountError::Provider("the account's storage does not let Marlin read it".into())
                 }
-                error => MountError::Provider(error.to_string()),
+                error => remote_error(error),
             })?;
             std::fs::create_dir_all(&self.root)?;
             // An empty mount folder has nothing to lose, so it becomes the helper's. A mount running at the same time writes the marker before it makes its mount point, so it never makes this folder look taken.
@@ -515,6 +527,10 @@ impl Mounts {
 
         match mounted {
             Ok((session, vfs, lock)) => {
+                let live = Live {
+                    session,
+                    vfs: Arc::clone(&vfs),
+                };
                 let writing = match lock {
                     Ok(lock) => {
                         let uploads = tokio::spawn(Arc::clone(&vfs).run_uploads());
@@ -538,7 +554,7 @@ impl Mounts {
                     let mut table = self.table.lock().unwrap();
                     let entry = table.entries.get_mut(&key).unwrap();
                     entry.writing = writing;
-                    entry.lifecycle = Lifecycle::Mounted(session);
+                    entry.lifecycle = Lifecycle::Mounted(live);
                     self.announce(&key, entry)
                 };
                 log_state(&status);
@@ -577,10 +593,10 @@ impl Mounts {
         };
 
         // A failed mount has no session and no folder of the helper's: only its entry goes.
-        if let Lifecycle::Mounted(mut session) = previous {
+        if let Lifecycle::Mounted(mut live) = previous {
             log_state(&unmounting);
-            if let Err(error) = session.unmount().await {
-                self.transition(&key, Lifecycle::Mounted(session));
+            if let Err(error) = live.session.unmount().await {
+                self.transition(&key, Lifecycle::Mounted(live));
                 return Err(MountError::Unmount(error.to_string()));
             }
             // The folder goes before the entry does, so no other account can be given this name while the folder is being removed.
@@ -744,6 +760,56 @@ impl Mounts {
             Err(VfsError::NotFound) => Err(MountError::NotUnsent),
             Err(_) => Err(MountError::Busy),
         }
+    }
+
+    /// The core of a mount that is up. [`MountError::NotMounted`] for an account with no mount, or one that is starting, unmounting, or failed.
+    fn mounted_core(&self, provider: &str, account: &str) -> Result<Arc<Vfs>, MountError> {
+        let key = Key {
+            provider: provider.to_string(),
+            account: account.to_string(),
+        };
+        let table = self.table.lock().unwrap();
+        match table.entries.get(&key).map(|entry| &entry.lifecycle) {
+            Some(Lifecycle::Mounted(live)) => Ok(Arc::clone(&live.vfs)),
+            _ => Err(MountError::NotMounted),
+        }
+    }
+
+    /// The mount-relative path of the item the provider's public ID names, or `None` when the account has it but the mount shows it in no folder.
+    pub async fn locate(
+        &self,
+        provider: &str,
+        account: &str,
+        reference: &str,
+    ) -> Result<Option<String>, MountError> {
+        self.mounted_core(provider, account)?
+            .locate(reference)
+            .await
+            .map_err(item_error)
+    }
+
+    /// The provider's public ID of the item at a mount-relative path, or that it is a new file the remote does not have yet.
+    pub async fn identify(
+        &self,
+        provider: &str,
+        account: &str,
+        path: &str,
+    ) -> Result<Identified, MountError> {
+        let found = self
+            .mounted_core(provider, account)?
+            .identify(path)
+            .await
+            .map_err(item_error)?;
+        Ok(match found {
+            marlin_vfs::Identified::Remote(reference) => Identified::Remote { reference },
+            marlin_vfs::Identified::New => Identified::New,
+        })
+    }
+
+    /// Makes the mount drop its cached listings and stored answers, so its next listing asks the remote.
+    pub fn refresh(&self, provider: &str, account: &str) -> Result<(), MountError> {
+        self.mounted_core(provider, account)?.refresh();
+        Ok(())
     }
 
     /// The mount's core, and a guard that keeps the unmount from letting the spool go while this call runs.
@@ -935,6 +1001,25 @@ fn log_state(status: &MountStatus) {
         "info"
     };
     log::write(level, "mount.state", serde_json::json!(status));
+}
+
+/// The error a `locate` or `identify` answers when its core call fails. A remote that says no is no such item for the caller: an unknown ID, one the account may not see, and a path through a file.
+fn item_error(error: VfsError) -> MountError {
+    match error {
+        VfsError::NotFound | VfsError::NotAFolder | VfsError::AccessDenied => {
+            MountError::NoSuchItem
+        }
+        error => remote_error(error),
+    }
+}
+
+/// The error a request answers when its provider call fails for a reason about the remote: a sign-in that is gone, a remote out of reach, or a failure with the provider's own text.
+fn remote_error(error: VfsError) -> MountError {
+    match error {
+        VfsError::SignInNeeded => MountError::SignInNeeded,
+        VfsError::Offline | VfsError::TimedOut => MountError::Unreachable,
+        error => MountError::Provider(error.to_string()),
+    }
 }
 
 fn snapshot(key: &Key, entry: &MountEntry, root: &Path) -> MountStatus {

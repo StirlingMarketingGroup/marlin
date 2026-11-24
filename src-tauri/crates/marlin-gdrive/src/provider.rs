@@ -610,6 +610,85 @@ impl Provider for DriveProvider {
         })
     }
 
+    async fn locate(&self, reference: &str) -> Result<Option<Vec<ItemId>>, VfsError> {
+        // The reference goes into the request's path, so only the characters of a Drive ID pass.
+        if reference.is_empty()
+            || !reference
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        {
+            return Err(VfsError::NotFound);
+        }
+        let fields = format!("{ITEM_FIELDS},parents");
+        let query = [("fields", fields.as_str()), ("supportsAllDrives", "true")];
+        let path = format!("/files/{reference}");
+        let asked = self.request(Method::GET, &path, &query, None, None);
+        // `parents` names the top of My Drive by its real ID, never `root`. It is asked at the same time as the item, as `held` does, so an item in My Drive waits for one answer less.
+        let root_query = [("fields", "id")];
+        let root = self.request(Method::GET, "/files/root", &root_query, None, None);
+        let (found, root) = tokio::join!(asked, root);
+        let found: DriveFile = api::json(found?).await?;
+        // A mount lists no trashed file.
+        if found.trashed {
+            return Ok(None);
+        }
+        let drive = found.drive_id.as_deref();
+        // The walk up ends at the top folder of the item's shared drive, or at the top of My Drive. Only the second needs `root`'s answer.
+        let top = match drive {
+            Some(drive) => drive.to_string(),
+            None => api::json::<FileParents>(root?).await?.id,
+        };
+        let id_of = |file: &str| match drive {
+            None if file == top => ItemId(MY_DRIVE.to_string()),
+            drive => Place::File { drive, file }.id(),
+        };
+        let mut chain = vec![if found.id == top {
+            id_of(&found.id)
+        } else {
+            shown(drive, &found.id, &found).0.id()
+        }];
+        let mut file = found.id.clone();
+        let mut parents = found.parents.clone();
+        while file != top {
+            // An item outside My Drive and the account's shared drives, such as a file shared with the account, has no parent the account can see.
+            let Some(parent) = parents.first().cloned() else {
+                return Ok(None);
+            };
+            if parent != top {
+                let query = [("fields", "id,parents"), ("supportsAllDrives", "true")];
+                match self
+                    .request(Method::GET, &format!("/files/{parent}"), &query, None, None)
+                    .await
+                {
+                    Ok(response) => parents = api::json::<FileParents>(response).await?.parents,
+                    Err(VfsError::NotFound | VfsError::AccessDenied) => return Ok(None),
+                    Err(error) => return Err(error),
+                }
+            }
+            chain.push(id_of(&parent));
+            file = parent;
+        }
+        if drive.is_some() {
+            chain.push(ItemId(SHARED_DRIVES.to_string()));
+        }
+        chain.reverse();
+        Ok(Some(chain))
+    }
+
+    fn reference(&self, id: &ItemId) -> Option<String> {
+        match place(id) {
+            // The top and the two folders under it are the mount's own: Google gives My Drive's top another real ID, and decision 0009 stores these by name.
+            Place::Top
+            | Place::SharedDrives
+            | Place::File {
+                drive: None,
+                file: MY_DRIVE,
+            } => None,
+            // A shared drive's top folder is `{drive}/{drive}`, so this gives the drive's ID. A link file gives the Drive file it is, not the one its page opens.
+            Place::File { file, .. } | Place::Link { file, .. } => Some(file.to_string()),
+        }
+    }
+
     fn can_write(&self) -> bool {
         true
     }

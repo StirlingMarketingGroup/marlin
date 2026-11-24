@@ -83,6 +83,18 @@ pub trait Provider: Send + Sync + 'static {
     /// The account's total and free space, in bytes.
     async fn space(&self) -> Result<Space, VfsError>;
 
+    /// The items from the top of the mount down to the item that `reference` names, the top itself not included. `reference` is the remote's own public ID for an item, such as the file ID in a Google Drive link: the reverse of [`Self::reference`]. `None` when the remote has the item, but the mount shows it in no folder. A reference the remote does not know is [`VfsError::NotFound`], and one the account may not see is that or [`VfsError::AccessDenied`], as the remote answers. A provider that cannot find an item by a reference leaves this out, and it answers [`VfsError::NotSupported`].
+    async fn locate(&self, reference: &str) -> Result<Option<Vec<ItemId>>, VfsError> {
+        let _ = reference;
+        Err(VfsError::NotSupported)
+    }
+
+    /// The remote's own public ID for the item `id`, which [`Self::locate`] takes back. `None` for an item that has none, such as a folder that only the mount shows. Makes no remote call. A provider without public IDs leaves this out, and no item has one.
+    fn reference(&self, id: &ItemId) -> Option<String> {
+        let _ = id;
+        None
+    }
+
     /// Whether this provider has the three change calls and the two byte calls. A mount of a provider that answers `false` is read-only (decision 0005, choice 13).
     fn can_write(&self) -> bool {
         false

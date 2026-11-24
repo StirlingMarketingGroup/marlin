@@ -28,6 +28,16 @@ pub struct NodeId(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct HandleId(pub u64);
 
+/// What [`Vfs::identify`] found at a path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Identified {
+    /// An item the remote has, with the remote's public ID for it. `None` when it has none: the top of the mount, or a folder that only the mount shows.
+    Remote(Option<String>),
+
+    /// A file that is only in the spool. It has not reached the remote yet, so it has no ID there.
+    New,
+}
+
 /// One name in a folder, as the mount shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
@@ -893,6 +903,54 @@ impl Vfs {
         state.generation += 1;
     }
 
+    /// The path of the item that the provider's public ID `reference` names, as this mount shows it: the names from the top of the mount down, escaped and with their ` (2)` suffixes, joined with `/`. The top of the mount is the empty path. `None` when the provider has the item but the mount shows it in no folder. An unknown reference is [`VfsError::NotFound`], or [`VfsError::AccessDenied`] for one the account may not see: see [`Provider::locate`].
+    pub async fn locate(&self, reference: &str) -> Result<Option<String>, VfsError> {
+        let Some(chain) = self.call(self.provider.locate(reference)).await? else {
+            return Ok(None);
+        };
+        let mut folder = self.provider.root();
+        let mut names = Vec::with_capacity(chain.len());
+        for id in chain {
+            let held = self
+                .held_listing(&folder)
+                .and_then(|listing| self.shown_name(&folder, &listing, &id));
+            // A held listing can be older than the item, such as a file another client made a moment ago. One new listing settles it.
+            let name = match held {
+                Some(name) => name,
+                None => {
+                    let listing = self.ask_listing(&folder).await?;
+                    let Some(name) = self.shown_name(&folder, &listing, &id) else {
+                        return Ok(None);
+                    };
+                    name
+                }
+            };
+            names.push(name);
+            folder = id;
+        }
+        Ok(Some(names.join("/")))
+    }
+
+    /// What is at `path`: names as the mount shows them, joined with `/`, from the top of the mount. The empty path is the top. A name that is not there is [`VfsError::NotFound`], and a path through a file [`VfsError::NotAFolder`]. It reads the listings the core holds while they are fresh, as a lookup does.
+    pub async fn identify(&self, path: &str) -> Result<Identified, VfsError> {
+        let mut id = self.provider.root();
+        if !path.is_empty() {
+            let mut names = path.split('/').peekable();
+            while let Some(name) = names.next() {
+                let holder = self.find(&id, name).await?.1.ok_or(VfsError::NotFound)?;
+                // The core knows a file is no folder: no listing is asked for it.
+                if names.peek().is_some() && holder.kind() != Kind::Folder {
+                    return Err(VfsError::NotAFolder);
+                }
+                match holder {
+                    Holder::Item(item) => id = item.id,
+                    Holder::New { .. } => return Ok(Identified::New),
+                }
+            }
+        }
+        Ok(Identified::Remote(self.provider.reference(&id)))
+    }
+
     /// Makes an empty folder named `name` in `parent` and returns it. `name` is the name the OS sent. A name already in the listing, including a new file, is [`VfsError::Conflict`].
     pub async fn create_folder(&self, parent: NodeId, name: &str) -> Result<Entry, VfsError> {
         let _changes = self.lock_changes().await?;
@@ -1198,15 +1256,31 @@ impl Vfs {
         Ok((listing, holder))
     }
 
-    async fn listing(&self, folder: &ItemId) -> Result<Listing, VfsError> {
+    /// The name the item `id` shows under in `folder`, from `listing` with this mount's new files laid over it, as a lookup sees it.
+    fn shown_name(&self, folder: &ItemId, listing: &Listing, id: &ItemId) -> Option<String> {
+        let state = self.state.lock().unwrap();
+        let items = shown_items(&state, &self.rules, folder, listing);
+        items
+            .iter()
+            .find(|item| item.id == *id)
+            .map(|item| item.name.clone())
+    }
+
+    /// The listing of `folder` the core holds, while it is fresh.
+    fn held_listing(&self, folder: &ItemId) -> Option<Listing> {
+        let ttl = self.options.listing_ttl;
+        let state = self.state.lock().unwrap();
+        let held = state.listings.get(folder)?;
+        held.asked
+            .is_fresh(state.generation, ttl)
+            .then(|| held.clone())
+    }
+
+    /// A new listing of `folder` from the provider. The core keeps it, unless a refresh, a later listing, or a change of the folder came after it was asked for.
+    async fn ask_listing(&self, folder: &ItemId) -> Result<Listing, VfsError> {
         let ttl = self.options.listing_ttl;
         let (at, generation) = {
             let state = self.state.lock().unwrap();
-            if let Some(held) = state.listings.get(folder) {
-                if held.asked.is_fresh(state.generation, ttl) {
-                    return Ok(held.clone());
-                }
-            }
             (Instant::now(), state.generation)
         };
         let remote = self.call(self.provider.list(folder)).await?;
@@ -1246,6 +1320,13 @@ impl Vfs {
             state.listings.insert(folder.clone(), listing.clone());
         }
         Ok(listing)
+    }
+
+    async fn listing(&self, folder: &ItemId) -> Result<Listing, VfsError> {
+        match self.held_listing(folder) {
+            Some(held) => Ok(held),
+            None => self.ask_listing(folder).await,
+        }
     }
 
     /// Whether `node` may be opened for write or cut: the mount has a spool, the node is a file by [`held_kind`], and the provider has not marked that file read-only. A node with no answer is [`VfsError::StaleHandle`]: this asks the provider nothing. A read-only file is [`VfsError::AccessDenied`].
@@ -1768,6 +1849,17 @@ fn renamed_items(
     Some(remote)
 }
 
+/// The remote items of `folder` under the names the mount shows, with this mount's new files laid over them.
+fn shown_items(
+    state: &State,
+    rules: &NameRules,
+    folder: &ItemId,
+    listing: &Listing,
+) -> Arc<Vec<Item>> {
+    renamed_items(state, rules, folder, listing)
+        .map_or_else(|| Arc::clone(&listing.shown), Arc::new)
+}
+
 fn resolve(
     state: &State,
     rules: &NameRules,
@@ -1805,8 +1897,7 @@ fn folder_entries(
     folder: &ItemId,
     listing: &Listing,
 ) -> Vec<Entry> {
-    let items = renamed_items(state, rules, folder, listing)
-        .map_or_else(|| Arc::clone(&listing.shown), Arc::new);
+    let items = shown_items(state, rules, folder, listing);
     let new_files: Vec<Holder> = state.new_files.get(folder).map_or(Vec::new(), |held| {
         held.values()
             .map(|node| Holder::New {

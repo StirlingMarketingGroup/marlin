@@ -436,3 +436,12 @@ export interface DeadMount {
   name: string;
   mountPoint: string;
 }
+
+// What `identify_in_mount` found at a path in a mount. `ref` is the remote's own ID for the item, absent when it has none: the top of the mount, and a folder only the mount shows. A `new` file is only on this computer and has not reached the remote yet.
+export type IdentifiedItem = { item: 'remote'; ref?: string } | { item: 'new' };
+
+// The mount that holds a path, and the path inside it, as `find_mount` returns it.
+export interface MountedPath {
+  mount: MountStatus;
+  path: string;
+}

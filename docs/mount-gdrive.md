@@ -11,14 +11,14 @@ This is not the code behind `gdrive://` paths. The app handles those through its
 
 | File                    | Holds                                                                                                                             |
 | ----------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `src/provider.rs`       | `DriveProvider`, its five read calls, three change calls, and two byte calls, the item IDs, and the two things a caller supplies. |
+| `src/provider.rs`       | `DriveProvider`, its five read calls, `locate`, three change calls, and two byte calls, the item IDs, and what a caller supplies. |
 | `src/upload.rs`         | The resumable upload behind the two byte calls: the session, the pieces, and the resume.                                          |
 | `src/api.rs`            | `request`, the path of every request but an upload's `PUT`s: the token, the retries, and the error table. Google's JSON.          |
 | `src/sign_in.rs`        | `OAuthClient`, `SavedSignIn`, and the keychain entry: see [The saved sign-in](#the-saved-sign-in).                                |
 | `build.rs`              | Passes the OAuth client ID and secret to the compiler.                                                                            |
 | `tests/drive.rs`        | The provider's tests. They run against a fake Drive server in the test process.                                                   |
 | `tests/sign_in.rs`      | The sign-in's tests. They run against a fake token endpoint and an in-memory keychain.                                            |
-| `tests/live.rs`         | One manual test against a real account: see [Checked against real Google](#checked-against-real-google).                          |
+| `tests/live.rs`         | Manual tests against a real account: see [Checked against real Google](#checked-against-real-google).                             |
 | `tests/live_changes.rs` | One manual test of the three change calls against a real account. It changes the account.                                         |
 | `tests/live_uploads.rs` | One manual test of the two byte calls against a real account. It changes the account.                                             |
 
@@ -93,6 +93,16 @@ Not handled:
 
 A Drive ID never holds `/` or `#`, so the two made-up IDs cannot be real ones, and a link file's ID cannot be a plain item's.
 
+**Public IDs.** `reference` maps each ID to the Drive file ID that `locate` takes back.
+
+| Item ID                       | Public ID                                     |
+| ----------------------------- | --------------------------------------------- |
+| `/`, `/shared-drives`, `root` | none                                          |
+| `{file id}`                   | that file ID                                  |
+| `{drive id}/{file id}`        | the file ID                                   |
+| `{drive id}/{drive id}`       | the drive ID                                  |
+| a link file                   | its own file's ID, not the one its page opens |
+
 **Why a link file's ID holds the ID it opens.** `read` gets an item ID and nothing else, and the provider keeps nothing between calls. With the ID to open in the item ID, a read builds the page and asks Google nothing. A Google Doc `abc` in My Drive is `abc#abc`. A shortcut `abc` to `xyz` is `abc#xyz`. A shortcut's target is set when the shortcut is made, and a Google editor file stays one, so the ID stays with the item.
 
 **For a file or a link file, `item` returns the ID it was asked for, or `NotFound`.** The provider builds an item's ID from Google's answer. If that is not the ID asked for, the answer is not the item the core holds: a plain ID whose item is a Google Doc, or a link whose shortcut has another target. The size in such an answer would not be the size of the bytes a read returns.
@@ -121,7 +131,8 @@ What follows from that:
 - **Free space with no limit.** Google gives some Workspace accounts no storage limit. The provider then reports 1 PiB free, because a mount that reports 0 free makes file managers refuse to copy.
 - **A shared drive's top folder is asked from the drive, not from `files.get`.** On a real account `files.get` gives that folder another name than the drive's. So `item` asks `drives.get`, and its answer equals the drive's line in the `Shared drives` listing.
 - **A shared drive's modified time** is the time the drive was made. Google gives a shared drive no other time.
-- The five read calls send only GET. The change calls also send POST and PATCH, and the byte calls PUT. A token refresh sends a POST to Google's token endpoint.
+- **`locate` walks parents.** One `files.get` of the item, with its parents, and at the same time one of `root`, whose real ID ends a walk in My Drive. Then one `files.get` for each folder above the item, up to the top. An empty ID, or one with any character but a letter, a digit, `-`, or `_`, sends nothing and is `NotFound`. A trashed item, an item with no parent the account can see, and a parent Google refuses or does not know, answer no place.
+- The five read calls send only GET, and so does `locate`. The change calls also send POST and PATCH, and the byte calls PUT. A token refresh sends a POST to Google's token endpoint.
 
 ## The three change calls
 
@@ -329,7 +340,7 @@ The [mount core](mount-core.md) runs at most 16 provider calls at once and ends 
 
 ## Checked against real Google
 
-`tests/live.rs` is a manual test on a real account, with the five read calls only. It reads the real keychain, it never changes anything, and it prints counts, sizes, times, and the type words of link files, but no name. Its header has the command. It ran on 2026-11-16 against one Google Workspace account with two shared drives:
+`tests/live.rs` holds manual tests on a real account, with the five read calls and `locate` only. It reads the real keychain, it never changes anything, and it prints counts, sizes, times, and the type words of link files, but no name. Its header has the command. `a_real_account_lists_and_reads` ran on 2026-11-16 against one Google Workspace account with two shared drives:
 
 - **A read at the end of a file, and past it, returns no bytes.**
 - **A read at an offset returns the same bytes as that part of a read from the start.**
@@ -366,6 +377,7 @@ Every automated test runs against the fake server, so these still rest on Google
 
 - That `corpora=drive` with `driveId` lists every child of a folder in a shared drive. The live test lists a shared drive, but it cannot tell whether the listing is complete.
 - That every child of a folder is in the folder's own drive.
+- **What `locate` walks.** That `files.get` names an item's one parent in `parents`, names the top of My Drive by its real ID, and gives the top of a shared drive the drive's ID as its own, with no parent. That an item shared with the account, outside its My Drive and its shared drives, has no parent it can see, or one Google answers with 404 or 403. A check of the first part in `tests/live.rs` has not run yet.
 - That Google answers a read of an empty file with 416. The account had no empty file at the top of My Drive.
 - **An upload that fails partway.** `tests/live_uploads.rs` uploads with no failure. What a session answers after a dropped connection, a 308 with no `Range`, a new session after a 429, a 409 on a session, and an upload into a shared drive rest on Google's guide.
 - How long a page of 1,000 items takes, and so how big a folder can be before its listing passes the core's 30 seconds.
@@ -387,6 +399,7 @@ Every automated test runs against the fake server, so these still rest on Google
 - The change-call tests cover creating a folder, trashing, renaming, moving, the refusals, a resent create, and a move whose answer was lost. They check the request, not only the result.
 - The byte-call tests cover a new file, a replacement, the pieces, a resume from an even and an uneven offset, a dropped connection, a body cut off after a finished upload, a lost session, the revision check before a first send and a resend of the last request, and the refusals. The tests of a dropped connection, a cut-off answer, and a local file cut during an upload serve the session from a small HTTP server in the test, because wiremock cannot drop a connection partway through a body. They check the request, not only the result.
 - One test checks that the five read calls send only GET.
+- `locate` and `reference` are tested for a My Drive file, a shared drive item, an item the mount shows nowhere, an unknown or unsafe ID, each ID form, and a `Vfs` on the fake server whose shared drive holds two files named `a.txt`. They check the fields each request asks for.
 - The listing test checks the read-only mark of a file the account may only view, a file it owns, a file with no `capabilities`, a folder, and a link file. The `item` test checks a view-only file and an owned one. A replace of a view-only file opens no upload session.
 - The helper's tests mount this provider through FUSE against a fake Google: see [Mount helper](mount-helper.md#testing).
 - `tests/live.rs`, `tests/live_changes.rs`, and `tests/live_uploads.rs` are marked `#[ignore]`. Never run this crate's tests with `--ignored` or `--include-ignored`: that runs all three, and `live_changes.rs` and `live_uploads.rs` change the account. To run one, use the command in its header.
