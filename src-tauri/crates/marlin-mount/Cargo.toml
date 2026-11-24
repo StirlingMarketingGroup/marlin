@@ -21,6 +21,7 @@ uuid = { version = "1.23", features = ["v4"] }
 # The helper's library is Unix only until the Windows adapter (#375).
 [target.'cfg(unix)'.dependencies]
 marlin-sftp = { path = "../marlin-sftp" }
+marlin-smb-client = { path = "../marlin-smb-client" }
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 marlin-fuse = { path = "../marlin-fuse" }
@@ -30,6 +31,7 @@ tempfile = "3"
 wiremock = "0.6"
 marlin-test-keychain = { path = "../marlin-test-keychain" }
 marlin-test-sshd = { path = "../marlin-test-sshd" }
+marlin-test-samba = { path = "../marlin-test-samba" }
 libc = "0.2"
 # For the paused clock in the log test.
 tokio = { version = "1.50", features = ["test-util"] }

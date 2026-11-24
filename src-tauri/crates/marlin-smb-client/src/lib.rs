@@ -19,4 +19,4 @@ pub use servers::{
     servers_path, CredentialsError, SmbServerCredentials, SmbServerInfo,
 };
 #[cfg(feature = "client")]
-pub use sidecar::{CallError, Sidecar, StartError};
+pub use sidecar::{is_installed, CallError, Sidecar, StartError};

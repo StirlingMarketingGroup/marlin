@@ -1,14 +1,24 @@
 //! The storage providers the helper links.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use marlin_gdrive::{DriveProvider, OAuthClient, SavedSignIn};
 use marlin_sftp::{SftpAccount, SftpProvider};
+use marlin_smb_client::{SmbProvider, SmbSignIn};
 
 use crate::{MountError, Opened};
 
-/// The helper links Google Drive (`gdrive`) and SFTP (`sftp`).
+/// What an SMB mount needs from this machine.
+pub struct SmbConfig {
+    /// The `marlin-smb` program to run: the file beside `marlin-mount` (decision 0006). None when the helper could not find its own file.
+    pub binary: Option<PathBuf>,
+    /// The saved SMB servers file. `marlin_smb_client::servers_path()` in the helper.
+    pub servers: PathBuf,
+}
+
+/// The helper links Google Drive (`gdrive`), SFTP (`sftp`), and SMB (`smb`).
 pub struct LinkedProviders {
     drive: marlin_gdrive::Config,
     /// Finds Marlin's OAuth client. `OAuthClient::load` in the helper. A test hands in one that points at a fake token endpoint.
@@ -18,6 +28,9 @@ pub struct LinkedProviders {
     sftp: marlin_sftp::Config,
     /// One `SftpAccount` per SFTP account for the life of the helper, so a sign-in the server refused stays refused across an unmount and a new mount. Each mount gets its own provider, so its connection closes when the mount goes. The key is the parsed account with the host in lower case: `deploy@Host` and `deploy@host` find the same saved server, so they share one account.
     sftp_accounts: Mutex<HashMap<(String, String, u16), Arc<SftpAccount>>>,
+    smb: SmbConfig,
+    /// One sign-in per SMB server for the life of the helper, keyed by the host in lower case: saved servers match a host in any letter case. A refusal stays with it, so a later mount never sends a password the server refused.
+    smb_sign_ins: Mutex<HashMap<String, Arc<SmbSignIn>>>,
 }
 
 impl LinkedProviders {
@@ -25,6 +38,7 @@ impl LinkedProviders {
         drive: marlin_gdrive::Config,
         oauth_client: impl Fn() -> Result<OAuthClient, String> + Send + Sync + 'static,
         sftp: marlin_sftp::Config,
+        smb: SmbConfig,
     ) -> Self {
         Self {
             drive,
@@ -32,6 +46,8 @@ impl LinkedProviders {
             sign_ins: Mutex::new(HashMap::new()),
             sftp,
             sftp_accounts: Mutex::new(HashMap::new()),
+            smb,
+            smb_sign_ins: Mutex::new(HashMap::new()),
         }
     }
 
@@ -79,6 +95,27 @@ impl LinkedProviders {
             max_calls: Some(marlin_sftp::MAX_CALLS),
         })
     }
+
+    fn open_smb(&self, account: &str) -> Result<Opened, MountError> {
+        let sign_in = Arc::clone(
+            self.smb_sign_ins
+                .lock()
+                .unwrap()
+                .entry(account.to_ascii_lowercase())
+                .or_insert_with(|| Arc::new(SmbSignIn::new(account, self.smb.servers.clone()))),
+        );
+        // Looked at for each mount, so a `marlin-smb` built after the helper started is found.
+        let binary = self
+            .smb
+            .binary
+            .clone()
+            .filter(|path| marlin_smb_client::is_installed(path));
+        Ok(Opened {
+            provider: Arc::new(SmbProvider::new(sign_in, binary)),
+            // Each `marlin-smb` process runs one call at a time (decision 0006).
+            max_calls: Some(marlin_smb_client::PROCESSES),
+        })
+    }
 }
 
 #[async_trait::async_trait]
@@ -87,6 +124,7 @@ impl crate::Providers for LinkedProviders {
         match provider {
             "gdrive" => self.open_gdrive(account),
             "sftp" => self.open_sftp(account),
+            "smb" => self.open_smb(account),
             _ => Err(MountError::UnknownProvider),
         }
     }

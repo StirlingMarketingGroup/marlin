@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 
 use marlin_mount::protocol::{error_codes, MountState, MountStatus, ReadOnly};
 use marlin_mount::{
-    Adapter, Config, LinkedProviders, MountError, OsAdapter, Server, Session, MOUNT_FOLDER_MARKER,
+    Adapter, Config, LinkedProviders, MountError, OsAdapter, Server, Session, SmbConfig,
+    MOUNT_FOLDER_MARKER,
 };
 use marlin_mount_client::{mount_name, Client, ClientError, Event, Start};
 use marlin_test_sshd::{Proxy, Sshd};
@@ -137,6 +138,10 @@ impl Lab {
                     servers: servers.clone(),
                     known_hosts: known_hosts.clone(),
                     retry_after: Duration::from_secs(60),
+                },
+                SmbConfig {
+                    binary: None,
+                    servers: dir.path().join("smb-servers.json"),
                 },
             )),
         )

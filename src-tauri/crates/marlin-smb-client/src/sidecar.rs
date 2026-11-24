@@ -37,6 +37,11 @@ impl std::fmt::Display for StartError {
 
 impl std::error::Error for StartError {}
 
+/// Whether `path` is a `marlin-smb` that can run. A build with no `marlin-smb`, such as one for an Intel Mac, ships an empty placeholder file in its place (`src-tauri/build.rs`).
+pub fn is_installed(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|file| file.is_file() && file.len() > 0)
+}
+
 /// Why one call to `marlin-smb` failed.
 #[derive(Debug, PartialEq, Eq)]
 pub enum CallError {

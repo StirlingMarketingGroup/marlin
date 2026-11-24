@@ -1,6 +1,6 @@
 # SMB mount provider (`marlin-smb-client`)
 
-`SmbProvider` shows one saved SMB server to the [mount core](mount-core.md) as a `Provider`. The server's shares are the top folders. It is read-only: `can_write` is false, so a mount of it takes no writes. [Decision 0006](decisions/0006-smb-mounts.md) says what an SMB mount is, how many `marlin-smb` processes it runs, and where it gets the password. The [mount helper](mount-helper.md) does not use the provider yet: #478 opens it as the provider `smb`.
+`SmbProvider` shows one saved SMB server to the [mount core](mount-core.md) as a `Provider`. The server's shares are the top folders. It is read-only: `can_write` is false, so a mount of it takes no writes. [Decision 0006](decisions/0006-smb-mounts.md) says what an SMB mount is, how many `marlin-smb` processes it runs, and where it gets the password. The [mount helper](mount-helper.md#providers) opens it as the provider `smb`.
 
 This is not the code behind `smb://` paths. The app handles those through its own location provider and its own `marlin-smb` process: see [Location providers](location-providers.md).
 
@@ -80,7 +80,7 @@ The ID is the path. So a rename that another client makes looks like one item re
 - **An untried sign-in goes out on one call at a time.** The other calls wait for its answer. So four calls with a wrong new password cost one refusal, not four.
 - **An accepted sign-in goes out on every call at once.** When the password changes on the server, up to 4 calls in flight can each be refused once.
 - **A refused sign-in is never sent again.** Each later call reads the saved server and the keychain again, the calls that waited for the refusal included. When they still hold the refused user name, password, and domain, the call fails with `SignInNeeded` and sends nothing. A refused share call costs at least two sign-ins: one that gets `EACCES` runs `smbclient -L` to learn who refused, and a folder listing stats the folder first. A domain with a lockout threshold counts every try. A new password, user name, or domain is tried, so the mount recovers with no unmount.
-- **Give every provider of one server the same `SmbSignIn`, for the whole run of the process**, as the helper keeps one `SavedSignIn` per Google account. The first call of a mount is `space`. When it is refused, the mount fails and its provider goes away, but the refusal stays with the server's `SmbSignIn`. #478 keeps one per server in the helper.
+- **Give every provider of one server the same `SmbSignIn`, for the whole run of the process**, as the helper keeps one `SavedSignIn` per Google account. The first call of a mount is `space`. When it is refused, the mount fails and its provider goes away, but the refusal stays with the server's `SmbSignIn`. The helper keeps one per server.
 - **Every request to `marlin-smb` reads `smb-servers.json` first.** When the user name or domain saved for the server is not the one the sign-in holds, the request reads the sign-in again: the user may have switched accounts while the old one still works on the server. An accepted or untried sign-in of the same account keeps its password, so the request reads no keychain.
 - A missing saved server or keychain entry is `SignInNeeded`. A saved servers file or a keychain that cannot be read is `Other("Marlin could not read the saved SMB sign-in")`.
 

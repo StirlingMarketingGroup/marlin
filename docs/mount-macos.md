@@ -104,9 +104,9 @@ The table in [Linux mount adapter](mount-linux.md#errors) holds for macOS: both 
 
 ## Testing
 
-Run `src-tauri/crates/marlin-fuse/test-on-mac.sh` on a Mac that has macFUSE 5 with both switches on. CI does not run it: the runners have no macFUSE.
+Run `src-tauri/crates/marlin-fuse/test-on-mac.sh` on a Mac that has macFUSE 5 with both switches on and Homebrew's samba. CI does not run it: the runners have no macFUSE.
 
-- It runs the `marlin-fuse` tests with the ignored ones, the `marlin-mount` tests with the ignored ones, and `crates/marlin-mount/test-sweep.sh`. The helper's ignored tests mount a Google account against a fake Google, and an SFTP server against an `sshd` the test starts, with the in-memory keychain: see [Mount helper](mount-helper.md#testing). No test touches a real account or the real keychain. One SFTP test drives Finder, which can take the focus from whoever works at the Mac.
+- It runs the `marlin-fuse` tests with the ignored ones, the `marlin-mount` tests with the ignored ones, and `crates/marlin-mount/test-sweep.sh`. The helper's ignored tests mount a Google account against a fake Google, an SFTP server against an `sshd` the test starts, and a Samba server the test starts, all with the in-memory keychain: see [Mount helper](mount-helper.md#testing). No test touches a real account or the real keychain. One SFTP test drives Finder, which can take the focus from whoever works at the Mac.
 - The mount tests are the Linux ones: see [Testing](mount-linux.md#testing). These differ:
   - `editor_saves_keep_one_file` runs `sed -i ''` and `/usr/bin/vim` instead of `sed -i` and `vim.tiny`, and leaves `._name` files out of its listing check. `names_change_through_the_mount` checks the macOS errnos: `EPERM` for `unlink` of a folder, which `unlink(2)` documents, `ENOTSUP` for a link, and the `renamex_np` answers above.
   - `a_cocoa_safe_save_keeps_the_item` is macOS only. It saves through a real `NSDocument`, from `osascript -l JavaScript`, and checks that the file keeps its ID.

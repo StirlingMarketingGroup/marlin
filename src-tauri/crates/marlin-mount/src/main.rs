@@ -13,7 +13,7 @@ async fn main() {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use marlin_mount::{log, BindError, Config, LinkedProviders, OsAdapter, Server};
+    use marlin_mount::{log, BindError, Config, LinkedProviders, OsAdapter, Server, SmbConfig};
     use tokio::signal::unix::{signal, SignalKind};
 
     let mut socket = None;
@@ -49,8 +49,15 @@ async fn main() {
     let spool = spool.or_else(marlin_mount_client::default_spool);
     let servers = marlin_sftp::servers_path().ok();
     let known_hosts = marlin_sftp::known_hosts_path().ok();
-    let (Some(socket), Some(root), Some(spool), Some(servers), Some(known_hosts)) =
-        (socket, root, spool, servers, known_hosts)
+    let smb_servers = marlin_smb_client::servers_path().ok();
+    let (
+        Some(socket),
+        Some(root),
+        Some(spool),
+        Some(servers),
+        Some(known_hosts),
+        Some(smb_servers),
+    ) = (socket, root, spool, servers, known_hosts, smb_servers)
     else {
         log::write("error", "helper.no_home_folder", serde_json::Value::Null);
         std::process::exit(1);
@@ -72,6 +79,13 @@ async fn main() {
                 known_hosts,
                 // One minute: often enough to see a fix made on the server, rarely enough that OpenSSH does not penalize the address.
                 retry_after: Duration::from_secs(60),
+            },
+            SmbConfig {
+                // Only the file beside the helper, never `PATH` (decision 0006).
+                binary: std::env::current_exe()
+                    .ok()
+                    .map(|exe| exe.with_file_name("marlin-smb")),
+                servers: smb_servers,
             },
         )),
     ) {

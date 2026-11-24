@@ -21,7 +21,8 @@ apt-get update -qq
 # procps: a marlin-mount test finds the helper with pgrep and ps.
 # rsync: copies_reach_the_provider and preserved_times_reach_the_provider. vim-tiny: editor_saves_keep_one_file.
 # openssh-server: the SFTP mount tests run sshd, ssh-keygen, ssh-agent, and ssh-add. openssh-server brings the client tools.
-apt-get install -y -qq fuse3 procps rsync vim-tiny openssh-server
+# samba, smbclient, libsmbclient-dev, pkg-config: the SMB mount tests build marlin-smb and run a Samba server.
+apt-get install -y -qq fuse3 procps rsync vim-tiny openssh-server samba smbclient libsmbclient-dev pkg-config
 useradd -m tester
 chown tester /usr/local/cargo/registry /target
 cat > /tmp/as-tester.sh << 'TEST'
@@ -32,6 +33,8 @@ echo "=== environment ==="
 id
 uname -r
 fusermount3 --version
+# The SMB mount tests run the marlin-smb beside the helper.
+cargo build --locked -p marlin-smb
 # marlin-mount is here because its Linux half, the wiring to this adapter, is compiled out on a Mac.
 # One test at a time: see the note at the top of tests/mount.rs.
 cargo test --locked -p marlin-fuse -p marlin-mount -- --include-ignored --test-threads=1

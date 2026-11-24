@@ -226,17 +226,33 @@ impl Server {
             .expect("pdbedit");
         assert!(status.success(), "pdbedit could not disable the account");
     }
+
+    /// Stops smbd and the processes it started for each connection, as a server that hangs: a connection still opens, and nothing answers. [`Self::resume`] lets it go on.
+    pub fn pause(&self) {
+        self.signal(libc::SIGSTOP);
+    }
+
+    pub fn resume(&self) {
+        self.signal(libc::SIGCONT);
+    }
+
+    /// Sends `signal` to smbd's process group: smbd and its children.
+    fn signal(&self, signal: libc::c_int) {
+        if let Ok(pid) = i32::try_from(self.smbd.id()) {
+            // SAFETY: kill(2) takes plain integers and touches no memory of ours.
+            unsafe {
+                libc::kill(-pid, signal);
+            }
+        }
+    }
 }
 
 impl Drop for Server {
     fn drop(&mut self) {
         // smbd's children share its process group, so a SIGTERM to the group leaves none behind.
-        if let Ok(pid) = i32::try_from(self.smbd.id()) {
-            // SAFETY: kill(2) takes plain integers and touches no memory of ours.
-            unsafe {
-                libc::kill(-pid, libc::SIGTERM);
-            }
-        }
+        self.signal(libc::SIGTERM);
+        // A paused group takes the SIGTERM only once it runs again.
+        self.signal(libc::SIGCONT);
         let _ = self.smbd.wait();
         // smbd starts samba-dcerpcd to list shares. It leads a process group of its own, which outlives smbd and keeps restarting its workers. Every one of them names this server's config file.
         let _ = Command::new("pkill")
