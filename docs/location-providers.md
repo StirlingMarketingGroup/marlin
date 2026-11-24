@@ -100,7 +100,9 @@ Same-scheme pairs go through the provider's own `copy`. Anything from an `archiv
 
 ## Where this is going
 
-Epic #368 turns each connected account or server into a native mount, so the OS sees an ordinary folder. Then local-to-remote and remote-to-remote copies, drag and drop, the clipboard, and other apps all work through normal filesystem calls, and the pair table goes away. The provider code for API calls and sign-in stays. The work is split into issues #369 to #378. [Decision 0001](decisions/0001-mount-architecture.md) sets the architecture and the order of that work. Its evidence is the spike in `spikes/mount-hello/`, which the real adapters replace. The first piece, the [mount core](mount-core.md), is in the repo, and nothing uses it yet.
+Epic #368 turns each connected account or server into a native mount, so the OS sees an ordinary folder. Then local-to-remote and remote-to-remote copies, drag and drop, the clipboard, and other apps all work through normal filesystem calls, and the pair table goes away. A few provider actions stay outside the filesystem, such as a Drive copy that keeps a Google Doc a Doc. The work is split into issues #369 to #378. [Decision 0001](decisions/0001-mount-architecture.md) sets the architecture and the order of that work. Its evidence is the spike in `spikes/mount-hello/`. The helper's sweep test uses the spike's programs. The [mount core](mount-core.md) and the [mount helper](mount-helper.md) are in the repo: the helper mounts a Google account, with writes, on Linux and macOS. Marlin's window does not route an account to its mount yet: a saved account or a provider address opens through the providers on this page. A mount opened by its own path is a local folder to the window.
+
+[Decision 0009](decisions/0009-window-on-mount-paths.md) sets how the window moves onto mounts, one provider at a time, and which code on this page stays. #377 lists the pieces.
 
 ## Adding a provider today
 
