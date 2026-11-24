@@ -224,7 +224,7 @@ Rules the table keeps:
 | -------- | -------------------------- | ---------------------------------------------- |
 | `gdrive` | The Google account's email | [Google Drive mount provider](mount-gdrive.md) |
 
-**Opening a Google account** makes no request. The helper finds Marlin's OAuth client and builds the provider on the account's [saved sign-in](mount-gdrive.md#the-saved-sign-in). A build with no OAuth client (#536) fails here with -1005, "this build of Marlin has no Google OAuth client". No text from the OAuth client loader reaches a log or a response: it can hold a file path.
+**Opening a Google account** makes no request. The helper finds Marlin's OAuth client and builds the provider on the account's [saved sign-in](mount-gdrive.md#the-saved-sign-in). A build with no OAuth client, such as a dev build with no `src-tauri/.env`, fails here with -1005, "this build of Marlin has no Google OAuth client". No text from the OAuth client loader reaches a log or a response: it can hold a file path.
 
 **One saved sign-in per account, for the life of the helper.** It keeps the refresh token in memory, so an unmount and a new mount of the account read the keychain once in all.
 

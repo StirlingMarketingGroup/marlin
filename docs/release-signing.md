@@ -1,6 +1,6 @@
 # Release signing
 
-A release is built, signed, and notarized by `.github/workflows/release.yml`. Pushing a `v*` tag, or running the workflow by hand with a tag, starts it. Signing needs six Apple secrets and two Tauri updater secrets in the repository settings.
+A release is built, signed, and notarized by `.github/workflows/release.yml`. Pushing a `v*` tag, or running the workflow by hand with a tag, starts it. Signing needs six Apple secrets and two Tauri updater secrets in the repository settings. The build also needs Marlin's Google OAuth client.
 
 **Covers:** `.github/workflows/release.yml`, `src-tauri/Entitlements.plist`, `src-tauri/tauri.conf.json`, `scripts/check-linux-package-libraries.mjs`, `scripts/check-bundled-licenses.mjs`, `src-tauri/build.rs`
 **Checked against the code:** 2026-11-24
@@ -74,9 +74,11 @@ Both jobs install cargo-about, because `npm run tauri build` writes the license 
 | `APPLE_TEAM_ID`              | The 10-character team ID                                                              | "Notarize DMG"                 |
 | `TAURI_PRIVATE_KEY`          | The Tauri updater signing key                                                         | "Build and publish installers" |
 | `TAURI_KEY_PASSWORD`         | The password for that key                                                             | "Build and publish installers" |
+| `GOOGLE_CLIENT_ID`           | The client ID of Marlin's Google OAuth client                                         | "Build and publish installers" |
+| `GOOGLE_CLIENT_SECRET`       | The client secret of that OAuth client                                                | "Build and publish installers" |
 | `APP_ID`, `APP_PRIVATE_KEY`  | The GitHub App that commits the version bump                                          | `sync-version`                 |
 
-Without `APPLE_CERTIFICATE` the import step is skipped. Without `APPLE_SIGNING_IDENTITY` the build signs ad hoc (`-`), which Gatekeeper does not accept.
+Without `APPLE_CERTIFICATE` the import step is skipped. Without `APPLE_SIGNING_IDENTITY` the build signs ad hoc (`-`), which Gatekeeper does not accept. Without both Google secrets the `release` job stops at its first step, "Check the Google sign-in client": the app would build but could not sign in to Google. The dry run does not get them, so its bundle has no OAuth client.
 
 ## Setting up Apple signing from nothing
 
