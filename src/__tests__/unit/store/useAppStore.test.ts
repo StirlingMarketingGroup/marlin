@@ -2252,13 +2252,18 @@ describe('useAppStore', () => {
 
   describe('pasteFiles', () => {
     // The OS clipboard holds `filePaths`, and the paste writes `pastedPaths`.
-    function mockPaste(filePaths: string[], isCut: boolean, pastedPaths: string[]) {
+    function mockPaste(
+      filePaths: string[],
+      isCut: boolean,
+      pastedPaths: string[],
+      errorMessage: string | null = null
+    ) {
       answerCommands({
         clipboard_get_contents: { hasFiles: true, hasImage: false, filePaths, isCut },
         paste_items_to_location: {
           pastedPaths,
           skippedCount: filePaths.length - pastedPaths.length,
-          errorMessage: null,
+          errorMessage,
           cancelled: false,
         },
       });
@@ -2341,6 +2346,23 @@ describe('useAppStore', () => {
       expect(useToastStore.getState().toasts.map((toast) => toast.message)).toEqual([
         'Copied 1 item',
         '1 item skipped',
+      ]);
+    });
+
+    it('says why an item failed beside the undo toast of a local paste', async () => {
+      useToastStore.setState({ toasts: [] });
+      mockPaste(
+        ['/src/a.txt', '/src/b.txt'],
+        false,
+        ['/test/a.txt'],
+        'Failed to copy /src/b.txt: No space left on device'
+      );
+
+      await useAppStore.getState().pasteFiles();
+
+      expect(useToastStore.getState().toasts.map((toast) => toast.message)).toEqual([
+        'Copied 1 item',
+        'Failed to copy /src/b.txt: No space left on device',
       ]);
     });
 

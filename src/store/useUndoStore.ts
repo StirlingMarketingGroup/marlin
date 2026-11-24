@@ -59,7 +59,7 @@ async function executeUndoRecordInternal(record: UndoRecord): Promise<string[]> 
       // Move files back to their original locations
       const restoredPaths: string[] = [];
       for (const file of record.files) {
-        await invoke('rename_file', {
+        await invoke('move_file', {
           fromPath: file.currentPath,
           toPath: file.originalPath,
         });

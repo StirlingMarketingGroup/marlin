@@ -2629,10 +2629,12 @@ export const useAppStore = create<AppState>((set, get) => ({
 
       if (pastedCount > 0) {
         if (undoInfo) {
-          // The undo toast has its own message, so the skipped count gets its own toast, as a
-          // drop's does.
+          // The undo toast has its own message, so why an item failed, or else the skipped
+          // count, gets its own toast, as a drop's does.
           pushUndoAndShowToast(result, moved, undoInfo.sourcePaths, toastStore);
-          if (skippedCount > 0) {
+          if (result.errorMessage) {
+            toastStore.addToast({ type: 'error', message: result.errorMessage });
+          } else if (skippedCount > 0) {
             toastStore.addToast({
               type: 'info',
               message: `${skippedCount} item${skippedCount !== 1 ? 's' : ''} skipped`,

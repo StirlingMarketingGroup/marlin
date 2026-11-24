@@ -807,86 +807,8 @@ pub fn get_clipboard_image() -> Result<Vec<u8>, String> {
 }
 
 // ============================================================================
-// File Operations
+// Image Paste
 // ============================================================================
-
-/// Paste files from clipboard to destination directory
-pub fn paste_files(destination: &str, is_cut: bool) -> Result<PasteResult, String> {
-    let clipboard_info = get_clipboard_contents()?;
-
-    if clipboard_info.file_paths.is_empty() {
-        return Err("No files in clipboard".into());
-    }
-
-    let dest_path = Path::new(destination);
-    if !dest_path.exists() {
-        return Err(format!("Destination does not exist: {}", destination));
-    }
-    if !dest_path.is_dir() {
-        return Err(format!("Destination is not a directory: {}", destination));
-    }
-
-    let mut pasted_paths = Vec::new();
-    let mut skipped_count = 0;
-    let mut last_error: Option<String> = None;
-
-    for source_path_str in &clipboard_info.file_paths {
-        let source_path = Path::new(source_path_str);
-
-        // Skip if source doesn't exist (for cut operations, file may have been moved/deleted)
-        if !source_path.exists() {
-            skipped_count += 1;
-            continue;
-        }
-
-        // Skip directories (v1 limitation)
-        if source_path.is_dir() {
-            skipped_count += 1;
-            continue;
-        }
-
-        let file_name = source_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unnamed");
-
-        let final_target = allocate_unique_path(dest_path, file_name)
-            .map_err(|e| format!("Failed to allocate unique path: {}", e))?;
-
-        // Use actual clipboard is_cut if available, otherwise use parameter
-        let should_move = is_cut || clipboard_info.is_cut;
-
-        let result = if should_move {
-            // Move operation
-            std::fs::rename(source_path, &final_target).or_else(|_| {
-                // If rename fails (cross-device), fall back to copy + delete
-                std::fs::copy(source_path, &final_target)?;
-                std::fs::remove_file(source_path)?;
-                Ok::<_, std::io::Error>(())
-            })
-        } else {
-            // Copy operation
-            std::fs::copy(source_path, &final_target).map(|_| ())
-        };
-
-        match result {
-            Ok(()) => {
-                pasted_paths.push(final_target.to_string_lossy().into_owned());
-            }
-            Err(e) => {
-                skipped_count += 1;
-                last_error = Some(format!("Failed to paste {}: {}", file_name, e));
-            }
-        }
-    }
-
-    Ok(PasteResult {
-        pasted_paths,
-        skipped_count,
-        error_message: last_error,
-        cancelled: false,
-    })
-}
 
 /// Paste an image from clipboard to a file
 pub fn paste_image(destination: &str, filename: Option<&str>) -> Result<PasteImageResult, String> {
@@ -936,17 +858,6 @@ pub async fn clipboard_copy_files(paths: Vec<String>, is_cut: bool) -> Result<()
 #[tauri::command]
 pub async fn clipboard_get_contents() -> Result<ClipboardInfo, String> {
     tokio::task::spawn_blocking(get_clipboard_contents)
-        .await
-        .map_err(|e| format!("Task failed: {}", e))?
-}
-
-/// Paste files from clipboard to destination
-#[tauri::command]
-pub async fn clipboard_paste_files(
-    destination: String,
-    is_cut: bool,
-) -> Result<PasteResult, String> {
-    tokio::task::spawn_blocking(move || paste_files(&destination, is_cut))
         .await
         .map_err(|e| format!("Task failed: {}", e))?
 }

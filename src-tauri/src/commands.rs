@@ -2347,23 +2347,6 @@ pub async fn rename_file(from_path: LocationInput, to_path: LocationInput) -> Re
 }
 
 #[command]
-pub async fn copy_file(from_path: LocationInput, to_path: LocationInput) -> Result<(), String> {
-    let (from_provider, from_location) = resolve_location(from_path)?;
-    let (_, to_location) = resolve_location(to_path)?;
-
-    if from_location.scheme() != to_location.scheme() {
-        return Err("Copying across different providers is not yet supported".to_string());
-    }
-
-    let capabilities = from_provider.capabilities(&from_location);
-    if !capabilities.can_copy {
-        return Err("Provider does not support copy operations".to_string());
-    }
-
-    from_provider.copy(&from_location, &to_location).await
-}
-
-#[command]
 pub async fn move_file(from_path: LocationInput, to_path: LocationInput) -> Result<(), String> {
     let (from_provider, from_location) = resolve_location(from_path)?;
     let (_, to_location) = resolve_location(to_path)?;
@@ -2677,16 +2660,16 @@ pub async fn paste_items_to_location(
                         // No conflict — proceed normally
                         let dest_raw = candidate.to_string_lossy().to_string();
                         let (_, dest_item_location) = resolve_location(LI::Raw(dest_raw.clone()))?;
-                        if is_cut {
+                        let op = if is_cut {
                             source_provider
                                 .move_item(&source_location, &dest_item_location)
-                                .await?;
+                                .await
                         } else {
                             source_provider
                                 .copy(&source_location, &dest_item_location)
-                                .await?;
-                        }
-                        Ok(Some(dest_raw))
+                                .await
+                        };
+                        op.map(|()| Some(dest_raw))
                     }
                 }
                 (src, dst) if src == dst => {
@@ -2986,9 +2969,10 @@ pub async fn paste_items_to_location(
                             }
                             ConflictAction::Replace => delete_file_or_directory(&candidate)
                                 .and_then(|_| {
-                                    crate::fs_utils::copy_file_or_directory(
+                                    crate::fs_utils::transfer(
                                         Path::new(&temp_path),
                                         &candidate,
+                                        crate::fs_utils::Transfer::Copy,
                                     )
                                 })
                                 .map(|_| Some(candidate.to_string_lossy().to_string())),
@@ -2996,9 +2980,10 @@ pub async fn paste_items_to_location(
                             ConflictAction::KeepBoth | ConflictAction::Merge => {
                                 allocate_unique_path(dest_dir.as_path(), &name).and_then(
                                     |dest_path| {
-                                        crate::fs_utils::copy_file_or_directory(
+                                        crate::fs_utils::transfer(
                                             Path::new(&temp_path),
                                             &dest_path,
+                                            crate::fs_utils::Transfer::Copy,
                                         )
                                         .map(|_| Some(dest_path.to_string_lossy().to_string()))
                                     },
@@ -3013,17 +2998,22 @@ pub async fn paste_items_to_location(
                                     if dest_path.exists() {
                                         Err(format!("A file named '{safe_name}' already exists"))
                                     } else {
-                                        crate::fs_utils::copy_file_or_directory(
+                                        crate::fs_utils::transfer(
                                             Path::new(&temp_path),
                                             &dest_path,
+                                            crate::fs_utils::Transfer::Copy,
                                         )
                                         .map(|_| Some(dest_path.to_string_lossy().to_string()))
                                     }
                                 }),
                         }
                     } else {
-                        crate::fs_utils::copy_file_or_directory(Path::new(&temp_path), &candidate)
-                            .map(|_| Some(candidate.to_string_lossy().to_string()))
+                        crate::fs_utils::transfer(
+                            Path::new(&temp_path),
+                            &candidate,
+                            crate::fs_utils::Transfer::Copy,
+                        )
+                        .map(|_| Some(candidate.to_string_lossy().to_string()))
                     };
 
                     // Ensure temp file is removed after copy/move logic
@@ -8146,7 +8136,7 @@ fn sanitize_conflict_name(name: &str) -> Result<String, String> {
 
 /// Execute the resolved conflict action for a local-to-local file operation.
 /// Returns Ok(Some(dest_path)) on success, Ok(None) if skipped.
-async fn execute_local_conflict_action(
+pub(crate) async fn execute_local_conflict_action(
     action: &ConflictAction,
     custom_name: Option<&str>,
     source_path: &Path,
@@ -8206,8 +8196,12 @@ async fn execute_local_conflict_action(
             }
             Ok(Some(dest_raw))
         }
-        // Directory merge: recursively combine contents
-        ConflictAction::Merge if source_path.is_dir() && dest_dir.join(name).is_dir() => {
+        // Directory merge: recursively combine contents. Only real folders on both sides: a merge through a link would move or fill the folder the link points to.
+        ConflictAction::Merge
+            if fs::symlink_metadata(source_path).is_ok_and(|metadata| metadata.is_dir())
+                && fs::symlink_metadata(dest_dir.join(name))
+                    .is_ok_and(|metadata| metadata.is_dir()) =>
+        {
             let dest_path = dest_dir.join(name);
             // Guard: don't merge a directory into itself
             let source_canon =
@@ -8216,7 +8210,16 @@ async fn execute_local_conflict_action(
             if source_canon == dest_canon {
                 return Ok(Some(dest_path.to_string_lossy().to_string()));
             }
-            merge_local_directory(source_path, &dest_path, is_cut)?;
+            let kind = if is_cut {
+                fs_utils::Transfer::Move
+            } else {
+                fs_utils::Transfer::Copy
+            };
+            // Checked before anything moves: inside the merge, the entry that holds the destination would fail only after the entries before it moved.
+            if dest_canon.starts_with(&source_canon) {
+                return Err(format!("Cannot {} {name} into itself", kind.verb()));
+            }
+            merge_local_directory(source_path, &dest_path, kind)?;
             if is_cut {
                 // Source directory should be empty after merge
                 let _ = fs::remove_dir(source_path);
@@ -8242,34 +8245,15 @@ async fn execute_local_conflict_action(
     }
 }
 
-fn copy_symlink(src: &Path, dst: &Path) -> Result<(), String> {
-    let target = fs::read_link(src).map_err(|e| format!("Failed to read link: {e}"))?;
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::symlink(target, dst)
-            .map_err(|e| format!("Failed to create symlink: {e}"))
-    }
-    #[cfg(windows)]
-    {
-        if src.is_dir() {
-            std::os::windows::fs::symlink_dir(target, dst)
-                .map_err(|e| format!("Failed to create symlink: {e}"))
-        } else {
-            std::os::windows::fs::symlink_file(target, dst)
-                .map_err(|e| format!("Failed to create symlink: {e}"))
-        }
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        Err("Symlinks not supported on this platform".to_string())
-    }
-}
-
-/// Recursively merge a source directory into an existing destination directory.
-/// Files that don't conflict are copied/moved directly.
-/// Files that conflict are auto-renamed with (N) suffix (same as KeepBoth for inner items).
-fn merge_local_directory(source: &Path, dest: &Path, is_cut: bool) -> Result<(), String> {
+/// Merges `source` into the folder `dest`: a subfolder whose name is a folder in `dest` merges into it, and every other entry is copied or moved there with `transfer`.
+pub(crate) fn merge_local_directory(
+    source: &Path,
+    dest: &Path,
+    kind: fs_utils::Transfer,
+) -> Result<(), String> {
     let entries = fs::read_dir(source)
+        .map_err(|e| format!("Failed to read directory {}: {e}", source.display()))?;
+    let source_metadata = fs::symlink_metadata(source)
         .map_err(|e| format!("Failed to read directory {}: {e}", source.display()))?;
 
     for entry in entries {
@@ -8281,71 +8265,38 @@ fn merge_local_directory(source: &Path, dest: &Path, is_cut: bool) -> Result<(),
         let file_type = entry
             .file_type()
             .map_err(|e| format!("Failed to get file type: {e}"))?;
-
-        if file_type.is_symlink() {
-            if dest_path.exists() {
-                let unique = allocate_unique_path(dest, &entry_name)?;
-                if is_cut {
-                    fs::rename(&entry_path, &unique)
-                        .map_err(|e| format!("Failed to move {}: {e}", entry_path.display()))?;
-                } else {
-                    copy_symlink(&entry_path, &unique)?;
-                }
-            } else {
-                if is_cut {
-                    fs::rename(&entry_path, &dest_path)
-                        .map_err(|e| format!("Failed to move {}: {e}", entry_path.display()))?;
-                } else {
-                    copy_symlink(&entry_path, &dest_path)?;
-                }
-            }
-        } else if file_type.is_dir() {
-            if dest_path.exists() && dest_path.is_dir() {
-                // Recursively merge subdirectories
-                merge_local_directory(&entry_path, &dest_path, is_cut)?;
-                if is_cut {
-                    let _ = fs::remove_dir(&entry_path);
-                }
-            } else if dest_path.exists() {
-                // Name conflict with a file — auto-rename the directory
-                let unique = allocate_unique_path(dest, &entry_name)?;
-                if is_cut {
-                    fs::rename(&entry_path, &unique)
-                        .map_err(|e| format!("Failed to move {}: {e}", entry_path.display()))?;
-                } else {
-                    fs_utils::copy_file_or_directory(&entry_path, &unique)?;
-                }
-            } else {
-                // No conflict
-                if is_cut {
-                    fs::rename(&entry_path, &dest_path)
-                        .map_err(|e| format!("Failed to move {}: {e}", entry_path.display()))?;
-                } else {
-                    fs_utils::copy_file_or_directory(&entry_path, &dest_path)?;
-                }
-            }
-        } else {
-            // File
-            if dest_path.exists() {
-                // File conflict inside merge — auto-rename (KeepBoth semantics)
-                let unique = allocate_unique_path(dest, &entry_name)?;
-                if is_cut {
-                    fs::rename(&entry_path, &unique)
-                        .map_err(|e| format!("Failed to move {}: {e}", entry_path.display()))?;
-                } else {
-                    fs::copy(&entry_path, &unique)
-                        .map_err(|e| format!("Failed to copy {}: {e}", entry_path.display()))?;
-                }
-            } else {
-                if is_cut {
-                    fs::rename(&entry_path, &dest_path)
-                        .map_err(|e| format!("Failed to move {}: {e}", entry_path.display()))?;
-                } else {
-                    fs::copy(&entry_path, &dest_path)
-                        .map_err(|e| format!("Failed to copy {}: {e}", entry_path.display()))?;
-                }
-            }
+        // Each entry moves on its own, so the device each `transfer` starts from is the entry's: the merge asks for its folder.
+        if kind == fs_utils::Transfer::Move && file_type.is_dir() {
+            let metadata = entry
+                .metadata()
+                .map_err(|e| format!("Failed to read {}: {e}", entry_path.display()))?;
+            fs_utils::refuse_other_volume(
+                &entry_path,
+                &metadata,
+                fs_utils::device(&source_metadata),
+            )?;
         }
+
+        // A folder merges only into a real folder, never through a link.
+        let dest_metadata = fs::symlink_metadata(&dest_path);
+        if file_type.is_dir()
+            && dest_metadata
+                .as_ref()
+                .is_ok_and(|metadata| metadata.is_dir())
+        {
+            merge_local_directory(&entry_path, &dest_path, kind)?;
+            if kind == fs_utils::Transfer::Move {
+                let _ = fs::remove_dir(&entry_path);
+            }
+            continue;
+        }
+        // A taken name gets a free numbered name, as Keep Both does.
+        let target = if dest_metadata.is_ok() {
+            allocate_unique_path(dest, &entry_name)?
+        } else {
+            dest_path
+        };
+        fs_utils::transfer(&entry_path, &target, kind)?;
     }
 
     Ok(())

@@ -8,8 +8,8 @@ use super::{
     Location, LocationCapabilities, LocationProvider, LocationSummary, ProviderDirectoryEntries,
 };
 use crate::fs_utils::{
-    copy_file_or_directory, create_directory, delete_file_or_directory, expand_path, get_file_info,
-    read_directory_contents, rename_file_or_directory, FileItem,
+    create_directory, delete_file_or_directory, expand_path, get_file_info,
+    read_directory_contents, rename_file_or_directory, transfer, FileItem, Transfer,
 };
 
 #[derive(Default)]
@@ -160,30 +160,17 @@ impl LocationProvider for FileSystemProvider {
         let from_path = self.resolve_path_only(from)?;
         let to_path = self.resolve_path_only(to)?;
 
-        spawn_blocking(move || {
-            if !from_path.exists() {
-                return Err("Source path does not exist".to_string());
-            }
-            copy_file_or_directory(&from_path, &to_path)
-        })
-        .await
-        .map_err(|e| format!("Task join error: {}", e))?
+        spawn_blocking(move || transfer(&from_path, &to_path, Transfer::Copy))
+            .await
+            .map_err(|e| format!("Task join error: {}", e))?
     }
 
     async fn move_item(&self, from: &Location, to: &Location) -> Result<(), String> {
         let from_path = self.resolve_path_only(from)?;
         let to_path = self.resolve_path_only(to)?;
 
-        spawn_blocking(move || {
-            if !from_path.exists() {
-                return Err("Source path does not exist".to_string());
-            }
-            if to_path.exists() {
-                return Err("Destination path already exists".to_string());
-            }
-            rename_file_or_directory(&from_path, &to_path)
-        })
-        .await
-        .map_err(|e| format!("Task join error: {}", e))?
+        spawn_blocking(move || transfer(&from_path, &to_path, Transfer::Move))
+            .await
+            .map_err(|e| format!("Task join error: {}", e))?
     }
 }

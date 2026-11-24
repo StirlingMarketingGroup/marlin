@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(target_family = "unix")]
 use std::ffi::CString;
 use std::fs;
+use std::io;
 #[cfg(target_family = "unix")]
 use std::os::unix::ffi::OsStrExt;
 #[cfg(target_os = "windows")]
@@ -12,9 +13,6 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-
-#[cfg(target_family = "unix")]
-use std::io;
 
 #[cfg(target_os = "windows")]
 use windows::core::PCWSTR;
@@ -245,14 +243,14 @@ fn local_device_of(folder: &Path) -> Option<u64> {
 }
 
 #[cfg(unix)]
-fn device(metadata: &fs::Metadata) -> u64 {
+pub(crate) fn device(metadata: &fs::Metadata) -> u64 {
     use std::os::unix::fs::MetadataExt;
     metadata.dev()
 }
 
-/// Windows has no device ID here, so every entry of a local folder is read inside (#706).
+/// Windows has no device ID here, so every entry of a local folder is read inside (#706), and a move does not see another volume mounted inside the source.
 #[cfg(not(unix))]
-fn device(_metadata: &fs::Metadata) -> u64 {
+pub(crate) fn device(_metadata: &fs::Metadata) -> u64 {
     0
 }
 
@@ -607,52 +605,453 @@ pub fn rename_file_or_directory(from: &Path, to: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub fn copy_file_or_directory(from: &Path, to: &Path) -> Result<(), String> {
+/// What a paste, a drop, a merge, or an undo does with one item.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Transfer {
+    Copy,
+    Move,
+}
+
+impl Transfer {
+    pub(crate) fn verb(self) -> &'static str {
+        match self {
+            Transfer::Copy => "copy",
+            Transfer::Move => "move",
+        }
+    }
+}
+
+/// Copies or moves `from` to `to` (decision 0009, choice 8). It replaces nothing, but a macOS `._name` file inside a folder it made (see `copy_file`).
+///
+/// A move inside one filesystem is a rename. A move the OS refuses as crossing filesystems, and every copy, copies `from` entry by entry. A move then deletes exactly the source entries it copied, unchanged, once the whole copy is in place. A failed copy removes what it made and leaves `from` as it was. A copy is always a filesystem copy, inside one mount too (#682).
+pub fn transfer(from: &Path, to: &Path, kind: Transfer) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let _from_scope = macos_security::retain_access(from)?;
     #[cfg(target_os = "macos")]
     let _to_scope = macos_security::retain_access(to)?;
 
-    if from.is_dir() {
-        let result = copy_dir_recursive(from, to);
+    let metadata = fs::symlink_metadata(from)
+        .map_err(|err| format!("Failed to read {}: {err}", from.display()))?;
+    let name = from
+        .file_name()
+        .map(|file_name| file_name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| from.display().to_string());
 
-        #[cfg(target_os = "macos")]
-        if result.is_ok() {
-            macos_security::persist_bookmark(to, "copying directory");
+    let into_itself = || {
+        to.parent()
+            .and_then(|parent| fs::canonicalize(parent).ok())
+            .zip(fs::canonicalize(from).ok())
+            .is_some_and(|(parent, from)| parent.starts_with(from))
+    };
+    if metadata.is_dir() && into_itself() {
+        return Err(format!("Cannot {} {name} into itself", kind.verb()));
+    }
+
+    if kind == Transfer::Move {
+        match rename_no_replace(from, to) {
+            Ok(()) => {
+                #[cfg(target_os = "macos")]
+                macos_security::persist_bookmark(to, "moving");
+                return Ok(());
+            }
+            // The rename's own answer is the test for one filesystem. On Linux two bind mounts of one filesystem share a device ID and still refuse a rename with EXDEV.
+            Err(err) if err.kind() == io::ErrorKind::CrossesDevices => {}
+            // A mount answers "not supported" (ENOTSUP, which std maps to `Unsupported` only where it equals EOPNOTSUPP, as on Linux) when its remote cannot make the move. A copy and delete would replace the remote item with a new one, so the move stops here.
+            Err(err)
+                if err.kind() == io::ErrorKind::Unsupported
+                    || cfg!(unix) && err.raw_os_error() == Some(libc::ENOTSUP) =>
+            {
+                return Err(format!(
+                    "Cannot move {name} there: the volume it is on does not allow that move"
+                ));
+            }
+            Err(err) => return Err(format!("Failed to move {name}: {err}")),
+        }
+    }
+
+    let mut copying = Copying {
+        made: Vec::new(),
+        move_from_device: (kind == Transfer::Move).then(|| device(&metadata)),
+    };
+    if let Err(err) = copying.entry(from, to) {
+        return Err(match copying.roll_back() {
+            Some(removal_error) => format!(
+                "{err}; the partial copy at {} could not be fully removed: {removal_error}",
+                to.display()
+            ),
+            None => err,
+        });
+    }
+    copying.finish();
+    if kind == Transfer::Move {
+        if let Some((path, reason)) = copying.remove_sources() {
+            return Err(format!(
+                "Moved {name} to {}, but part of the original stayed: {}: {reason}",
+                to.display(),
+                path.display()
+            ));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    macos_security::persist_bookmark(
+        to,
+        if kind == Transfer::Move {
+            "moving"
+        } else {
+            "copying"
+        },
+    );
+
+    Ok(())
+}
+
+/// A filesystem copy of one item, and the entries it has made, top first.
+///
+/// It fills with `entry`. After an error, `roll_back` removes what it made. Otherwise `finish` gives each entry what it held back while filling: a folder stays owner-only and a file unlocked until then. A move then calls `remove_sources`.
+struct Copying {
+    made: Vec<Copied>,
+    /// For a move, the source's device: see `refuse_other_volume`.
+    move_from_device: Option<u64>,
+}
+
+/// One entry a copy made under its final name, and the source entry it came from. A folder comes before its entries, so walking the list backwards reaches a folder after them.
+struct Copied {
+    source: PathBuf,
+    destination: PathBuf,
+    /// The source as the copy read it.
+    metadata: fs::Metadata,
+}
+
+impl Copying {
+    /// Copies `from` to `to` without following a link, and records each entry it makes.
+    fn entry(&mut self, from: &Path, to: &Path) -> Result<(), String> {
+        let metadata = fs::symlink_metadata(from)
+            .map_err(|err| format!("Failed to copy {}: {err}", from.display()))?;
+        let file_type = metadata.file_type();
+
+        if file_type.is_dir() {
+            if let Some(top) = self.move_from_device {
+                refuse_other_volume(from, &metadata, top)?;
+            }
+            // Owner-only until `finish`, so a private folder is never open to others while it fills.
+            #[cfg(unix)]
+            let created = {
+                use std::os::unix::fs::DirBuilderExt;
+                fs::DirBuilder::new().mode(0o700).create(to)
+            };
+            #[cfg(not(unix))]
+            let created = fs::create_dir(to);
+            created
+                .map_err(|err| match err.kind() {
+                    io::ErrorKind::AlreadyExists => name_taken(),
+                    _ => err,
+                })
+                .map_err(|err| format!("Failed to copy {}: {err}", to.display()))?;
+            self.made.push(Copied {
+                source: from.to_path_buf(),
+                destination: to.to_path_buf(),
+                metadata,
+            });
+
+            let entries = fs::read_dir(from)
+                .map_err(|err| format!("Failed to copy {}: {err}", from.display()))?;
+            for entry in entries {
+                let entry =
+                    entry.map_err(|err| format!("Failed to copy {}: {err}", from.display()))?;
+                self.entry(&entry.path(), &to.join(entry.file_name()))?;
+            }
+            return Ok(());
         }
 
-        result
-    } else {
-        let result = fs::copy(from, to)
-            .map(|_| ())
-            .map_err(|e| format!("Failed to copy file: {}", e));
-
-        #[cfg(target_os = "macos")]
-        if result.is_ok() {
-            macos_security::persist_bookmark(to, "copying file");
+        if file_type.is_symlink() {
+            copy_symlink(from, to)
+                .map_err(|err| format!("Failed to copy {}: {err}", from.display()))?;
+        } else if file_type.is_file() {
+            // Only the top entry comes before anything is made, so any other is in a folder this copy made.
+            copy_file(from, to, !self.made.is_empty())?;
+            // `fs::copy` keeps the modified time on macOS and Windows, not on Linux.
+            #[cfg(target_os = "linux")]
+            copy_modified_time(&metadata, to);
+        } else {
+            return Err(format!(
+                "Cannot copy {}: it is not a file, a folder, or a link",
+                from.display()
+            ));
         }
+        self.made.push(Copied {
+            source: from.to_path_buf(),
+            destination: to.to_path_buf(),
+            metadata,
+        });
+        Ok(())
+    }
 
-        result
+    /// Removes what the copy made, newest first, and returns the first failure.
+    fn roll_back(&self) -> Option<io::Error> {
+        let mut first_failure = None;
+        for made in self.made.iter().rev() {
+            // Gone already counts as removed: on a volume without native extended attributes, macOS deletes `._name` with `name`.
+            let failure = made
+                .remove(&made.destination)
+                .err()
+                .filter(|err| err.kind() != io::ErrorKind::NotFound);
+            first_failure = first_failure.or(failure);
+        }
+        first_failure
+    }
+
+    /// Gives each entry what it held back while the copy filled: a folder its extended attributes, permissions, and modified time, and any item its file flags, such as Finder's lock or hidden flag. A read-only folder would have stopped its entries and the roll back, each new entry changes a folder's time, and a locked item takes no other change, so these come last. Inner entries go first, so a parent's mode cannot stop them. A mount answers some of these calls with "not supported", so they only warn.
+    fn finish(&self) {
+        for made in self.made.iter().rev() {
+            if made.metadata.is_dir() {
+                #[cfg(target_os = "macos")]
+                copy_folder_attributes(&made.source, &made.destination);
+                #[cfg(unix)]
+                copy_modified_time(&made.metadata, &made.destination);
+                if let Err(err) =
+                    fs::set_permissions(&made.destination, made.metadata.permissions())
+                {
+                    log::warn!(
+                        "Failed to copy the permissions of {}: {err}",
+                        made.destination.display()
+                    );
+                }
+            }
+            // Only Finder's lock and hidden flag, added to the flags the copy already has: other flags, such as `UF_COMPRESSED`, describe how the source's own bytes are stored. A file has the hidden flag from `fs::copy`, and the lock that `copy_file` took off; a folder has neither.
+            #[cfg(target_os = "macos")]
+            {
+                use std::os::macos::fs::MetadataExt;
+                let flags = made.metadata.st_flags() & (FINDER_LOCK | libc::UF_HIDDEN);
+                if flags != 0 && !made.metadata.is_symlink() {
+                    let current = fs::symlink_metadata(&made.destination)
+                        .map_or(0, |metadata| metadata.st_flags());
+                    if let Err(err) = set_flags(&made.destination, current | flags) {
+                        log::warn!(
+                            "Failed to copy the flags of {}: {err}",
+                            made.destination.display()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Removes the source entries the copy read, newest first, and returns the first that stayed and why. Only these entries: a file another program added during the copy was never copied, and it stays, and so does a source that changed. The folders above an entry that stays stay too.
+    fn remove_sources(&self) -> Option<(&Path, String)> {
+        let mut first_kept = None;
+        for made in self.made.iter().rev() {
+            let kept = if made.source_changed() {
+                Some("it changed during the move".to_string())
+            } else {
+                made.remove(&made.source)
+                    .err()
+                    .filter(|err| err.kind() != io::ErrorKind::NotFound)
+                    .map(|err| err.to_string())
+            };
+            if let Some(reason) = kept {
+                first_kept.get_or_insert((made.source.as_path(), reason));
+            }
+        }
+        first_kept
     }
 }
 
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
-    fs::create_dir_all(dst)
-        .map_err(|e| format!("Failed to create destination directory: {}", e))?;
-
-    for entry in fs::read_dir(src).map_err(|e| format!("Failed to read source directory: {}", e))? {
-        let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-
-        if src_path.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path)?;
+impl Copied {
+    /// Removes this entry at `path`, its source or its copy. Windows removes a link to a folder as a folder.
+    fn remove(&self, path: &Path) -> io::Result<()> {
+        #[cfg(windows)]
+        let folder_link =
+            std::os::windows::fs::FileTypeExt::is_symlink_dir(&self.metadata.file_type());
+        #[cfg(not(windows))]
+        let folder_link = false;
+        if self.metadata.is_dir() || folder_link {
+            fs::remove_dir(path)
         } else {
-            fs::copy(&src_path, &dst_path).map_err(|e| format!("Failed to copy file: {}", e))?;
+            fs::remove_file(path)
         }
     }
 
+    /// Whether the source is no longer what the copy read: a file with another length or modified time, or a link with another target. A source that is gone has not changed: on a volume without native extended attributes, macOS deletes `._name` with `name`.
+    fn source_changed(&self) -> bool {
+        let changed_if_there = |err: io::Error| err.kind() != io::ErrorKind::NotFound;
+        if self.metadata.is_symlink() {
+            fs::read_link(&self.source).map_or_else(changed_if_there, |target| {
+                Some(target) != fs::read_link(&self.destination).ok()
+            })
+        } else if self.metadata.is_file() {
+            fs::symlink_metadata(&self.source).map_or_else(changed_if_there, |now| {
+                now.len() != self.metadata.len()
+                    || now.modified().ok() != self.metadata.modified().ok()
+            })
+        } else {
+            false
+        }
+    }
+}
+
+/// Stops a move at `folder` when it is on another device than `top`, the device of the folder being moved: a move never empties another drive mounted inside its source, as a delete never does (decision 0007). `transfer` and a merge both ask.
+pub(crate) fn refuse_other_volume(
+    folder: &Path,
+    metadata: &fs::Metadata,
+    top: u64,
+) -> Result<(), String> {
+    if device(metadata) == top {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} is on another drive or volume, so it cannot move with its folder",
+            folder.display()
+        ))
+    }
+}
+
+/// The error for a name that is taken, worded the same on every filesystem.
+fn name_taken() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "an item with that name is already there",
+    )
+}
+
+/// Renames `from` to `to` and never replaces an item at `to`.
+fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
+    #[cfg(not(target_os = "windows"))]
+    {
+        match rustix::fs::renameat_with(
+            rustix::fs::CWD,
+            from,
+            rustix::fs::CWD,
+            to,
+            rustix::fs::RenameFlags::NOREPLACE,
+        ) {
+            Ok(()) => return Ok(()),
+            Err(rustix::io::Errno::EXIST) => return Err(name_taken()),
+            // A filesystem without the flag answers this. macFUSE answers ENOTSUP for RENAME_EXCL onto a free name. Linux answers EINVAL.
+            Err(rustix::io::Errno::NOTSUP | rustix::io::Errno::INVAL) => {}
+            Err(err) => return Err(err.into()),
+        }
+    }
+
+    if fs::symlink_metadata(to).is_ok() {
+        return Err(name_taken());
+    }
+    fs::rename(from, to)
+}
+
+/// Writes `from` to a temporary name in `to`'s folder, then renames it to `to`. `in_new_folder` says that `to` is in a folder this copy made.
+fn copy_file(from: &Path, to: &Path, in_new_folder: bool) -> Result<(), String> {
+    // The random name keeps this file apart from others. Opening it with `create_new` first would stop `fs::copy` from cloning on APFS. A dot name is hidden in the views. A mount uploads a new file 2 seconds after its last writer closes, so the rename almost always comes first; when it does not, the mount renames the uploaded item on the remote.
+    let temp = to.with_file_name(format!(".marlin-copy-{}", uuid::Uuid::new_v4().simple()));
+    if let Err(err) = fs::copy(from, &temp) {
+        let _ = fs::remove_file(&temp);
+        return Err(format!("Failed to copy {}: {err}", from.display()));
+    }
+
+    // `fs::copy` brings Finder's lock along, and a locked file can be neither renamed nor removed. `Copying::finish` locks the copy again once the whole copy is in place.
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::macos::fs::MetadataExt;
+        let flags = fs::symlink_metadata(&temp).map_or(0, |metadata| metadata.st_flags());
+        if flags & FINDER_LOCK != 0 {
+            set_flags(&temp, flags & !FINDER_LOCK)
+                .map_err(|err| format!("Failed to copy {}: {err}", from.display()))?;
+        }
+    }
+
+    // On a volume without native extended attributes, macOS keeps those of `name` in `._name`, and writes that file itself when the copy of `name` gets them. In a folder this copy made, the source's own `._name` holds the same attributes, so it may replace that file. Nothing else is ever replaced: a destination that ignores case can fold two source names into one.
+    let attributes_file = in_new_folder
+        && cfg!(target_os = "macos")
+        && to
+            .file_name()
+            .is_some_and(|name| name.as_encoded_bytes().starts_with(b"._"));
+    let published = if attributes_file {
+        fs::rename(&temp, to)
+    } else {
+        rename_no_replace(&temp, to)
+    };
+    if let Err(err) = published {
+        let _ = fs::remove_file(&temp);
+        return Err(format!("Failed to copy {}: {err}", to.display()));
+    }
     Ok(())
+}
+
+/// Gives `to` the modified time in `metadata`, or logs why not. A read-only handle is enough: setting a time needs ownership, not write access.
+#[cfg(unix)]
+fn copy_modified_time(metadata: &fs::Metadata, to: &Path) {
+    let set = metadata
+        .modified()
+        .and_then(|modified| fs::File::open(to)?.set_modified(modified));
+    if let Err(err) = set {
+        log::warn!(
+            "Failed to copy the modified time of {}: {err}",
+            to.display()
+        );
+    }
+}
+
+/// The flags behind Finder's Locked checkbox: no change and no removal (`uchg`), and append only (`uappnd`).
+#[cfg(target_os = "macos")]
+const FINDER_LOCK: u32 = libc::UF_IMMUTABLE | libc::UF_APPEND;
+
+/// Sets the file flags of `path` to `flags`, all of them at once.
+#[cfg(target_os = "macos")]
+fn set_flags(path: &Path, flags: u32) -> io::Result<()> {
+    let path = CString::new(path.as_os_str().as_bytes())?;
+    // SAFETY: a NUL-terminated path that outlives the call.
+    if unsafe { libc::chflags(path.as_ptr(), flags) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// Copies a folder's extended attributes, such as Finder tags, and its access list, or logs why not. `fs::copy` does this for a file.
+#[cfg(target_os = "macos")]
+fn copy_folder_attributes(from: &Path, to: &Path) {
+    let (Ok(from_c), Ok(to_c)) = (
+        CString::new(from.as_os_str().as_bytes()),
+        CString::new(to.as_os_str().as_bytes()),
+    ) else {
+        return;
+    };
+    // SAFETY: both paths are NUL-terminated and outlive the call, and copyfile takes a null state.
+    let copied = unsafe {
+        libc::copyfile(
+            from_c.as_ptr(),
+            to_c.as_ptr(),
+            std::ptr::null_mut(),
+            libc::COPYFILE_XATTR | libc::COPYFILE_ACL,
+        )
+    };
+    if copied != 0 {
+        log::warn!(
+            "Failed to copy the extended attributes of {}: {}",
+            to.display(),
+            io::Error::last_os_error()
+        );
+    }
+}
+
+fn copy_symlink(src: &Path, dst: &Path) -> io::Result<()> {
+    let target = fs::read_link(src)?;
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, dst)
+    }
+    #[cfg(windows)]
+    {
+        // The link's own type: a link to a folder that is gone is still a folder link.
+        use std::os::windows::fs::FileTypeExt;
+        let folder_link =
+            fs::symlink_metadata(src).is_ok_and(|metadata| metadata.file_type().is_symlink_dir());
+        if folder_link {
+            std::os::windows::fs::symlink_dir(target, dst)
+        } else {
+            std::os::windows::fs::symlink_file(target, dst)
+        }
+    }
 }
 
 pub fn expand_path(path: &str) -> Result<PathBuf, String> {
@@ -764,7 +1163,7 @@ pub fn allocate_unique_path(dir: &Path, desired_name: &str) -> Result<PathBuf, S
         .ok_or_else(|| "Invalid file name".to_string())?;
 
     let base = dir.join(desired_name);
-    if !base.exists() {
+    if fs::symlink_metadata(&base).is_err() {
         return Ok(base);
     }
 
@@ -783,7 +1182,7 @@ pub fn allocate_unique_path(dir: &Path, desired_name: &str) -> Result<PathBuf, S
             format!("{stem} ({i})")
         };
         let p = dir.join(candidate);
-        if !p.exists() {
+        if fs::symlink_metadata(&p).is_err() {
             return Ok(p);
         }
     }
@@ -802,7 +1201,7 @@ pub fn allocate_unique_path(dir: &Path, desired_name: &str) -> Result<PathBuf, S
             format!("{stem}_{nanos}_{counter}")
         };
         let p = dir.join(candidate);
-        if !p.exists() {
+        if fs::symlink_metadata(&p).is_err() {
             return Ok(p);
         }
     }
@@ -818,7 +1217,7 @@ mod tests {
 
     use super::{
         build_file_item, build_file_metadata, delete_file_or_directory, local_device_of,
-        read_directory_streaming, FileMetadataUpdate,
+        read_directory_streaming, transfer, FileMetadataUpdate, Transfer,
     };
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1020,6 +1419,512 @@ mod tests {
         assert_eq!(same.operation, "move");
     }
 
+    #[cfg(unix)]
+    fn assert_no_marlin_copy_names(dir: &Path) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let entry = entry.unwrap();
+            let name = entry.file_name();
+            assert!(
+                !name.to_string_lossy().starts_with(".marlin-copy-"),
+                "{}",
+                name.to_string_lossy()
+            );
+            if entry.file_type().unwrap().is_dir() {
+                assert_no_marlin_copy_names(&entry.path());
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_copied_folder_keeps_its_links_and_modified_times() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        std::fs::create_dir_all(source.join("sub")).unwrap();
+        std::fs::write(source.join("a.txt"), b"aaa").unwrap();
+        std::fs::write(source.join("sub").join("b.txt"), b"bbb").unwrap();
+        std::os::unix::fs::symlink("a.txt", source.join("link")).unwrap();
+        std::os::unix::fs::symlink("missing", source.join("gone")).unwrap();
+        let past = std::time::UNIX_EPOCH + std::time::Duration::from_secs(981_158_400);
+        for folder in [source.join("sub"), source.clone()] {
+            std::fs::File::open(&folder)
+                .unwrap()
+                .set_modified(past)
+                .unwrap();
+        }
+
+        let dest = temp.path().join("dest");
+        transfer(&source, &dest, Transfer::Copy).unwrap();
+
+        for folder in [dest.join("sub"), dest.clone()] {
+            assert_eq!(
+                std::fs::metadata(&folder).unwrap().modified().unwrap(),
+                past
+            );
+        }
+
+        assert!(std::fs::symlink_metadata(dest.join("link"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::read_link(dest.join("link")).unwrap(),
+            Path::new("a.txt")
+        );
+        assert!(std::fs::symlink_metadata(dest.join("gone"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::read_link(dest.join("gone")).unwrap(),
+            Path::new("missing")
+        );
+        assert_eq!(std::fs::read(dest.join("a.txt")).unwrap(), b"aaa");
+        assert_eq!(
+            std::fs::read(dest.join("sub").join("b.txt")).unwrap(),
+            b"bbb"
+        );
+        assert_no_marlin_copy_names(&dest);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_copy_leaves_no_partial_copy() {
+        let parent = tempfile::tempdir_in("/tmp").unwrap();
+        let source = parent.path().join("source");
+        std::fs::create_dir_all(source.join("sub")).unwrap();
+        std::fs::write(source.join("a.txt"), b"a").unwrap();
+        std::fs::write(source.join("b.txt"), b"b").unwrap();
+        std::fs::write(source.join("sub").join("c.txt"), b"c").unwrap();
+        // Most entries are files beside `sub`, so a file is almost always copied before the socket fails.
+        for number in 0..16 {
+            std::fs::write(source.join(format!("{number}.txt")), b"n").unwrap();
+        }
+        let _listener =
+            std::os::unix::net::UnixListener::bind(source.join("sub").join("socket")).unwrap();
+
+        let err = transfer(&source, &parent.path().join("copy"), Transfer::Copy).unwrap_err();
+        assert!(err.contains("sub/socket"), "{err}");
+
+        let names: Vec<_> = std::fs::read_dir(parent.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert!(names.iter().all(|name| {
+            let name = name.to_string_lossy();
+            name != "copy" && !name.starts_with(".marlin-copy-")
+        }));
+        assert_eq!(std::fs::read(source.join("a.txt")).unwrap(), b"a");
+        assert_eq!(std::fs::read(source.join("b.txt")).unwrap(), b"b");
+        assert_eq!(
+            std::fs::read(source.join("sub").join("c.txt")).unwrap(),
+            b"c"
+        );
+        assert!(std::fs::symlink_metadata(source.join("sub").join("socket")).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_copied_folder_keeps_its_mode_even_when_read_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        std::fs::create_dir_all(source.join("private")).unwrap();
+        std::fs::create_dir_all(source.join("read-only")).unwrap();
+        std::fs::write(source.join("read-only").join("a.txt"), b"a").unwrap();
+        let set_mode = |path: &Path, mode| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap()
+        };
+        set_mode(&source.join("private"), 0o750);
+        set_mode(&source.join("read-only"), 0o555);
+
+        let dest = temp.path().join("dest");
+        let copied = transfer(&source, &dest, Transfer::Copy);
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        let modes = (mode(&dest.join("private")), mode(&dest.join("read-only")));
+        // Writable again, so the temporary folder can be removed.
+        set_mode(&source.join("read-only"), 0o755);
+        set_mode(&dest.join("read-only"), 0o755);
+
+        copied.unwrap();
+        assert_eq!(modes, (0o750, 0o555));
+        assert_eq!(
+            std::fs::read(dest.join("read-only").join("a.txt")).unwrap(),
+            b"a"
+        );
+    }
+
+    #[test]
+    fn a_transfer_never_replaces_what_is_at_the_destination() {
+        let temp = tempfile::tempdir().unwrap();
+        let from = temp.path().join("from.txt");
+        std::fs::write(&from, b"new").unwrap();
+        let to = temp.path().join("to.txt");
+        std::fs::write(&to, b"old").unwrap();
+        for kind in [Transfer::Copy, Transfer::Move] {
+            assert!(transfer(&from, &to, kind).is_err());
+            assert_eq!(std::fs::read(&to).unwrap(), b"old");
+            assert_eq!(std::fs::read(&from).unwrap(), b"new");
+        }
+        assert!(std::fs::read_dir(temp.path()).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".marlin-copy-")));
+
+        let from_dir = temp.path().join("from-dir");
+        std::fs::create_dir(&from_dir).unwrap();
+        std::fs::write(from_dir.join("a.txt"), b"a").unwrap();
+        let to_dir = temp.path().join("to-dir");
+        std::fs::create_dir(&to_dir).unwrap();
+        std::fs::write(to_dir.join("keep.txt"), b"keep").unwrap();
+        for kind in [Transfer::Copy, Transfer::Move] {
+            assert!(transfer(&from_dir, &to_dir, kind).is_err());
+            assert_eq!(std::fs::read(to_dir.join("keep.txt")).unwrap(), b"keep");
+            assert!(std::fs::symlink_metadata(to_dir.join("a.txt")).is_err());
+            assert_eq!(std::fs::read(from_dir.join("a.txt")).unwrap(), b"a");
+        }
+    }
+
+    #[test]
+    fn a_folder_is_not_copied_into_itself() {
+        let temp = tempfile::tempdir().unwrap();
+        let folder = temp.path().join("folder");
+        std::fs::create_dir_all(folder.join("sub")).unwrap();
+        std::fs::write(folder.join("a.txt"), b"a").unwrap();
+
+        for kind in [Transfer::Copy, Transfer::Move] {
+            let err = transfer(&folder, &folder.join("sub").join("folder"), kind).unwrap_err();
+            assert!(err.contains("into itself"), "{err}");
+            assert!(std::fs::symlink_metadata(folder.join("sub").join("folder")).is_err());
+            assert_eq!(std::fs::read(folder.join("a.txt")).unwrap(), b"a");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_dangling_link_moves_and_copies() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("gone");
+        std::os::unix::fs::symlink("missing", &source).unwrap();
+        let moved = temp.path().join("moved");
+
+        let (provider, from) = crate::locations::resolve_location(
+            crate::locations::LocationInput::Raw(source.to_string_lossy().into_owned()),
+        )
+        .unwrap();
+        let (_, to) = crate::locations::resolve_location(crate::locations::LocationInput::Raw(
+            moved.to_string_lossy().into_owned(),
+        ))
+        .unwrap();
+        provider.move_item(&from, &to).await.unwrap();
+
+        assert!(std::fs::symlink_metadata(&source).is_err());
+        assert!(std::fs::symlink_metadata(&moved)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read_link(&moved).unwrap(), Path::new("missing"));
+
+        let copied = temp.path().join("copied");
+        let (provider, from) = crate::locations::resolve_location(
+            crate::locations::LocationInput::Raw(moved.to_string_lossy().into_owned()),
+        )
+        .unwrap();
+        let (_, to) = crate::locations::resolve_location(crate::locations::LocationInput::Raw(
+            copied.to_string_lossy().into_owned(),
+        ))
+        .unwrap();
+        provider.copy(&from, &to).await.unwrap();
+
+        assert!(std::fs::symlink_metadata(&moved)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(std::fs::symlink_metadata(&copied)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read_link(&copied).unwrap(), Path::new("missing"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_locked_file_copies_and_stays_locked() {
+        use std::os::macos::fs::MetadataExt;
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("locked.txt"), b"locked").unwrap();
+        let locked = |path: &Path| {
+            std::fs::symlink_metadata(path).unwrap().st_flags() & super::FINDER_LOCK != 0
+        };
+        super::set_flags(&source.join("locked.txt"), libc::UF_IMMUTABLE).unwrap();
+
+        let dest = temp.path().join("copy");
+        let copied = transfer(&source, &dest, Transfer::Copy);
+        let copy_locked = locked(&dest.join("locked.txt"));
+        // Unlocked again, so the temporary folder can be removed.
+        super::set_flags(&source.join("locked.txt"), 0).unwrap();
+        let _ = super::set_flags(&dest.join("locked.txt"), 0);
+
+        copied.unwrap();
+        assert!(copy_locked);
+        assert_eq!(std::fs::read(dest.join("locked.txt")).unwrap(), b"locked");
+        assert_no_marlin_copy_names(&dest);
+    }
+
+    #[test]
+    fn a_source_changes_when_its_length_time_or_target_change_and_not_when_it_is_gone() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("a.txt");
+        let destination = temp.path().join("copy.txt");
+        std::fs::write(&source, b"a").unwrap();
+        std::fs::write(&destination, b"a").unwrap();
+        let copied = super::Copied {
+            source: source.clone(),
+            destination: destination.clone(),
+            metadata: std::fs::symlink_metadata(&source).unwrap(),
+        };
+        assert!(!copied.source_changed());
+        // Same length, new modified time: an editor saved over it.
+        let modified = copied.metadata.modified().unwrap();
+        std::fs::write(&source, b"b").unwrap();
+        let file = std::fs::File::options().write(true).open(&source).unwrap();
+        file.set_modified(modified + std::time::Duration::from_secs(1))
+            .unwrap();
+        assert!(copied.source_changed());
+        // New length, same modified time.
+        std::fs::write(&source, b"ab").unwrap();
+        file.set_modified(modified).unwrap();
+        assert!(copied.source_changed());
+        drop(file);
+        std::fs::remove_file(&source).unwrap();
+        assert!(!copied.source_changed());
+
+        #[cfg(unix)]
+        {
+            let link = temp.path().join("link");
+            let link_copy = temp.path().join("link-copy");
+            std::os::unix::fs::symlink("a.txt", &link).unwrap();
+            std::os::unix::fs::symlink("a.txt", &link_copy).unwrap();
+            let copied = super::Copied {
+                source: link.clone(),
+                destination: link_copy,
+                metadata: std::fs::symlink_metadata(&link).unwrap(),
+            };
+            assert!(!copied.source_changed());
+            std::fs::remove_file(&link).unwrap();
+            std::os::unix::fs::symlink("b.txt", &link).unwrap();
+            assert!(copied.source_changed());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_merge_into_its_own_subfolder_moves_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("Project");
+        let archive = project.join("archive");
+        std::fs::create_dir_all(archive.join("Project")).unwrap();
+        std::fs::write(project.join("a.txt"), b"a").unwrap();
+        std::fs::write(archive.join("Project").join("b.txt"), b"b").unwrap();
+        let (provider, location) = crate::locations::resolve_location(
+            crate::locations::LocationInput::Raw(project.to_string_lossy().into_owned()),
+        )
+        .unwrap();
+
+        let err = crate::commands::execute_local_conflict_action(
+            &crate::commands::ConflictAction::Merge,
+            None,
+            &project,
+            &archive,
+            "Project",
+            true,
+            provider.as_ref(),
+            &location,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.contains("into itself"), "{err}");
+        assert_eq!(std::fs::read(project.join("a.txt")).unwrap(), b"a");
+        let mut merged: Vec<_> = std::fs::read_dir(archive.join("Project"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        merged.sort();
+        assert_eq!(merged, ["b.txt"]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_copied_folder_keeps_its_extended_attributes() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("tagged");
+        std::fs::create_dir(&source).unwrap();
+        let xattr = |args: &[&std::ffi::OsStr]| {
+            let output = std::process::Command::new("/usr/bin/xattr")
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8(output.stdout).unwrap()
+        };
+        xattr(&[
+            "-w".as_ref(),
+            "com.marlin.test".as_ref(),
+            "kept".as_ref(),
+            source.as_os_str(),
+        ]);
+
+        let dest = temp.path().join("copy");
+        transfer(&source, &dest, Transfer::Copy).unwrap();
+
+        assert_eq!(
+            xattr(&["-p".as_ref(), "com.marlin.test".as_ref(), dest.as_os_str()]).trim(),
+            "kept"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_merge_never_follows_a_link_to_a_folder() {
+        let temp = tempfile::tempdir().unwrap();
+        let outside = temp.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        let dest = temp.path().join("dest");
+        std::fs::create_dir(&dest).unwrap();
+        std::os::unix::fs::symlink(&outside, dest.join("sub")).unwrap();
+        let source = temp.path().join("source");
+        std::fs::create_dir_all(source.join("sub")).unwrap();
+        std::fs::write(source.join("sub").join("a.txt"), b"a").unwrap();
+
+        crate::commands::merge_local_directory(&source, &dest, Transfer::Copy).unwrap();
+
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+        assert!(std::fs::symlink_metadata(dest.join("sub"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::read(dest.join("sub (2)").join("a.txt")).unwrap(),
+            b"a"
+        );
+    }
+
+    /// A folder on `/dev/shm` when that is a different filesystem from the normal temp folder.
+    #[cfg(target_os = "linux")]
+    fn folder_on_another_filesystem() -> Option<tempfile::TempDir> {
+        let disk = tempfile::tempdir().ok()?;
+        let other = tempfile::tempdir_in("/dev/shm").ok()?;
+        use std::os::unix::fs::MetadataExt;
+        let disk_dev = std::fs::metadata(disk.path()).ok()?.dev();
+        let other_dev = std::fs::metadata(other.path()).ok()?.dev();
+        (disk_dev != other_dev).then_some(other)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_move_to_another_filesystem_copies_then_deletes_the_source() {
+        let Some(shm) = folder_on_another_filesystem() else {
+            eprintln!("skipped: no second filesystem");
+            return;
+        };
+        let disk = tempfile::tempdir().unwrap();
+        let album = shm.path().join("album");
+        std::fs::create_dir_all(album.join("sub")).unwrap();
+        let note_bytes = b"hello";
+        let a_bytes = b"aaa";
+        let b_bytes = b"bbb";
+        std::fs::write(album.join("a.txt"), a_bytes).unwrap();
+        let past = std::time::UNIX_EPOCH + std::time::Duration::from_secs(981158400);
+        std::fs::File::open(album.join("a.txt"))
+            .unwrap()
+            .set_modified(past)
+            .unwrap();
+        let a_modified = std::fs::metadata(album.join("a.txt"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        std::fs::write(album.join("sub").join("b.txt"), b_bytes).unwrap();
+        std::os::unix::fs::symlink("a.txt", album.join("link")).unwrap();
+        let note = shm.path().join("note.txt");
+        std::fs::write(&note, note_bytes).unwrap();
+
+        let disk_album = disk.path().join("album");
+        let disk_note = disk.path().join("note.txt");
+        transfer(&album, &disk_album, Transfer::Move).unwrap();
+        transfer(&note, &disk_note, Transfer::Move).unwrap();
+
+        assert!(std::fs::symlink_metadata(&album).is_err());
+        assert!(std::fs::symlink_metadata(&note).is_err());
+        assert_eq!(std::fs::read(disk_album.join("a.txt")).unwrap(), a_bytes);
+        assert_eq!(
+            std::fs::read(disk_album.join("sub").join("b.txt")).unwrap(),
+            b_bytes
+        );
+        assert_eq!(std::fs::read(&disk_note).unwrap(), note_bytes);
+        assert!(std::fs::symlink_metadata(disk_album.join("link"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::read_link(disk_album.join("link")).unwrap(),
+            Path::new("a.txt")
+        );
+        assert_eq!(
+            std::fs::metadata(disk_album.join("a.txt"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            a_modified
+        );
+
+        crate::commands::move_file(
+            crate::locations::LocationInput::Raw(disk_album.to_string_lossy().into_owned()),
+            crate::locations::LocationInput::Raw(album.to_string_lossy().into_owned()),
+        )
+        .await
+        .unwrap();
+
+        assert!(std::fs::symlink_metadata(&disk_album).is_err());
+        assert_eq!(std::fs::read(album.join("a.txt")).unwrap(), a_bytes);
+        assert_eq!(
+            std::fs::read(album.join("sub").join("b.txt")).unwrap(),
+            b_bytes
+        );
+        assert_eq!(
+            std::fs::read_link(album.join("link")).unwrap(),
+            Path::new("a.txt")
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_failed_move_to_another_filesystem_leaves_the_source_whole() {
+        let Some(shm) = folder_on_another_filesystem() else {
+            eprintln!("skipped: no second filesystem");
+            return;
+        };
+        let disk = tempfile::tempdir().unwrap();
+        let source = shm.path().join("source");
+        std::fs::create_dir_all(source.join("sub")).unwrap();
+        std::fs::write(source.join("a.txt"), b"a").unwrap();
+        std::fs::write(source.join("sub").join("b.txt"), b"b").unwrap();
+        let _listener =
+            std::os::unix::net::UnixListener::bind(source.join("sub").join("socket")).unwrap();
+
+        let err = transfer(&source, &disk.path().join("source"), Transfer::Move).unwrap_err();
+        assert!(err.contains("sub/socket"), "{err}");
+        assert_eq!(std::fs::read(source.join("a.txt")).unwrap(), b"a");
+        assert_eq!(
+            std::fs::read(source.join("sub").join("b.txt")).unwrap(),
+            b"b"
+        );
+        assert!(std::fs::symlink_metadata(source.join("sub").join("socket")).is_ok());
+        assert_eq!(std::fs::read_dir(disk.path()).unwrap().count(), 0);
+    }
+
     /// Records each folder the mount lists and each file it reads, then answers from memory.
     #[cfg(target_os = "linux")]
     struct RecordingProvider {
@@ -1172,6 +2077,319 @@ mod tests {
         .await
         .unwrap();
         assert!(recorder.listed.lock().unwrap().contains(&folders[0]));
+
+        mount.unmount().await.unwrap();
+    }
+
+    /// A core with a spool and its uploader running, the same way a writable mount is built.
+    #[cfg(target_os = "linux")]
+    fn mount_with_spool(
+        provider: Arc<dyn marlin_vfs::Provider>,
+    ) -> (Arc<marlin_vfs::Vfs>, tempfile::TempDir) {
+        let spool = tempfile::tempdir().unwrap();
+        let vfs = Arc::new(
+            marlin_vfs::Vfs::new(provider, marlin_vfs::POSIX, marlin_vfs::Options::default())
+                .take_writes(marlin_vfs::Spool {
+                    folder: spool.path().to_path_buf(),
+                    limit: 1024 * 1024 * 1024,
+                    stays_local: marlin_fuse::stays_local,
+                })
+                .unwrap(),
+        );
+        tokio::spawn(Arc::clone(&vfs).run_uploads());
+        (vfs, spool)
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn wait_for_uploads(vfs: &marlin_vfs::Vfs) {
+        let started = std::time::Instant::now();
+        loop {
+            if vfs.unsent().is_empty() {
+                return;
+            }
+            if started.elapsed() >= std::time::Duration::from_secs(30) {
+                panic!("{} still unsent", vfs.unsent().len());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn stored_files(memory: &MemoryProvider) -> std::collections::BTreeMap<String, Vec<u8>> {
+        let mut files = std::collections::BTreeMap::new();
+        let mut pending = vec![(memory.root(), String::new())];
+        while let Some((folder, prefix)) = pending.pop() {
+            for item in memory.list(&folder).await.unwrap() {
+                let path = if prefix.is_empty() {
+                    item.name.clone()
+                } else {
+                    format!("{prefix}/{}", item.name)
+                };
+                match item.attributes.kind {
+                    marlin_vfs::Kind::Folder => pending.push((item.id, path)),
+                    marlin_vfs::Kind::File => {
+                        files.insert(path, memory.contents(&item.id));
+                    }
+                }
+            }
+        }
+        files
+    }
+
+    #[cfg(target_os = "linux")]
+    fn mount_point() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let point = dir.path().join("mnt");
+        std::fs::create_dir(&point).unwrap();
+        (dir, point)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[ignore = "mounts for real: run src-tauri/test-in-docker.sh"]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_move_into_a_fuse_mount_leaves_only_final_names() {
+        let memory = Arc::new(MemoryProvider::new());
+        let (vfs, _spool) = mount_with_spool(memory.clone());
+        let (_dir, point) = mount_point();
+        let mut mount = marlin_fuse::mount(vfs.clone(), &point).await.unwrap();
+
+        let disk = tempfile::tempdir().unwrap();
+        let album = disk.path().join("album");
+        std::fs::create_dir_all(album.join("sub")).unwrap();
+        std::fs::write(album.join("a.txt"), b"aaa").unwrap();
+        std::fs::write(album.join("sub").join("b.txt"), b"bbb").unwrap();
+        let destination = point.join("album");
+
+        let album_for_move = album.clone();
+        tokio::task::spawn_blocking(move || {
+            transfer(&album_for_move, &destination, Transfer::Move).unwrap();
+        })
+        .await
+        .unwrap();
+
+        assert!(std::fs::symlink_metadata(&album).is_err());
+        wait_for_uploads(&vfs).await;
+        assert_eq!(
+            stored_files(&memory).await,
+            std::collections::BTreeMap::from([
+                ("album/a.txt".to_string(), b"aaa".to_vec()),
+                ("album/sub/b.txt".to_string(), b"bbb".to_vec()),
+            ])
+        );
+
+        mount.unmount().await.unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[ignore = "mounts for real: run src-tauri/test-in-docker.sh"]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_move_of_a_folder_that_holds_a_mount_fails_and_keeps_both() {
+        let Some(shm) = folder_on_another_filesystem() else {
+            eprintln!("skipped: no second filesystem");
+            return;
+        };
+        let memory = Arc::new(MemoryProvider::new());
+        memory.add_file(&memory.root(), "remote.txt", b"remote");
+        let (vfs, _spool) = mount_with_spool(memory);
+        let (dir, point) = mount_point();
+        let mut mount = marlin_fuse::mount(vfs, &point).await.unwrap();
+        std::fs::write(dir.path().join("local.txt"), b"local").unwrap();
+
+        let source = dir.path().to_path_buf();
+        let moved = shm.path().join("moved");
+        let moved_for_task = moved.clone();
+        let err = tokio::task::spawn_blocking(move || {
+            transfer(&source, &moved_for_task, Transfer::Move).unwrap_err()
+        })
+        .await
+        .unwrap();
+
+        assert!(err.contains("another drive or volume"), "{err}");
+        assert_eq!(std::fs::read(point.join("remote.txt")).unwrap(), b"remote");
+        assert_eq!(
+            std::fs::read(dir.path().join("local.txt")).unwrap(),
+            b"local"
+        );
+        assert!(std::fs::symlink_metadata(&moved).is_err());
+
+        mount.unmount().await.unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[ignore = "mounts for real: run src-tauri/test-in-docker.sh"]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_merge_move_of_a_folder_that_holds_a_mount_keeps_the_mount() {
+        let Some(shm) = folder_on_another_filesystem() else {
+            eprintln!("skipped: no second filesystem");
+            return;
+        };
+        let memory = Arc::new(MemoryProvider::new());
+        memory.add_file(&memory.root(), "remote.txt", b"remote");
+        let (vfs, _spool) = mount_with_spool(memory);
+        let (dir, point) = mount_point();
+        let mut mount = marlin_fuse::mount(vfs, &point).await.unwrap();
+
+        // Once with no `mnt` in the destination, and once with one, which the merge would recurse into.
+        for destination_has_it in [false, true] {
+            let dest = shm.path().join(format!("dest-{destination_has_it}"));
+            std::fs::create_dir(&dest).unwrap();
+            if destination_has_it {
+                std::fs::create_dir(dest.join("mnt")).unwrap();
+            }
+            let source = dir.path().to_path_buf();
+            let err = tokio::task::spawn_blocking(move || {
+                crate::commands::merge_local_directory(&source, &dest, Transfer::Move).unwrap_err()
+            })
+            .await
+            .unwrap();
+
+            assert!(err.contains("another drive or volume"), "{err}");
+            assert_eq!(std::fs::read(point.join("remote.txt")).unwrap(), b"remote");
+        }
+
+        mount.unmount().await.unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[ignore = "mounts for real: run src-tauri/test-in-docker.sh"]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_folder_with_a_link_moved_into_a_fuse_mount_keeps_the_source() {
+        let memory = Arc::new(MemoryProvider::new());
+        let (vfs, _spool) = mount_with_spool(memory);
+        let (_dir, point) = mount_point();
+        let mut mount = marlin_fuse::mount(vfs, &point).await.unwrap();
+
+        let disk = tempfile::tempdir().unwrap();
+        let linked = disk.path().join("album");
+        std::fs::create_dir(&linked).unwrap();
+        std::fs::write(linked.join("a.txt"), b"aaa").unwrap();
+        std::os::unix::fs::symlink("a.txt", linked.join("link")).unwrap();
+        let destination = point.join("album");
+
+        let linked_for_move = linked.clone();
+        let err = tokio::task::spawn_blocking(move || {
+            transfer(&linked_for_move, &destination, Transfer::Move).unwrap_err()
+        })
+        .await
+        .unwrap();
+        assert!(err.contains("album/link"), "{err}");
+        assert_eq!(std::fs::read(linked.join("a.txt")).unwrap(), b"aaa");
+        assert_eq!(
+            std::fs::read_link(linked.join("link")).unwrap(),
+            Path::new("a.txt")
+        );
+        assert!(std::fs::symlink_metadata(point.join("album")).is_err());
+
+        mount.unmount().await.unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[ignore = "mounts for real: run src-tauri/test-in-docker.sh"]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_copy_shows_its_final_name_only_when_whole() {
+        let memory = Arc::new(MemoryProvider::new());
+        let bytes: Vec<u8> = (0..4 * 1024 * 1024)
+            .map(|index| (index % 251) as u8)
+            .collect();
+        memory.add_file(&memory.root(), "big.bin", &bytes);
+        memory.set_delay(std::time::Duration::from_millis(200));
+        let vfs = Arc::new(marlin_vfs::Vfs::new(
+            memory as Arc<dyn Provider>,
+            marlin_vfs::POSIX,
+            marlin_vfs::Options::default(),
+        ));
+        let (_dir, point) = mount_point();
+        let mut mount = marlin_fuse::mount(vfs, &point).await.unwrap();
+
+        let disk = tempfile::tempdir().unwrap();
+        let source = point.join("big.bin");
+        let dest = disk.path().join("big.bin");
+        let task = tokio::task::spawn_blocking(move || transfer(&source, &dest, Transfer::Copy));
+
+        let mut saw_temp = false;
+        loop {
+            if let Ok(entries) = std::fs::read_dir(disk.path()) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    if name.starts_with(".marlin-copy-") {
+                        saw_temp = true;
+                    }
+                    if name == "big.bin" {
+                        assert!(std::fs::read(entry.path()).unwrap() == bytes);
+                    }
+                }
+            }
+            if task.is_finished() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        task.await.unwrap().unwrap();
+        assert!(saw_temp);
+        assert_eq!(std::fs::read(disk.path().join("big.bin")).unwrap(), bytes);
+
+        mount.unmount().await.unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[ignore = "mounts for real: run src-tauri/test-in-docker.sh"]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_move_keeps_a_file_added_to_the_source_during_the_copy() {
+        let memory = Arc::new(MemoryProvider::new());
+        let album = memory.add_folder(&memory.root(), "album");
+        let bytes: Vec<u8> = (0..4 * 1024 * 1024)
+            .map(|index| (index % 251) as u8)
+            .collect();
+        memory.add_file(&album, "big.bin", &bytes);
+        memory.set_delay(std::time::Duration::from_millis(200));
+        let (vfs, _spool) = mount_with_spool(memory);
+        let (_dir, point) = mount_point();
+        let mut mount = marlin_fuse::mount(vfs, &point).await.unwrap();
+
+        let disk = tempfile::tempdir().unwrap();
+        let source = point.join("album");
+        let dest = disk.path().join("album");
+        let task = tokio::task::spawn_blocking(move || transfer(&source, &dest, Transfer::Move));
+
+        let mut wrote = false;
+        loop {
+            if !wrote {
+                if let Ok(entries) = std::fs::read_dir(disk.path().join("album")) {
+                    let saw_temp = entries.flatten().any(|entry| {
+                        entry
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with(".marlin-copy-")
+                    });
+                    if saw_temp {
+                        let new_file = point.join("album").join("new.txt");
+                        tokio::task::spawn_blocking(move || {
+                            std::fs::write(new_file, b"new").unwrap()
+                        })
+                        .await
+                        .unwrap();
+                        wrote = true;
+                    }
+                }
+            }
+            if task.is_finished() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let err = task.await.unwrap().unwrap_err();
+        assert!(wrote, "the copy finished before a temporary file was seen");
+        assert!(err.contains("stayed"), "{err}");
+        assert_eq!(
+            std::fs::read(disk.path().join("album").join("big.bin")).unwrap(),
+            bytes
+        );
+        assert_eq!(
+            std::fs::read(point.join("album").join("new.txt")).unwrap(),
+            b"new"
+        );
+        assert!(std::fs::symlink_metadata(point.join("album").join("big.bin")).is_err());
 
         mount.unmount().await.unwrap();
     }
