@@ -46,10 +46,22 @@ mod macos {
     use super::*;
     use objc2::class;
     use objc2::msg_send;
-    use objc2::rc::autoreleasepool;
+    use objc2::rc::{autoreleasepool, Retained};
     use objc2::runtime::AnyObject;
     use objc2_app_kit::NSPasteboard;
     use objc2_foundation::{NSArray, NSString};
+
+    /// The pasteboard the app copies files to and pastes them from. The test build keeps one of
+    /// its own, so a test never replaces what the developer copied, and two test runs at once
+    /// never read each other's copy.
+    fn file_pasteboard() -> Retained<NSPasteboard> {
+        if cfg!(feature = "app-test") {
+            let name = format!("marlin-app-test-{}", std::process::id());
+            NSPasteboard::pasteboardWithName(&NSString::from_str(&name))
+        } else {
+            NSPasteboard::generalPasteboard()
+        }
+    }
 
     /// Copy file paths to the system clipboard (macOS)
     pub fn copy_to_clipboard(paths: &[String], is_cut: bool) -> Result<(), String> {
@@ -58,7 +70,7 @@ mod macos {
         }
 
         autoreleasepool(|_| {
-            let pb = NSPasteboard::generalPasteboard();
+            let pb = file_pasteboard();
 
             // Clear existing contents
             pb.clearContents();
@@ -100,7 +112,7 @@ mod macos {
     /// Get clipboard contents information (macOS)
     pub fn get_clipboard_contents() -> Result<ClipboardInfo, String> {
         autoreleasepool(|_| unsafe {
-            let pb = NSPasteboard::generalPasteboard();
+            let pb = file_pasteboard();
 
             // Check for files
             let nsfilenames_type = NSString::from_str("NSFilenamesPboardType");
@@ -149,7 +161,7 @@ mod macos {
     /// Get image data from clipboard as PNG bytes (macOS)
     pub fn get_clipboard_image() -> Result<Vec<u8>, String> {
         autoreleasepool(|_| unsafe {
-            let pb = NSPasteboard::generalPasteboard();
+            let pb = file_pasteboard();
 
             // Try PNG first, then TIFF
             let png_type = NSString::from_str("public.png");

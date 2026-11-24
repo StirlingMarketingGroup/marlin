@@ -2,12 +2,11 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { afterAll, beforeAll, expect, test } from 'vitest';
 import type { Browser } from 'webdriverio';
-import { commandOrControl, fileRow, openFolder, rowNames, sizeBytes, startApp } from './app';
+import { fileRow, openFolder, rowNames, showView, sizeBytes, startApp } from './app';
 
 declare global {
   interface Window {
     __MAX_SIDEWAYS_OVERFLOW__?: number;
-    __TRACK_SIDEWAYS_OVERFLOW__?: boolean;
   }
 }
 
@@ -70,15 +69,8 @@ test(
       { timeout: 10_000, timeoutMsg: 'the status bar never showed 500 files of 500 bytes' }
     );
 
-    for (const [shortcut, view] of [
-      ['2', 'file-list'],
-      ['1', 'file-grid'],
-    ] as const) {
-      await browser.keys([commandOrControl, shortcut]);
-      await browser.$(`[data-testid="${view}"]`).waitForExist({
-        timeout: 10_000,
-        timeoutMsg: `${view} never appeared`,
-      });
+    for (const view of ['list', 'grid'] as const) {
+      await showView(browser, view);
 
       // Half a screen per step, so each step overlaps the one before it.
       const step = await browser.execute(() => {
@@ -116,8 +108,8 @@ test(
   }
 );
 
-// The first cause of #480. The grid's element leaves the page while the folder is empty, and
-// the grid once measured its width only when that element first appeared.
+// The grid's element leaves the page while the folder is empty, so the grid must measure the
+// element that comes back (#480).
 test("a grid whose folder empties and fills again follows the window's width", async () => {
   const { browser, files } = app;
   await browser.setWindowSize(1280, 800);
@@ -126,11 +118,7 @@ test("a grid whose folder empties and fills again follows the window's width", a
   await fs.mkdir(dir);
   await fs.writeFile(path.join(dir, 'seed.txt'), 'x');
   await openFolder(browser, dir);
-  await browser.keys([commandOrControl, '1']);
-  await browser.$('[data-testid="file-grid"]').waitForExist({
-    timeout: 10_000,
-    timeoutMsg: 'grid view never appeared',
-  });
+  await showView(browser, 'grid');
 
   await fs.rm(path.join(dir, 'seed.txt'));
   await browser.waitUntil(
@@ -173,7 +161,7 @@ test("a grid whose folder empties and fills again follows the window's width", a
   expect(tilesPastTheEdge).toBe(0);
 });
 
-// The second cause of #480: list cells let their text hang past the row.
+// A list cell's text must not hang past its row (#480).
 test('a narrow list has no sideways overflow', async () => {
   const { browser, files } = app;
   await browser.setWindowSize(1200, 800);
@@ -185,32 +173,36 @@ test('a narrow list has no sideways overflow', async () => {
   await fs.writeFile(path.join(dir, `${'bravo'.repeat(10)}.txt`), 'bb');
   await fs.writeFile(path.join(dir, `${'charlie'.repeat(8)}.txt`), 'ccc');
   await openFolder(browser, dir);
-  await browser.keys([commandOrControl, '2']);
-  await browser.$('[data-testid="file-list"]').waitForExist({
-    timeout: 10_000,
-    timeoutMsg: 'list view never appeared',
-  });
+  await showView(browser, 'list');
   await fileRow(browser, longName).waitForExist({
     timeout: 10_000,
     timeoutMsg: 'the list never showed its files',
   });
 
+  // Each wait also checks the page got narrow: a window that refused the size would pass at 1200.
   await browser.setWindowSize(700, 800);
   await browser.waitUntil(
     () =>
       browser.execute(() => {
         const rows = Array.from(document.querySelectorAll('[data-file-item="true"]'));
-        return rows.length > 0 && rows.every((row) => row.scrollWidth <= row.clientWidth);
+        return (
+          document.documentElement.clientWidth <= 700 &&
+          rows.length > 0 &&
+          rows.every((row) => row.scrollWidth <= row.clientWidth)
+        );
       }),
-    { timeout: 10_000, timeoutMsg: 'a list row stayed wider than its box' }
+    { timeout: 10_000, timeoutMsg: 'a list row stayed wider than its box at 700 wide' }
   );
 
-  // At 360 the gaps between the list's columns are wider than the list, so only the view's clip holds it.
+  // At 360 the gaps between the list's columns are wider than the list, so only the view's
+  // clip holds it.
   await browser.setWindowSize(360, 800);
-  await browser.waitUntil(async () => (await sidewaysOverflow(browser)) === 0, {
-    timeout: 10_000,
-    timeoutMsg: 'the list still stuck out past the window',
-  });
+  await browser.waitUntil(
+    async () =>
+      (await browser.execute(() => document.documentElement.clientWidth <= 360)) &&
+      (await sidewaysOverflow(browser)) === 0,
+    { timeout: 10_000, timeoutMsg: 'the list still stuck out past the window at 360 wide' }
+  );
 });
 
 for (const view of ['grid', 'list'] as const) {
@@ -223,25 +215,17 @@ for (const view of ['grid', 'list'] as const) {
     await fs.mkdir(dir);
     await Promise.all(seeded.map((name) => fs.writeFile(path.join(dir, name), 'x')));
     await openFolder(browser, dir);
-    await browser.keys([commandOrControl, view === 'grid' ? '1' : '2']);
-    const viewId = view === 'grid' ? 'file-grid' : 'file-list';
-    await browser.$(`[data-testid="${viewId}"]`).waitForExist({
-      timeout: 10_000,
-      timeoutMsg: `${view} view never appeared`,
-    });
+    await showView(browser, view);
     await browser.waitUntil(
       async () => (await rowNames(browser)).join('\n') === seeded.join('\n'),
       { timeout: 10_000, timeoutMsg: 'the view never showed its four files' }
     );
 
-    // The loop runs only while this flag is set. Both tests share the page, so the first
-    // test's loop must not run on into the second.
+    // Keep the widest overflow of any frame, so one that lasts a single frame still fails.
     await browser.execute(() => {
       window.__MAX_SIDEWAYS_OVERFLOW__ = 0;
-      window.__TRACK_SIDEWAYS_OVERFLOW__ = true;
       const scroller = document.querySelector('[data-main-content]')!;
       const tick = () => {
-        if (window.__TRACK_SIDEWAYS_OVERFLOW__ !== true) return;
         window.__MAX_SIDEWAYS_OVERFLOW__ = Math.max(
           window.__MAX_SIDEWAYS_OVERFLOW__ ?? 0,
           scroller.scrollWidth - scroller.clientWidth
@@ -250,42 +234,38 @@ for (const view of ['grid', 'list'] as const) {
       };
       requestAnimationFrame(tick);
     });
-    try {
-      const bulk = Array.from(
-        { length: 60 },
-        (_, index) => `bulk-${String(index).padStart(2, '0')}.txt`
-      );
-      await Promise.all(bulk.map((name) => fs.writeFile(path.join(dir, name), 'x')));
-      await browser.waitUntil(async () => await canScrollDown(browser), {
-        timeout: 10_000,
-        timeoutMsg: 'the folder never grew a scrollbar',
-      });
 
-      // What a browser download does, with no wait: a temp file, a rename, and now and then a delete.
-      const downloads: string[] = [];
-      for (let i = 0; i < 12; i++) {
-        await fs.writeFile(path.join(dir, `download-${i}.tmp`), 'x');
-        await fs.rename(path.join(dir, `download-${i}.tmp`), path.join(dir, `download-${i}.txt`));
-        downloads.push(`download-${i}.txt`);
-        if (i % 2 === 1) await fs.rm(path.join(dir, downloads.shift()!));
-        expect(await sidewaysOverflow(browser)).toBe(0);
-      }
+    const bulk = Array.from(
+      { length: 60 },
+      (_, index) => `bulk-${String(index).padStart(2, '0')}.txt`
+    );
+    await Promise.all(bulk.map((name) => fs.writeFile(path.join(dir, name), 'x')));
+    await browser.waitUntil(async () => await canScrollDown(browser), {
+      timeout: 10_000,
+      timeoutMsg: 'the folder never grew a scrollbar',
+    });
 
-      await Promise.all(bulk.map((name) => fs.rm(path.join(dir, name))));
-      await browser.waitUntil(async () => !(await canScrollDown(browser)), {
-        timeout: 10_000,
-        timeoutMsg: 'the scrollbar never went away',
-      });
-      const onDisk = (await fs.readdir(dir)).sort().join('\n');
-      await browser.waitUntil(async () => (await rowNames(browser)).join('\n') === onDisk, {
-        timeout: 10_000,
-        timeoutMsg: 'the view never matched the folder',
-      });
-      expect(await browser.execute(() => window.__MAX_SIDEWAYS_OVERFLOW__ ?? 0)).toBe(0);
-    } finally {
-      await browser.execute(() => {
-        window.__TRACK_SIDEWAYS_OVERFLOW__ = false;
-      });
+    // What a browser download does, with no wait: a temp file, a rename, and now and then a delete.
+    // macOS runs no frames for a covered window, so each round also reads the overflow itself.
+    const downloads: string[] = [];
+    for (let i = 0; i < 12; i++) {
+      await fs.writeFile(path.join(dir, `download-${i}.tmp`), 'x');
+      await fs.rename(path.join(dir, `download-${i}.tmp`), path.join(dir, `download-${i}.txt`));
+      downloads.push(`download-${i}.txt`);
+      if (i % 2 === 1) await fs.rm(path.join(dir, downloads.shift()!));
+      expect(await sidewaysOverflow(browser)).toBe(0);
     }
+
+    await Promise.all(bulk.map((name) => fs.rm(path.join(dir, name))));
+    await browser.waitUntil(async () => !(await canScrollDown(browser)), {
+      timeout: 10_000,
+      timeoutMsg: 'the scrollbar never went away',
+    });
+    const onDisk = (await fs.readdir(dir)).sort().join('\n');
+    await browser.waitUntil(async () => (await rowNames(browser)).join('\n') === onDisk, {
+      timeout: 10_000,
+      timeoutMsg: 'the view never matched the folder',
+    });
+    expect(await browser.execute(() => window.__MAX_SIDEWAYS_OVERFLOW__ ?? 0)).toBe(0);
   });
 }

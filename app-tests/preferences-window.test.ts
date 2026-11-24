@@ -14,14 +14,16 @@ afterAll(async () => {
   await app?.stop();
 });
 
-// The WebDriver server lists windows by their Tauri label, and before this test only main was used.
+// The WebDriver server lists windows by their Tauri label.
 test('a theme picked in Preferences changes the file browser and is saved', async () => {
   const { browser, home } = app;
   const current = await browser.execute(() => document.documentElement.dataset.theme ?? '');
+  // The background is the theme's appDark color, from src/themes/dracula.ts and github.ts. It
+  // tells the picked theme from the default one of the same scheme.
   const picked =
     current === 'light'
-      ? { name: 'Dracula', id: 'dracula', scheme: 'dark' }
-      : { name: 'GitHub Light', id: 'github-light', scheme: 'light' };
+      ? { name: 'Dracula', id: 'dracula', scheme: 'dark', background: '#282a36' }
+      : { name: 'GitHub Light', id: 'github-light', scheme: 'light', background: '#f6f8fa' };
 
   await browser.keys([commandOrControl, ',']);
   await browser.waitUntil(async () => (await browser.getWindowHandles()).includes('preferences'), {
@@ -38,8 +40,13 @@ test('a theme picked in Preferences changes the file browser and is saved', asyn
 
   await browser.switchWindow('main');
   await browser.waitUntil(
-    async () =>
-      (await browser.execute(() => document.documentElement.dataset.theme ?? '')) === picked.scheme,
+    async () => {
+      const shown = await browser.execute(() => ({
+        scheme: document.documentElement.dataset.theme,
+        background: document.documentElement.style.getPropertyValue('--color-app-dark'),
+      }));
+      return shown.scheme === picked.scheme && shown.background === picked.background;
+    },
     { timeout: 10_000, timeoutMsg: 'the file browser never took the theme picked in Preferences' }
   );
 

@@ -59,16 +59,24 @@ export function runCommand(
   );
 }
 
-// The key the app's shortcuts use with letters.
+// The modifier of the app's shortcuts: Cmd on macOS, Ctrl elsewhere.
 export const commandOrControl = process.platform === 'darwin' ? Key.Command : Key.Ctrl;
+
+// Switches the file view with the app's shortcut, and waits until the view shows.
+export async function showView(browser: Browser, view: 'grid' | 'list'): Promise<void> {
+  await browser.keys([commandOrControl, view === 'grid' ? '1' : '2']);
+  await browser.$(`[data-testid="file-${view}"]`).waitForExist({
+    timeout: 10_000,
+    timeoutMsg: `the ${view} view never appeared`,
+  });
+}
 
 export function fileRow(browser: Browser, name: string) {
   return browser.$(`[data-file-item="true"][data-name="${name}"]`);
 }
 
 // One script, not a request per row: rows come and go while the view scrolls, and on Linux a
-// burst of parallel requests for 30 or so rows crashed the test build ("malloc(): unaligned
-// tcache chunk detected").
+// burst of parallel requests for about 30 rows crashes the test build (#655).
 export function rowNames(browser: Browser): Promise<string[]> {
   return browser.execute(() =>
     Array.from(document.querySelectorAll('[data-file-item="true"]'), (row) =>

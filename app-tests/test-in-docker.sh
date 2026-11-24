@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # Runs `npm run test:app` on Linux, in a container with a virtual display.
+# A failed test's screenshot lands in test-results/app/ of this checkout.
 set -euo pipefail
 
 src=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+mkdir -p "${src}/test-results/app"
 
 docker run --rm \
   -v "${src}:/src:ro" \
+  -v "${src}/test-results/app:/screenshots" \
   -v marlin-app-test-registry:/usr/local/cargo/registry \
   -v marlin-app-test-target:/work/src-tauri/target \
   rust:1-slim-bookworm \
@@ -23,7 +26,8 @@ apt-get install -y -qq nodejs build-essential clang libclang-dev libssl-dev pkg-
   procps xvfb xauth xclip openssh-server
 useradd -m tester
 # The source is mounted read-only, and its node_modules and target folders were built on a Mac. Work on a copy without them.
-tar -C /src --exclude=./node_modules --exclude=./src-tauri/target --exclude=./dist --exclude=./.git -cf - . | tar -C /work -xf -
+tar -C /src --exclude=./node_modules --exclude=./src-tauri/target --exclude=./dist --exclude=./.git \
+  --exclude=./test-results -cf - . | tar -C /work -xf -
 chown -R tester /work /usr/local/cargo/registry
 cat > /tmp/as-tester.sh << 'TEST'
 set -euo pipefail
@@ -36,6 +40,13 @@ npm ci
 xvfb-run -a npm run test:app
 TEST
 chmod 755 /tmp/as-tester.sh
-su -s /bin/bash tester -c 'bash /tmp/as-tester.sh'
+status=0
+su -s /bin/bash tester -c 'bash /tmp/as-tester.sh' || status=$?
+# The screenshots of failed tests go back to the checkout, owned like the folder they land in.
+if [ -d /work/test-results/app ]; then
+  cp -r /work/test-results/app/. /screenshots/
+  chown -R "$(stat -c %u:%g /screenshots)" /screenshots
+fi
+exit "$status"
 EOF
 )"

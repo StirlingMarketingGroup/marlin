@@ -117,7 +117,8 @@ test('a file moved to the trash comes back with undo', async () => {
   }
 });
 
-// This uses the real system clipboard, so it replaces whatever the developer copied.
+// On macOS the test build copies to a pasteboard of its own. On Linux it uses the display's
+// clipboard, which under CI and test-in-docker.sh is Xvfb's.
 test('a copied file pastes into another folder', async () => {
   const { browser, files } = app;
   const from = path.join(files, 'copy-from');
@@ -130,8 +131,7 @@ test('a copied file pastes into another folder', async () => {
   await openFolder(browser, from);
   await fileRow(browser, 'notes.txt').click();
   await browser.keys([commandOrControl, 'c']);
-  // The copy runs after the key returns, and paste reads the live system clipboard. Pasting
-  // before the copy lands would paste what the developer copied, or move a file they cut.
+  // The copy runs after the key returns. Paste reads the clipboard, so it waits for the copy.
   await browser.waitUntil(
     async () =>
       isDeepStrictEqual(await runCommand(browser, 'clipboard_get_contents'), {
@@ -144,6 +144,11 @@ test('a copied file pastes into another folder', async () => {
   );
 
   await openFolder(browser, to);
+  // The rows of the folder it left show for a moment, and one of them is notes.txt too.
+  await browser.$('//p[text()="This folder is empty"]').waitForExist({
+    timeout: 10_000,
+    timeoutMsg: 'the empty destination never showed',
+  });
   await browser.keys([commandOrControl, 'v']);
   await fileRow(browser, 'notes.txt').waitForExist({
     timeout: 10_000,

@@ -8,7 +8,7 @@
 
 A test drives the real Marlin app over WebDriver. The server is inside the app: the `tauri-plugin-wdio-webdriver` crate, compiled in only by the Cargo feature `app-test`. macOS and Linux use the same route.
 
-- **The test build.** `npm run test:app` builds the app with `--features app-test` in debug, into its own folder, `src-tauri/target/app-test/`. The feature does two things: it serves WebDriver on a port of `127.0.0.1`, and it swaps the OS keychain for the in-memory one from `marlin-test-keychain`.
+- **The test build.** `npm run test:app` builds the app with `--features app-test` in debug, into its own folder, `src-tauri/target/app-test/`. The feature serves WebDriver on a port of `127.0.0.1`, and it swaps the OS keychain for the in-memory one from `marlin-test-keychain`. Since #579 it also copies files to a pasteboard of its own on macOS, so a test never replaces what the developer copied.
 - **The client.** Tests are Vitest files in `app-tests/`. They talk to the server with the `webdriverio` package, used as a plain client. This record chose version 9; Dependabot moved it to version 10 on 2026-11-18 (#582), and the tests run unchanged on it. We do not use WebdriverIO's test runner or its Tauri service.
 - **One app per test file.** `startApp()` in `app-tests/app.ts` starts the app with a temporary home folder and a free port. When the file is done, it stops the app and removes the folder.
 - **The existing Playwright suite stays as it is,** in Chromium with Tauri faked. Running it in WebKit as well is worth doing, and #576 tracks it.
