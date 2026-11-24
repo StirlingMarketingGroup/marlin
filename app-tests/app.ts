@@ -91,18 +91,19 @@ export function drawsFrames(browser: Browser): Promise<boolean> {
   return browser.execute(() => document.visibilityState === 'visible');
 }
 
-// Types a new name into an open rename box. The app fills the box with the current name on the
-// frame after it opens, and that fill replaces anything typed before it.
+// Types a new name into an open rename box. On the frame after the box opens the app fills it
+// with the current name, and on the next it focuses it (the grid view writes the name again).
+// Either one replaces anything typed before it.
 export async function typeNewName(
   browser: Browser,
   input: ReturnType<Browser['$']>,
   name: string
 ): Promise<void> {
   if (await drawsFrames(browser)) {
-    await browser.waitUntil(async () => (await input.getValue()) !== '', {
-      timeout: 10_000,
-      timeoutMsg: 'the rename box never filled with the current name',
-    });
+    await browser.waitUntil(
+      async () => (await input.isFocused()) && (await input.getValue()) !== '',
+      { timeout: 10_000, timeoutMsg: 'the rename box never filled with the current name' }
+    );
   }
   await input.setValue(name);
 }

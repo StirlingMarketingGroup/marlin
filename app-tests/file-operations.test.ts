@@ -5,7 +5,15 @@ import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { afterAll, beforeAll, expect, test } from 'vitest';
 import { Key } from 'webdriverio';
-import { commandOrControl, fileRow, openFolder, runCommand, startApp, typeNewName } from './app';
+import {
+  commandOrControl,
+  fileRow,
+  openFolder,
+  runCommand,
+  showView,
+  startApp,
+  typeNewName,
+} from './app';
 
 let app: Awaited<ReturnType<typeof startApp>>;
 
@@ -81,33 +89,37 @@ test('a renamed file can be renamed back with undo', async () => {
 });
 
 // The listing changes while the box is open, as it does in a folder a browser downloads into.
-test('a name typed into the rename box survives a change to the folder', async () => {
-  const { browser, files } = app;
-  const dir = path.join(files, 'rename-while-changing');
-  await fs.mkdir(dir);
-  await fs.writeFile(path.join(dir, 'draft.txt'), 'draft\n');
-  await openFolder(browser, dir);
+// Each view has its own rename box.
+for (const view of ['list', 'grid'] as const) {
+  test(`${view}: a name typed into the rename box survives a change to the folder`, async () => {
+    const { browser, files } = app;
+    const dir = path.join(files, `rename-while-changing-${view}`);
+    await fs.mkdir(dir);
+    await fs.writeFile(path.join(dir, 'draft.txt'), 'draft\n');
+    await openFolder(browser, dir);
+    await showView(browser, view);
 
-  await fileRow(browser, 'draft.txt').click();
-  await browser.keys(Key.F2);
-  const input = fileRow(browser, 'draft.txt').$('input');
-  await input.waitForExist({ timeout: 10_000, timeoutMsg: 'the rename box never opened' });
-  await typeNewName(browser, input, 'kept.txt');
+    await fileRow(browser, 'draft.txt').click();
+    await browser.keys(Key.F2);
+    const input = fileRow(browser, 'draft.txt').$('input');
+    await input.waitForExist({ timeout: 10_000, timeoutMsg: 'the rename box never opened' });
+    await typeNewName(browser, input, 'kept.txt');
 
-  await fs.writeFile(path.join(dir, 'other.txt'), 'other\n');
-  await fileRow(browser, 'other.txt').waitForExist({
-    timeout: 10_000,
-    timeoutMsg: 'other.txt never appeared',
+    await fs.writeFile(path.join(dir, 'other.txt'), 'other\n');
+    await fileRow(browser, 'other.txt').waitForExist({
+      timeout: 10_000,
+      timeoutMsg: 'other.txt never appeared',
+    });
+    expect(await input.getValue()).toBe('kept.txt');
+    await browser.keys(Key.Enter);
+
+    await fileRow(browser, 'kept.txt').waitForExist({
+      timeout: 10_000,
+      timeoutMsg: 'kept.txt never appeared',
+    });
+    expect((await fs.readdir(dir)).sort()).toEqual(['kept.txt', 'other.txt']);
   });
-  expect(await input.getValue()).toBe('kept.txt');
-  await browser.keys(Key.Enter);
-
-  await fileRow(browser, 'kept.txt').waitForExist({
-    timeout: 10_000,
-    timeoutMsg: 'kept.txt never appeared',
-  });
-  expect((await fs.readdir(dir)).sort()).toEqual(['kept.txt', 'other.txt']);
-});
+}
 
 test('a file moved to the trash comes back with undo', async () => {
   const name = `trash-test-${randomUUID()}.txt`;

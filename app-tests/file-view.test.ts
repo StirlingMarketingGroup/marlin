@@ -55,6 +55,27 @@ async function fileCount(browser: Browser): Promise<number> {
   return Number((await statusTitle(browser, 'Files')).replace(/\D/g, ''));
 }
 
+// The names of the rows inside the scrolling box. A virtual view keeps a few rows past its
+// edges as well, and a person cannot see those.
+function namesInView(browser: Browser): Promise<string[]> {
+  return browser.execute(() => {
+    const box = document.querySelector('[data-main-content]')!.getBoundingClientRect();
+    return Array.from(document.querySelectorAll('[data-file-item="true"]'))
+      .filter((row) => {
+        const rect = row.getBoundingClientRect();
+        return (
+          getComputedStyle(row).visibility === 'visible' &&
+          rect.bottom > box.top &&
+          rect.top < box.bottom &&
+          rect.right > box.left &&
+          rect.left < box.right
+        );
+      })
+      .map((row) => row.getAttribute('data-name')!)
+      .sort();
+  });
+}
+
 // The listing streams in batches of 100 from Rust, and both views are virtual, so a lost or
 // doubled batch shows only here. Walking both views takes hundreds of WebDriver calls.
 test(
@@ -88,7 +109,7 @@ test(
       });
       // The view keeps the rows it showed until the scroll is drawn. Rows from the bottom of
       // the last view would end the walk before the top files were collected.
-      await browser.waitUntil(async () => (await rowNames(browser)).includes('file-000.txt'), {
+      await browser.waitUntil(async () => (await namesInView(browser)).includes('file-000.txt'), {
         timeout: 10_000,
         timeoutMsg: 'the view never scrolled back to the first file',
       });
@@ -99,7 +120,7 @@ test(
         let names: string[] = [];
         await browser.waitUntil(
           async () => {
-            names = await rowNames(browser);
+            names = await namesInView(browser);
             return names.length > 0 && names[names.length - 1] > last;
           },
           { timeout: 10_000, timeoutMsg: `no file after ${last} appeared while scrolling` }
@@ -269,7 +290,7 @@ for (const view of ['grid', 'list'] as const) {
     const total = seeded.length + bulk.length + downloads.length;
     await browser.waitUntil(
       async () =>
-        (await fileCount(browser)) === total && (await rowNames(browser)).includes(downloads[0]),
+        (await fileCount(browser)) === total && (await namesInView(browser)).includes(downloads[0]),
       { timeout: 10_000, timeoutMsg: `the view never showed ${downloads[0]} among ${total} files` }
     );
     expect(await canScrollDown(browser)).toBe(true);

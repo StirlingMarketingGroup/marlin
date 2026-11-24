@@ -282,30 +282,29 @@ export default function FileList({ files, preferences }: FileListProps) {
     return file.is_symlink ? `${base} (symlink)` : base;
   };
 
-  // The rename box fills with the name once per rename target. The listing changes while the
-  // box is open (the watcher, a streaming batch), and a refill would replace what was typed.
-  const filledRenameTargetRef = useRef<string | undefined>(undefined);
+  // The rename box fills once per rename target, keyed on the target's name. The file list
+  // changes while the box is open (the watcher, a streaming batch), and a refill would replace
+  // what was typed.
+  const renameTarget = useMemo(
+    () => (renameTargetPath ? files.find((ff) => ff.path === renameTargetPath) : undefined),
+    [files, renameTargetPath]
+  );
+  const renameTargetName = renameTarget?.name;
+  const renameTargetIsDirectory = renameTarget?.is_directory;
 
   // Begin rename UX when store renameTargetPath points to an item in this view
   useEffect(() => {
-    if (!renameTargetPath) {
-      filledRenameTargetRef.current = undefined;
-      return;
-    }
-    if (filledRenameTargetRef.current === renameTargetPath) return;
-    const f = files.find((ff) => ff.path === renameTargetPath);
-    if (!f) return;
-    filledRenameTargetRef.current = renameTargetPath;
+    if (renameTargetName === undefined) return;
     // Clear first to avoid flashing previous value
     setRenameText('');
     const baseLen = (() => {
-      if (f.is_directory) {
-        return f.name.toLowerCase().endsWith('.app')
-          ? Math.max(0, f.name.length - 4)
-          : f.name.length;
+      if (renameTargetIsDirectory) {
+        return renameTargetName.toLowerCase().endsWith('.app')
+          ? Math.max(0, renameTargetName.length - 4)
+          : renameTargetName.length;
       }
-      const idx = f.name.lastIndexOf('.');
-      return idx > 0 ? idx : f.name.length;
+      const idx = renameTargetName.lastIndexOf('.');
+      return idx > 0 ? idx : renameTargetName.length;
     })();
     const focusAndSelect = () => {
       const el = renameInputRef.current;
@@ -319,10 +318,10 @@ export default function FileList({ files, preferences }: FileListProps) {
     };
     // Fill value on next frame, then select the base name
     requestAnimationFrame(() => {
-      setRenameText(f.name);
+      setRenameText(renameTargetName);
       requestAnimationFrame(focusAndSelect);
     });
-  }, [renameTargetPath, files]);
+  }, [renameTargetPath, renameTargetName, renameTargetIsDirectory]);
 
   const commitRename = async () => {
     const name = (renameText || '').trim();
