@@ -204,6 +204,17 @@ jobs:
       # build disagree, each one rebuilds what the other just built.
       MACOSX_DEPLOYMENT_TARGET: '10.13'
     steps:
+      - name: Check the Google sign-in client
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+        run: |
+          # Without both, the build still succeeds, but the app cannot sign in to Google (#536).
+          if [ -z "$GOOGLE_CLIENT_ID" ] || [ -z "$GOOGLE_CLIENT_SECRET" ]; then
+            echo "::error::Set the GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET repository secrets."
+            exit 1
+          fi
+
       - name: Setup persistent cargo target dir (self-hosted)
         if: matrix.self_hosted
         run: |
@@ -451,6 +462,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
           TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
+          # marlin-gdrive's build script compiles these into the app and the mount helper.
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           APPIMAGE_EXTRACT_AND_RUN: ${{ runner.os == 'Linux' && '1' || '' }}
           TAURI_BUNDLE_DEBUG: '1'
           TAURI_LOG: trace

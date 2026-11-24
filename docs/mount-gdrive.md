@@ -5,7 +5,7 @@
 This is not the code behind `gdrive://` paths. The app handles those through its own location provider: see [Location providers](location-providers.md).
 
 **Covers:** `src-tauri/crates/marlin-gdrive/`
-**Checked against the code:** 2026-11-23
+**Checked against the code:** 2026-11-24
 
 ## The parts
 
@@ -247,7 +247,7 @@ The app signs in to Google in a browser and saves the result. `src/sign_in.rs` r
 2. The same two variables when the crate was compiled. `build.rs` reads them from the environment of the build, or from `src-tauri/.env`, and hands them to the compiler. A build script reaches only its own crate, so this one must be in the crate that reads the values.
 3. A `google-credentials.json` file: in `<config dir>/marlin/`, beside the program, or in the app bundle's `Resources`. A debug build also looks in the working folder and in `src-tauri/`.
 
-`.env` is not in the repo, and the release workflow sets neither variable (#536). Cargo rebuilds the crate on every build while `src-tauri/.env` does not exist, because the build script watches that file (#466).
+`.env` is not in the repo. The release workflow passes both variables to the build from the repository secrets of the same names (see [Release signing](release-signing.md#secrets)). Cargo rebuilds the crate on every build while `src-tauri/.env` does not exist, because the build script watches that file (#466).
 
 **The keychain entry.** Each account's refresh token is in the OS keychain: service `marlin-gdrive` (`KEYRING_SERVICE`), user = the account's email. `keyring_entry` opens it. The app writes and deletes it. `SavedSignIn` writes it only when Google sends a new refresh token.
 
