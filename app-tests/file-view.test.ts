@@ -75,8 +75,8 @@ function namesInView(browser: Browser): Promise<string[]> {
   });
 }
 
-// The listing streams in batches of 100 from Rust, and both views are virtual, so a lost or
-// doubled batch shows only here. Walking both views takes hundreds of WebDriver calls.
+// Both views are virtual, so a lost or doubled file shows only here. Walking both views takes
+// hundreds of WebDriver calls.
 test(
   'a folder of 500 files shows every file once, in list view and in grid view',
   { timeout: 300_000 },
@@ -133,6 +133,48 @@ test(
       }
       expect([...seen].sort()).toEqual(expected);
     }
+  }
+);
+
+// Each batch of a listing makes the page sort the whole list again, so a listing sent in many
+// small batches takes time that grows with the square of the file count (#654). Sent as one
+// batch per step, 20,000 files show in about a second.
+test(
+  'a folder of 20,000 files shows within 10 seconds, and a file added right after it opens shows too',
+  { timeout: 120_000 },
+  async () => {
+    const { browser, files } = app;
+    const dir = path.join(files, 'big');
+    await fs.mkdir(dir);
+    const names = Array.from(
+      { length: 20_000 },
+      (_, index) => `file-${String(index).padStart(5, '0')}.txt`
+    );
+    // In slices: 20,000 writes at once can pass the limit on open files.
+    for (let start = 0; start < names.length; start += 500) {
+      await Promise.all(
+        names.slice(start, start + 500).map((name) => fs.writeFile(path.join(dir, name), 'x'))
+      );
+    }
+
+    // Nothing changes in the folder while it opens, so the sizes come from the listing alone.
+    const started = Date.now();
+    await openFolder(browser, dir);
+    await browser.waitUntil(
+      async () => (await fileCount(browser)) === 20_000 && (await sizeBytes(browser)) === 20_000,
+      { timeout: 60_000, timeoutMsg: 'the status bar never showed 20,000 files of 1 byte' }
+    );
+    expect(Date.now() - started).toBeLessThan(10_000);
+
+    // Open it again and add a file at once. openFolder returns when the app watches the
+    // folder. The listing may or may not be done by then, and the file must show either way.
+    await openFolder(browser, files);
+    await openFolder(browser, dir);
+    await fs.writeFile(path.join(dir, 'added.txt'), 'x');
+    await browser.waitUntil(
+      async () => (await fileCount(browser)) === 20_001 && (await sizeBytes(browser)) === 20_001,
+      { timeout: 30_000, timeoutMsg: 'the file added right after the folder opened never showed' }
+    );
   }
 );
 

@@ -133,46 +133,53 @@ function getPerformanceMockScript(fileCount: number): string {
         return args.handler;
       }
 
-      // Schedule directory batch events - emit in chunks to simulate streaming
+      // One batch of names, then one of metadata in a later task, as read_directory_streaming
+      // sends them (#654). The names carry the reader's placeholders until the metadata lands.
       function scheduleDirectoryBatch(sessionId, path) {
         const files = getFilesForPath(path);
-        const BATCH_SIZE = 100;
+        window.__PERF_BATCH_COMPLETE__ = false;
 
-        // Mark performance timing
-        window.__PERF_BATCH_START__ = performance.now();
-
-        queueMicrotask(() => {
-          let batchIndex = 0;
-          function emitBatch() {
-            const start = batchIndex * BATCH_SIZE;
-            const end = Math.min(start + BATCH_SIZE, files.length);
-            const chunk = files.slice(start, end);
-            const isFinal = end >= files.length;
-
-            const eventListeners = listeners.get('directory-batch') || [];
-            const payload = {
-              sessionId,
-              batchIndex,
-              entries: chunk,
-              isFinal,
-              totalCount: batchIndex === 0 ? files.length : null,
-            };
-
-            for (const handler of eventListeners) {
-              runCallback(handler, { event: 'directory-batch', payload });
-            }
-
-            if (isFinal) {
-              window.__PERF_BATCH_END__ = performance.now();
-              window.__PERF_BATCH_COMPLETE__ = true;
-            } else {
-              batchIndex++;
-              // Use setTimeout(0) to allow rendering between batches
-              setTimeout(emitBatch, 0);
-            }
+        setTimeout(() => {
+          const entries = files.map((file) => ({
+            ...file,
+            size: 0,
+            is_git_repo: false,
+            child_count: null,
+            image_width: null,
+            image_height: null,
+          }));
+          const payload = {
+            sessionId,
+            batchIndex: 0,
+            entries,
+            isFinal: true,
+            totalCount: files.length,
+          };
+          for (const handler of listeners.get('directory-batch') || []) {
+            runCallback(handler, { event: 'directory-batch', payload });
           }
-          setTimeout(emitBatch, 10);
-        });
+
+          setTimeout(() => {
+            const updates = files.map((file) => ({
+              path: file.path,
+              size: file.size,
+              modified: file.modified,
+              isDirectory: file.is_directory,
+              isSymlink: file.is_symlink,
+              isGitRepo: file.is_git_repo,
+              childCount: file.child_count,
+              imageWidth: file.image_width,
+              imageHeight: file.image_height,
+            }));
+            for (const handler of listeners.get('metadata-batch') || []) {
+              runCallback(handler, {
+                event: 'metadata-batch',
+                payload: { sessionId, updates, isFinal: true },
+              });
+            }
+            window.__PERF_BATCH_COMPLETE__ = true;
+          }, 0);
+        }, 10);
       }
 
       const commandHandlers = {
@@ -324,16 +331,6 @@ test.describe('Performance Profiling', () => {
 
     const timeToComplete = performance.now() - navigationStart;
 
-    // Get batch timing from page
-    const batchTiming = await page.evaluate(() => {
-      const w = window as any;
-      return {
-        batchStart: w.__PERF_BATCH_START__,
-        batchEnd: w.__PERF_BATCH_END__,
-      };
-    });
-    const batchDuration = batchTiming.batchEnd - batchTiming.batchStart;
-
     // Count rendered items
     const renderedCount = await page.locator('[data-testid="file-item"]').count();
 
@@ -352,7 +349,6 @@ test.describe('Performance Profiling', () => {
     console.log(`\n⏱️  TIMING:`);
     console.log(`   Time to first file visible:  ${timeToFirstFile.toFixed(0)}ms`);
     console.log(`   Time to streaming complete:  ${timeToComplete.toFixed(0)}ms`);
-    console.log(`   Batch processing duration:   ${batchDuration.toFixed(0)}ms`);
     console.log(`\n📦 RENDERING:`);
     console.log(`   Files rendered (visible):    ${renderedCount}`);
     console.log(`   Total files in directory:    ${FILE_COUNT}`);

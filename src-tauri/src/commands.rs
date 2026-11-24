@@ -1554,8 +1554,8 @@ pub struct StreamingDirectoryResponse {
     pub capabilities: LocationCapabilities,
 }
 
-/// Start streaming directory contents. Returns immediately with session info,
-/// then emits batches via the "directory-batch" event.
+/// Starts reading a local folder. Returns at once with the session info, then sends one
+/// "directory-batch" event with the names and one "metadata-batch" event with the metadata.
 /// The session_id is provided by the frontend to avoid race conditions - the frontend
 /// sets up the session ID in state BEFORE calling this command, ensuring batches
 /// arriving via events will be accepted immediately.
@@ -1628,7 +1628,7 @@ pub async fn read_directory_streaming_command(
         let session_for_blocking = session_for_task.clone();
         let cancel_for_blocking = cancel_for_task.clone();
         let app_for_batches = app_for_task.clone();
-        let app_for_metadata = app_for_task;
+        let app_for_metadata = app_for_task.clone();
 
         let result = tauri::async_runtime::spawn_blocking(move || {
             read_directory_streaming(
@@ -1636,13 +1636,11 @@ pub async fn read_directory_streaming_command(
                 session_for_blocking,
                 cancel_for_blocking,
                 |batch| {
-                    // Emit skeleton file batches (instant UI)
                     if let Err(e) = app_for_batches.emit(DIRECTORY_BATCH_EVENT, &batch) {
                         warn!("Failed to emit directory batch: {}", e);
                     }
                 },
                 |metadata_batch| {
-                    // Emit metadata updates (fills in size, dates, etc.)
                     if let Err(e) = app_for_metadata.emit(METADATA_BATCH_EVENT, &metadata_batch) {
                         warn!("Failed to emit metadata batch: {}", e);
                     }
@@ -1653,6 +1651,11 @@ pub async fn read_directory_streaming_command(
 
         if let Err(e) = result {
             warn!("Directory streaming task failed: {}", e);
+        }
+
+        // A finished read has nothing left to cancel, and the map would grow with every folder opened.
+        if let Ok(mut sessions) = app_for_task.state::<DirectoryStreamState>().sessions.lock() {
+            sessions.remove(&session_for_task);
         }
     });
 
