@@ -913,8 +913,6 @@ async fn dropping_a_mount_during_a_read_does_not_crash() {
     }
 }
 
-// Linux drop detaches whatever FUSE mount is at the path, so it would remove the second mount.
-#[cfg(target_os = "macos")]
 #[ignore = "mounts for real: run crates/marlin-fuse/test-in-docker.sh on Linux, crates/marlin-fuse/test-on-mac.sh on a Mac"]
 #[tokio::test(flavor = "multi_thread")]
 async fn dropping_the_first_mount_leaves_a_second_mount_at_the_same_path() {

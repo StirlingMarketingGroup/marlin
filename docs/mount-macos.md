@@ -99,7 +99,7 @@ The table in [Linux mount adapter](mount-linux.md#errors) holds for macOS: both 
 - **A mount removed from outside.** A user can run `umount` or eject the volume in Finder. The loop ends, and the next `unmount` succeeds without running anything. Until that `unmount`, the helper still lists the mount (#488).
 - **A forced unmount waits for a slow provider.** While a request is waiting on the provider, macOS holds `umount -f` until the request is answered. The core answers a provider call after 30 seconds at most (`call_timeout`), so that is the longest wait. This holds for a user's `umount -f` and for the one a dropped `Mount` runs.
 - **A request macOS sent itself can hold a plain unmount too.** macOS sends a new mount about ten requests in its first moments. While one of them waits on a slow provider, `umount` returns only when it is answered. A request that the unmount itself causes does not hold it.
-- Dropping a `Mount` whose session has not ended runs `umount -f`. Dropping one whose session has ended does nothing, so a later mount at the same path is safe. This differs from Linux, where a drop detaches whatever mount is at the path.
+- Dropping a `Mount` whose session has not ended runs `umount -f`. Dropping one whose session has ended does nothing, so a later mount at the same path is safe.
 - A helper that is killed leaves a dead mount. A listing of it fails with "Device not configured". `is_dead_mount` reports that, and `unmount_dead` runs `umount -f`. See [Dead mounts](mount-helper.md#dead-mounts).
 
 ## Testing
@@ -114,7 +114,6 @@ Run `src-tauri/crates/marlin-fuse/test-on-mac.sh` on a Mac that has macFUSE 5 wi
   - `finder_copies_reach_the_provider` is macOS only. It copies a file and a folder with Finder through `osascript`, as a drag does, and checks the provider holds exactly those bytes. The first run asks to let the terminal control Finder. It copies less than the 250,000 bytes `MemoryProvider` reports free.
   - The test of bytes kept across opens is Linux only. It tests a flag the macOS adapter does not set.
   - A mount on a file must fail fast. This test is macOS only: Linux lets a mount sit on a file.
-  - A second mount at a path survives the drop of the first `Mount`. This test is macOS only: on Linux the drop would detach it.
 - The unit tests need no macFUSE: the struct layouts, the attribute rules, the free-space counts, the version check, the three messages, and what is not a dead mount.
 - **macFUSE can stop working during a run.** The script mounts about 30 times. After many mounts in a row, macOS can stop finding macFUSE's extension, and every later mount fails (macFUSE issue 1232, open). Turn both switches on again in System Settings, General, Login Items & Extensions, File System Extensions.
 - A failed mount prints lines from macFUSE on stderr, such as "Failed to mount volume: mount(8) returned 69". The test of a mount on a file prints one.
