@@ -130,3 +130,8 @@ gtk = { version = "0.18", package = "gtk" }
 [dev-dependencies]
 tempfile = "3.27"
 marlin-test-keychain = { path = "crates/marlin-test-keychain" }
+
+# The tests that mount a real FUSE filesystem: run them with test-in-docker.sh.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+marlin-fuse = { path = "crates/marlin-fuse" }
+marlin-vfs = { path = "crates/marlin-vfs" }
