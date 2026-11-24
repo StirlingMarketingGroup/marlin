@@ -85,22 +85,26 @@ export function rowNames(browser: Browser): Promise<string[]> {
   );
 }
 
-// Types a new name into an open rename box and presses Enter. The app fills the box with the
-// current name one animation frame after it opens, and that fill replaces anything typed
-// before it. A hidden window (a locked or covered Mac) runs no frames, so there it never fills.
+// Whether the window runs animation frames. A hidden window (a locked or covered Mac) runs
+// none, so what the app does on a frame (the rename box's fill, a row's fade) never happens.
+export function drawsFrames(browser: Browser): Promise<boolean> {
+  return browser.execute(() => document.visibilityState === 'visible');
+}
+
+// Types a new name into an open rename box. The app fills the box with the current name on the
+// frame after it opens, and that fill replaces anything typed before it.
 export async function typeNewName(
   browser: Browser,
   input: ReturnType<Browser['$']>,
   name: string
 ): Promise<void> {
-  if (await browser.execute(() => document.visibilityState === 'visible')) {
+  if (await drawsFrames(browser)) {
     await browser.waitUntil(async () => (await input.getValue()) !== '', {
       timeout: 10_000,
       timeoutMsg: 'the rename box never filled with the current name',
     });
   }
   await input.setValue(name);
-  await browser.keys(Key.Enter);
 }
 
 // A change made before the watcher starts is never reported.

@@ -30,6 +30,7 @@ test('a new folder gets the name typed into its rename box', async () => {
     timeoutMsg: 'the new folder never opened its rename box',
   });
   await typeNewName(browser, input, 'Reports');
+  await browser.keys(Key.Enter);
 
   await fileRow(browser, 'Reports').waitForExist({
     timeout: 10_000,
@@ -51,6 +52,7 @@ test('a renamed file can be renamed back with undo', async () => {
   const input = fileRow(browser, 'draft.txt').$('input');
   await input.waitForExist({ timeout: 10_000, timeoutMsg: 'the rename box never opened' });
   await typeNewName(browser, input, 'final.txt');
+  await browser.keys(Key.Enter);
 
   await fileRow(browser, 'final.txt').waitForExist({
     timeout: 10_000,
@@ -76,6 +78,35 @@ test('a renamed file can be renamed back with undo', async () => {
   });
   expect(await fs.readdir(dir)).toEqual(['draft.txt']);
   expect(await fs.readFile(path.join(dir, 'draft.txt'), 'utf8')).toBe('draft\n');
+});
+
+// The listing changes while the box is open, as it does in a folder a browser downloads into.
+test('a name typed into the rename box survives a change to the folder', async () => {
+  const { browser, files } = app;
+  const dir = path.join(files, 'rename-while-changing');
+  await fs.mkdir(dir);
+  await fs.writeFile(path.join(dir, 'draft.txt'), 'draft\n');
+  await openFolder(browser, dir);
+
+  await fileRow(browser, 'draft.txt').click();
+  await browser.keys(Key.F2);
+  const input = fileRow(browser, 'draft.txt').$('input');
+  await input.waitForExist({ timeout: 10_000, timeoutMsg: 'the rename box never opened' });
+  await typeNewName(browser, input, 'kept.txt');
+
+  await fs.writeFile(path.join(dir, 'other.txt'), 'other\n');
+  await fileRow(browser, 'other.txt').waitForExist({
+    timeout: 10_000,
+    timeoutMsg: 'other.txt never appeared',
+  });
+  expect(await input.getValue()).toBe('kept.txt');
+  await browser.keys(Key.Enter);
+
+  await fileRow(browser, 'kept.txt').waitForExist({
+    timeout: 10_000,
+    timeoutMsg: 'kept.txt never appeared',
+  });
+  expect((await fs.readdir(dir)).sort()).toEqual(['kept.txt', 'other.txt']);
 });
 
 test('a file moved to the trash comes back with undo', async () => {

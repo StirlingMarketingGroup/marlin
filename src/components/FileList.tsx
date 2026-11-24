@@ -282,11 +282,20 @@ export default function FileList({ files, preferences }: FileListProps) {
     return file.is_symlink ? `${base} (symlink)` : base;
   };
 
+  // The rename box fills with the name once per rename target. The listing changes while the
+  // box is open (the watcher, a streaming batch), and a refill would replace what was typed.
+  const filledRenameTargetRef = useRef<string | undefined>(undefined);
+
   // Begin rename UX when store renameTargetPath points to an item in this view
   useEffect(() => {
-    if (!renameTargetPath) return;
+    if (!renameTargetPath) {
+      filledRenameTargetRef.current = undefined;
+      return;
+    }
+    if (filledRenameTargetRef.current === renameTargetPath) return;
     const f = files.find((ff) => ff.path === renameTargetPath);
     if (!f) return;
+    filledRenameTargetRef.current = renameTargetPath;
     // Clear first to avoid flashing previous value
     setRenameText('');
     const baseLen = (() => {

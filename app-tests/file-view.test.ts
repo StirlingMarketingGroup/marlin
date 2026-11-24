@@ -2,7 +2,16 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { afterAll, beforeAll, expect, test } from 'vitest';
 import type { Browser } from 'webdriverio';
-import { fileRow, openFolder, rowNames, showView, sizeBytes, startApp, statusTitle } from './app';
+import {
+  drawsFrames,
+  fileRow,
+  openFolder,
+  rowNames,
+  showView,
+  sizeBytes,
+  startApp,
+  statusTitle,
+} from './app';
 
 declare global {
   interface Window {
@@ -234,9 +243,10 @@ for (const view of ['grid', 'list'] as const) {
       requestAnimationFrame(tick);
     });
 
+    // Named to sort last, so the downloads below sort into view at the top.
     const bulk = Array.from(
       { length: 60 },
-      (_, index) => `bulk-${String(index).padStart(2, '0')}.txt`
+      (_, index) => `zz-bulk-${String(index).padStart(2, '0')}.txt`
     );
     await Promise.all(bulk.map((name) => fs.writeFile(path.join(dir, name), 'x')));
     await browser.waitUntil(async () => await canScrollDown(browser), {
@@ -245,7 +255,7 @@ for (const view of ['grid', 'list'] as const) {
     });
 
     // What a browser download does, with no wait: a temp file, a rename, and now and then a delete.
-    // macOS runs no frames for a covered window, so each round also reads the overflow itself.
+    // A hidden window runs no frames (see drawsFrames), so each round also reads the overflow.
     const downloads: string[] = [];
     for (let i = 0; i < 12; i++) {
       await fs.writeFile(path.join(dir, `download-${i}.tmp`), 'x');
@@ -257,10 +267,11 @@ for (const view of ['grid', 'list'] as const) {
     // The burst can end before the app reads the folder once. Wait for a view that holds the
     // downloads beside a vertical scrollbar, so that layout is measured too.
     const total = seeded.length + bulk.length + downloads.length;
-    await browser.waitUntil(async () => (await fileCount(browser)) === total, {
-      timeout: 10_000,
-      timeoutMsg: `the status bar never counted the ${total} files`,
-    });
+    await browser.waitUntil(
+      async () =>
+        (await fileCount(browser)) === total && (await rowNames(browser)).includes(downloads[0]),
+      { timeout: 10_000, timeoutMsg: `the view never showed ${downloads[0]} among ${total} files` }
+    );
     expect(await canScrollDown(browser)).toBe(true);
     expect(await sidewaysOverflow(browser)).toBe(0);
 
@@ -274,9 +285,8 @@ for (const view of ['grid', 'list'] as const) {
       timeout: 10_000,
       timeoutMsg: 'the view never matched the folder',
     });
-    // No row may stay faded in or out. The fade runs on animation frames, which a hidden
-    // window (a locked or covered Mac) does not run, so it is checked only while visible.
-    if (await browser.execute(() => document.visibilityState === 'visible')) {
+    // No row may stay faded in or out. The fade runs on animation frames.
+    if (await drawsFrames(browser)) {
       await browser.waitUntil(
         () =>
           browser.execute(() =>
