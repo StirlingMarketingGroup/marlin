@@ -1,6 +1,7 @@
 import { useEffect, useCallback, useMemo, useRef, RefObject } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
+import { useAppStore } from '@/store/useAppStore';
 import { useDragStore } from '@/store/useDragStore';
 import { useToastStore } from '@/store/useToastStore';
 import { pushUndoAndShowToast } from '@/store/useUndoStore';
@@ -434,20 +435,21 @@ export function useFilePanelDropZone(
               isCut,
             });
 
+            // The backend can report an error beside items that arrived. Those items still get
+            // their undo and are shown.
+            if (result.pastedPaths.length > 0) {
+              pushUndoAndShowToast(result, isCut, sourcePaths, toastStore);
+              // A drop onto a folder row adds nothing to the open folder, so this shows only a drop
+              // into the open folder itself.
+              useAppStore.getState().revealInOpenFolder(result.pastedPaths);
+            }
+
             if (result.errorMessage) {
               toastStore.addToast({
                 type: 'error',
                 message: result.errorMessage,
               });
-              return;
-            }
-
-            if (result.pastedPaths.length > 0) {
-              // Push to undo stack and show toast with Undo button
-              pushUndoAndShowToast(result, isCut, sourcePaths, toastStore);
-            }
-
-            if (result.skippedCount > 0) {
+            } else if (result.skippedCount > 0) {
               toastStore.addToast({
                 type: 'info',
                 message: `${result.skippedCount} item${result.skippedCount !== 1 ? 's' : ''} skipped`,

@@ -237,6 +237,21 @@ type FolderRead =
   // The user opened another folder while this one was read.
   | { outcome: 'superseded' };
 
+// Whether the OS clipboard still holds the cut Marlin wrote. A remote cut puts temp copies on
+// the clipboard (`clipboardTempPaths`), and a local cut puts the files themselves.
+const holdsOwnCut = (
+  state: Pick<AppState, 'clipboardMode' | 'clipboardPaths' | 'clipboardTempPaths'>,
+  clipboardInfo: ClipboardInfo
+): boolean => {
+  if (state.clipboardMode !== 'cut' || !clipboardInfo.hasFiles) return false;
+  const written =
+    state.clipboardTempPaths.length > 0 ? state.clipboardTempPaths : state.clipboardPaths;
+  return (
+    written.length === clipboardInfo.filePaths.length &&
+    written.every((path, i) => path === clipboardInfo.filePaths[i])
+  );
+};
+
 interface AppState {
   // Navigation
   currentPath: string;
@@ -453,12 +468,15 @@ interface AppState {
   beginRenameSelected: () => void;
   cancelRename: () => Promise<void>;
   renameFile: (newName: string) => Promise<void>;
-  // The item to select and scroll to once it is listed: set by `navigateTo` with `reveal`,
-  // and by creating, pasting, or extracting an item. It is a full path, so it matches only
-  // in the folder that holds it. The next navigation replaces it. A target that is not
-  // shown stays until then, so turning hidden files on still selects it.
-  pendingRevealTarget?: string;
-  setPendingRevealTarget: (path?: string) => void;
+  // The items to select and scroll to once they are listed (see useRevealTarget). They are full
+  // paths, so they match only in the folder that holds them. The next navigation replaces them.
+  // While the view shows none of them they stay, so turning hidden files on still selects them.
+  pendingRevealTargets?: string[];
+  setPendingRevealTargets: (paths?: string[]) => void;
+  // Asks the view to select and show what an action made or moved. Only the items in the open
+  // folder count: a paste that ends after the user left, an undo that puts items back in another
+  // folder, or a rename into a subfolder has nothing to show here.
+  revealInOpenFolder: (paths: string[]) => void;
 
   // Animation actions
   markFilesEntering: (paths: string[]) => void;
@@ -847,7 +865,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       showFilterInput: false,
       justCreatedPath: undefined,
       renameTargetPath: undefined,
-      pendingRevealTarget: options?.reveal,
+      pendingRevealTargets: options?.reveal ? [options.reveal] : undefined,
       // Opening the folder already open leaves no other folder to return to, so it starts
       // nothing to undo. A navigation that starts while another is pending keeps the folder
       // that one left, because the pending folder never reached the screen.
@@ -897,7 +915,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       files: before.files,
       filterText: before.filterText,
       showFilterInput: before.showFilterInput,
-      pendingRevealTarget: undefined,
+      pendingRevealTargets: undefined,
       navigation: null,
       failedAddress: typedText === undefined ? null : { text: typedText, reason },
     });
@@ -936,7 +954,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         historyIndex: newIndex,
         justCreatedPath: undefined,
         renameTargetPath: undefined,
-        pendingRevealTarget: undefined,
+        pendingRevealTargets: undefined,
         failedAddress: null,
       });
       const scheme = getUriScheme(newPath);
@@ -964,7 +982,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         historyIndex: newIndex,
         justCreatedPath: undefined,
         renameTargetPath: undefined,
-        pendingRevealTarget: undefined,
+        pendingRevealTargets: undefined,
         failedAddress: null,
       });
       const scheme = getUriScheme(newPath);
@@ -1439,9 +1457,7 @@ export const useAppStore = create<AppState>((set, get) => ({
                       token: undoToken,
                     });
                     await state.refreshCurrentDirectoryStreaming();
-                    if (Array.isArray(undoResult.restored) && undoResult.restored.length > 0) {
-                      state.setSelectedFiles(undoResult.restored);
-                    }
+                    state.revealInOpenFolder(undoResult.restored);
                     toastStore.addToast({
                       type: 'success',
                       message:
@@ -2022,10 +2038,6 @@ export const useAppStore = create<AppState>((set, get) => ({
         createSubfolder,
       });
 
-      if (result?.folderPath && createSubfolder) {
-        set({ pendingRevealTarget: result.folderPath });
-      }
-
       const resolvedFormat = result?.format ?? archiveFormat;
 
       console.info('[extractArchive] success', {
@@ -2034,6 +2046,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       });
 
       await state.refreshCurrentDirectoryStreaming();
+      if (result?.folderPath && createSubfolder) {
+        state.revealInOpenFolder([result.folderPath]);
+      }
       return true;
     } catch (error) {
       console.error('Failed to extract archive:', error);
@@ -2591,7 +2606,8 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     const showPasteResultToast = (
       result: PasteResult,
-      undoInfo?: { isCut: boolean; sourcePaths: string[] }
+      moved: boolean,
+      undoInfo?: { sourcePaths: string[] }
     ) => {
       const pastedCount = result.pastedPaths.length;
       const skippedCount = result.skippedCount;
@@ -2610,15 +2626,23 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
 
       if (pastedCount > 0) {
-        const verb = undoInfo?.isCut ? 'Moved' : 'Copied';
-        let messageText = pastedCount === 1 ? `${verb} 1 item` : `${verb} ${pastedCount} items`;
-        if (skippedCount > 0) {
-          messageText += ` (${skippedCount} skipped)`;
-        }
-
-        if (undoInfo && result.pastedPaths.length > 0) {
-          pushUndoAndShowToast(result, undoInfo.isCut, undoInfo.sourcePaths, toastStore);
+        if (undoInfo) {
+          // The undo toast has its own message, so the skipped count gets its own toast, as a
+          // drop's does.
+          pushUndoAndShowToast(result, moved, undoInfo.sourcePaths, toastStore);
+          if (skippedCount > 0) {
+            toastStore.addToast({
+              type: 'info',
+              message: `${skippedCount} item${skippedCount !== 1 ? 's' : ''} skipped`,
+              duration: 4000,
+            });
+          }
         } else {
+          const verb = moved ? 'Moved' : 'Copied';
+          let messageText = pastedCount === 1 ? `${verb} 1 item` : `${verb} ${pastedCount} items`;
+          if (skippedCount > 0) {
+            messageText += ` (${skippedCount} skipped)`;
+          }
           toastStore.addToast({ type: 'success', message: messageText, duration: 4000 });
         }
         return;
@@ -2656,16 +2680,16 @@ export const useAppStore = create<AppState>((set, get) => ({
             totalItems: 1,
           });
           await state.refreshCurrentDirectory();
-          state.setSelectedFiles([result.path]);
           set({ renameTargetPath: result.path });
+          state.revealInOpenFolder([result.path]);
         } else {
           const result = await invoke<PasteImageResult>('clipboard_paste_image', {
             destination: currentPath,
             filename: null as string | null,
           });
           await state.refreshCurrentDirectoryStreaming();
-          state.setSelectedFiles([result.path]);
           set({ renameTargetPath: result.path });
+          state.revealInOpenFolder([result.path]);
         }
         toastStore.addToast({ type: 'success', message: 'Screenshot pasted.', duration: 3000 });
       } catch (error) {
@@ -2692,6 +2716,15 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     const isCut = clipboardInfo.isCut;
     const sourcePaths = clipboardInfo.filePaths.slice();
+    // A cut of remote files puts local temp copies on the OS clipboard, and the paste deletes the
+    // remote originals. They are Marlin's to delete only while the OS clipboard holds that cut:
+    // after a copy in Marlin, or a cut in another app, they are not.
+    const clipboardState = get();
+    const remoteOriginals =
+      isCut && holdsOwnCut(clipboardState, clipboardInfo)
+        ? clipboardState.clipboardPaths.filter((p) => /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(p))
+        : [];
+    const isRemoteCut = remoteOriginals.length > 0;
 
     try {
       const task = invoke<PasteResult>('paste_items_to_location', {
@@ -2711,27 +2744,12 @@ export const useAppStore = create<AppState>((set, get) => ({
         await state.refreshCurrentDirectoryStreaming();
       }
 
-      if (result.pastedPaths.length > 0) {
-        state.setSelectedFiles(result.pastedPaths);
-      }
+      state.revealInOpenFolder(result.pastedPaths);
 
-      // On cut+paste success, delete the original remote files (if any) and
-      // clear clipboard state. clipboardPaths holds the *original* remote URIs
-      // (e.g. smb://...) while the OS clipboard had temp local copies. The
-      // backend only moved/deleted the temp files, so we must explicitly delete
-      // the remote originals here.
-      //
-      // Only delete if ALL items pasted successfully to prevent data loss on
-      // partial failures. If some items were skipped/cancelled, leave originals
-      // intact so the user can retry.
+      // Delete the originals only when every item pasted, so a skipped item is never lost.
       const allPasted = result.pastedPaths.length === sourcePaths.length && !result.cancelled;
-      // Capture remote originals BEFORE clearing state (clearClipboardState empties clipboardPaths)
-      const movedPaths = get().clipboardPaths;
-      const hasRemoteOriginals = movedPaths.some((p) => /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(p));
+      const failedDeletes: string[] = [];
       if (isCut && allPasted) {
-        // Delete remote originals that the backend couldn't see
-        const remoteOriginals = movedPaths.filter((p) => /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(p));
-        const failedDeletes: string[] = [];
         for (const remotePath of remoteOriginals) {
           try {
             await invoke('delete_file', { path: remotePath });
@@ -2748,13 +2766,14 @@ export const useAppStore = create<AppState>((set, get) => ({
           });
         }
         get().clearClipboardState();
-        emitCutComplete(movedPaths);
+        emitCutComplete(clipboardState.clipboardPaths);
       }
 
-      // Skip undo for remote cut — remote originals are already deleted and
-      // undo can't reverse that. Undo would point to temp local paths.
-      const undoInfo = isCut && hasRemoteOriginals ? undefined : { isCut, sourcePaths };
-      showPasteResultToast(result, undoInfo);
+      // A remote cut has no undo: its sources are temp copies, and its originals may be deleted.
+      const undoInfo = isRemoteCut ? undefined : { sourcePaths };
+      // A remote cut moves only once its originals are deleted.
+      const moved = isCut && (!isRemoteCut || (allPasted && failedDeletes.length === 0));
+      showPasteResultToast(result, moved, undoInfo);
       if (result.errorMessage) {
         console.warn('Paste error:', result.errorMessage);
       }
@@ -2792,10 +2811,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         renameTargetPath: createdPath,
         renameLoading: false,
       });
-      state.setSelectedFiles([createdPath]);
-      state.setSelectionAnchor(createdPath);
-      state.setSelectionLead(createdPath);
-      state.setPendingRevealTarget(createdPath);
+      state.revealInOpenFolder([createdPath]);
     } catch (error) {
       console.error('Failed to create new folder:', error);
       const msg = error instanceof Error ? error.message : String(error);
@@ -2834,10 +2850,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         renameTargetPath: createdPath,
         renameLoading: false,
       });
-      state.setSelectedFiles([createdPath]);
-      state.setSelectionAnchor(createdPath);
-      state.setSelectionLead(createdPath);
-      state.setPendingRevealTarget(createdPath);
+      state.revealInOpenFolder([createdPath]);
     } catch (error) {
       console.error('Failed to create new file:', error);
       const msg = error instanceof Error ? error.message : String(error);
@@ -2902,10 +2915,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         await state.refreshCurrentDirectoryStreaming();
       }
 
-      state.setSelectedFiles([createdPath]);
-      state.setSelectionAnchor(createdPath);
-      state.setSelectionLead(createdPath);
-      state.setPendingRevealTarget(createdPath);
+      state.revealInOpenFolder([createdPath]);
     } catch (error) {
       console.error('Failed to compress selection:', error);
       const msg = error instanceof Error ? error.message : String(error);
@@ -2930,24 +2940,13 @@ export const useAppStore = create<AppState>((set, get) => ({
       const clipboardInfo = await invoke<ClipboardInfo>('clipboard_get_contents');
 
       // If clipboard changed externally (user copied something else), clear cut state.
-      // For remote cut, the OS clipboard has temp paths stored in clipboardTempPaths.
-      // For local cut, clipboardTempPaths is empty so we compare against clipboardPaths.
-      // If the clipboard contents don't match what we wrote, the user has overwritten it.
-      if (get().clipboardMode === 'cut') {
-        const { clipboardPaths, clipboardTempPaths } = get();
-        const expectedPaths = clipboardTempPaths.length > 0 ? clipboardTempPaths : clipboardPaths;
-        const currentPaths = clipboardInfo.filePaths;
-        const pathsMatch =
-          currentPaths.length === expectedPaths.length &&
-          currentPaths.every((p, i) => p === expectedPaths[i]);
-        if (!clipboardInfo.hasFiles || !pathsMatch) {
-          set({
-            clipboardMode: null,
-            clipboardPaths: [],
-            clipboardPathsSet: new Set<string>(),
-            clipboardTempPaths: [],
-          });
-        }
+      if (get().clipboardMode === 'cut' && !holdsOwnCut(get(), clipboardInfo)) {
+        set({
+          clipboardMode: null,
+          clipboardPaths: [],
+          clipboardPathsSet: new Set<string>(),
+          clipboardTempPaths: [],
+        });
       }
 
       set({
@@ -2976,7 +2975,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   justCreatedPath: undefined,
   renameTargetPath: undefined,
   renameLoading: false,
-  pendingRevealTarget: undefined,
+  pendingRevealTargets: undefined,
   setRenameTarget: (path?: string) => set({ renameTargetPath: path, renameLoading: false }),
   beginRenameSelected: () => {
     const { selectedFiles } = get();
@@ -3109,7 +3108,6 @@ export const useAppStore = create<AppState>((set, get) => ({
         renameLoading: false,
         justCreatedPath: isJustCreated ? undefined : state.justCreatedPath,
       });
-      state.setSelectedFiles([finalPath]);
 
       // Skip animation for the renamed file (it's not a new file, just renamed)
       state.addSkipAnimationPath(finalPath);
@@ -3152,6 +3150,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       } else {
         await state.refreshCurrentDirectoryStreaming();
       }
+      state.revealInOpenFolder([finalPath]);
     } catch (err) {
       set({ renameLoading: false });
       const msg = err instanceof Error ? err.message : String(err);
@@ -3166,7 +3165,13 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
     }
   },
-  setPendingRevealTarget: (path?: string) => set({ pendingRevealTarget: path }),
+  setPendingRevealTargets: (paths?: string[]) => set({ pendingRevealTargets: paths }),
+  revealInOpenFolder: (paths: string[]) => {
+    // parentPath gives `/` separators and no trailing one, so compare the open folder the same way.
+    const openFolder = get().currentPath.replace(/\\/g, '/').replace(/\/+$/, '') || '/';
+    const inOpenFolder = paths.filter((path) => parentPath(path) === openFolder);
+    if (inOpenFolder.length > 0) set({ pendingRevealTargets: inOpenFolder });
+  },
 
   // Animation actions
   markFilesEntering: (paths: string[]) =>
