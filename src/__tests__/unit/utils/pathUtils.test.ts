@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { basename, parentPath } from '../../../utils/pathUtils';
+import { basename, parentPath, resolveTypedPath } from '../../../utils/pathUtils';
 import { buildArchiveUri } from '../../../utils/archiveUri';
 
 describe('pathUtils', () => {
@@ -83,6 +83,13 @@ describe('pathUtils', () => {
       expect(parentPath(buildArchiveUri(innerFile, '/'))).toBe(
         buildArchiveUri('/a/outer.zip', '/dir')
       );
+    });
+  });
+
+  describe('resolveTypedPath', () => {
+    it('reads a pasted address with spaces around it as Enter does', () => {
+      expect(resolveTypedPath(' smb://alice:secret@nas/share/ ')).toBe('smb://nas/share/');
+      expect(resolveTypedPath(' sftp://alice:secret@host/home')).toBe('sftp://alice@host/home');
     });
   });
 });

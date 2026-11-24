@@ -5,6 +5,11 @@
 // Export constants for use in test files
 export const MOCK_HOME_DIR = '/Users/testuser';
 export const MOCK_DOWNLOADS_DIR = `${MOCK_HOME_DIR}/Downloads`;
+// Not a folder: a typo of Downloads. Listing it fails as a missing folder does, so a spec can
+// fix the typo in the path bar.
+export const MOCK_MISSING_DIR = `${MOCK_HOME_DIR}/Downloadz`;
+// The host of remote addresses that cannot be reached: listing one fails.
+export const MOCK_DOWN_HOST = 'down.example';
 // A folder of many subfolders, so going up has to scroll the one that was left.
 export const MOCK_BIG_DIR = `${MOCK_HOME_DIR}/BigFolder`;
 export const MOCK_BIG_COUNT = 600;
@@ -96,6 +101,8 @@ export function getTauriMockScript(viewMode: 'list' | 'grid' = 'list'): string {
     (function() {
       const mockHomeDir = '${MOCK_HOME_DIR}';
       const mockDownloadsDir = '${MOCK_DOWNLOADS_DIR}';
+      const mockMissingDir = '${MOCK_MISSING_DIR}';
+      const mockDownHost = '${MOCK_DOWN_HOST}';
       const mockLongNameDir = '${MOCK_LONG_NAME_DIR}';
       const mockArtworkDir = '${MOCK_ARTWORK_DIR}';
       const mockPercentDir = '${MOCK_PERCENT_DIR}';
@@ -312,6 +319,20 @@ export function getTauriMockScript(viewMode: 'list' | 'grid' = 'list'): string {
         },
       ];
 
+      // A missing folder and a down host fail before any listing, as the backend does.
+      // Tauri rejects with the error's text, so these throw strings.
+      function throwIfUnreadable(path) {
+        const normalizedPath = (path || '').replace(/\\\\/g, '/').replace(/\\/+$/, '') || '/';
+        if (normalizedPath === mockMissingDir || normalizedPath.startsWith(mockMissingDir + '/')) {
+          throw 'Path does not exist';
+        }
+        // The host is the authority after any user name and before any port.
+        const authority = (path || '').split('://')[1]?.split('/')[0] ?? '';
+        if (authority.split('@').pop().split(':')[0] === mockDownHost) {
+          throw 'Could not connect to ' + mockDownHost;
+        }
+      }
+
       function getFilesForPath(path) {
         const normalizedPath = (path || '').replace(/\\\\/g, '/').replace(/\\/+$/, '') || '/';
         let files;
@@ -465,6 +486,7 @@ export function getTauriMockScript(viewMode: 'list' | 'grid' = 'list'): string {
       const commandHandlers = {
         get_home_directory: () => mockHomeDir,
         read_directory: (args) => {
+          throwIfUnreadable(args?.path);
           const path = args?.path || mockHomeDir;
           const files = getFilesForPath(path);
           return {
@@ -474,6 +496,7 @@ export function getTauriMockScript(viewMode: 'list' | 'grid' = 'list'): string {
           };
         },
         read_directory_streaming_command: (args) => {
+          throwIfUnreadable(args?.path);
           const path = args?.path || mockHomeDir;
           const sessionId = args?.sessionId || 'mock-session';
           scheduleDirectoryBatch(sessionId, path);

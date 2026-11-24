@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { useAppStore } from '../../../store/useAppStore';
 import { useToastStore } from '../../../store/useToastStore';
 import { invoke } from '@tauri-apps/api/core';
-import { ask } from '@tauri-apps/plugin-dialog';
+import { ask, message } from '@tauri-apps/plugin-dialog';
 import { open as openShell } from '@tauri-apps/plugin-shell';
 import { getPlatform } from '@/hooks/usePlatform';
 import { FileItem } from '@/types';
@@ -20,6 +20,7 @@ vi.mock('@/hooks/usePlatform', () => ({
 
 const mockInvoke = vi.mocked(invoke);
 const mockAsk = vi.mocked(ask);
+const mockMessage = vi.mocked(message);
 const mockOpen = vi.mocked(openShell);
 
 function fileItem(overrides: Partial<FileItem> & Pick<FileItem, 'name' | 'path'>): FileItem {
@@ -70,6 +71,8 @@ describe('useAppStore', () => {
       loading: false,
       pathHistory: ['/test'],
       historyIndex: 0,
+      navigation: null,
+      failedAddress: null,
       appIconCache: {},
       pinnedDirectories: [],
       sidebarWidth: 200,
@@ -561,6 +564,46 @@ describe('useAppStore', () => {
       expect(useAppStore.getState().currentPath).toBe('/other');
       expect(useAppStore.getState().files).toEqual([kept]);
     });
+
+    it('asks for a sign-in and leaves the pending navigation when a share has no saved sign-in', async () => {
+      const smbPath = 'smb://server/share';
+      const navigation = {
+        path: smbPath,
+        before: {
+          currentPath: '/test',
+          currentLocationRaw: 'file:///test',
+          pathHistory: ['/test'],
+          historyIndex: 0,
+          files: [],
+          filterText: '',
+          showFilterInput: false,
+          listed: true,
+        },
+      };
+      useAppStore.setState({
+        currentPath: smbPath,
+        currentLocationRaw: smbPath,
+        navigation,
+        error: undefined,
+      });
+      mockInvoke.mockImplementation((cmd) => {
+        if (cmd === 'read_directory') {
+          return Promise.reject(new Error('[SMB_NO_CREDENTIALS] server'));
+        }
+        return Promise.resolve(undefined);
+      });
+
+      await expect(useAppStore.getState().refreshCurrentDirectory()).resolves.toEqual({
+        outcome: 'signInRequested',
+      });
+
+      expect(useAppStore.getState().navigation).toEqual(navigation);
+      expect(useAppStore.getState().pendingSmbCredentialRequest).toEqual({
+        hostname: 'server',
+        targetPath: smbPath,
+      });
+      expect(useAppStore.getState().error).toBeUndefined();
+    });
   });
 
   describe('Google accounts', () => {
@@ -737,6 +780,14 @@ describe('useAppStore', () => {
       expect(useAppStore.getState().currentPath).toBe('//server/share');
     });
 
+    it('drops the password and keeps the user name of a typed sftp address', () => {
+      useAppStore.getState().navigateTo('sftp://alice:secret@host/home');
+      expect(useAppStore.getState().currentPath).toBe('sftp://alice@host/home');
+
+      useAppStore.getState().navigateTo('sftp://me@corp.com:p@ss@host:2222/x');
+      expect(useAppStore.getState().currentPath).toBe('sftp://me@corp.com@host:2222/x');
+    });
+
     it('drops a user name and password from a typed smb address', () => {
       useAppStore.getState().navigateTo('smb://user:secret@server/share');
 
@@ -750,6 +801,152 @@ describe('useAppStore', () => {
 
       expect(useAppStore.getState().currentPath).toBe('/x');
       expect(useAppStore.getState().pendingRevealTarget).toBeUndefined();
+    });
+
+    it('returns to the folder it left, with its list, filter, and history, when the new one fails', () => {
+      const item = fileItem({ name: 'x', path: '/a/x' });
+      useAppStore.setState({
+        currentPath: '/a',
+        currentLocationRaw: 'file:///a',
+        pathHistory: ['/a', '/b'],
+        historyIndex: 0,
+        files: [item],
+        filterText: 'x',
+        showFilterInput: true,
+      });
+
+      useAppStore.getState().navigateTo('/missing');
+      useAppStore.setState({ files: [] });
+      useAppStore.getState().returnFromFailedNavigation('Path does not exist');
+
+      const state = useAppStore.getState();
+      expect(state.currentPath).toBe('/a');
+      expect(state.currentLocationRaw).toBe('file:///a');
+      expect(state.pathHistory).toEqual(['/a', '/b']);
+      expect(state.historyIndex).toBe(0);
+      expect(state.files).toEqual([item]);
+      expect(state.filterText).toBe('x');
+      expect(state.showFilterInput).toBe(true);
+      expect(state.navigation).toBeNull();
+      expect(state.failedAddress).toBeNull();
+    });
+
+    it('hands a typed address back to the path bar with the reason', () => {
+      useAppStore.getState().navigateTo('~/Missing ', { typed: true });
+      useAppStore.getState().returnFromFailedNavigation('Path does not exist');
+
+      expect(useAppStore.getState().failedAddress).toEqual({
+        text: '~/Missing ',
+        reason: 'Path does not exist',
+      });
+    });
+
+    it('records no navigation for the folder already open, which leaves nothing to return to', () => {
+      useAppStore.getState().navigateTo('/test');
+
+      const state = useAppStore.getState();
+      expect(state.navigation).toBeNull();
+      expect(state.pathHistory).toEqual(['/test', '/test']);
+      expect(state.historyIndex).toBe(1);
+    });
+
+    it('keeps the folder on screen when a second navigation starts before the first loads', () => {
+      useAppStore.getState().navigateTo('/b');
+      useAppStore.getState().navigateTo('/c');
+
+      const { navigation } = useAppStore.getState();
+      expect(navigation?.before.currentPath).toBe('/test');
+      expect(navigation?.path).toBe('/c');
+    });
+
+    it('records whether the folder left was fully listed', () => {
+      useAppStore.setState({ loading: true });
+      useAppStore.getState().navigateTo('/b');
+      expect(useAppStore.getState().navigation?.before.listed).toBe(false);
+
+      useAppStore.setState({ navigation: null, loading: false, isMetadataComplete: true });
+      useAppStore.getState().navigateTo('/c');
+      expect(useAppStore.getState().navigation?.before.listed).toBe(true);
+
+      // A folder showing an error is read again when a failed navigation returns to it.
+      useAppStore.setState({ navigation: null, error: 'Path does not exist' });
+      useAppStore.getState().navigateTo('/d');
+      expect(useAppStore.getState().navigation?.before.listed).toBe(false);
+    });
+
+    it('a listing of the current folder ends the pending navigation', async () => {
+      useAppStore.getState().navigateTo('/b');
+
+      await expect(useAppStore.getState().refreshCurrentDirectory()).resolves.toEqual({
+        outcome: 'listed',
+      });
+      expect(useAppStore.getState().navigation).toBeNull();
+    });
+
+    it('another navigation drops a failed address', () => {
+      const failed = { text: '/nope', reason: 'Path does not exist' };
+
+      useAppStore.setState({ failedAddress: failed });
+      useAppStore.getState().navigateTo('/x');
+      expect(useAppStore.getState().failedAddress).toBeNull();
+
+      useAppStore.setState({
+        failedAddress: failed,
+        pathHistory: ['/a', '/b'],
+        historyIndex: 1,
+        currentPath: '/b',
+      });
+      useAppStore.getState().goBack();
+      expect(useAppStore.getState().failedAddress).toBeNull();
+
+      useAppStore.setState({
+        failedAddress: failed,
+        pathHistory: ['/a', '/b'],
+        historyIndex: 0,
+        currentPath: '/a',
+      });
+      useAppStore.getState().goForward();
+      expect(useAppStore.getState().failedAddress).toBeNull();
+    });
+
+    it('drops a Google Drive link that fails after the user opened another folder', async () => {
+      let rejectLookup: (reason: unknown) => void = () => {};
+      mockInvoke.mockImplementation((cmd) => {
+        if (cmd === 'resolve_gdrive_folder_url') {
+          return new Promise((_, reject) => {
+            rejectLookup = reject;
+          });
+        }
+        return Promise.resolve(undefined);
+      });
+      useAppStore.setState({
+        googleAccounts: [{ email: 'me@example.com', mountName: 'me' }],
+      });
+
+      const opening = useAppStore
+        .getState()
+        .navigateTo('https://drive.google.com/drive/folders/1Buzv1qFiKf79xF_RE91MfAcMxPnu6CWS', {
+          typed: true,
+        });
+      useAppStore.setState({ currentPath: '/elsewhere' });
+      rejectLookup('Not found');
+      await opening;
+
+      expect(useAppStore.getState().failedAddress).toBeNull();
+      expect(mockMessage).not.toHaveBeenCalled();
+      expect(useAppStore.getState().currentPath).toBe('/elsewhere');
+    });
+
+    it('a typed Google Drive link that cannot be opened goes back to the path bar, and an untyped one shows a dialog', async () => {
+      const link = 'https://drive.google.com/drive/folders/1Buzv1qFiKf79xF_RE91MfAcMxPnu6CWS';
+      useAppStore.setState({ googleAccounts: [] });
+
+      await useAppStore.getState().navigateTo(link, { typed: true });
+      expect(useAppStore.getState().failedAddress?.reason).toContain('No Google Drive accounts');
+      expect(mockMessage).not.toHaveBeenCalled();
+
+      await useAppStore.getState().navigateTo(link);
+      expect(mockMessage).toHaveBeenCalledTimes(1);
     });
 
     it('clears a pending reveal target when going back or forward', () => {
@@ -1531,6 +1728,74 @@ describe('useAppStore', () => {
         const newSessionId = useAppStore.getState().streamingSessionId;
         expect(newSessionId).toBeTruthy();
         expect(newSessionId).not.toBe('old-session');
+      });
+
+      it('writes nothing when the user opens another folder while it is read', async () => {
+        let resolveRead: (value: unknown) => void = () => {};
+        let commandStarted: () => void = () => {};
+        const commandPending = new Promise<void>((resolve) => {
+          commandStarted = resolve;
+        });
+        mockInvoke.mockImplementation((cmd) => {
+          if (cmd === 'read_directory_streaming_command') {
+            commandStarted();
+            return new Promise((resolve) => {
+              resolveRead = resolve;
+            });
+          }
+          return Promise.resolve(undefined);
+        });
+
+        const refresh = useAppStore.getState().refreshCurrentDirectoryStreaming();
+        await commandPending;
+        useAppStore.setState({ currentPath: '/other' });
+        resolveRead({
+          location: {
+            raw: 'file:///test',
+            scheme: 'file',
+            path: '/test',
+            displayPath: '/test',
+          },
+          capabilities: {},
+        });
+
+        await expect(refresh).resolves.toEqual({ outcome: 'superseded' });
+        expect(useAppStore.getState().currentPath).toBe('/other');
+        expect(useAppStore.getState().error).toBeUndefined();
+      });
+
+      it('leaves the newer stream alone when a superseded read fails', async () => {
+        let rejectRead: (reason: unknown) => void = () => {};
+        let commandStarted: () => void = () => {};
+        const commandPending = new Promise<void>((resolve) => {
+          commandStarted = resolve;
+        });
+        mockInvoke.mockImplementation((cmd) => {
+          if (cmd === 'read_directory_streaming_command') {
+            commandStarted();
+            return new Promise((_, reject) => {
+              rejectRead = reject;
+            });
+          }
+          return Promise.resolve(undefined);
+        });
+
+        const refresh = useAppStore.getState().refreshCurrentDirectoryStreaming();
+        await commandPending;
+        useAppStore.setState({
+          currentPath: '/other',
+          streamingSessionId: 'newer',
+          isStreamingComplete: false,
+          loading: true,
+        });
+        rejectRead('Path does not exist');
+
+        await expect(refresh).resolves.toEqual({ outcome: 'superseded' });
+        const state = useAppStore.getState();
+        expect(state.streamingSessionId).toBe('newer');
+        expect(state.isStreamingComplete).toBe(false);
+        expect(state.loading).toBe(true);
+        expect(state.error).toBeUndefined();
       });
     });
   });
