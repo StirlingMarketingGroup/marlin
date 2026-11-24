@@ -11,6 +11,7 @@ fn main() {
 async fn main() {
     use std::path::PathBuf;
     use std::sync::Arc;
+    use std::time::Duration;
 
     use marlin_mount::{log, BindError, Config, LinkedProviders, OsAdapter, Server};
     use tokio::signal::unix::{signal, SignalKind};
@@ -46,7 +47,11 @@ async fn main() {
     let socket = socket.or_else(marlin_mount_client::default_socket);
     let root = root.or_else(marlin_mount_client::default_root);
     let spool = spool.or_else(marlin_mount_client::default_spool);
-    let (Some(socket), Some(root), Some(spool)) = (socket, root, spool) else {
+    let servers = marlin_sftp::servers_path().ok();
+    let known_hosts = marlin_sftp::known_hosts_path().ok();
+    let (Some(socket), Some(root), Some(spool), Some(servers), Some(known_hosts)) =
+        (socket, root, spool, servers, known_hosts)
+    else {
         log::write("error", "helper.no_home_folder", serde_json::Value::Null);
         std::process::exit(1);
     };
@@ -62,6 +67,12 @@ async fn main() {
         Arc::new(LinkedProviders::new(
             marlin_gdrive::Config::default(),
             marlin_gdrive::OAuthClient::load,
+            marlin_sftp::Config {
+                servers,
+                known_hosts,
+                // One minute: often enough to see a fix made on the server, rarely enough that OpenSSH does not penalize the address.
+                retry_after: Duration::from_secs(60),
+            },
         )),
     ) {
         Ok(server) => server,

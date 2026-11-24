@@ -1,5 +1,5 @@
 //! Saved SFTP servers, the check of a server's host key, the connection, and the read-only provider for mounts.
-//! The app links this crate, and the mount helper is to link it for SFTP mounts (#477).
+//! The app links this crate, and so does the mount helper, for SFTP mounts.
 
 mod connect;
 mod host_key;

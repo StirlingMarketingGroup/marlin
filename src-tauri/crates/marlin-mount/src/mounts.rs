@@ -45,11 +45,18 @@ pub trait Session: Send + 'static {
     async fn unmount(&mut self) -> Result<(), MountError>;
 }
 
+/// An account that [`Providers::open`] opened for a mount.
+pub struct Opened {
+    pub provider: Arc<dyn Provider>,
+    /// How many calls a mount of this provider runs at once, when the provider needs its own number rather than the helper's `Options::max_calls`.
+    pub max_calls: Option<usize>,
+}
+
 /// Opens the storage behind an account. `LinkedProviders` is the one the helper links.
 #[async_trait::async_trait]
 pub trait Providers: Send + Sync + 'static {
-    /// `provider` is a kind such as `gdrive`. `account` names the account and is never a secret: the provider reads its own credentials from the OS keychain. `open` need not reach the remote: the mount table makes the first call.
-    async fn open(&self, provider: &str, account: &str) -> Result<Arc<dyn Provider>, MountError>;
+    /// `provider` is a kind such as `gdrive`. `account` names the account and is never a secret: the provider reads its own credentials from the OS keychain. `open` need not reach the remote: the mount table makes the first call. `max_calls` replaces the helper's own call limit when the provider needs one.
+    async fn open(&self, provider: &str, account: &str) -> Result<Opened, MountError>;
 }
 
 /// A failure the helper can send on the wire.
@@ -277,7 +284,7 @@ pub struct Mounts {
     root: PathBuf,
     /// The folder that holds one spool folder per account.
     spool: PathBuf,
-    /// The limits of each mount's core.
+    /// The limits of each mount's core. A provider's own call limit replaces `max_calls`.
     options: Options,
 }
 
@@ -443,10 +450,14 @@ impl Mounts {
         let mounted = async {
             // The provider comes first, so a mount it refuses leaves no folder behind.
             let opened = self.providers.open(provider, account).await?;
+            let options = Options {
+                max_calls: opened.max_calls.unwrap_or(self.options.max_calls),
+                ..self.options
+            };
             let build = || {
                 let mounts = Arc::downgrade(self);
                 let watched = key.clone();
-                Vfs::new(Arc::clone(&opened), marlin_vfs::POSIX, self.options).watch_calls(
+                Vfs::new(Arc::clone(&opened.provider), marlin_vfs::POSIX, options).watch_calls(
                     // Weak, because a session can hold the `Vfs`, and the table holds the session.
                     move |error| {
                         if let Some(mounts) = mounts.upgrade() {
@@ -494,7 +505,7 @@ impl Mounts {
                 }
             }
             // The spool lock, or why the mount takes no writes.
-            let (vfs, lock) = if !opened.can_write() {
+            let (vfs, lock) = if !opened.provider.can_write() {
                 (vfs, Err(ReadOnly::Provider))
             } else {
                 let taken = self.open_spool(&key).and_then(|(spool, lock)| {

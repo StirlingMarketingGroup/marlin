@@ -2,7 +2,7 @@
 
 `marlin-fuse` serves one [mount core](mount-core.md) `Vfs` to Linux as a FUSE mount. The [mount helper](mount-helper.md) uses it on Linux. The same crate serves macOS through macFUSE: see [macOS mount adapter](mount-macos.md). The adapter serves writes when `Vfs::writable()` is true, and mounts read-only otherwise. [Decision 0005](decisions/0005-mount-writes.md) says how a write works. A mount the helper makes takes writes when the helper gives it a spool: see [Unsent files](mount-helper.md#unsent-files).
 
-The helper mounts a Google account through it: see [Providers](mount-helper.md#providers). No part of the UI asks for a mount yet (#377).
+The helper mounts a Google account or a saved SFTP server through it: see [Providers](mount-helper.md#providers). No part of the UI asks for a mount yet (#377).
 
 **Covers:** `src-tauri/crates/marlin-fuse/` except its macOS half (`src/macos.rs`, `src/macos/`, `test-on-mac.sh`), and the adapter wiring in `src-tauri/crates/marlin-mount/src/adapter.rs`
 **Checked against the code:** 2026-11-24
@@ -114,7 +114,7 @@ These errors reach an app without a core error:
 Run `src-tauri/crates/marlin-fuse/test-in-docker.sh`. It needs Docker.
 
 - The container gets `/dev/fuse`, `CAP_SYS_ADMIN`, and no AppArmor profile. The tests run as a user who is not root, so every mount goes through the setuid `fusermount3`, as it does for any user who is not root.
-- It also runs the helper's tests (`marlin-mount`). The helper's Linux half, the wiring to this adapter, is compiled out on a Mac. Two of those tests mount a Google account against a fake Google: see [Mount helper](mount-helper.md#testing).
+- It also runs the helper's tests (`marlin-mount`). The helper's Linux half, the wiring to this adapter, is compiled out on a Mac. Some of those tests mount a Google account against a fake Google, and some an SFTP server against an `sshd` the test starts: see [Mount helper](mount-helper.md#testing).
 - Last, it runs `crates/marlin-mount/test-sweep.sh`, which kills a mount's server and checks that the helper clears the dead mount. The script mounts with the spike program in `spikes/mount-hello/`, so the container gets the whole repo, read-only.
 - The first run downloads and builds everything. Two Docker volumes keep the registry and the build folder for later runs.
 - The unit tests cover the attribute rules, the two "missing" messages, and what is not a dead mount: a folder, a missing path, a symbolic link. They need no kernel support.

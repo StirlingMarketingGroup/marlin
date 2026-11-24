@@ -975,7 +975,7 @@ async fn dropping_a_provider_closes_its_connection() {
     within(async {
         let harness = Harness::start().await;
         harness.save("ed25519");
-        // The account outlives the provider, as it is to outlive a mount in the helper (#477).
+        // The account outlives the provider, as it outlives a mount in the helper.
         let account = harness.account(Duration::from_secs(60));
         let provider = SftpProvider::new(Arc::clone(&account));
         provider.item(&provider.root()).await.unwrap();

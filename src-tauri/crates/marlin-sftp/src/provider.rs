@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 use crate::connect::{open_sftp_channel, ConnectError, SshHandler};
 use crate::servers::{server_credentials, SignIn};
 
-/// How many calls one SFTP mount runs at once: the `Options::max_calls` for a mount of this provider. The helper is to set it (#477).
+/// How many calls one SFTP mount runs at once: the helper sets it as the mount's `Options::max_calls`.
 ///
 /// The app downloads one file at a time per server, because some servers fail on parallel reads. The mount core's default of 16 is for Google Drive, and one read here already keeps [`IN_FLIGHT`] requests going. Nobody has measured how fast either number is.
 pub const MAX_CALLS: usize = 4;
@@ -46,14 +46,15 @@ const COULD_NOT_START: &str = "the SFTP connection could not start";
 const COULD_NOT_READ: &str = "the SFTP server sent an answer Marlin could not read";
 
 /// Where the saved server and its host keys are, and how long a failed attempt waits.
+#[derive(Clone)]
 pub struct Config {
-    /// The saved servers file. The helper is to pass `servers_path()` (#477).
+    /// The saved servers file: `servers_path()` in the helper.
     pub servers: PathBuf,
 
-    /// `known_hosts`. The helper is to pass `known_hosts_path()` (#477).
+    /// `known_hosts`: `known_hosts_path()` in the helper.
     pub known_hosts: PathBuf,
 
-    /// How long a refused key or agent sign-in, or an attempt that failed before the sign-in, waits before it is made again. A refused password is never sent again. The helper is to use 60 seconds (#477).
+    /// How long a refused key or agent sign-in, or an attempt that failed before the sign-in, waits before it is made again. A refused password is never sent again. The helper uses 60 seconds.
     pub retry_after: Duration,
 }
 
