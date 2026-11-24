@@ -5,7 +5,7 @@ import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { afterAll, beforeAll, expect, test } from 'vitest';
 import { Key } from 'webdriverio';
-import { commandOrControl, fileRow, openFolder, runCommand, startApp } from './app';
+import { commandOrControl, fileRow, openFolder, runCommand, startApp, typeNewName } from './app';
 
 let app: Awaited<ReturnType<typeof startApp>>;
 
@@ -29,8 +29,7 @@ test('a new folder gets the name typed into its rename box', async () => {
     timeout: 10_000,
     timeoutMsg: 'the new folder never opened its rename box',
   });
-  await input.setValue('Reports');
-  await browser.keys(Key.Enter);
+  await typeNewName(browser, input, 'Reports');
 
   await fileRow(browser, 'Reports').waitForExist({
     timeout: 10_000,
@@ -51,8 +50,7 @@ test('a renamed file can be renamed back with undo', async () => {
   await browser.keys(Key.F2);
   const input = fileRow(browser, 'draft.txt').$('input');
   await input.waitForExist({ timeout: 10_000, timeoutMsg: 'the rename box never opened' });
-  await input.setValue('final.txt');
-  await browser.keys(Key.Enter);
+  await typeNewName(browser, input, 'final.txt');
 
   await fileRow(browser, 'final.txt').waitForExist({
     timeout: 10_000,

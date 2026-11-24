@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
-import { fileRow, openFolder, showView, sizeBytes, sizeTitle, startApp } from './app';
+import { fileRow, openFolder, showView, sizeBytes, startApp, statusTitle } from './app';
 
 // On macOS the file events for a file written through one open handle come only when it
 // is created and closed, so the list does not change while it grows.
@@ -77,7 +77,7 @@ describe.skipIf(process.platform !== 'linux')('a file that is still being writte
     await browser.waitUntil(
       async () =>
         (await sizeBytes(browser)) === written &&
-        (await sizeTitle(browser)).startsWith(`${await rowSize()} (`),
+        (await statusTitle(browser, 'Size')).startsWith(`${await rowSize()} (`),
       { timeout: 5_000, timeoutMsg: 'the list never showed the final size of the file' }
     );
     // Eight seconds of writing gives the cap three or four refreshes. One alone could be a

@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { afterAll, beforeAll, expect, test } from 'vitest';
 import type { Browser } from 'webdriverio';
-import { fileRow, openFolder, rowNames, showView, sizeBytes, startApp } from './app';
+import { fileRow, openFolder, rowNames, showView, sizeBytes, startApp, statusTitle } from './app';
 
 declare global {
   interface Window {
@@ -41,10 +41,9 @@ function columnCount(browser: Browser): Promise<number> {
   });
 }
 
-// The status bar's Files title is the count. Grouping characters depend on the locale.
+// Grouping characters in the count depend on the locale.
 async function fileCount(browser: Browser): Promise<number> {
-  const title = await browser.$('//div[@title][span[text()="Files"]]').getAttribute('title');
-  return Number((title ?? '').replace(/\D/g, ''));
+  return Number((await statusTitle(browser, 'Files')).replace(/\D/g, ''));
 }
 
 // The listing streams in batches of 100 from Rust, and both views are virtual, so a lost or

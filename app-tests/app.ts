@@ -73,14 +73,34 @@ export function fileRow(browser: Browser, name: string) {
   return browser.$(`[data-file-item="true"][data-name="${name}"]`);
 }
 
-// One script, not a request per row: rows come and go while the view scrolls, and on Linux a
-// burst of parallel requests for about 30 rows crashes the test build (#655).
+// The names of the rows a person can see: the view hides its rows while it loads. One script,
+// not a request per row: rows come and go while the view scrolls, and on Linux a burst of
+// parallel requests for about 30 rows crashes the test build (#655).
 export function rowNames(browser: Browser): Promise<string[]> {
   return browser.execute(() =>
-    Array.from(document.querySelectorAll('[data-file-item="true"]'), (row) =>
-      row.getAttribute('data-name')!
-    ).sort()
+    Array.from(document.querySelectorAll('[data-file-item="true"]'))
+      .filter((row) => getComputedStyle(row).visibility === 'visible')
+      .map((row) => row.getAttribute('data-name')!)
+      .sort()
   );
+}
+
+// Types a new name into an open rename box and presses Enter. The app fills the box with the
+// current name one animation frame after it opens, and that fill replaces anything typed
+// before it. A hidden window (a locked or covered Mac) runs no frames, so there it never fills.
+export async function typeNewName(
+  browser: Browser,
+  input: ReturnType<Browser['$']>,
+  name: string
+): Promise<void> {
+  if (await browser.execute(() => document.visibilityState === 'visible')) {
+    await browser.waitUntil(async () => (await input.getValue()) !== '', {
+      timeout: 10_000,
+      timeoutMsg: 'the rename box never filled with the current name',
+    });
+  }
+  await input.setValue(name);
+  await browser.keys(Key.Enter);
 }
 
 // A change made before the watcher starts is never reported.
@@ -95,16 +115,16 @@ export async function openFolder(browser: Browser, folder: string): Promise<void
   );
 }
 
-// The status bar's Size title, like "1.2 KiB (1,234 B)". The list view's Size column header is
-// a span too, but its parent has no title. Read as an attribute: on Linux, getText on the
-// value span returns the whole segment.
-export async function sizeTitle(browser: Browser): Promise<string> {
-  return (await browser.$('//div[@title][span[text()="Size"]]').getAttribute('title')) ?? '';
+// The title of a status bar segment: the Files count, or the Size, like "1.2 KiB (1,234 B)".
+// The list view's column headers repeat the labels in spans too, but their parents have no
+// title. Read as an attribute: on Linux, getText on the value span returns the whole segment.
+export async function statusTitle(browser: Browser, label: 'Files' | 'Size'): Promise<string> {
+  return (await browser.$(`//div[@title][span[text()="${label}"]]`).getAttribute('title')) ?? '';
 }
 
-// The exact byte count: the digits in the title's last parentheses.
+// The exact byte count: the digits in the Size title's last parentheses.
 export async function sizeBytes(browser: Browser): Promise<number> {
-  const groups = (await sizeTitle(browser)).match(/\([^()]*\)/g);
+  const groups = (await statusTitle(browser, 'Size')).match(/\([^()]*\)/g);
   const last = groups?.[groups.length - 1] ?? '';
   return Number(last.replace(/\D/g, ''));
 }
