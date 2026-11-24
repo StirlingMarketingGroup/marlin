@@ -8,6 +8,9 @@ use crate::locations::{
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use marlin_sftp::parse_authority;
+use russh_sftp::client::error::Error as SftpError;
+use russh_sftp::protocol::{OpenFlags, StatusCode};
+use tokio::io::AsyncWriteExt;
 
 #[derive(Default)]
 pub struct SftpProvider;
@@ -285,7 +288,7 @@ impl LocationProvider for SftpProvider {
             return Err("Copying across different SFTP servers is not supported".to_string());
         }
 
-        // SFTP has no server-side copy; download into memory and re-upload
+        // russh-sftp has no server-side copy (OpenSSH's `copy-data`), so the bytes pass through memory.
         let sftp = pool::get_sftp_session(&from_host, from_port).await?;
 
         let data = sftp
@@ -293,12 +296,47 @@ impl LocationProvider for SftpProvider {
             .await
             .map_err(|e| format!("Failed to read source file: {}", e))?;
 
-        sftp.write(to.path(), &data)
+        write_new_file(&sftp, to.path(), &data)
             .await
             .map_err(|e| format!("Failed to write destination file: {}", e))?;
 
         Ok(())
     }
+}
+
+/// Writes `data` to a new file at `path`. The open fails when the name is
+/// taken, so a file made after the caller's check is never overwritten.
+/// russh-sftp's own `write` opens without `CREATE`, so it fails for a new name.
+async fn write_new_file(
+    sftp: &russh_sftp::client::SftpSession,
+    path: &str,
+    data: &[u8],
+) -> Result<(), String> {
+    let mut file = sftp
+        .open_with_flags(
+            path,
+            OpenFlags::CREATE | OpenFlags::EXCLUDE | OpenFlags::WRITE,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    // `shutdown` waits for the server's answer to every write, then closes the
+    // file. A file that is only dropped does not wait for the last answers.
+    let written = async {
+        file.write_all(data).await?;
+        file.shutdown().await
+    }
+    .await;
+    if let Err(e) = written {
+        // The file is ours and incomplete. Say so when the server does not remove it.
+        if sftp.remove_file(path).await.is_err() {
+            return Err(format!(
+                "{}. The incomplete file may still be on the server",
+                e
+            ));
+        }
+        return Err(e.to_string());
+    }
+    Ok(())
 }
 
 /// Recursively delete a directory and all its contents.
@@ -427,16 +465,17 @@ pub async fn upload_file_to_sftp(
             format!("{}/{}", dest_dir.trim_end_matches('/'), candidate)
         };
 
-        // Check if file already exists
-        match sftp.metadata(&dest_path).await {
-            Ok(_) => continue, // File exists, try next name
-            Err(_) => {
-                // File doesn't exist, upload here
-                sftp.write(&dest_path, &data)
+        // Only "no such file" frees a name: a refused stat or a dropped connection is an error.
+        // `lstat`, because a link whose target is gone still takes the name for the exclusive open.
+        match sftp.symlink_metadata(&dest_path).await {
+            Ok(_) => continue,
+            Err(SftpError::Status(status)) if status.status_code == StatusCode::NoSuchFile => {
+                write_new_file(&sftp, &dest_path, &data)
                     .await
                     .map_err(|e| format!("Failed to upload file: {}", e))?;
                 return Ok(candidate);
             }
+            Err(e) => return Err(format!("Failed to check upload destination: {}", e)),
         }
     }
 

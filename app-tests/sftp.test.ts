@@ -159,10 +159,10 @@ afterAll(async () => {
 });
 
 test(
-  'an SFTP server is added, trusted, listed, read, and removed through the app',
+  'an SFTP server is added, trusted, listed, read, written, and removed through the app',
   { timeout: 60_000 },
   async () => {
-    const { browser, home } = app!;
+    const { browser, files, home } = app!;
     const server = {
       hostname: '127.0.0.1',
       port,
@@ -219,6 +219,59 @@ test(
       path: `${remote}/hello.txt`,
     });
     expect(await fs.readFile(String(downloaded), 'utf8')).toBe('hello over sftp\n');
+
+    // A paste of the same local file twice: the second takes the next free name (#671).
+    const notes = path.join(files, 'notes.txt');
+    await fs.writeFile(notes, 'notes from this computer\n');
+    for (const name of ['notes.txt', 'notes (2).txt']) {
+      const uploaded = await runCommand(browser, 'paste_items_to_location', {
+        destination: remote,
+        sourcePaths: [notes],
+        isCut: false,
+      });
+      expect(uploaded).toEqual({
+        pastedPaths: [`${remote}/${name}`],
+        skippedCount: 0,
+        errorMessage: null,
+        cancelled: false,
+      });
+      expect(await fs.readFile(path.join(served, name), 'utf8')).toBe('notes from this computer\n');
+    }
+
+    // A link whose target is gone still holds its name.
+    const report = path.join(files, 'report.txt');
+    await fs.writeFile(report, 'report\n');
+    await fs.symlink('gone.txt', path.join(served, 'report.txt'));
+    const besideLink = await runCommand(browser, 'paste_items_to_location', {
+      destination: remote,
+      sourcePaths: [report],
+      isCut: false,
+    });
+    expect(besideLink).toEqual({
+      pastedPaths: [`${remote}/report (2).txt`],
+      skippedCount: 0,
+      errorMessage: null,
+      cancelled: false,
+    });
+    expect(await fs.readlink(path.join(served, 'report.txt'))).toBe('gone.txt');
+    expect(await fs.readFile(path.join(served, 'report (2).txt'), 'utf8')).toBe('report\n');
+
+    // A paste from the same server copies through the SFTP provider.
+    await fs.mkdir(path.join(served, 'copies'));
+    const copied = await runCommand(browser, 'paste_items_to_location', {
+      destination: `${remote}/copies`,
+      sourcePaths: [`${remote}/hello.txt`],
+      isCut: false,
+    });
+    expect(copied).toEqual({
+      pastedPaths: [`${remote}/copies/hello.txt`],
+      skippedCount: 0,
+      errorMessage: null,
+      cancelled: false,
+    });
+    expect(await fs.readFile(path.join(served, 'copies', 'hello.txt'), 'utf8')).toBe(
+      'hello over sftp\n'
+    );
 
     const removed = await runCommand(browser, 'remove_sftp_server', {
       hostname: '127.0.0.1',

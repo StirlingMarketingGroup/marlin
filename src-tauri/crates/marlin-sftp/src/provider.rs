@@ -24,7 +24,7 @@ use crate::servers::{server_credentials, SignIn};
 
 /// How many calls one SFTP mount runs at once: the `Options::max_calls` for a mount of this provider. The helper is to set it (#477).
 ///
-/// The app runs one transfer at a time per server, because some servers fail on parallel reads. The mount core's default of 16 is for Google Drive, and one read here already keeps [`IN_FLIGHT`] requests going. Nobody has measured how fast either number is.
+/// The app downloads one file at a time per server, because some servers fail on parallel reads. The mount core's default of 16 is for Google Drive, and one read here already keeps [`IN_FLIGHT`] requests going. Nobody has measured how fast either number is.
 pub const MAX_CALLS: usize = 4;
 
 /// How many requests one call keeps going at once: the pieces of a read, or the link lookups of a listing.
