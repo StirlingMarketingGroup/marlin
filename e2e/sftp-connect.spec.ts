@@ -12,7 +12,12 @@ const savedServers = [
   { hostname: 'files.example', port: 22, username: 'ops', authMethod: 'agent', keyPath: null },
 ];
 
-async function openConnectWindow(page: Page, payload: Record<string, unknown>) {
+// The connection test fails with a passphrase request unless `connects` is set.
+async function openConnectWindow(
+  page: Page,
+  payload: Record<string, unknown>,
+  { connects = false } = {}
+) {
   // One script, so the saved servers wrap the base mock whatever order Playwright runs scripts in.
   await page.addInitScript(`
     ${getTauriMockScript()}
@@ -22,7 +27,12 @@ async function openConnectWindow(page: Page, payload: Record<string, unknown>) {
         const answer = await baseInvoke(cmd, args);
         if (cmd === 'get_sftp_servers') return ${JSON.stringify(savedServers)};
         if (cmd === 'test_sftp_connection') {
+          if (${connects}) return true;
           throw '[SFTP_NO_CREDENTIALS] The SSH key needs its passphrase.';
+        }
+        if (cmd === 'add_sftp_server') {
+          const { hostname, port, username, authMethod, keyPath } = args;
+          return { hostname, port, username, authMethod, keyPath };
         }
         return answer;
       };
@@ -94,6 +104,42 @@ test.describe('SFTP connect window', () => {
     await page.locator('#sftp-auth-method').selectOption('password');
 
     await expect(page.locator('#sftp-password')).toHaveValue('');
+  });
+
+  test('an address with no user asks for the user, then sends the typed folder on success', async ({
+    page,
+  }) => {
+    const targetPath = 'sftp://10.5.0.247:2222/some/folder';
+    await openConnectWindow(
+      page,
+      { initialHostname: '10.5.0.247', initialPort: 2222, targetPath },
+      { connects: true }
+    );
+
+    await expect(page.locator('#sftp-hostname')).toHaveValue('10.5.0.247');
+    await expect(page.locator('#sftp-hostname')).toBeDisabled();
+    await expect(page.locator('#sftp-port')).toHaveValue('2222');
+    await expect(page.locator('#sftp-username')).toHaveValue('');
+    await expect(page.locator('#sftp-username')).toBeFocused();
+
+    await page.locator('#sftp-username').fill('admin');
+    await page.locator('#sftp-password').fill('secret');
+    await page.getByRole('button', { name: 'Connect', exact: true }).click();
+
+    type LoggingWindow = Window & {
+      __TAURI_INVOKE_LOG__: { cmd: string; args?: { event?: string; payload?: unknown } }[];
+    };
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window as unknown as LoggingWindow).__TAURI_INVOKE_LOG__.find(
+              ({ cmd, args }) =>
+                cmd === 'plugin:event|emit' && args?.event === 'sftp-connect:success'
+            )?.args?.payload
+        )
+      )
+      .toEqual({ hostname: '10.5.0.247', port: 2222, username: 'admin', targetPath });
   });
 
   test('shows a passphrase request without its tag', async ({ page }) => {

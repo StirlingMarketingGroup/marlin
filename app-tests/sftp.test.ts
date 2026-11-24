@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { isDeepStrictEqual, promisify } from 'node:util';
 import { afterAll, beforeAll, expect, test } from 'vitest';
-import { freePort, runCommand, startApp } from './app';
+import { freePort, rowNames, runCommand, startApp } from './app';
 
 const execFileAsync = promisify(execFile);
 const sshdPath = '/usr/sbin/sshd';
@@ -210,6 +210,40 @@ test(
     expect(knownHosts).toHaveLength(1);
     expect(knownHosts[0].startsWith(`[127.0.0.1]:${port} ssh-ed25519 `)).toBe(true);
 
+    // The first connection comes from an address with no user. It signs in as the server saved
+    // for the host and port, and the listing names that user.
+    const byHost = `sftp://127.0.0.1:${port}${served}`;
+    const listingByHost = await runCommand(browser, 'read_directory', { path: byHost });
+    expect(listingByHost).toMatchObject({
+      location: expect.objectContaining({ raw: remote }),
+      entries: [
+        expect.objectContaining({
+          name: 'hello.txt',
+          is_directory: false,
+          size: 16,
+          path: `${remote}/hello.txt`,
+        }),
+      ],
+    });
+    const metadataByHost = await runCommand(browser, 'get_file_metadata', {
+      path: `${byHost}/hello.txt`,
+    });
+    expect(metadataByHost).toMatchObject({ name: 'hello.txt', is_directory: false, size: 16 });
+
+    // Typed into the path bar, the address opens the folder and comes back with the user.
+    const pathInput = browser.$('[data-testid="path-input"]');
+    await pathInput.click();
+    await pathInput.setValue(byHost);
+    await browser.keys('Enter');
+    await browser.waitUntil(async () => (await rowNames(browser)).includes('hello.txt'), {
+      timeout: 10_000,
+      timeoutMsg: 'hello.txt never appeared',
+    });
+    await browser.waitUntil(async () => (await pathInput.getValue()) === remote, {
+      timeout: 10_000,
+      timeoutMsg: `the path bar never showed ${remote}`,
+    });
+
     const listing = await runCommand(browser, 'read_directory', { path: remote });
     expect(listing).toMatchObject({
       entries: [expect.objectContaining({ name: 'hello.txt', is_directory: false, size: 16 })],
@@ -327,5 +361,10 @@ test(
     });
     expect(removed).toBeNull();
     expect(await runCommand(browser, 'get_sftp_servers')).toEqual([]);
+
+    const notSaved = await runCommand(browser, 'read_directory', { path: byHost });
+    expect(notSaved).toContain(
+      `[SFTP_NO_CREDENTIALS] No credentials stored for server: 127.0.0.1:${port}`
+    );
   }
 );
