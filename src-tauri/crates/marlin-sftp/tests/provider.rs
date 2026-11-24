@@ -1,16 +1,19 @@
 //! The SFTP provider against OpenSSH's `sshd`, run as the user on 127.0.0.1, and against a small SSH server inside the test for what OpenSSH cannot show. They need `/usr/sbin/sshd` and `ssh-keygen`.
 
+#![cfg(unix)]
+
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::future::Future;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use marlin_sftp::{add_server, Config, SftpProvider};
+use marlin_sftp::{add_server, Config, SftpAccount, SftpProvider};
+use marlin_test_sshd::{Proxy, Sshd};
 use marlin_vfs::{ItemId, Kind, Provider, Space, VfsError};
 use russh::keys::{Algorithm, PrivateKey};
 use russh::server::{Auth, Handler, Msg, Server, Session};
@@ -18,12 +21,8 @@ use russh::{Channel, ChannelId};
 use russh_sftp::protocol::{
     Attrs, Data, FileAttributes, Handle, OpenFlags, Packet, Status, StatusCode, Version,
 };
-use tokio::io::copy_bidirectional;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 use tokio::sync::Notify;
-use tokio::task::JoinHandle;
-
-const SSHD: &str = "/usr/sbin/sshd";
 
 /// The bytes the test files hold: byte `i` of a file is `pattern(0, n)[i]`. They never repeat in a way that would hide two pieces of a read swapped or sent twice.
 fn pattern(start: u64, len: usize) -> Vec<u8> {
@@ -43,189 +42,31 @@ async fn within(test: impl Future<Output = ()>) {
         .expect("the test did not finish within 60 seconds");
 }
 
-/// A TCP relay between the provider and sshd, so a test can count the connections and cut them all at once.
-struct Proxy {
-    port: u16,
-    accepted: Arc<AtomicUsize>,
-    relays: Arc<Mutex<Vec<JoinHandle<()>>>>,
-    listening: JoinHandle<()>,
-    frozen: Arc<Notify>,
-}
-
-impl Proxy {
-    async fn start(to: u16) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let accepted = Arc::new(AtomicUsize::new(0));
-        let relays = Arc::new(Mutex::new(Vec::new()));
-        let frozen = Arc::new(Notify::new());
-        let listening = tokio::spawn({
-            let (accepted, relays, frozen) = (
-                Arc::clone(&accepted),
-                Arc::clone(&relays),
-                Arc::clone(&frozen),
-            );
-            async move {
-                while let Ok((mut client, _)) = listener.accept().await {
-                    accepted.fetch_add(1, Ordering::SeqCst);
-                    let frozen = Arc::clone(&frozen);
-                    relays.lock().unwrap().push(tokio::spawn(async move {
-                        let mut server = TcpStream::connect(("127.0.0.1", to)).await.unwrap();
-                        let freeze = tokio::select! {
-                            _ = copy_bidirectional(&mut client, &mut server) => false,
-                            () = frozen.notified() => true,
-                        };
-                        if freeze {
-                            // Both sockets stay open and say nothing, as on a network that died with no word, until the relay is cut.
-                            std::future::pending::<()>().await;
-                        }
-                    }));
-                }
-            }
-        });
-        Self {
-            port,
-            accepted,
-            relays,
-            listening,
-            frozen,
-        }
-    }
-
-    /// Stops every open connection without closing it.
-    fn freeze(&self) {
-        self.frozen.notify_waiters();
-    }
-
-    fn accepted(&self) -> usize {
-        self.accepted.load(Ordering::SeqCst)
-    }
-
-    fn cut(&self) {
-        for relay in self.relays.lock().unwrap().drain(..) {
-            relay.abort();
-        }
-    }
-
-    /// Stops listening, so a new connection is refused.
-    async fn stop(&mut self) {
-        self.listening.abort();
-        let _ = (&mut self.listening).await;
-    }
-}
-
-impl Drop for Proxy {
-    fn drop(&mut self) {
-        self.listening.abort();
-        self.cut();
-    }
-}
-
-/// OpenSSH's `sshd` with key sign-in only, as `app-tests/sftp.test.ts` runs it, behind a [`Proxy`]. The folder holds the client keys `ed25519` and `rsa`, which `authorized_keys` names, and `unauthorized`, which it does not.
+/// OpenSSH's `sshd` with key sign-in only, behind a [`Proxy`]. The folder holds the client keys `ed25519` and `rsa`, which `authorized_keys` names, and `unauthorized`, which it does not.
 struct Harness {
+    sshd: Sshd,
     proxy: Proxy,
     root: PathBuf,
     user: String,
     servers: PathBuf,
     known_hosts: PathBuf,
-    sshd: Child,
-    _dir: tempfile::TempDir,
-}
-
-impl Drop for Harness {
-    fn drop(&mut self) {
-        let _ = self.sshd.kill();
-        let _ = self.sshd.wait();
-    }
 }
 
 impl Harness {
     async fn start() -> Self {
-        assert!(
-            Path::new(SSHD).exists(),
-            "Install OpenSSH's server: {SSHD} does not exist."
-        );
-        let dir = tempfile::Builder::new()
-            .prefix("marlin-sftp-")
-            .tempdir_in("/tmp")
-            .unwrap();
-        // On macOS `/tmp` is a link to `/private/tmp`, and the provider shows folder links only where a folder's path is its real path.
-        let root = dir.path().canonicalize().unwrap();
-
-        for (name, kind) in [
-            ("host_key", "ed25519"),
-            ("ed25519", "ed25519"),
-            ("rsa", "rsa"),
-            ("unauthorized", "ed25519"),
-        ] {
-            let output = Command::new("ssh-keygen")
-                .args(["-q", "-t", kind, "-N", "", "-f"])
-                .arg(root.join(name))
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "ssh-keygen failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        let mut authorized = fs::read(root.join("ed25519.pub")).unwrap();
-        authorized.extend(fs::read(root.join("rsa.pub")).unwrap());
-        fs::write(root.join("authorized_keys"), authorized).unwrap();
-
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        let root_text = root.display();
-        let config = root.join("sshd_config");
-        fs::write(
-            &config,
-            format!(
-                "Port {port}\nListenAddress 127.0.0.1\nHostKey {root_text}/host_key\nPidFile {root_text}/sshd.pid\nAuthorizedKeysFile {root_text}/authorized_keys\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nPubkeyAuthentication yes\nUsePAM no\nStrictModes no\nSubsystem sftp internal-sftp\n"
-            ),
-        )
-        .unwrap();
-
-        let log_path = root.join("sshd.log");
-        let log = fs::File::create(&log_path).unwrap();
-        let mut sshd = Command::new(SSHD)
-            .args(["-D", "-e", "-f"])
-            .arg(&config)
-            .stdin(Stdio::null())
-            .stderr(log)
-            .spawn()
-            .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while TcpStream::connect(("127.0.0.1", port)).await.is_err() {
-            let ended = sshd.try_wait().unwrap().is_some();
-            assert!(
-                !ended && Instant::now() < deadline,
-                "sshd did not accept a connection on port {port}.\n{}",
-                fs::read_to_string(&log_path).unwrap_or_default()
-            );
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-
-        let proxy = Proxy::start(port).await;
-        let known_hosts = root.join("known_hosts");
-        let host_key = fs::read_to_string(root.join("host_key.pub")).unwrap();
-        fs::write(
-            &known_hosts,
-            format!("[127.0.0.1]:{} {host_key}", proxy.port),
-        )
-        .unwrap();
-        let user = Command::new("id").arg("-un").output().unwrap().stdout;
-
+        let sshd = Sshd::start().await;
+        let proxy = Proxy::start(sshd.port()).await;
+        let known_hosts = sshd.root().join("known_hosts");
+        fs::write(&known_hosts, sshd.known_hosts_line(proxy.port())).unwrap();
+        let root = sshd.root().to_path_buf();
+        let user = sshd.user().to_string();
         Self {
+            sshd,
             proxy,
-            user: String::from_utf8(user).unwrap().trim().to_string(),
+            user,
             servers: root.join("sftp-servers.json"),
             known_hosts,
             root,
-            sshd,
-            _dir: dir,
         }
     }
 
@@ -234,25 +75,34 @@ impl Harness {
         add_server(
             &self.servers,
             "127.0.0.1".into(),
-            self.proxy.port,
+            self.proxy.port(),
             self.user.clone(),
             None,
             "key".into(),
-            Some(self.root.join(key).to_string_lossy().into_owned()),
+            Some(self.sshd.key(key).to_string_lossy().into_owned()),
         )
         .unwrap();
     }
 
-    fn provider(&self, retry_refused_after: Duration) -> SftpProvider {
-        SftpProvider::new(
+    fn config(&self, retry_after: Duration) -> Config {
+        Config {
+            servers: self.servers.clone(),
+            known_hosts: self.known_hosts.clone(),
+            retry_after,
+        }
+    }
+
+    fn account(&self, retry_after: Duration) -> Arc<SftpAccount> {
+        Arc::new(SftpAccount::new(
+            &self.user,
             "127.0.0.1",
-            self.proxy.port,
-            Config {
-                servers: self.servers.clone(),
-                known_hosts: self.known_hosts.clone(),
-                retry_refused_after,
-            },
-        )
+            self.proxy.port(),
+            self.config(retry_after),
+        ))
+    }
+
+    fn provider(&self, retry_after: Duration) -> SftpProvider {
+        SftpProvider::new(self.account(retry_after))
     }
 }
 
@@ -445,7 +295,7 @@ async fn an_rsa_key_signs_in_and_an_unknown_or_changed_host_key_does_not() {
         let other = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
         let line = format!(
             "[127.0.0.1]:{} {}\n",
-            harness.proxy.port,
+            harness.proxy.port(),
             other.public_key().to_openssh().unwrap()
         );
         fs::write(&harness.known_hosts, line).unwrap();
@@ -808,13 +658,21 @@ impl Fake {
         (fake, provider)
     }
 
+    fn account(&self) -> Arc<SftpAccount> {
+        Arc::new(SftpAccount::new(
+            "user",
+            "127.0.0.1",
+            self.port,
+            Config {
+                servers: self.servers.clone(),
+                known_hosts: self.known_hosts.clone(),
+                retry_after: Duration::from_secs(60),
+            },
+        ))
+    }
+
     fn provider(&self) -> SftpProvider {
-        let config = Config {
-            servers: self.servers.clone(),
-            known_hosts: self.known_hosts.clone(),
-            retry_refused_after: Duration::from_secs(60),
-        };
-        SftpProvider::new("127.0.0.1", self.port, config)
+        SftpProvider::new(self.account())
     }
 }
 
@@ -987,6 +845,151 @@ async fn an_open_cancelled_before_its_answer_drops_the_connection() {
             .expect("the connection stuck on the open was not closed");
         provider.item(&provider.root()).await.unwrap();
         assert_eq!(fake.server.connections.load(Ordering::SeqCst), 2);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn an_unknown_host_key_is_not_asked_again_until_known_hosts_changes() {
+    marlin_test_keychain::install();
+    within(async {
+        let harness = Harness::start().await;
+        fs::write(&harness.known_hosts, "").unwrap();
+        harness.save("ed25519");
+        let provider = harness.provider(Duration::from_secs(60));
+        assert_eq!(
+            provider.item(&provider.root()).await,
+            Err(VfsError::SignInNeeded)
+        );
+        assert_eq!(harness.proxy.accepted(), 1);
+        for _ in 0..5 {
+            assert_eq!(
+                provider.item(&provider.root()).await,
+                Err(VfsError::SignInNeeded)
+            );
+        }
+        assert_eq!(harness.proxy.accepted(), 1);
+        fs::write(
+            &harness.known_hosts,
+            harness.sshd.known_hosts_line(harness.proxy.port()),
+        )
+        .unwrap();
+        provider.item(&provider.root()).await.unwrap();
+        assert_eq!(harness.proxy.accepted(), 2);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_key_file_that_does_not_load_waits_before_it_is_tried_again() {
+    marlin_test_keychain::install();
+    within(async {
+        let harness = Harness::start().await;
+        harness.save("no-such-key");
+        let provider = harness.provider(Duration::from_secs(2));
+        let root = provider.root();
+        assert_eq!(provider.item(&root).await, Err(VfsError::SignInNeeded));
+        assert_eq!(harness.proxy.accepted(), 1);
+        assert_eq!(provider.item(&root).await, Err(VfsError::SignInNeeded));
+        assert_eq!(harness.proxy.accepted(), 1);
+        tokio::time::sleep(Duration::from_millis(2100)).await;
+        assert_eq!(provider.item(&root).await, Err(VfsError::SignInNeeded));
+        assert_eq!(harness.proxy.accepted(), 2);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_provider_signs_in_only_as_its_accounts_user() {
+    marlin_test_keychain::install();
+    within(async {
+        let harness = Harness::start().await;
+        harness.save("ed25519");
+        let provider = SftpProvider::new(Arc::new(SftpAccount::new(
+            "someone-else",
+            "127.0.0.1",
+            harness.proxy.port(),
+            harness.config(Duration::from_secs(60)),
+        )));
+        assert_eq!(
+            provider.item(&provider.root()).await,
+            Err(VfsError::SignInNeeded)
+        );
+        assert_eq!(harness.proxy.accepted(), 0);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn providers_that_share_an_account_never_send_a_refused_password_again() {
+    marlin_test_keychain::install();
+    within(async {
+        let fake = Fake::start("right").await;
+        fake.save("wrong");
+        let account = fake.account();
+        let first = SftpProvider::new(Arc::clone(&account));
+        assert_eq!(first.item(&first.root()).await, Err(VfsError::SignInNeeded));
+        assert_eq!(fake.server.passwords.load(Ordering::SeqCst), 1);
+        drop(first);
+        let second = SftpProvider::new(account);
+        assert_eq!(
+            second.item(&second.root()).await,
+            Err(VfsError::SignInNeeded)
+        );
+        assert_eq!(fake.server.passwords.load(Ordering::SeqCst), 1);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_second_provider_waits_for_the_first_ones_sign_in() {
+    marlin_test_keychain::install();
+    within(async {
+        let fake = Fake::start("right").await;
+        fake.save("wrong");
+        let account = fake.account();
+        let first = SftpProvider::new(Arc::clone(&account));
+        let root = first.root();
+        let held = fake.server.answers.write().await;
+        tokio::select! {
+            answer = first.item(&root) => panic!("the sign-in answered: {answer:?}"),
+            () = fake.server.password_seen.notified() => {}
+        }
+        drop(first);
+        let second = SftpProvider::new(account);
+        let second_root = second.root();
+        let call = tokio::spawn(async move { second.item(&second_root).await });
+        // Long enough for the second attempt to reach the server, had nothing held it back.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        drop(held);
+        assert_eq!(call.await.unwrap(), Err(VfsError::SignInNeeded));
+        assert_eq!(fake.server.passwords.load(Ordering::SeqCst), 1);
+        assert_eq!(fake.server.connections.load(Ordering::SeqCst), 1);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn dropping_a_provider_closes_its_connection() {
+    marlin_test_keychain::install();
+    within(async {
+        let harness = Harness::start().await;
+        harness.save("ed25519");
+        // The account outlives the provider, as it is to outlive a mount in the helper (#477).
+        let account = harness.account(Duration::from_secs(60));
+        let provider = SftpProvider::new(Arc::clone(&account));
+        provider.item(&provider.root()).await.unwrap();
+        assert_eq!(harness.proxy.open(), 1);
+        drop(provider);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while harness.proxy.open() != 0 {
+            assert!(
+                Instant::now() < deadline,
+                "the connection was still open after the provider was dropped"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        drop(account);
     })
     .await;
 }

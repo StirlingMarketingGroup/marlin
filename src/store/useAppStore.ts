@@ -969,7 +969,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   refreshCurrentDirectory: async () => {
     const { currentPath, setLoading, setError } = get();
-    // A username can contain `@`. The host starts after the last one, as in `parse_sftp_authority`.
+    // A username can contain `@`. The host starts after the last one, as in `parse_authority` in the `marlin-sftp` crate.
     const sftpMatch = currentPath.match(/^sftp:\/\/(?:([^/]+)@)?([^/:@]+)(?::(\d+))?/);
     const sftpPort = sftpMatch?.[3] ? parseInt(sftpMatch[3], 10) : 22;
     const gdriveEmail = currentPath.match(/^gdrive:\/\/([^/]+)/)?.[1];

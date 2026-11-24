@@ -1,0 +1,12 @@
+[package]
+name = "marlin-test-sshd"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+rust-version = "1.89"
+description = "OpenSSH's sshd and a TCP relay for Marlin's tests only."
+
+[dependencies]
+tempfile = "3.27"
+tokio = { version = "1.50", features = ["net", "io-util", "sync", "rt", "macros", "time"] }

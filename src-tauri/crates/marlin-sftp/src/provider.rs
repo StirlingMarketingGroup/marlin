@@ -9,6 +9,8 @@ use futures_util::future::{BoxFuture, FutureExt, Shared};
 use futures_util::stream::{self, StreamExt, TryStreamExt};
 use marlin_vfs::{Attributes, Item, ItemId, Kind, Provider, Space, VfsError};
 use russh::client;
+use russh::keys::PublicKey;
+use russh::ChannelStream;
 use russh_sftp::client::error::Error as SftpError;
 use russh_sftp::client::RawSftpSession;
 use russh_sftp::extensions::{LIMITS, STATVFS};
@@ -18,7 +20,7 @@ use tokio::sync::OnceCell;
 use tokio_util::sync::CancellationToken;
 
 use crate::connect::{open_sftp_channel, ConnectError, SshHandler};
-use crate::servers::{server_credentials, SftpServerCredentials, SignIn};
+use crate::servers::{server_credentials, SignIn};
 
 /// How many calls one SFTP mount runs at once: the `Options::max_calls` for a mount of this provider. The helper is to set it (#477).
 ///
@@ -43,19 +45,146 @@ const UNKNOWN_SPACE: Space = Space {
 const COULD_NOT_START: &str = "the SFTP connection could not start";
 const COULD_NOT_READ: &str = "the SFTP server sent an answer Marlin could not read";
 
-/// Where the saved server and its host keys are, and how long a refused key waits.
+/// Where the saved server and its host keys are, and how long a failed attempt waits.
 pub struct Config {
-    /// The saved servers file: `servers_path()` in the helper.
+    /// The saved servers file. The helper is to pass `servers_path()` (#477).
     pub servers: PathBuf,
 
-    /// `known_hosts`: `known_hosts_path()` in the helper.
+    /// `known_hosts`. The helper is to pass `known_hosts_path()` (#477).
     pub known_hosts: PathBuf,
 
-    /// How long a key or agent sign-in the server refused waits before it is tried again. The helper is to use 60 seconds (#477).
-    pub retry_refused_after: Duration,
+    /// How long a refused key or agent sign-in, or an attempt that failed before the sign-in, waits before it is made again. A refused password is never sent again. The helper is to use 60 seconds (#477).
+    pub retry_after: Duration,
+}
+
+/// One account, a user on a saved server's host and port, with its failed sign-in attempts. A caller keeps one per account for the life of its process and gives it to every provider of that account, so a refused sign-in stays refused across mounts. It holds no connection.
+pub struct SftpAccount {
+    username: String,
+    hostname: String,
+    port: u16,
+    config: Config,
+    /// The attempts the server refused, and those that failed before it judged the sign-in. An attempt holds this lock from its check through the recording of its result, so a second attempt waits and then sees that result. A connection attempt runs in a task of its own and outlives the call that started it.
+    failed_attempts: tokio::sync::Mutex<Vec<FailedAttempt>>,
+}
+
+impl SftpAccount {
+    pub fn new(username: &str, hostname: &str, port: u16, config: Config) -> Self {
+        Self {
+            username: username.to_string(),
+            hostname: hostname.to_string(),
+            port,
+            config,
+            failed_attempts: tokio::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Signs in and opens the SFTP channel. It reads the saved server each time, and the keychain for a password or a key's passphrase, so a changed sign-in works with no unmount.
+    pub(crate) async fn sign_in(
+        &self,
+    ) -> Result<(client::Handle<SshHandler>, ChannelStream<client::Msg>), VfsError> {
+        let mut failed_attempts = self.failed_attempts.lock().await;
+        let servers = self.config.servers.clone();
+        let hostname = self.hostname.clone();
+        let port = self.port;
+        let known_hosts = self.config.known_hosts.clone();
+        let username = self.username.clone();
+        // A keychain read can wait on a prompt.
+        let (creds, host_keys) = tokio::task::spawn_blocking(move || {
+            let creds = server_credentials(&servers, &hostname, port)
+                .map_err(|_| VfsError::SignInNeeded)?;
+            // The account names this user, so a saved server that now holds another user is not signed in as.
+            if creds.username != username {
+                return Err(VfsError::SignInNeeded);
+            }
+            let host_keys = crate::host_key::saved_host_keys(&hostname, port, &known_hosts)
+                .map_err(|_| VfsError::Other(COULD_NOT_START.into()))?;
+            Ok((creds, host_keys))
+        })
+        .await
+        .map_err(|_| VfsError::Other(COULD_NOT_START.into()))??;
+
+        // What a failed attempt holds back lasts `retry_after`, except a refused password, which lasts for good: servers lock an account after a few wrong passwords. A refused key or agent waits because the fix is often on the server, as a key added to `authorized_keys`. A failure before the sign-in waits because OpenSSH 9.8 and later penalize an address for such connections (`PerSourcePenalties`), and a mount makes a call for every file the OS touches.
+        failed_attempts.retain(|failed| {
+            matches!(
+                (&failed.ended, &failed.sign_in),
+                (Ended::Refused, SignIn::Password(_))
+            ) || failed.at.elapsed() < self.config.retry_after
+        });
+        // Another password, key path, or passphrase is another attempt, tried at once. So is the same one after the user trusted the server's key, since `known_hosts` then holds other keys. A fixed key file under the same path, or an agent that now runs, waits.
+        let blocked = failed_attempts.iter().any(|failed| {
+            failed.sign_in == creds.sign_in
+                && match &failed.ended {
+                    Ended::Refused => true,
+                    Ended::BeforeSignIn { host_keys: then } => then == &host_keys,
+                }
+        });
+        if blocked {
+            return Err(VfsError::SignInNeeded);
+        }
+
+        // A connection that dies during the sign-in would otherwise hold every call waiting on this attempt until TCP gives up. The keychain read above has no limit, since its prompt waits for the user.
+        let opened = tokio::time::timeout(
+            SIGN_IN_LIMIT,
+            open_sftp_channel(
+                &self.hostname,
+                port,
+                &creds,
+                &self.config.known_hosts,
+                host_keys.clone(),
+            ),
+        )
+        .await
+        .map_err(|_| VfsError::TimedOut)?;
+        let error = match opened {
+            Ok(opened) => return Ok(opened),
+            Err(error) => error,
+        };
+        let (ended, answer) = match error {
+            ConnectError::SignInRejected(_) => (Some(Ended::Refused), VfsError::SignInNeeded),
+            ConnectError::UnknownHostKey(_)
+            | ConnectError::ChangedHostKey(_)
+            | ConnectError::PassphraseNeeded(_)
+            // An agent that could not sign, as when the user declined its prompt: the next call would bring the prompt back at once.
+            | ConnectError::SignInUnusable(_) => (
+                Some(Ended::BeforeSignIn { host_keys }),
+                VfsError::SignInNeeded,
+            ),
+            ConnectError::Unreachable(_) => (None, VfsError::Offline),
+            // Its text can hold a path.
+            ConnectError::Failed(_) => (None, VfsError::Other(COULD_NOT_START.into())),
+        };
+        if let Some(ended) = ended {
+            failed_attempts.push(FailedAttempt {
+                sign_in: creds.sign_in,
+                at: Instant::now(),
+                ended,
+            });
+        }
+        Err(answer)
+    }
+}
+
+/// A sign-in attempt that the server refused, or that failed before the server judged it. The account holds the user, so the attempt is told apart by its sign-in: the password, the key with its passphrase, or the agent.
+struct FailedAttempt {
+    sign_in: SignIn,
+    at: Instant,
+    ended: Ended,
+}
+
+/// How the attempt ended.
+enum Ended {
+    /// The server said no to the sign-in.
+    Refused,
+    /// The attempt failed before the server judged the sign-in: the host key, the passphrase, the key file, or the agent.
+    BeforeSignIn {
+        /// What `known_hosts` held for the server then.
+        host_keys: Vec<PublicKey>,
+    },
 }
 
 /// One saved SFTP server, read-only. An item's id is its absolute path.
+///
+/// A provider holds one connection. Dropping the provider closes it once no call uses it.
 ///
 /// The top of a mount is `/`, not the home folder. A server's useful folders are often outside home, and a mount's top cannot move. The app's `sftp://` view also starts at `/`.
 pub struct SftpProvider {
@@ -64,12 +193,8 @@ pub struct SftpProvider {
 
 /// What a connection attempt needs. An attempt runs in a task of its own, so it holds this, not the provider.
 struct Inner {
-    hostname: String,
-    port: u16,
-    config: Config,
+    account: Arc<SftpAccount>,
     slot: Mutex<Slot>,
-    /// Every sign-in the server said no to while this provider lives. Each is one the user saved, so the list stays short.
-    refusals: Mutex<Vec<Refusal>>,
 }
 
 /// The provider's one connection.
@@ -80,20 +205,6 @@ enum Slot {
     /// Every call that needs a connection waits on this attempt. Only the attempt changes the slot, when it ends.
     Connecting(Shared<BoxFuture<'static, Result<Arc<Connection>, VfsError>>>),
     Ready(Arc<Connection>),
-}
-
-/// A sign-in the server said no to.
-struct Refusal {
-    username: String,
-    sign_in: SignIn,
-    at: Instant,
-}
-
-impl Refusal {
-    /// Whether this refusal is for these credentials. `add_server` can change the user alone, so the user counts too.
-    fn of(&self, creds: &SftpServerCredentials) -> bool {
-        self.username == creds.username && self.sign_in == creds.sign_in
-    }
 }
 
 struct Connection {
@@ -249,71 +360,9 @@ async fn ask<T>(
     }
 }
 
-/// Opens a connection. It reads the saved server and the keychain each time, so a changed password or key works with no unmount.
+/// Signs in, starts the SFTP session, and asks the server its limits.
 async fn open_connection(inner: &Arc<Inner>) -> Result<Arc<Connection>, VfsError> {
-    let (servers, hostname, port) = (
-        inner.config.servers.clone(),
-        inner.hostname.clone(),
-        inner.port,
-    );
-    // A keychain read can wait on a prompt.
-    let creds = tokio::task::spawn_blocking(move || server_credentials(&servers, &hostname, port))
-        .await
-        .map_err(|_| VfsError::Other(COULD_NOT_START.into()))?
-        .map_err(|_| VfsError::SignInNeeded)?;
-
-    let blocked = inner.refusals.lock().unwrap().iter().any(|refusal| {
-        refusal.of(&creds)
-            && match creds.sign_in {
-                // Servers lock an account after a few wrong passwords. A changed password is another sign-in, so it is tried.
-                SignIn::Password(_) => true,
-                // The fix is often on the server, as a key added to `authorized_keys`.
-                SignIn::Key { .. } | SignIn::Agent => {
-                    refusal.at.elapsed() < inner.config.retry_refused_after
-                }
-            }
-    });
-    if blocked {
-        return Err(VfsError::SignInNeeded);
-    }
-
-    // A connection that dies during the sign-in would otherwise hold every call waiting on this attempt until TCP gives up. The keychain read above has no limit, since its prompt waits for the user.
-    let opened = tokio::time::timeout(
-        SIGN_IN_LIMIT,
-        open_sftp_channel(&inner.hostname, port, &creds, &inner.config.known_hosts),
-    )
-    .await
-    .map_err(|_| VfsError::TimedOut)?;
-    let (ssh, stream) = match opened {
-        Ok(opened) => opened,
-        Err(error) => {
-            // An agent that could not sign is remembered as a refusal too: when the user declined its prompt, the next call would bring the prompt back at once.
-            let refused = match &error {
-                ConnectError::SignInRejected(_) => true,
-                ConnectError::SignInUnusable(_) => matches!(creds.sign_in, SignIn::Agent),
-                _ => false,
-            };
-            if refused {
-                let mut refusals = inner.refusals.lock().unwrap();
-                refusals.retain(|refusal| !refusal.of(&creds));
-                refusals.push(Refusal {
-                    username: creds.username,
-                    sign_in: creds.sign_in,
-                    at: Instant::now(),
-                });
-            }
-            return Err(match error {
-                ConnectError::UnknownHostKey(_)
-                | ConnectError::ChangedHostKey(_)
-                | ConnectError::SignInRejected(_)
-                | ConnectError::PassphraseNeeded(_)
-                | ConnectError::SignInUnusable(_) => VfsError::SignInNeeded,
-                ConnectError::Unreachable(_) => VfsError::Offline,
-                // Its text can hold a path.
-                ConnectError::Failed(_) => VfsError::Other(COULD_NOT_START.into()),
-            });
-        }
-    };
+    let (ssh, stream) = inner.account.sign_in().await?;
 
     let ended = CancellationToken::new();
     let heard = Arc::new(Mutex::new(Instant::now()));
@@ -426,14 +475,11 @@ fn item_of(id: String, attrs: &FileAttributes) -> Option<Item> {
 }
 
 impl SftpProvider {
-    pub fn new(hostname: &str, port: u16, config: Config) -> Self {
+    pub fn new(account: Arc<SftpAccount>) -> Self {
         Self {
             inner: Arc::new(Inner {
-                hostname: hostname.to_string(),
-                port,
-                config,
+                account,
                 slot: Mutex::new(Slot::Empty),
-                refusals: Mutex::new(Vec::new()),
             }),
         }
     }

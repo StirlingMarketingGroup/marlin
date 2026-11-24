@@ -4,8 +4,8 @@
 
 The same crate holds the saved servers, the host key check, and the connect that the app's `sftp://` view uses: see [Location providers](location-providers.md).
 
-**Covers:** `src-tauri/crates/marlin-sftp/src/provider.rs`, `open_sftp_channel` in `src-tauri/crates/marlin-sftp/src/connect.rs`, `src-tauri/crates/marlin-sftp/tests/provider.rs`
-**Checked against the code:** 2026-11-23
+**Covers:** `src-tauri/crates/marlin-sftp/src/provider.rs`, `open_sftp_channel` in `src-tauri/crates/marlin-sftp/src/connect.rs`, `src-tauri/crates/marlin-sftp/tests/provider.rs`, `src-tauri/crates/marlin-test-sshd/`
+**Checked against the code:** 2026-11-24
 
 ## What a mount shows
 
@@ -36,12 +36,31 @@ The mount core knows files and folders only. A link shows as what it points to, 
 - **`space`** asks `statvfs@openssh.com` about `/`. A server without that extension, or one that answers it with an error status, gets 1 PiB as both total and free: zero free would make file managers refuse to copy. The space is that of the disk that holds `/`, which can differ from the disk of a folder the user browses.
 - **`MAX_CALLS` is 4.** The helper is to set a mount's `max_calls` to it (#477). The app runs one transfer at a time per server, because some servers fail on parallel reads, and one read here already keeps 8 requests going. Nobody has measured how fast either number is.
 
+## The account
+
+`SftpAccount` is one account: a user on a saved server's host and port, with the sign-in attempts that failed. It holds no connection. A caller keeps one per account for its whole run, and builds each provider on it with `SftpProvider::new`. So what the server refused stays refused across mounts, and each mount's connection closes with its provider. The account tells its sign-ins apart by the password, the local key path with its passphrase, or the use of the SSH agent.
+
+- **The provider signs in as the account's user only.** When the saved server for the host and port now holds another user, the call is `SignInNeeded`, and no connection is opened.
+- **One attempt at a time per account.** An attempt holds the account's lock from its check to the moment it records how it ended. An attempt outlives the call that started it (see [The connection](#the-connection)). Without the lock, a second mount could send a password while the server is still judging the first try of it.
+- **Each attempt reads `sftp-servers.json` again, and the keychain for a password or a key's passphrase**, so a changed sign-in works with no unmount. Once the saved user matches the account, it reads `known_hosts` once and passes those keys to the handshake.
+- **The account remembers each attempt the server refused, and each that failed before the server judged it**, with its sign-in.
+
+| The attempt ended                                                                                                                                                  | The same attempt is made again                                                          |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------- |
+| The server refused the password                                                                                                                                    | Never, while the `SftpAccount` lives. A new host key does not change that.              |
+| The server refused the key, or every agent key                                                                                                                     | After `retry_after`.                                                                    |
+| Before the server judged the sign-in: an unknown or changed host key, a key that needs its passphrase, a key file that does not load, or an agent that cannot sign | After `retry_after`, or at once when `known_hosts` holds other keys for the server now. |
+
+- **Why a password is never sent again:** servers lock an account after a few wrong ones.
+- **Why a refused key waits:** the fix is often on the server, as a key added to `authorized_keys`.
+- **Why a failure before the sign-in waits:** a mount gets a provider call for every file the OS touches, and each call would open a connection that fails the same way. OpenSSH 9.8 and later penalize an address for such connections (`PerSourcePenalties`) and then refuse it for a while, which also blocks the user's own `ssh`. An agent that could not sign, as when the user declines its prompt, waits too: otherwise the prompt would come back with the next call.
+- **A change is tried at once.** Another password, key path, or passphrase is a new sign-in. Trusting the server's key in the app changes `known_hosts`. A new key file under the same path waits out the old failure.
+- **Not remembered:** a server that cannot be reached, a server that closes the connection during the sign-in (unless it already refused an earlier agent key), a password that gets no answer within the attempt's 60 seconds, and a server that signs in but does not start SFTP. The next call tries again.
+
 ## The connection
 
-- **Each `SftpProvider` holds one connection**, opened by the first call that needs one and kept for the calls after it.
+- **Each `SftpProvider` holds one connection**, opened by the first call that needs one and kept for the calls after it. Dropping the provider closes it once no call uses it.
 - **An attempt to connect runs in a task of its own**, and every call that needs a connection meanwhile waits on it. The core cancels a call by dropping it. An attempt inside that call would end with it: a cancel during a keychain prompt would let the next call start a second prompt, and a cancel while the server judges a password would lose the refusal.
-- **Each new connection reads `sftp-servers.json` and the keychain again**, so a changed password or key works with no unmount.
-- **Every refused sign-in is remembered** with its user, for as long as the provider lives. A refused password is never sent again, because servers lock an account after a few wrong ones. A refused key or agent sign-in is tried again after `retry_refused_after`, which the helper is to set to 60 seconds (#477), because the fix is often on the server. Saving another user, password, key path, or passphrase makes a new sign-in, which is tried at once. A new key file under the same path waits out the refusal. A server that closes the connection during the sign-in has not refused it, unless it already refused an earlier agent key. A password that gets no answer within the attempt's 60 seconds is not remembered either, and the next call sends it again. An SSH agent that could not sign, as when the user declines its prompt, waits the same way as a refused agent key: otherwise the prompt would come back with the next call.
 - **A connection that ends is seen at once.** The provider watches the read half of the SFTP channel. When it ends, every request still waiting ends too: russh-sftp itself would wait out its time limit.
 - **A connection that ended is never used again.** A call that lost a connection that was there before the call runs once more on a new one. Every call only reads, so a repeat is safe. A second loss is `Offline`.
 - **A connection that died silently**, as after a laptop sleeps, ends within 20 seconds. A task beside each connection asks the server every 5 seconds whether it is there, and ends the connection when the server has been quiet for 15 seconds: no answer to the ask, and no SFTP bytes since the ask or since the last bytes before it. Bytes count as an answer, because on a slow link the answer can queue behind file data already on its way. That is inside the core's 30-second call limit, so a call waiting on the dead connection loses it and runs again on a new one.
@@ -56,6 +75,7 @@ The mount core knows files and folders only. A link shows as what it points to, 
 | The saved server cannot be read, a password sign-in cannot read its password from the keychain, or a key needs a passphrase the keychain cannot give             | `SignInNeeded`                                                                                   |
 | The host key is not in `known_hosts`, or does not match the saved one                                                                                            | `SignInNeeded`. The app can trust an unknown key. A changed key has no override in the app.      |
 | The server refuses the sign-in, the key needs its passphrase, the key does not load, or the agent cannot sign                                                    | `SignInNeeded`                                                                                   |
+| The saved server holds another user than the account's, or the same attempt failed and must still wait ([The account](#the-account))                             | `SignInNeeded`, with no connection opened                                                        |
 | The server cannot be reached, or closes the connection during the sign-in                                                                                        | `Offline`                                                                                        |
 | The connection ends during a call                                                                                                                                | `Offline`. A call whose connection was there before it first runs once more on a new connection. |
 | `known_hosts` cannot be read, the server refuses SFTP or does not answer the request for it within 10 seconds, or the SFTP channel does not start in another way | `Other("the SFTP connection could not start")`                                                   |
@@ -69,15 +89,16 @@ No `Other` text holds a path or a secret.
 
 ## For the helper (#477)
 
-- Build the provider with `Config { servers: servers_path(), known_hosts: known_hosts_path(), retry_refused_after: 60 seconds }`.
-- Keep one `SftpProvider` per saved server for the life of the helper, as `LinkedProviders` keeps one saved sign-in per Google account. The refused sign-ins live in the provider, so a new provider for each mount would send a refused password again.
+- Build each `SftpAccount` with `Config { servers: servers_path(), known_hosts: known_hosts_path(), retry_after: 60 seconds }`.
+- Keep one `SftpAccount` per account for the life of the helper, as `LinkedProviders` keeps one saved sign-in per Google account, and give each mount a new `SftpProvider` on it. A host name matches a saved server in any letter case, so key the accounts by the host in lower case.
 - An agent sign-in reads `SSH_AUTH_SOCK` from the process that connects. A helper started without it answers `SignInNeeded` for an agent server.
+- `parse_authority` in this crate parses the account the way the app's `sftp://` views do: `user@host`, or `user@host:port`.
 
 ## Testing
 
 `cargo test -p marlin-sftp` runs the tests, and `npm run test:rust` includes them. `tests/provider.rs` needs `/usr/sbin/sshd` and `ssh-keygen`: a Mac has both, and CI installs `openssh-server`.
 
-- **Against OpenSSH:** each test starts `sshd` as the user on 127.0.0.1, with key sign-in only, as `app-tests/sftp.test.ts` does. A TCP relay in the test sits between the provider and `sshd`, so a test can count connections and cut them all at once. The keys are an Ed25519 key, an RSA key, and a key the server does not accept. The tests cover listings, a FIFO, reads at an offset, the link rules with a walk that would never end without them, the errors, an RSA sign-in, unknown and changed host keys, a refused key and its wait, a cut connection, and a connection that goes silent, which the relay keeps open and quiet.
-- **Against a server inside the test:** a russh server with password sign-in, whose SFTP server has no extensions and answers one request at a time. It covers a refused password, also when the call that sent it was cancelled, an agent that cannot sign, free space from a server without `statvfs` or one that answers it with an error, reads that come back short, a path the user may not read, a generic failure to list, a connection lost during a call, and an open cancelled before its answer.
+- **Against OpenSSH:** each test starts `sshd` as the user on 127.0.0.1, with key sign-in only, as `app-tests/sftp.test.ts` does. A TCP relay sits between the provider and `sshd`, so a test can count connections, see which are still open, and cut them all at once. Both come from the test-only crate `marlin-test-sshd`. The keys are an Ed25519 key, an RSA key, and a key the server does not accept. The tests cover listings, a FIFO, reads at an offset, the link rules with a walk that would never end without them, the errors, an RSA sign-in, unknown and changed host keys, a refused key and its wait, an unknown host key that opens one connection until `known_hosts` changes, a key file that does not load and its wait, an account for another user than the saved one, a dropped provider that closes its connection, a cut connection, and a connection that goes silent, which the relay keeps open and quiet.
+- **Against a server inside the test:** a russh server with password sign-in, whose SFTP server has no extensions and answers one request at a time. It covers a refused password, also when the call that sent it was cancelled, and across two providers on one account, also when the second starts while the server still judges the first; an agent that cannot sign, free space from a server without `statvfs` or one that answers it with an error, reads that come back short, a path the user may not read, a generic failure to list, a connection lost during a call, and an open cancelled before its answer.
 
 Not tested: a sign-in with a real SSH agent, a slow link where file data holds up the answer to the provider's ask, SFTP servers other than OpenSSH and the one in the test, and a real remote server.

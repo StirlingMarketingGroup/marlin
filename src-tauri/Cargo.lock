@@ -4340,6 +4340,7 @@ dependencies = [
  "futures-util",
  "keyring",
  "marlin-test-keychain",
+ "marlin-test-sshd",
  "marlin-vfs",
  "rand 0.10.4",
  "russh",
@@ -4401,6 +4402,14 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "tempfile",
+]
+
+[[package]]
+name = "marlin-test-sshd"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
