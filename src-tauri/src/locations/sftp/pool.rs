@@ -21,7 +21,7 @@ static POOL: Lazy<Mutex<HashMap<PoolKey, PooledConnection>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 const IDLE_TIMEOUT_SECS: u64 = 300; // 5 minutes
-/// Max concurrent SFTP file transfer operations per server.
+/// Max concurrent downloads and thumbnail reads per server. Uploads and copies within a server take no permit.
 /// Many corporate SFTP servers (e.g., FedEx) can't handle parallel reads at all.
 const MAX_CONCURRENT_OPS: usize = 1;
 /// Skip the liveness check if the connection was used within this many seconds.
@@ -112,7 +112,7 @@ pub async fn get_sftp_session(hostname: &str, port: u16) -> Result<Arc<SftpSessi
 }
 
 /// Acquire a concurrency permit for the given server.
-/// Limits parallel SFTP operations to avoid overwhelming servers.
+/// Limits parallel downloads and thumbnail reads to avoid overwhelming servers.
 /// Hold the returned permit for the duration of the operation.
 pub async fn acquire_permit(
     hostname: &str,
