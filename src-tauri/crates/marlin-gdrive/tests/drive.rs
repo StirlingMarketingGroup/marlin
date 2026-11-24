@@ -7,7 +7,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use marlin_gdrive::{AccessTokens, Config, DriveProvider};
 use marlin_vfs::{
-    Access, IfExists, Item, ItemId, Kind, Options, Provider, Revision, Space, Vfs, VfsError, POSIX,
+    Access, Identified, IfExists, Item, ItemId, Kind, Options, Provider, Revision, Space, Vfs,
+    VfsError, POSIX,
 };
 use serde_json::{json, Value};
 use wiremock::matchers::{header, method, path, query_param};
@@ -3605,4 +3606,159 @@ async fn replace_bytes_of_an_empty_file_checks_the_revision_before_a_resend() {
     assert!(puts[0].body.is_empty());
     assert_eq!(sent_header(&puts[0], "content-range"), "");
     assert_eq!(sent(&server, "GET").await.len(), 3);
+}
+
+#[tokio::test]
+async fn locate_walks_a_my_drive_file_up_to_my_drive() {
+    let server = MockServer::start().await;
+    mount_held(&server, "f", "notes", DOC, &["p"], None).await;
+    mount_held(&server, "p", "Plans", FOLDER, &["real-root"], None).await;
+    mount_path(&server, "/files/root", ok_json(json!({"id": "real-root"}))).await;
+    let drive = drive(&server);
+    assert_eq!(
+        drive.locate("f").await.unwrap(),
+        Some(vec![id("root"), id("p"), id("f#f")])
+    );
+    // Google answers only the fields a request names, so the walk must ask for each item's parents and drive.
+    let requests = server.received_requests().await.unwrap();
+    let query = |at: &str| {
+        query_of(
+            requests
+                .iter()
+                .find(|request| request.url.path() == at)
+                .unwrap(),
+        )
+    };
+    assert_eq!(
+        query("/files/f")["fields"],
+        format!("{ITEM_FIELDS},parents")
+    );
+    assert_eq!(query("/files/p")["fields"], "id,parents");
+    assert_eq!(query("/files/root")["fields"], "id");
+    assert!(requests.iter().all(|request| request.method == "GET"));
+}
+
+#[tokio::test]
+async fn locate_walks_a_shared_drive_item_up_to_shared_drives() {
+    let server = MockServer::start().await;
+    mount_held(&server, "f", "a.txt", PLAIN, &["p"], Some("d")).await;
+    mount_held(&server, "p", "Plans", FOLDER, &["d"], Some("d")).await;
+    // A walk in a shared drive never needs My Drive's ID, so a failure to get it changes nothing.
+    mount_path(&server, "/files/root", ResponseTemplate::new(503)).await;
+    let drive = drive(&server);
+    assert_eq!(
+        drive.locate("f").await.unwrap(),
+        Some(vec![id("/shared-drives"), id("d/d"), id("d/p"), id("d/f")])
+    );
+    // Google finds an item of a shared drive only with `supportsAllDrives`. The drive's own top needs no request.
+    let requests = server.received_requests().await.unwrap();
+    let query = |at: &str| {
+        query_of(
+            requests
+                .iter()
+                .find(|request| request.url.path() == at)
+                .unwrap(),
+        )
+    };
+    assert_eq!(query("/files/f")["supportsAllDrives"], "true");
+    assert_eq!(query("/files/p")["supportsAllDrives"], "true");
+    assert!(requests
+        .iter()
+        .all(|request| request.url.path() != "/files/d"));
+
+    mount_path(
+        &server,
+        "/files/d",
+        ok_json(held_json("d", "Team", FOLDER, &[], Some("d"))),
+    )
+    .await;
+    assert_eq!(
+        drive.locate("d").await.unwrap(),
+        Some(vec![id("/shared-drives"), id("d/d")])
+    );
+}
+
+#[tokio::test]
+async fn locate_of_an_item_the_mount_shows_nowhere_is_none() {
+    let server = MockServer::start().await;
+    mount_held(&server, "f", "a.txt", PLAIN, &["p"], None).await;
+    mount_path(&server, "/files/p", ResponseTemplate::new(404)).await;
+    mount_held(&server, "n", "loose.txt", PLAIN, &[], None).await;
+    let mut trashed = held_json("t", "old.txt", PLAIN, &["p"], None);
+    trashed["trashed"] = json!(true);
+    mount_path(&server, "/files/t", ok_json(trashed)).await;
+    mount_path(&server, "/files/root", ok_json(json!({"id": "real-root"}))).await;
+    let drive = drive(&server);
+    assert_eq!(drive.locate("f").await.unwrap(), None);
+    assert_eq!(drive.locate("n").await.unwrap(), None);
+    assert_eq!(drive.locate("t").await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn locate_of_an_unknown_or_unsafe_id_is_not_found() {
+    let server = MockServer::start().await;
+    mount_path(&server, "/files/x", ResponseTemplate::new(404)).await;
+    mount_path(&server, "/files/root", ok_json(json!({"id": "real-root"}))).await;
+    let drive = drive(&server);
+    for reference in ["../about", "a?b", ""] {
+        assert_eq!(drive.locate(reference).await, Err(VfsError::NotFound));
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+    assert_eq!(drive.locate("x").await, Err(VfsError::NotFound));
+}
+
+#[tokio::test]
+async fn reference_gives_the_drive_file_id_of_each_id_form() {
+    let server = MockServer::start().await;
+    let drive = drive(&server);
+    assert_eq!(drive.reference(&id("/")), None);
+    assert_eq!(drive.reference(&id("/shared-drives")), None);
+    assert_eq!(drive.reference(&id("root")), None);
+    assert_eq!(drive.reference(&id("f")), Some("f".to_string()));
+    assert_eq!(drive.reference(&id("d/f")), Some("f".to_string()));
+    assert_eq!(drive.reference(&id("d/d")), Some("d".to_string()));
+    assert_eq!(drive.reference(&id("f#f")), Some("f".to_string()));
+    assert_eq!(drive.reference(&id("d/s#t")), Some("s".to_string()));
+}
+
+#[tokio::test]
+async fn locate_and_identify_round_trip_through_a_mount_with_duplicate_names() {
+    let server = MockServer::start().await;
+    mount_path(
+        &server,
+        "/files/root",
+        ok_json(folder_json("alias-root", "My Drive")),
+    )
+    .await;
+    mount_path(
+        &server,
+        "/drives",
+        ok_json(json!({
+            "drives": [{ "id": "d", "name": "Team", "createdTime": MODIFIED }],
+        })),
+    )
+    .await;
+    mount_path(
+        &server,
+        "/files",
+        ok_json(file_page(
+            vec![plain("f1", "a.txt"), plain("f2", "a.txt")],
+            None,
+        )),
+    )
+    .await;
+    mount_held(&server, "f2", "a.txt", PLAIN, &["d"], Some("d")).await;
+    let vfs = Vfs::new(Arc::new(drive(&server)), POSIX, Options::default());
+    assert_eq!(
+        vfs.locate("f2").await.unwrap(),
+        Some("Shared drives/Team/a (2).txt".to_string())
+    );
+    assert_eq!(
+        vfs.identify("Shared drives/Team/a (2).txt").await.unwrap(),
+        Identified::Remote(Some("f2".to_string()))
+    );
+    assert_eq!(
+        vfs.identify("Shared drives").await.unwrap(),
+        Identified::Remote(None)
+    );
 }

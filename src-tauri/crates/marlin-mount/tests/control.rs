@@ -1626,6 +1626,9 @@ async fn a_file_where_the_spool_folder_should_be_mounts_read_only() {
         .unwrap_err();
     assert_eq!(error, VfsError::ReadOnly);
     assert!(client.call("unsent", account("ana")).await["result"].is_null());
+    // A read-only mount answers the requests about its items too.
+    let top = client.call("identify", item_call("ana", "path", "")).await;
+    assert_eq!(top["result"], json!({"item": "remote"}));
 }
 
 #[tokio::test]
@@ -1793,4 +1796,185 @@ async fn a_mount_during_a_shutdown_that_waits_for_uploads_is_refused_at_once() {
     assert_eq!(code(&again), -1009);
     harness.signal.send(()).unwrap();
     harness.run.await.unwrap();
+}
+
+fn item_call(account: &str, key: &str, value: &str) -> Value {
+    json!({"provider": "memory", "account": account, key: value})
+}
+
+#[tokio::test]
+async fn locate_and_identify_name_an_item_as_the_listing_shows_it() {
+    let harness = start();
+    let mut client = Client::connect(&harness.socket).await;
+    client.call("mount", mount("ana", "drive")).await;
+    let memory = provider(&harness, "ana");
+    let projects = memory.add_folder(&memory.root(), "Projects");
+    let plans = memory.add_folder(&projects, "Plans");
+    let first = memory.add_file(&plans, "a.txt", b"a");
+    let second = memory.add_file(&plans, "a.txt", b"b");
+
+    let second_path = client
+        .call("locate", item_call("ana", "ref", &second.0))
+        .await;
+    assert_eq!(second_path["result"], "Projects/Plans/a (2).txt");
+    let first_path = client
+        .call("locate", item_call("ana", "ref", &first.0))
+        .await;
+    assert_eq!(first_path["result"], "Projects/Plans/a.txt");
+
+    let identified = client
+        .call(
+            "identify",
+            item_call("ana", "path", "Projects/Plans/a (2).txt"),
+        )
+        .await;
+    assert_eq!(
+        identified["result"],
+        json!({"item": "remote", "ref": second.0})
+    );
+    let again = client
+        .call("locate", item_call("ana", "ref", &second.0))
+        .await;
+    assert_eq!(again["result"], "Projects/Plans/a (2).txt");
+    let top = client.call("identify", item_call("ana", "path", "")).await;
+    assert_eq!(top["result"], json!({"item": "remote"}));
+}
+
+#[tokio::test]
+async fn identify_of_a_new_file_says_it_is_not_on_the_remote_yet() {
+    let harness = start();
+    let mut client = Client::connect(&harness.socket).await;
+    client.call("mount", mount("ana", "drive")).await;
+    let vfs = harness.fake.vfs.lock().unwrap()["drive"].clone();
+    let (_entry, _handle) = vfs
+        .create(Vfs::ROOT, "draft.txt", Access::Write)
+        .await
+        .unwrap();
+    let identified = client
+        .call("identify", item_call("ana", "path", "draft.txt"))
+        .await;
+    assert_eq!(identified["result"], json!({"item": "new"}));
+    let through = client
+        .call("identify", item_call("ana", "path", "draft.txt/x"))
+        .await;
+    assert_eq!(code(&through), -1019);
+
+    // The new file keeps its name, so a remote file with the same name shows with a suffix.
+    let memory = provider(&harness, "ana");
+    let remote = memory.add_file(&memory.root(), "draft.txt", b"r");
+    let found = client
+        .call("locate", item_call("ana", "ref", &remote.0))
+        .await;
+    assert_eq!(found["result"], "draft (2).txt");
+}
+
+#[tokio::test]
+async fn a_missing_item_answers_no_such_item_and_an_item_without_a_place_answers_null() {
+    let harness = start();
+    let mut client = Client::connect(&harness.socket).await;
+    client.call("mount", mount("ana", "drive")).await;
+    let missing = client
+        .call("locate", item_call("ana", "ref", "item-99"))
+        .await;
+    assert_eq!(code(&missing), -1019);
+    let no_folder = client
+        .call("identify", item_call("ana", "path", "Nope/a.txt"))
+        .await;
+    assert_eq!(code(&no_folder), -1019);
+
+    let memory = provider(&harness, "ana");
+    let folder = memory.add_folder(&memory.root(), "Gone");
+    let file = memory.add_file(&folder, "a.txt", b"a");
+    memory.remote_remove(&folder);
+    let nowhere = client
+        .call("locate", item_call("ana", "ref", &file.0))
+        .await;
+    assert!(nowhere["error"].is_null(), "{nowhere}");
+    assert!(nowhere["result"].is_null());
+}
+
+#[tokio::test]
+async fn locate_lists_again_when_a_held_listing_is_older_than_the_item() {
+    let harness = start();
+    let mut client = Client::connect(&harness.socket).await;
+    client.call("mount", mount("ana", "drive")).await;
+    let memory = provider(&harness, "ana");
+    let a = memory.add_file(&memory.root(), "a.txt", b"a");
+    let known = client
+        .call("identify", item_call("ana", "path", "a.txt"))
+        .await;
+    assert_eq!(known["result"]["ref"], a.0);
+    let b = memory.add_file(&memory.root(), "b.txt", b"b");
+    let found = client.call("locate", item_call("ana", "ref", &b.0)).await;
+    assert_eq!(found["result"], "b.txt");
+}
+
+#[tokio::test]
+async fn refresh_makes_the_next_listing_show_a_remote_change() {
+    let harness = start();
+    let mut client = Client::connect(&harness.socket).await;
+    client.call("mount", mount("ana", "drive")).await;
+    let memory = provider(&harness, "ana");
+    memory.add_file(&memory.root(), "a.txt", b"a");
+    client
+        .call("identify", item_call("ana", "path", "a.txt"))
+        .await;
+    let b = memory.add_file(&memory.root(), "b.txt", b"b");
+    let stale = client
+        .call("identify", item_call("ana", "path", "b.txt"))
+        .await;
+    assert_eq!(code(&stale), -1019);
+    let refreshed = client.call("refresh", account("ana")).await;
+    assert!(refreshed["result"].is_null());
+    assert!(refreshed["error"].is_null(), "{refreshed}");
+    let found = client
+        .call("identify", item_call("ana", "path", "b.txt"))
+        .await;
+    assert_eq!(found["result"], json!({"item": "remote", "ref": b.0}));
+}
+
+#[tokio::test]
+async fn requests_about_items_need_a_mount_that_is_up() {
+    let harness = start();
+    let mut client = Client::connect(&harness.socket).await;
+    assert_eq!(
+        code(&client.call("locate", item_call("ana", "ref", "x")).await),
+        -1018
+    );
+    assert_eq!(
+        code(
+            &client
+                .call("identify", item_call("ana", "path", "a.txt"))
+                .await
+        ),
+        -1018
+    );
+    assert_eq!(code(&client.call("refresh", account("ana")).await), -1018);
+
+    *harness.fake.fail_mount.lock().unwrap() = Some(MountError::Adapter("no".into()));
+    assert_eq!(
+        code(&client.call("mount", mount("ana", "drive")).await),
+        -1006
+    );
+    assert_eq!(
+        code(&client.call("locate", item_call("ana", "ref", "x")).await),
+        -1018
+    );
+    assert_eq!(
+        code(
+            &client
+                .call("identify", item_call("ana", "path", "a.txt"))
+                .await
+        ),
+        -1018
+    );
+    assert_eq!(code(&client.call("refresh", account("ana")).await), -1018);
+
+    let mounted = client.call("mount", mount("ana", "drive")).await;
+    assert!(mounted["error"].is_null(), "{mounted}");
+    fail(&harness, "ana", Some(VfsError::Offline));
+    assert_eq!(
+        code(&client.call("locate", item_call("ana", "ref", "x")).await),
+        -1014
+    );
 }

@@ -2,7 +2,7 @@
 
 `marlin-mount` is the process that owns every native mount. It runs once per socket, apart from the app, so a mount outlives a hot reload, an app crash, and every window. A dev build runs a helper of its own: see [Running it](#running-it). The app tells it what to mount over a local socket.
 
-On Linux and macOS it can mount a Google account: see [Providers](#providers), the [Linux mount adapter](mount-linux.md), and the [macOS mount adapter](mount-macos.md). The helper does not run on Windows (#375). The app starts the helper on the first mount command: see [The app side](#the-app-side). No part of the UI sends one yet (#377). The app bundle holds the helper: see [Building and bundling](#building-and-bundling).
+On Linux and macOS it can mount a Google account: see [Providers](#providers), the [Linux mount adapter](mount-linux.md), and the [macOS mount adapter](mount-macos.md). The helper does not run on Windows (#375). The app starts the helper on the first command that sends it a request: see [The app side](#the-app-side). No part of the UI sends one yet (#377). The app bundle holds the helper: see [Building and bundling](#building-and-bundling).
 
 **Covers:** `src-tauri/crates/marlin-mount/`, `src-tauri/crates/marlin-mount-client/`, `src-tauri/src/mount_helper.rs`, `src-tauri/build.rs`, `scripts/run-tauri.mjs`, `scripts/check-bundled-mount-helper.mjs`
 **Checked against the code:** 2026-11-24
@@ -29,7 +29,7 @@ The wire types and the client are in a second crate, `marlin-mount-client`. The 
 | `lib.rs`        | `default_socket`, `default_root`, and `default_spool`: the helper's default paths, and the one definition of the socket path that the helper and the app share. |
 | `mount_name.rs` | `build`, the folder name an account mounts at.                                                                                                                  |
 
-`marlin-mount` and `Client` are Unix only. A Windows named pipe comes with the Windows adapter (#375). On Windows the mount commands fail with the message "Marlin cannot mount on this OS yet."
+`marlin-mount` and `Client` are Unix only. A Windows named pipe comes with the Windows adapter (#375). On Windows the commands that send a request fail with the message "Marlin cannot mount on this OS yet.", and `find_mount` answers `null`.
 
 ## Building and bundling
 
@@ -87,6 +87,11 @@ A request is `{jsonrpc, id, method, params?}`. The `id` must be an unsigned inte
 | `unsent`        | `{provider, account}`                | The mount's [unsent files](#unsent-files), or `null` when the mount takes no writes.                     |
 | `retryUnsent`   | `{provider, account, mountId, node}` | `null`. Sends one failed or refused file now.                                                            |
 | `discardUnsent` | `{provider, account, mountId, node}` | `null`. Drops one file's unsent bytes.                                                                   |
+| `locate`        | `{provider, account, ref}`           | The mount-relative path, or `null` when the account has the item but the mount shows it in no folder.    |
+| `identify`      | `{provider, account, path}`          | `{item: "remote", ref?}` or `{item: "new"}`.                                                             |
+| `refresh`       | `{provider, account}`                | `null`.                                                                                                  |
+
+A mount-relative path is the names the mount shows, escaped, with their ` (2)` suffixes, joined with `/`. The empty path is the top of the mount. `locate` and `identify` read the core's listings while those listings are fresh. `locate` asks for a new listing of a folder once when the held listing does not have the item. Those calls count toward the mount's health, like any other provider call. A provider without public IDs answers `identify` with no `ref`.
 
 A status is `{provider, account, name, mountPoint, state, error?, readOnly?}`. `error` is `{code, message}` and is there only when the state is `failed`. `readOnly` is there only when the mount takes no writes: see [Unsent files](#unsent-files).
 
@@ -98,7 +103,7 @@ What a client must know:
 - **Notifications start after the `hello` response and are not replayed.** Call `list` after `hello`, then `unsent` for each mount. A client that falls 64 notifications behind loses the oldest ones, and those two calls are how it catches up. Drop every unsent list and its `mountId` when the connection closes. The notifications a client does get arrive in the order the changes happened.
 - **A failed `mount` answers with an error, not a status.** The codes -1001, -1002, and -1009 are refusals: they make no entry, keep an entry that is already there, and send no notification. Any other failure leaves a `failed` entry, which keeps its name until the next attempt or an `unmount`.
 
-**Version rules.** The protocol number is 7 (`PROTOCOL_VERSION` in `marlin-mount-client/src/protocol.rs`).
+**Version rules.** The protocol number is 8 (`PROTOCOL_VERSION` in `marlin-mount-client/src/protocol.rs`).
 
 - The first request on a connection must be `hello`. The helper answers it before it reads anything else.
 - A `hello` with a valid `protocol` succeeds whatever the number is, and returns the helper's own number.
@@ -115,7 +120,7 @@ What a client must know:
 | -1002  | Another account's mount has this name, ignoring letter case.                                                                                       |
 | -1003  | The mount point exists and is not an empty folder.                                                                                                 |
 | -1004  | Unknown provider.                                                                                                                                  |
-| -1005  | The provider could not open the account, or the account's [first call](#providers) failed.                                                         |
+| -1005  | The provider could not open the account, or a call to the remote failed with this text.                                                            |
 | -1006  | The adapter could not mount.                                                                                                                       |
 | -1007  | The adapter could not unmount.                                                                                                                     |
 | -1008  | A folder could not be made or read.                                                                                                                |
@@ -123,17 +128,25 @@ What a client must know:
 | -1010  | `hello` must come first.                                                                                                                           |
 | -1011  | The protocol versions differ, and the request was not a `shutdown`.                                                                                |
 | -1012  | A dead mount is at the mount point, and the helper could not clear it.                                                                             |
-| -1013  | The account's first call said the sign-in is gone. The user must sign in again.                                                                    |
-| -1014  | The account's first call could not reach the remote. Try again later.                                                                              |
+| -1013  | A call to the remote said the sign-in is gone. The user must sign in again.                                                                        |
+| -1014  | A call to the remote got no answer, or none in time. Try again later.                                                                              |
 | -1015  | That file has no unsent bytes in this mount, or the `mountId` is not this mount's.                                                                 |
 | -1016  | A discard waited too long for the mount's other changes. Try again.                                                                                |
 | -1017  | The mount folder holds files the helper did not put there, and no marker. The message names the folder. See [The mount folder](#the-mount-folder). |
+| -1018  | The account has no mount that is up: none, or one that is starting, unmounting, or failed.                                                         |
+| -1019  | The mount shows no item at that path, or the account has no item with that ID.                                                                     |
+
+`locate`, `identify`, and `refresh` answer -1018 when the account's mount is not up. A `locate` or `identify` whose call fails uses four more codes. `NotFound`, `NotAFolder`, and `AccessDenied` are -1019. `SignInNeeded` is -1013, and `Offline` or `TimedOut` is -1014, as for a first call. Any other error is -1005 with the error's own text: a provider without public IDs answers `locate` with "not supported".
 
 The protocol has no `health` request. A helper that answers `hello` is alive, and a machine that cannot mount says why in the error of a `mount`.
 
+## Refresh and the kernel's cache
+
+`refresh` drops the core's listings and makes its stored attributes and free space stale. The kernel keeps no listing, so the next listing of a folder shows the remote at once. The kernel keeps a name and its attributes for 1 second (`TTL` in `src-tauri/crates/marlin-fuse/src/lib.rs`), so a file's new size or time can show up to 1 second later, on Linux and macOS. On Linux, bytes kept across opens are dropped once the new size or time shows ([Linux mount adapter](mount-linux.md)). The kernel test `a_refresh_shows_a_remote_change_at_once` checks a new file in the next listing, and a file's new size and bytes. It passed on 2026-11-24 on Linux, in a Debian 12 container, and on macOS 27.2 with macFUSE 5.5.0.
+
 ## The app side
 
-The app talks to the helper through `Client` in `marlin-mount-client`. `src-tauri/src/mount_helper.rs` keeps one `Client` for the app process and puts eight commands over it.
+The app talks to the helper through `Client` in `marlin-mount-client`. `src-tauri/src/mount_helper.rs` keeps one `Client` for the app process and puts eleven commands over it. A twelfth, `find_mount`, reads the app's mount table and sends nothing.
 
 | Command               | Helper request  | Returns                  |
 | --------------------- | --------------- | ------------------------ |
@@ -145,6 +158,14 @@ The app talks to the helper through `Client` in `marlin-mount-client`. `src-taur
 | `list_unsent_files`   | `unsent`        | `UnsentFiles`, or `null` |
 | `retry_unsent_file`   | `retryUnsent`   | nothing                  |
 | `discard_unsent_file` | `discardUnsent` | nothing                  |
+| `locate_in_mount`     | `locate`        | `string`, or `null`      |
+| `identify_in_mount`   | `identify`      | `IdentifiedItem`         |
+| `refresh_mount`       | `refresh`       | nothing                  |
+| `find_mount`          | none            | `MountedPath`, or `null` |
+
+**The mount table.** The app lists the mounts when it connects, then keeps the latest status of each: from every answer to `list_mounts`, `get_mount_status`, and `mount_account`, and from every `mount-changed`. An answer can arrive after a newer notification, so an answer never replaces what a notification that arrived after the request said. The table is emptied on `mount-helper-closed`. `MountTable::holding` gives the mount that holds a path, and the path inside it. Only a mount that is up holds a path, and a path with `..` in it is in no mount, because the path is never resolved on the disk. `find_mount` is that function for the frontend. Neither one starts a helper. So before the first command that sends a request, the table is empty, and `find_mount` answers `null` even for a mount that is up, as after an app restart. A caller that needs the answer at launch calls `list_mounts` first.
+
+`locate_in_mount` takes `{provider, account, reference}`: the helper's `ref` is `reference` in the command, because `ref` is a Rust keyword. The other three take the helper's own names: `identify_in_mount` `{provider, account, path}`, `refresh_mount` `{provider, account}`, and `find_mount` `{path}`.
 
 The types are in `src/types/index.ts`. A failed command rejects with a `MountCommandError`, `{code?, message}`. `code` is one of the helper's [error codes](#the-protocol), and it is missing when the failure was not an answer from the helper: a missing binary, a helper that would not start, a lost connection.
 
@@ -158,7 +179,7 @@ The types are in `src/types/index.ts`. A failed command rejects with a `MountCom
 
 **A helper that is finishing its uploads.** After a quit, the helper stays until its uploads end. An app opened in that time reaches the same helper. `list_mounts` shows its mounts as `unmounting`, `list_unsent_files` shows what is left, and every `mount_account` fails with -1009. -1009 can be retried: send the mount again every few seconds while the connection lasts. A shutdown whose unmount failed takes mounts again, and the helper stays. After `mount-helper-closed`, refresh as above and mount again: that starts a new helper.
 
-**Starting the helper.** The first command connects to the socket. The app starts a helper only when the socket file is missing or refuses the connection. Any other error, such as no permission on the socket's folder, is reported and starts nothing.
+**Starting the helper.** The first command that sends a request connects to the socket. The app starts a helper only when the socket file is missing or refuses the connection. Any other error, such as no permission on the socket's folder, is reported and starts nothing.
 
 - The binary is the file `marlin-mount` in the folder of the app binary, and nowhere else. [Building and bundling](#building-and-bundling) says how it gets there. When the file is missing or empty, the command fails with "Marlin's mount helper is missing", and the rest of the app works.
 - The helper is detached: it runs in its own process group, with no pipe to the app. A Ctrl+C in the terminal that runs `npm run tauri dev` does not reach it, and it keeps running when the app is killed or rebuilt.
@@ -400,7 +421,7 @@ No secret crosses the socket or the command line. The text inside a `MountError`
 
 `cd src-tauri && cargo test -p marlin-mount` needs no kernel driver, no network, and no account. It compiles the helper against the half of `marlin-fuse` for the machine it runs on. From a Mac, `src-tauri/crates/marlin-fuse/test-in-docker.sh` covers the Linux half.
 
-- `tests/control.rs` runs the server on a real socket in a temporary folder, with a fake adapter and the core's `MemoryProvider`. The fake adapter can hold a mount or an unmount open, so the tests for two requests at once do not depend on timing. The fake adapter keeps each mount's `Vfs`, so a test writes a file through it and sets failures with `MemoryProvider::fail_with`. The harness gives each mount a spool in the temp folder and a settle time of 50 ms. The spool tests cover a private folder, a failed upload, a refused upload, retry, discard, a wrong `mountId`, an unmount that leaves a failed file, an unmount that waits for an upload, a discard that ends that wait, a shutdown that waits, a mount sent during that wait (-1009 at once), a signal that ends an unmount's wait, a spool path that is a file, a folder with mode 0755 or 0500, a symbolic link, two helpers on one spool, an unmount that waits for a discard held up by a folder being made, and a spool file with no record. No test covers a provider that cannot write.
+- `tests/control.rs` runs the server on a real socket in a temporary folder, with a fake adapter and the core's `MemoryProvider`. The fake adapter can hold a mount or an unmount open, so the tests for two requests at once do not depend on timing. The fake adapter keeps each mount's `Vfs`, so a test writes a file through it and sets failures with `MemoryProvider::fail_with`. The harness gives each mount a spool in the temp folder and a settle time of 50 ms. The spool tests cover a private folder, a failed upload, a refused upload, retry, discard, a wrong `mountId`, an unmount that leaves a failed file, an unmount that waits for an upload, a discard that ends that wait, a shutdown that waits, a mount sent during that wait (-1009 at once), a signal that ends an unmount's wait, a spool path that is a file, a folder with mode 0755 or 0500, a symbolic link, two helpers on one spool, an unmount that waits for a discard held up by a folder being made, and a spool file with no record. No test covers a provider that cannot write. The tests of `locate`, `identify`, and `refresh` cover a name with a ` (2)` suffix, a new file, a missing item, an item the mount shows in no folder, a listing older than the item, a refresh that shows another client's file, a read-only mount, and a mount that is not up.
 - One test starts the built binary and checks its flags, a refused mount, and a clean exit. **A test never sends provider `gdrive` to the built binary.** On a developer's machine that would read the real keychain. Those tests use the provider name `memory`, which the binary does not know.
 - One test reads the log. The server runs inside the test process, so the test points the process's stderr at a file while it makes the failed calls. It moves tokio's clock a minute ahead to see the same text logged again.
 - `tests/gdrive.rs` runs the real server with `OsAdapter` and `LinkedProviders` against a fake Google: one `wiremock` server that is the Drive API and the token endpoint, and the in-memory keychain. It talks to the server through `Client`. Four tests run on any Unix: a sign-in that is gone (-1013), Google out of reach (-1014), a Drive API that answers 503 or 403 (-1005), and a missing OAuth client (-1005). Each fails and leaves no folder. Two tests mount through FUSE and run only in `test-in-docker.sh` and `test-on-mac.sh`. The first lists a folder that Google sends in two pages, with a duplicate name, a `/` in a name, and a Google Doc, reads a file whole and at an offset, reads the Doc's link file and checks its size, checks that a write, a delete, and a rename fail with `EROFS` because the spool path is a file, and checks that the fake Google got nothing but GETs and one token request, and mounts the account a second time, which asks Google again though the helper still holds a token. The second rejects the sign-in, waits for `auth-required`, signs in again, and waits for `mounted`. Its first status takes writes.
@@ -409,6 +430,6 @@ No secret crosses the socket or the command line. The text inside a `MountError`
 - A unit test in `marlin-mount-client` checks that a build with debug assertions picks the dev build's socket, mount folder, and spool. It runs only in such a build, so no test covers a release build's paths.
 - `src-tauri/crates/marlin-mount/test-sweep.sh` makes a real dead mount and a live one with the spike programs in `spikes/mount-hello/`, in a mount folder with the marker. It starts the built helper and checks that only the dead mount and the empty folder are gone. Run it on a Mac with macFUSE, both of its switches on: `test-on-mac.sh` runs it there. `test-in-docker.sh` runs it on Linux.
 - `tests/client.rs` tests `Client` against the built helper: the first connect starts it, a second one reuses it, it outlives its client, it runs in its own process group, `shutdown` stops it, and `ask_to_stop` returns at once and the helper still exits. A fake helper, a plain socket listener in the test, covers another protocol version, a refused shutdown, and a notification in front of an answer.
-- The Tauri layer in `src-tauri/src/mount_helper.rs` has one test: the request at quit runs outside the async runtime, with no helper. No real-app test covers mounts yet (#580), so the `Exit` event, the eight commands, and the three events are untested.
+- The Tauri layer in `src-tauri/src/mount_helper.rs` has one test of the request at quit, outside the async runtime and with no helper, and tests of the mount table: which mount holds a path, and which answer loses to a newer notification. No real-app test covers mounts yet (#580), so the `Exit` event, the twelve commands, and the three events are untested.
 - A signal is tested through the future that `Server::run` takes, not with a real `SIGTERM`.
 - The check of the connecting user's ID has no test. It needs a second user account.
