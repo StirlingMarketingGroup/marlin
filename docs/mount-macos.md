@@ -106,7 +106,7 @@ The table in [Linux mount adapter](mount-linux.md#errors) holds for macOS: both 
 
 Run `src-tauri/crates/marlin-fuse/test-on-mac.sh` on a Mac that has macFUSE 5 with both switches on and Homebrew's samba. CI does not run it: the runners have no macFUSE.
 
-- It runs the `marlin-fuse` tests with the ignored ones, the `marlin-mount` tests with the ignored ones, and `crates/marlin-mount/test-sweep.sh`. The helper's ignored tests mount a Google account against a fake Google, an SFTP server against an `sshd` the test starts, and a Samba server the test starts, all with the in-memory keychain: see [Mount helper](mount-helper.md#testing). No test touches a real account or the real keychain. One SFTP test drives Finder, which can take the focus from whoever works at the Mac.
+- It runs the `marlin-fuse` tests with the ignored ones, the `marlin-mount` tests with the ignored ones, and `crates/marlin-mount/test-sweep.sh`. The helper's ignored tests mount a Google account against a fake Google, an SFTP server against an `sshd` the test starts, and a Samba server the test starts, all with the in-memory keychain: see [Mount helper](mount-helper.md#testing). No test touches a real account or the real keychain.
 - The mount tests are the Linux ones: see [Testing](mount-linux.md#testing). These differ:
   - `editor_saves_keep_one_file` runs `sed -i ''` and `/usr/bin/vim` instead of `sed -i` and `vim.tiny`, and leaves `._name` files out of its listing check. `names_change_through_the_mount` checks the macOS errnos: `EPERM` for `unlink` of a folder, which `unlink(2)` documents, `ENOTSUP` for a link, and the `renamex_np` answers above.
   - `a_cocoa_safe_save_keeps_the_item` is macOS only. It saves through a real `NSDocument`, from `osascript -l JavaScript`, and checks that the file keeps its ID.
@@ -117,6 +117,7 @@ Run `src-tauri/crates/marlin-fuse/test-on-mac.sh` on a Mac that has macFUSE 5 wi
 - The unit tests need no macFUSE: the struct layouts, the attribute rules, the free-space counts, the version check, the three messages, and what is not a dead mount.
 - **macFUSE can stop working during a run.** The script mounts about 30 times. After many mounts in a row, macOS can stop finding macFUSE's extension, and every later mount fails (macFUSE issue 1232, open). Turn both switches on again in System Settings, General, Login Items & Extensions, File System Extensions.
 - A failed mount prints lines from macFUSE on stderr, such as "Failed to mount volume: mount(8) returned 69". The test of a mount on a file prints one.
+- **The script interrupts whoever works at the Mac.** Each test volume shows in Finder's sidebar while it is mounted: macFUSE 5.5.0's FSKit backend drops `nobrowse`, so a mount that asks for it gets no `nobrowse` in the mount table (macOS 27.2, 2026-11-24). After the test of a mount on a file, macFUSE opens an alert that comes to the front until someone clicks it. #731 tracks these two. And one SFTP test drives Finder, which can take the focus. Run the script when nobody is working at the Mac.
 
 ## Tested, and not
 
