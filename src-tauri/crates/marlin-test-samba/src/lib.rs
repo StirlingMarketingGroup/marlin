@@ -13,10 +13,12 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 pub const PASSWORD: &str = "marlin-test-password";
-/// The share the user may read.
+/// The share the user may read and write.
 pub const SHARE: &str = "data";
 /// A share the user signs in to but may not open.
 pub const DENIED_SHARE: &str = "denied";
+/// The folder of [`SHARE`] shared again, under a name an `smb://` URL would change: `%41` decodes to `A`, and libsmbclient drops a `"` from a share name.
+pub const URL_CHARACTERS_SHARE: &str = "odd%41\"share";
 
 const INSTALL: &str = "Install Samba (`brew install samba` on a Mac, `samba smbclient` on Debian).";
 
@@ -96,12 +98,16 @@ impl Server {
   printcap name = /dev/null
   server role = standalone server
   map to guest = never
+  # Samba makes a new folder under a temporary name, then renames it. macOS refuses that rename to an smbd not run as root, as OpenBSD does, where Samba turns it off itself. An older Samba ignores the setting.
+  vfs mkdir use tmp name = no
 [{SHARE}]
   path = {root}/data
-  read only = yes
+  read only = no
 [{DENIED_SHARE}]
   path = {root}/data
   valid users = marlin-nobody
+[{URL_CHARACTERS_SHARE}]
+  path = {root}/data
 "
             ),
         )

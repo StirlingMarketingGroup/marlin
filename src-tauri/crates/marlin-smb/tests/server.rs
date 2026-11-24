@@ -1,9 +1,11 @@
 use marlin_smb_client::protocol::{
-    error_codes, methods, ListSharesParams, ListSharesResult, ReadDirectoryParams,
-    ReadDirectoryResult, ReadParams, ReadResult, SmbCredentials, SpaceParams, SpaceResult,
-    READ_MAX,
+    error_codes, methods, CopyParams, CreateDirectoryParams, DeleteParams, DownloadFileParams,
+    DownloadFileResult, DownloadPartialParams, DownloadPartialResult, FileMetadataResult,
+    GetFileMetadataParams, ListSharesParams, ListSharesResult, ReadDirectoryParams,
+    ReadDirectoryResult, ReadParams, ReadResult, RenameParams, SmbCredentials, SpaceParams,
+    SpaceResult, UploadFileParams, UploadFileResult, READ_MAX,
 };
-use marlin_test_samba::{Server, DENIED_SHARE, PASSWORD, SHARE};
+use marlin_test_samba::{Server, DENIED_SHARE, PASSWORD, SHARE, URL_CHARACTERS_SHARE};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::fs::Permissions;
@@ -408,6 +410,232 @@ fn read_directory_errors() {
     let response = listed(SHARE, "/", PASSWORD);
     let body: ReadDirectoryResult = result(&response);
     assert!(body.entries.iter().any(|entry| entry.name == "small.txt"));
+}
+
+#[test]
+fn names_with_url_characters_reach_their_own_file() {
+    let server = Server::start();
+    let files = [
+        ("a%20b.txt", &b"percent twenty"[..]),
+        ("c%2fd.txt", &b"slash"[..]),
+        ("100%.txt", &b"lone percent"[..]),
+        ("x%00y.txt", &b"nul"[..]),
+        ("a#b.txt", &b"hash"[..]),
+        ("a b.txt", &b"space"[..]),
+    ];
+    for (name, bytes) in files {
+        std::fs::write(server.path(name), bytes).unwrap();
+    }
+    // Folders by the same rules, each holding one file named after it. `x` and `d e` are what `x%00y.txt` and `d%20e` would reach if libsmbclient decoded them, as `a b.txt` is for `a%20b.txt`.
+    let folders = ["d%20e", "d e", "f%2fg", "50%"];
+    for folder in folders {
+        std::fs::create_dir(server.path(folder)).unwrap();
+        std::fs::write(server.path(folder).join(format!("in {folder}")), b"").unwrap();
+    }
+    std::fs::write(server.path("x"), b"decoy x").unwrap();
+
+    for (name, bytes) in files {
+        let response = call(
+            methods::READ,
+            ReadParams {
+                credentials: credentials(&server, PASSWORD),
+                share: SHARE.into(),
+                path: format!("/{name}"),
+                offset: 0,
+                length: 100,
+            },
+        );
+        let body: ReadResult = result(&response);
+        assert_eq!(body.data, bytes, "{name}");
+
+        let response = call(
+            methods::GET_FILE_METADATA,
+            GetFileMetadataParams {
+                credentials: credentials(&server, PASSWORD),
+                share: SHARE.into(),
+                path: format!("/{name}"),
+            },
+        );
+        let meta: FileMetadataResult = result(&response);
+        assert_eq!(meta.name, name, "{name}");
+        assert_eq!(meta.size, bytes.len() as u64, "{name}");
+    }
+
+    let listed = |share: &str, path: &str| -> Vec<(String, u64)> {
+        let response = call(
+            methods::READ_DIRECTORY,
+            ReadDirectoryParams {
+                credentials: credentials(&server, PASSWORD),
+                share: share.into(),
+                path: path.into(),
+            },
+        );
+        result::<ReadDirectoryResult>(&response)
+            .entries
+            .into_iter()
+            .map(|entry| (entry.name, entry.size))
+            .collect()
+    };
+
+    let top = listed(SHARE, "/");
+    for (name, bytes) in files {
+        assert!(
+            top.contains(&(name.to_string(), bytes.len() as u64)),
+            "{name} in {top:?}"
+        );
+    }
+    for folder in folders {
+        assert_eq!(
+            listed(SHARE, &format!("/{folder}")),
+            [(format!("in {folder}"), 0)]
+        );
+    }
+    let top = listed(URL_CHARACTERS_SHARE, "/");
+    assert!(top.contains(&("a%20b.txt".to_string(), 14)), "{top:?}");
+
+    let response = call(
+        methods::SPACE,
+        SpaceParams {
+            credentials: credentials(&server, PASSWORD),
+            share: URL_CHARACTERS_SHARE.into(),
+        },
+    );
+    let space: Option<SpaceResult> = result(&response);
+    assert!(space.is_some(), "{response}");
+}
+
+#[test]
+fn write_calls_keep_names_with_url_characters() {
+    let server = Server::start();
+    std::fs::write(server.path("a%20b.txt"), b"percent twenty").unwrap();
+    std::fs::write(server.path("a b.txt"), b"space").unwrap();
+    let credentials = credentials(&server, PASSWORD);
+
+    let response = call(
+        methods::CREATE_DIRECTORY,
+        CreateDirectoryParams {
+            credentials: credentials.clone(),
+            share: SHARE.into(),
+            path: "/new%41".into(),
+        },
+    );
+    assert!(response.get("error").is_none(), "{response}");
+    assert!(server.path("new%41").is_dir());
+    assert!(!server.path("newA").exists());
+
+    let response = call(
+        methods::CREATE_DIRECTORY,
+        CreateDirectoryParams {
+            credentials: credentials.clone(),
+            share: SHARE.into(),
+            path: "/what?".into(),
+        },
+    );
+    assert!(response.get("error").is_some(), "{response}");
+    assert!(!server.path("what").exists());
+
+    let response = call(
+        methods::COPY,
+        CopyParams {
+            credentials: credentials.clone(),
+            share: SHARE.into(),
+            from_path: "/a%20b.txt".into(),
+            to_path: "/copy%41.txt".into(),
+        },
+    );
+    assert!(response.get("error").is_none(), "{response}");
+    assert_eq!(
+        std::fs::read(server.path("copy%41.txt")).unwrap(),
+        b"percent twenty"
+    );
+    assert!(!server.path("copyA.txt").exists());
+
+    let response = call(
+        methods::RENAME,
+        RenameParams {
+            credentials: credentials.clone(),
+            share: SHARE.into(),
+            from_path: "/a%20b.txt".into(),
+            to_path: "/r%20s.txt".into(),
+        },
+    );
+    assert!(response.get("error").is_none(), "{response}");
+    assert_eq!(
+        std::fs::read(server.path("r%20s.txt")).unwrap(),
+        b"percent twenty"
+    );
+    assert!(!server.path("a%20b.txt").exists());
+    assert!(!server.path("r s.txt").exists());
+    assert_eq!(std::fs::read(server.path("a b.txt")).unwrap(), b"space");
+
+    // The local paths hold `%20` too: they must reach the disk as they are.
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("upload%20source.txt");
+    std::fs::write(&source, b"uploaded").unwrap();
+    let response = call(
+        methods::UPLOAD_FILE,
+        UploadFileParams {
+            credentials: credentials.clone(),
+            share: SHARE.into(),
+            source_path: source.display().to_string(),
+            dest_path: "/up%41.txt".into(),
+        },
+    );
+    let uploaded: UploadFileResult = result(&response);
+    assert_eq!(uploaded.size, 8);
+    assert_eq!(
+        std::fs::read(server.path("up%41.txt")).unwrap(),
+        b"uploaded"
+    );
+    assert!(!server.path("upA.txt").exists());
+
+    // A file and a folder, each beside what its name would reach if libsmbclient decoded it. Each decoy is the other kind, so a `stat` of the decoy would pick the wrong call.
+    std::fs::create_dir(server.path("copyA.txt")).unwrap();
+    std::fs::write(server.path("newA"), b"decoy").unwrap();
+    for path in ["/copy%41.txt", "/new%41"] {
+        let response = call(
+            methods::DELETE,
+            DeleteParams {
+                credentials: credentials.clone(),
+                share: SHARE.into(),
+                path: path.into(),
+            },
+        );
+        assert!(response.get("error").is_none(), "{response}");
+    }
+    assert!(!server.path("copy%41.txt").exists());
+    assert!(!server.path("new%41").exists());
+    assert!(server.path("copyA.txt").is_dir());
+    assert_eq!(std::fs::read(server.path("newA")).unwrap(), b"decoy");
+
+    let downloaded = temp.path().join("download%20dest.txt");
+    let response = call(
+        methods::DOWNLOAD_FILE,
+        DownloadFileParams {
+            credentials: credentials.clone(),
+            share: SHARE.into(),
+            path: "/r%20s.txt".into(),
+            dest_path: downloaded.display().to_string(),
+        },
+    );
+    assert_eq!(result::<DownloadFileResult>(&response).size, 14);
+    assert_eq!(std::fs::read(&downloaded).unwrap(), b"percent twenty");
+
+    let partial_path = temp.path().join("partial%20dest.txt");
+    let response = call(
+        methods::DOWNLOAD_PARTIAL,
+        DownloadPartialParams {
+            credentials,
+            share: SHARE.into(),
+            path: "/r%20s.txt".into(),
+            dest_path: partial_path.display().to_string(),
+            max_bytes: 7,
+        },
+    );
+    let partial: DownloadPartialResult = result(&response);
+    assert_eq!(partial.bytes_written, 7);
+    assert_eq!(partial.total_size, 14);
+    assert_eq!(std::fs::read(&partial_path).unwrap(), b"percent");
 }
 
 #[test]

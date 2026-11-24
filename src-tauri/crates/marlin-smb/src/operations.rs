@@ -10,13 +10,18 @@ use marlin_smb_client::protocol::{
     SmbCredentials, SpaceParams, SpaceResult, UploadFileParams, UploadFileResult, READ_MAX,
     SMBCLIENT_MISSING,
 };
-use pavao::{SmbClient, SmbCredentials as PavaoCredentials, SmbMode, SmbOpenOptions, SmbOptions};
+use pavao::{
+    SmbClient, SmbCredentials as PavaoCredentials, SmbDirentInfo, SmbFile, SmbMode, SmbOpenOptions,
+    SmbOptions, SmbResult, SmbStat, SmbStatVfs,
+};
 use std::io::{Read, Seek, SeekFrom, Write};
 
 /// Sidecar version string.
 pub const SIDECAR_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// One connection to a share, for one call. pavao connects at the first call, not when it opens. The helper runs one request at a time, and pavao holds one lock around every libsmbclient call, whose global state is not thread-safe.
+///
+/// Its calls take each name as the server holds it, and escape it for libsmbclient's URL ([`escape_for_url`]). Every libsmbclient call goes through one of them.
 struct Share<'a> {
     client: SmbClient,
     credentials: &'a SmbCredentials,
@@ -27,7 +32,7 @@ impl<'a> Share<'a> {
         // pavao adds the `/` before the share when it is missing.
         let mut server = PavaoCredentials::default()
             .server(format!("smb://{}", credentials.hostname))
-            .share(share)
+            .share(escape_for_url(share))
             .username(&credentials.username)
             .password(&credentials.password);
         if let Some(domain) = &credentials.domain {
@@ -64,6 +69,45 @@ impl<'a> Share<'a> {
         };
         (code, format!("{action}: {error}"))
     }
+
+    fn list_dirplus(&self, path: &str) -> SmbResult<Vec<SmbDirentInfo>> {
+        self.client.list_dirplus(escape_for_url(path))
+    }
+
+    fn stat(&self, path: &str) -> SmbResult<SmbStat> {
+        self.client.stat(escape_for_url(path))
+    }
+
+    fn statvfs(&self, path: &str) -> SmbResult<SmbStatVfs> {
+        self.client.statvfs(escape_for_url(path))
+    }
+
+    fn mkdir(&self, path: &str, mode: SmbMode) -> SmbResult<()> {
+        self.client.mkdir(escape_for_url(path), mode)
+    }
+
+    fn rmdir(&self, path: &str) -> SmbResult<()> {
+        self.client.rmdir(escape_for_url(path))
+    }
+
+    fn unlink(&self, path: &str) -> SmbResult<()> {
+        self.client.unlink(escape_for_url(path))
+    }
+
+    fn rename(&self, from: &str, to: &str) -> SmbResult<()> {
+        self.client.rename(escape_for_url(from), escape_for_url(to))
+    }
+
+    fn open_with(&self, path: &str, options: SmbOpenOptions) -> SmbResult<SmbFile<'_>> {
+        self.client.open_with(escape_for_url(path), options)
+    }
+}
+
+/// pavao hands libsmbclient each share and path inside an `smb://` URL. libsmbclient ends the path at the last `?`, drops `"` from a share name, and decodes every `%XX`, so `a%20b.txt` would reach `a b.txt`. Each of those characters goes in escaped, and the server gets the name as given.
+fn escape_for_url(name: &str) -> String {
+    name.replace('%', "%25")
+        .replace('?', "%3F")
+        .replace('"', "%22")
 }
 
 /// The code for a failed libsmbclient call, from its errno.
@@ -100,8 +144,9 @@ pub fn read_directory(params: ReadDirectoryParams) -> Result<ReadDirectoryResult
     let share = Share::open(&params.credentials, &params.share)?;
 
     // pavao drops opendir's errno (it answers BadFileDescriptor), so a stat of the same path finds out why the listing failed. A folder that is there and still cannot be listed was refused: the stat proves the sign-in works. A path that is there and is not a folder answers SMB_NOT_A_FOLDER.
-    let entries = share.client.list_dirplus(&params.path).map_err(|_| {
-        match share.client.stat(&params.path) {
+    let entries = share
+        .list_dirplus(&params.path)
+        .map_err(|_| match share.stat(&params.path) {
             Err(cause) => share.failure("Failed to list directory", cause),
             Ok(stat) if stat.mode.is_dir() => (
                 error_codes::SMB_PERMISSION_DENIED,
@@ -111,8 +156,7 @@ pub fn read_directory(params: ReadDirectoryParams) -> Result<ReadDirectoryResult
                 error_codes::SMB_NOT_A_FOLDER,
                 "Failed to list directory: not a folder".to_string(),
             ),
-        }
-    })?;
+        })?;
 
     let mut result_entries = Vec::new();
 
@@ -159,7 +203,6 @@ pub fn get_file_metadata(
     let share = Share::open(&params.credentials, &params.share)?;
 
     let stat = share
-        .client
         .stat(&params.path)
         .map_err(|e| share.failure("Failed to get file metadata", e))?;
 
@@ -194,7 +237,6 @@ pub fn create_directory(params: CreateDirectoryParams) -> Result<(), (i32, Strin
     let share = Share::open(&params.credentials, &params.share)?;
 
     share
-        .client
         .mkdir(&params.path, SmbMode::from(0o755))
         .map_err(|e| share.failure("Failed to create directory", e))
 }
@@ -204,18 +246,15 @@ pub fn delete(params: DeleteParams) -> Result<(), (i32, String)> {
     let share = Share::open(&params.credentials, &params.share)?;
 
     let stat = share
-        .client
         .stat(&params.path)
         .map_err(|e| share.failure("Failed to stat path", e))?;
 
     if stat.mode.is_dir() {
         share
-            .client
             .rmdir(&params.path)
             .map_err(|e| share.failure("Failed to delete directory", e))
     } else {
         share
-            .client
             .unlink(&params.path)
             .map_err(|e| share.failure("Failed to delete file", e))
     }
@@ -226,7 +265,6 @@ pub fn rename(params: RenameParams) -> Result<(), (i32, String)> {
     let share = Share::open(&params.credentials, &params.share)?;
 
     share
-        .client
         .rename(&params.from_path, &params.to_path)
         .map_err(|e| share.failure("Failed to rename", e))
 }
@@ -236,12 +274,10 @@ pub fn copy(params: CopyParams) -> Result<(), (i32, String)> {
     let share = Share::open(&params.credentials, &params.share)?;
 
     let mut src = share
-        .client
         .open_with(&params.from_path, SmbOpenOptions::default().read(true))
         .map_err(|e| share.failure("Failed to open source", e))?;
 
     let mut dst = share
-        .client
         .open_with(
             &params.to_path,
             SmbOpenOptions::default()
@@ -271,7 +307,6 @@ pub fn read(params: ReadParams) -> Result<ReadResult, (i32, String)> {
     let share = Share::open(&params.credentials, &params.share)?;
 
     let mut file = share
-        .client
         .open_with(&params.path, SmbOpenOptions::default().read(true))
         .map_err(|e| share.failure("Failed to open SMB file", e))?;
     file.seek(SeekFrom::Start(params.offset))
@@ -289,7 +324,6 @@ pub fn space(params: SpaceParams) -> Result<Option<SpaceResult>, (i32, String)> 
     let share = Share::open(&params.credentials, &params.share)?;
 
     let stat = share
-        .client
         .statvfs("/")
         .map_err(|e| share.failure("Failed to read share size", e))?;
     Ok(space_from(&stat))
@@ -458,7 +492,6 @@ pub fn download_file(params: DownloadFileParams) -> Result<DownloadFileResult, (
 
     // Open the remote file for reading
     let mut smb_file = share
-        .client
         .open_with(&params.path, SmbOpenOptions::default().read(true))
         .map_err(|e| share.failure("Failed to open SMB file", e))?;
 
@@ -509,14 +542,12 @@ pub fn download_partial(
 
     // Get total file size first
     let stat = share
-        .client
         .stat(&params.path)
         .map_err(|e| share.failure("Failed to stat SMB file", e))?;
     let total_size = stat.size;
 
     // Open the remote file for reading
     let smb_file = share
-        .client
         .open_with(&params.path, SmbOpenOptions::default().read(true))
         .map_err(|e| share.failure("Failed to open SMB file", e))?;
 
@@ -572,7 +603,6 @@ pub fn upload_file(params: UploadFileParams) -> Result<UploadFileResult, (i32, S
     })?;
 
     let mut smb_file = share
-        .client
         .open_with(
             &params.dest_path,
             SmbOpenOptions::default()

@@ -42,7 +42,7 @@ async fn the_server_lists_its_shares_and_a_folder() {
     let shares = provider.list(&ItemId("/".into())).await.unwrap();
     let mut ids: Vec<_> = shares.iter().map(|item| item.id.0.as_str()).collect();
     ids.sort();
-    assert_eq!(ids, vec!["/data", "/denied"]);
+    assert_eq!(ids, vec!["/data", "/denied", "/odd%41\"share"]);
     assert!(shares
         .iter()
         .all(|item| item.attributes.kind == Kind::Folder));
@@ -71,6 +71,29 @@ async fn the_server_lists_its_shares_and_a_folder() {
     let asked = provider.item(&notes_item.id).await.unwrap();
     assert_eq!(asked.attributes, notes_item.attributes);
     assert_eq!(asked.name, notes_item.name);
+}
+
+#[tokio::test]
+async fn names_with_url_characters_reach_their_own_file() {
+    let (server, _dir, provider) = mounted(PASSWORD);
+    std::fs::write(server.path("a%20b.txt"), b"percent twenty").unwrap();
+    std::fs::write(server.path("a b.txt"), b"space").unwrap();
+
+    let listed = provider.list(&ItemId("/data".into())).await.unwrap();
+    let item = listed.iter().find(|item| item.name == "a%20b.txt").unwrap();
+    assert_eq!(item.id.0, "/data/a%20b.txt");
+    assert_eq!(item.attributes.size, 14);
+    let asked = provider.item(&item.id).await.unwrap();
+    assert_eq!(asked.attributes, item.attributes);
+
+    let got = provider.read(&item.id, 0, 100).await.unwrap();
+    assert_eq!(got, b"percent twenty");
+
+    let odd = provider
+        .list(&ItemId("/odd%41\"share".into()))
+        .await
+        .unwrap();
+    assert!(odd.iter().any(|item| item.name == "a%20b.txt"));
 }
 
 #[tokio::test]
