@@ -326,6 +326,8 @@ test.describe('Path bar', () => {
   test.describe('an SFTP address with no user', () => {
     type SftpTestWindow = Window & {
       __SIGNED_IN__?: boolean;
+      __ANSWER_CONNECT_WINDOW__?: (address: string | null) => void;
+      __CONNECT_WINDOW_ERROR__?: string;
       __TAURI_INVOKE_LOG__?: { cmd: string; args?: Record<string, unknown> }[];
       __TAURI_INTERNALS__: {
         invoke: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
@@ -334,13 +336,23 @@ test.describe('Path bar', () => {
     const invokeLog = (page: Page) =>
       page.evaluate(() => (window as SftpTestWindow).__TAURI_INVOKE_LOG__ ?? []);
 
-    // No server is saved for 10.5.0.247, so a read of it asks for a sign-in. Once the test sets
-    // `__SIGNED_IN__`, a read lists one file as the saved user, `admin`.
+    // No server is saved for 10.5.0.247, so a read of it asks for a sign-in and waits on
+    // `__ANSWER_CONNECT_WINDOW__`. Once the test sets `__SIGNED_IN__`, a read lists one file as
+    // the saved user, `admin`.
     test.beforeEach(async ({ page }) => {
       await page.evaluate(() => {
         const w = window as SftpTestWindow;
         const original = w.__TAURI_INTERNALS__.invoke.bind(w.__TAURI_INTERNALS__);
         w.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
+          if (cmd === 'open_sftp_connect_window') {
+            void original(cmd, args);
+            if (w.__CONNECT_WINDOW_ERROR__) {
+              throw w.__CONNECT_WINDOW_ERROR__;
+            }
+            return new Promise((resolve) => {
+              w.__ANSWER_CONNECT_WINDOW__ = resolve;
+            });
+          }
           const path = String(args?.path ?? '');
           if (cmd !== 'read_directory' || !path.startsWith('sftp://')) return original(cmd, args);
           const url = new URL(path);
@@ -348,6 +360,9 @@ test.describe('Path bar', () => {
           const port = Number(url.port || 22);
           if (!w.__SIGNED_IN__) {
             throw `[SFTP_NO_CREDENTIALS] No credentials stored for server: 10.5.0.247:${port}`;
+          }
+          if (url.pathname.endsWith('/missing')) {
+            throw 'Failed to read directory: No such file';
           }
           if (url.pathname.endsWith('/report.txt')) {
             throw `[ENOTDIR] Not a folder: ${path}`;
@@ -397,7 +412,6 @@ test.describe('Path bar', () => {
           initialHostname: '10.5.0.247',
           initialPort: 22,
           initialUsername: undefined,
-          targetPath: 'sftp://10.5.0.247',
         });
       expect((await invokeLog(page)).some(({ cmd }) => cmd === 'plugin:dialog|message')).toBe(
         false
@@ -406,10 +420,43 @@ test.describe('Path bar', () => {
       await expect(page.locator('[data-testid="file-item"][data-name="Documents"]')).toBeVisible();
     });
 
-    test('opens the typed folder after the window connects', async ({ page }) => {
-      const targetPath = 'sftp://10.5.0.247:2222/some/folder';
+    test('asking again while the connect window waits brings it to the front', async ({ page }) => {
       const pathInput = page.locator('[data-testid="path-input"]');
-      await pathInput.fill(targetPath);
+      await pathInput.fill('sftp://10.5.0.247');
+      await pathInput.press('Enter');
+      await expect
+        .poll(async () =>
+          (await invokeLog(page)).some(({ cmd }) => cmd === 'open_sftp_connect_window')
+        )
+        .toBe(true);
+
+      await pathInput.fill('sftp://10.5.0.247');
+      await pathInput.press('Enter');
+
+      await expect
+        .poll(async () =>
+          (await invokeLog(page)).some(({ cmd }) => cmd === 'show_sftp_connect_window')
+        )
+        .toBe(true);
+      expect(
+        (await invokeLog(page)).filter(({ cmd }) => cmd === 'open_sftp_connect_window')
+      ).toHaveLength(1);
+    });
+
+    async function answerConnectWindow(page: Page, address: string | null) {
+      await page.evaluate((value) => {
+        const w = window as SftpTestWindow;
+        if (value !== null) w.__SIGNED_IN__ = true;
+        const answer = w.__ANSWER_CONNECT_WINDOW__;
+        if (!answer) throw new Error('the connect window was not asked for');
+        answer(value);
+      }, address);
+    }
+
+    test('opens the typed folder after the window connects', async ({ page }) => {
+      const typed = 'sftp://10.5.0.247:2222/some/folder';
+      const pathInput = page.locator('[data-testid="path-input"]');
+      await pathInput.fill(typed);
       await pathInput.press('Enter');
 
       await expect
@@ -417,22 +464,140 @@ test.describe('Path bar', () => {
           async () =>
             (await invokeLog(page)).find(({ cmd }) => cmd === 'open_sftp_connect_window')?.args
         )
-        .toEqual(expect.objectContaining({ initialPort: 2222, targetPath }));
+        .toEqual(expect.objectContaining({ initialHostname: '10.5.0.247', initialPort: 2222 }));
 
-      await page.evaluate(
-        (payload) => {
-          const w = window as SftpTestWindow;
-          w.__SIGNED_IN__ = true;
-          return w.__TAURI_INTERNALS__.invoke('plugin:event|emit', {
-            event: 'sftp-connect:success',
-            payload,
-          });
-        },
-        { hostname: '10.5.0.247', port: 2222, username: 'admin', targetPath }
-      );
+      await answerConnectWindow(page, 'sftp://admin@10.5.0.247:2222/');
 
       await expect(page.locator('[data-testid="file-item"][data-name="report.txt"]')).toBeVisible();
       await expect(pathInput).toHaveValue('sftp://admin@10.5.0.247:2222/some/folder');
+      // History holds the address once, so Back returns to the folder before.
+      await page.getByTitle(/^Back/).click();
+      await expect(pathInput).toHaveValue(MOCK_HOME_DIR);
+    });
+
+    test('closing the connect window puts the typed address back with the reason', async ({
+      page,
+    }) => {
+      const typed = 'sftp://10.5.0.247';
+      const pathInput = page.locator('[data-testid="path-input"]');
+      await pathInput.fill(typed);
+      await pathInput.press('Enter');
+
+      await expect
+        .poll(async () =>
+          (await invokeLog(page)).some(({ cmd }) => cmd === 'open_sftp_connect_window')
+        )
+        .toBe(true);
+      await answerConnectWindow(page, null);
+
+      const failure = page.getByTestId('path-bar-failure');
+      await expect(failure).toBeVisible();
+      await expect(failure).toContainText('Sign-in was cancelled.');
+      await expect(pathInput).toHaveValue(typed);
+      await expect(page.locator('[data-testid="file-item"][data-name="Documents"]')).toBeVisible();
+      expect((await invokeLog(page)).some(({ cmd }) => cmd === 'plugin:dialog|message')).toBe(
+        false
+      );
+    });
+
+    test('a file address typed with no saved sign-in opens its folder after the sign-in, with the file selected', async ({
+      page,
+    }) => {
+      const pathInput = page.locator('[data-testid="path-input"]');
+      await pathInput.fill('sftp://10.5.0.247/some/folder/report.txt');
+      await pathInput.press('Enter');
+
+      await expect
+        .poll(async () =>
+          (await invokeLog(page)).some(({ cmd }) => cmd === 'open_sftp_connect_window')
+        )
+        .toBe(true);
+      await answerConnectWindow(page, 'sftp://admin@10.5.0.247/');
+
+      await expect(pathInput).toHaveValue('sftp://admin@10.5.0.247:22/some/folder');
+      const selected = page.locator('[data-testid="file-item"].bg-accent-selected');
+      await expect(selected).toHaveCount(1);
+      await expect(selected).toHaveAttribute('data-name', 'report.txt');
+      await page.getByTitle(/^Back/).click();
+      await expect(pathInput).toHaveValue(MOCK_HOME_DIR);
+    });
+
+    test('a folder that fails after the sign-in goes back as any failure does', async ({
+      page,
+    }) => {
+      const typed = 'sftp://10.5.0.247/missing';
+      const pathInput = page.locator('[data-testid="path-input"]');
+      await pathInput.fill(typed);
+      await pathInput.press('Enter');
+
+      await expect
+        .poll(async () =>
+          (await invokeLog(page)).some(({ cmd }) => cmd === 'open_sftp_connect_window')
+        )
+        .toBe(true);
+      await answerConnectWindow(page, 'sftp://admin@10.5.0.247/');
+
+      const failure = page.getByTestId('path-bar-failure');
+      await expect(failure).toBeVisible();
+      await expect(failure).toContainText('Failed to read directory: No such file');
+      await expect(pathInput).toHaveValue(typed);
+      await expect(page.locator('[data-testid="file-item"][data-name="Documents"]')).toBeVisible();
+      expect((await invokeLog(page)).some(({ cmd }) => cmd === 'plugin:dialog|message')).toBe(
+        false
+      );
+    });
+
+    test('a connect window that fails to open puts the typed address back with its error', async ({
+      page,
+    }) => {
+      const typed = 'sftp://10.5.0.247';
+      await page.evaluate(() => {
+        (window as SftpTestWindow).__CONNECT_WINDOW_ERROR__ =
+          'Failed to create SFTP connect window: test';
+      });
+      const pathInput = page.locator('[data-testid="path-input"]');
+      await pathInput.fill(typed);
+      await pathInput.press('Enter');
+
+      const failure = page.getByTestId('path-bar-failure');
+      await expect(failure).toBeVisible();
+      await expect(failure).toContainText('Failed to create SFTP connect window: test');
+      await expect(pathInput).toHaveValue(typed);
+    });
+
+    test('a sign-in another window asked for does not move this window', async ({ page }) => {
+      const pathInput = page.locator('[data-testid="path-input"]');
+      await expect(pathInput).toHaveValue(MOCK_HOME_DIR);
+      const before = (await invokeLog(page)).filter(({ cmd }) => cmd === 'get_sftp_servers').length;
+
+      await page.evaluate(() => {
+        const w = window as SftpTestWindow;
+        return w.__TAURI_INTERNALS__.invoke('plugin:event|emit', {
+          event: 'sftp-connect:success',
+        });
+      });
+
+      await expect
+        .poll(
+          async () => (await invokeLog(page)).filter(({ cmd }) => cmd === 'get_sftp_servers').length
+        )
+        .toBeGreaterThan(before);
+      await expect(pathInput).toHaveValue(MOCK_HOME_DIR);
+    });
+
+    test('Add SFTP Server opens the server it connected to in this window', async ({ page }) => {
+      await page.getByRole('button', { name: 'Add SFTP Server...' }).click();
+      await expect
+        .poll(async () =>
+          (await invokeLog(page)).some(({ cmd }) => cmd === 'open_sftp_connect_window')
+        )
+        .toBe(true);
+      await answerConnectWindow(page, 'sftp://admin@10.5.0.247/');
+
+      await expect(page.locator('[data-testid="file-item"][data-name="report.txt"]')).toBeVisible();
+      await expect(page.locator('[data-testid="path-input"]')).toHaveValue(
+        'sftp://admin@10.5.0.247:22/'
+      );
     });
 
     test('a file address opens its folder as the listing names it, with the file selected', async ({
@@ -451,6 +616,48 @@ test.describe('Path bar', () => {
       await expect(selected).toHaveAttribute('data-name', 'report.txt');
     });
   });
+});
+
+test('a folder opened while the start folder waits for a sign-in loads once the window closes', async ({
+  page,
+}) => {
+  // One script, so the wrapper sees the base mock whatever order Playwright runs scripts in.
+  // No server is saved for 10.5.0.247, and the connect window answers when the test says.
+  await page.addInitScript(`
+    ${getTauriMockScript()}
+    (function() {
+      const baseInvoke = window.__TAURI_INTERNALS__.invoke;
+      window.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
+        if (cmd === 'open_sftp_connect_window') {
+          void baseInvoke(cmd, args);
+          return new Promise((resolve) => {
+            window.__ANSWER_CONNECT_WINDOW__ = resolve;
+          });
+        }
+        if (cmd === 'read_directory' && String(args?.path ?? '').startsWith('sftp://10.5.0.247')) {
+          throw '[SFTP_NO_CREDENTIALS] No credentials stored for server: 10.5.0.247:22';
+        }
+        return baseInvoke(cmd, args);
+      };
+    })();
+  `);
+  await page.goto(`/?path=${encodeURIComponent('sftp://10.5.0.247/')}`);
+  type AnsweringWindow = Window & { __ANSWER_CONNECT_WINDOW__?: (address: null) => void };
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => typeof (window as AnsweringWindow).__ANSWER_CONNECT_WINDOW__ === 'function'
+      )
+    )
+    .toBe(true);
+
+  const pathInput = page.locator('[data-testid="path-input"]');
+  await pathInput.fill(MOCK_DOWNLOADS_DIR);
+  await pathInput.press('Enter');
+  await page.evaluate(() => (window as AnsweringWindow).__ANSWER_CONNECT_WINDOW__?.(null));
+
+  await expect(page.locator('[data-testid="file-item"][data-name="sample.pdf"]')).toBeVisible();
+  await expect(pathInput).toHaveValue(MOCK_DOWNLOADS_DIR);
 });
 
 test.describe('Path bar: an address that cannot be opened', () => {

@@ -300,12 +300,7 @@ export interface SmbServerInfo {
 
 export interface SmbConnectInitPayload {
   initialHostname?: string | null;
-  targetPath?: string | null;
-}
-
-export interface SmbConnectSuccessPayload {
-  hostname: string;
-  targetPath?: string | null;
+  requestId: number;
 }
 
 // SFTP Server Types
@@ -327,14 +322,7 @@ export interface SftpConnectInitPayload {
   initialHostname?: string | null;
   initialPort?: number | null;
   initialUsername?: string | null;
-  targetPath?: string | null;
-}
-
-export interface SftpConnectSuccessPayload {
-  hostname: string;
-  port: number;
-  username: string;
-  targetPath?: string | null;
+  requestId: number;
 }
 
 // Clipboard Types

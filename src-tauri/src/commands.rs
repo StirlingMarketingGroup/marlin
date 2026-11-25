@@ -17,7 +17,7 @@ use std::io::{ErrorKind, Read, Seek, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command as OsCommand;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{command, AppHandle, Emitter, Manager};
@@ -139,7 +139,6 @@ pub struct DirectoryListingResponse {
 }
 
 /// Generic queue for window payloads that handles the ready/pending pattern.
-/// Replaces the duplicated queue_*_payload and try_emit_pending_*_payload functions.
 struct WindowPayloadQueue<T: Clone + Serialize> {
     ready: AtomicBool,
     pending: Mutex<Option<T>>,
@@ -214,6 +213,83 @@ impl<T: Clone + Serialize> WindowPayloadQueue<T> {
     }
 }
 
+/// The sign-in request a connect window shows, and the caller waiting for it. A request ends
+/// once: with the address the user connected to, or with nothing when the window closes or a
+/// newer request takes the window. Its ID goes to the window with the request and comes back
+/// with the address, so a late answer to a replaced request cannot end the newer one.
+struct ConnectWindowRequest {
+    next_id: AtomicU64,
+    current: Mutex<Option<(u64, tokio::sync::oneshot::Sender<String>)>>,
+}
+
+impl ConnectWindowRequest {
+    const fn new() -> Self {
+        Self {
+            next_id: AtomicU64::new(0),
+            current: Mutex::new(None),
+        }
+    }
+
+    /// Shows a new request in the connect window that `queue` feeds, built by `build` when it is
+    /// not open, and waits for the request to end.
+    async fn ask<T: Clone + Serialize>(
+        &'static self,
+        app: &AppHandle,
+        queue: &WindowPayloadQueue<T>,
+        build: impl FnOnce() -> Result<tauri::WebviewWindow, String>,
+        payload: impl FnOnce(u64) -> T,
+    ) -> Result<Option<String>, String> {
+        let (id, answer) = self.start();
+        if let Some(existing) = app.get_webview_window(queue.window_label) {
+            queue.queue(app, payload(id));
+            let _ = existing.show();
+            let _ = existing.set_focus();
+        } else {
+            queue.set_ready(false);
+            let window = build()?;
+            // Every close ends the request: a button, the system, or quitting.
+            window.on_window_event(move |event| {
+                if matches!(event, tauri::WindowEvent::Destroyed) {
+                    self.close();
+                }
+            });
+            queue.queue(app, payload(id));
+        }
+        Ok(answer.await.ok())
+    }
+
+    fn start(&self) -> (u64, tokio::sync::oneshot::Receiver<String>) {
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let mut current = self
+            .current
+            .lock()
+            .expect("Failed to lock connect request");
+        // Dropping the old sender ends that request: its receiver gets `Err`.
+        *current = Some((id, sender));
+        (id, receiver)
+    }
+
+    fn connect(&self, id: u64, address: String) {
+        let mut current = self
+            .current
+            .lock()
+            .expect("Failed to lock connect request");
+        if let Some((_, sender)) = current.take_if(|(stored, _)| *stored == id) {
+            // The caller is gone when the send fails.
+            let _ = sender.send(address);
+        }
+    }
+
+    fn close(&self) {
+        // Dropping the sender ends the request with nothing.
+        self.current
+            .lock()
+            .expect("Failed to lock connect request")
+            .take();
+    }
+}
+
 static FOLDER_SIZE_QUEUE: Lazy<WindowPayloadQueue<FolderSizeInitPayload>> =
     Lazy::new(|| WindowPayloadQueue::new(FOLDER_SIZE_WINDOW_LABEL, FOLDER_SIZE_INIT_EVENT));
 static ARCHIVE_PROGRESS_QUEUE: Lazy<WindowPayloadQueue<ArchiveProgressPayload>> =
@@ -232,6 +308,8 @@ static SMB_CONNECT_QUEUE: Lazy<WindowPayloadQueue<SmbConnectInitPayload>> =
     Lazy::new(|| WindowPayloadQueue::new(SMB_CONNECT_WINDOW_LABEL, SMB_CONNECT_INIT_EVENT));
 static SFTP_CONNECT_QUEUE: Lazy<WindowPayloadQueue<SftpConnectInitPayload>> =
     Lazy::new(|| WindowPayloadQueue::new(SFTP_CONNECT_WINDOW_LABEL, SFTP_CONNECT_INIT_EVENT));
+static SMB_CONNECT_REQUEST: ConnectWindowRequest = ConnectWindowRequest::new();
+static SFTP_CONNECT_REQUEST: ConnectWindowRequest = ConnectWindowRequest::new();
 static CONFLICT_QUEUE: Lazy<WindowPayloadQueue<ConflictPayload>> =
     Lazy::new(|| WindowPayloadQueue::new(CONFLICT_WINDOW_LABEL, CONFLICT_INIT_EVENT));
 static CONFLICT_SENDER: Lazy<
@@ -599,7 +677,7 @@ struct ClipboardProgressUpdatePayload {
 #[serde(rename_all = "camelCase")]
 struct SmbConnectInitPayload {
     initial_hostname: Option<String>,
-    target_path: Option<String>,
+    request_id: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -608,7 +686,7 @@ struct SftpConnectInitPayload {
     initial_hostname: Option<String>,
     initial_port: Option<u16>,
     initial_username: Option<String>,
-    target_path: Option<String>,
+    request_id: u64,
 }
 
 // --- Conflict Resolution Types ---
@@ -6517,46 +6595,43 @@ fn configure_modal_utility_window<'a>(
     }
 }
 
+/// Opens the SMB connect window and waits for the user. `Some(address)` when they connected,
+/// `None` when the window closed without a connection or another request took it.
 #[command]
-pub fn open_smb_connect_window(
+pub async fn open_smb_connect_window(
     app: AppHandle,
     initial_hostname: Option<String>,
-    target_path: Option<String>,
-) -> Result<(), String> {
-    let payload = SmbConnectInitPayload {
-        initial_hostname,
-        target_path,
+) -> Result<Option<String>, String> {
+    let build = || {
+        let url = tauri::WebviewUrl::App("index.html?view=smb-connect".into());
+        let builder = configure_modal_utility_window(
+            &app,
+            tauri::WebviewWindowBuilder::new(&app, SMB_CONNECT_WINDOW_LABEL, url),
+        )
+        .title("Add Network Share")
+        .inner_size(460.0, 520.0);
+
+        #[cfg(target_os = "macos")]
+        let builder = builder
+            .title_bar_style(tauri::TitleBarStyle::Overlay)
+            .hidden_title(true)
+            .traffic_light_position(tauri::LogicalPosition::new(14.0, 14.0));
+
+        builder
+            .build()
+            .map_err(|e| format!("Failed to create SMB connect window: {}", e))
     };
-
-    if let Some(existing) = app.get_webview_window(SMB_CONNECT_WINDOW_LABEL) {
-        SMB_CONNECT_QUEUE.queue(&app, payload);
-        let _ = existing.show();
-        let _ = existing.set_focus();
-        return Ok(());
-    }
-
-    let url = tauri::WebviewUrl::App("index.html?view=smb-connect".into());
-    let builder = configure_modal_utility_window(
-        &app,
-        tauri::WebviewWindowBuilder::new(&app, SMB_CONNECT_WINDOW_LABEL, url),
-    )
-    .title("Add Network Share")
-    .inner_size(460.0, 520.0);
-
-    #[cfg(target_os = "macos")]
-    let builder = builder
-        .title_bar_style(tauri::TitleBarStyle::Overlay)
-        .hidden_title(true)
-        .traffic_light_position(tauri::LogicalPosition::new(14.0, 14.0));
-
-    SMB_CONNECT_QUEUE.set_ready(false);
-
-    builder
-        .build()
-        .map_err(|e| format!("Failed to create SMB connect window: {}", e))?;
-
-    SMB_CONNECT_QUEUE.queue(&app, payload);
-    Ok(())
+    SMB_CONNECT_REQUEST
+        .ask(
+            &app,
+            &SMB_CONNECT_QUEUE,
+            build,
+            |request_id| SmbConnectInitPayload {
+                initial_hostname,
+                request_id,
+            },
+        )
+        .await
 }
 
 #[command]
@@ -6572,10 +6647,26 @@ pub fn hide_smb_connect_window(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Bring the SMB connect window to the front, for a read that waits on its request.
+#[command]
+pub fn show_smb_connect_window(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(SMB_CONNECT_WINDOW_LABEL) {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+    Ok(())
+}
+
 #[command]
 pub fn smb_connect_window_ready(app: AppHandle) -> Result<(), String> {
     SMB_CONNECT_QUEUE.set_ready(true);
     SMB_CONNECT_QUEUE.try_emit(&app);
+    Ok(())
+}
+
+#[command]
+pub fn smb_connect_window_connected(request_id: u64, address: String) -> Result<(), String> {
+    SMB_CONNECT_REQUEST.connect(request_id, address);
     Ok(())
 }
 
@@ -7946,51 +8037,47 @@ pub async fn download_sftp_file(path: String) -> Result<String, String> {
         .map(|p| p.to_string_lossy().to_string())
 }
 
-/// Open the SFTP connect window
+/// Opens the SFTP connect window and waits for the user. `Some(address)` when they connected,
+/// `None` when the window closed without a connection or another request took it.
 #[command]
-pub fn open_sftp_connect_window(
+pub async fn open_sftp_connect_window(
     app: AppHandle,
     initial_hostname: Option<String>,
     initial_port: Option<u16>,
     initial_username: Option<String>,
-    target_path: Option<String>,
-) -> Result<(), String> {
-    let payload = SftpConnectInitPayload {
-        initial_hostname,
-        initial_port,
-        initial_username,
-        target_path,
+) -> Result<Option<String>, String> {
+    let build = || {
+        let url = tauri::WebviewUrl::App("index.html?view=sftp-connect".into());
+        let builder = configure_modal_utility_window(
+            &app,
+            tauri::WebviewWindowBuilder::new(&app, SFTP_CONNECT_WINDOW_LABEL, url),
+        )
+        .title("Add SFTP Server")
+        .inner_size(460.0, 600.0);
+
+        #[cfg(target_os = "macos")]
+        let builder = builder
+            .title_bar_style(tauri::TitleBarStyle::Overlay)
+            .hidden_title(true)
+            .traffic_light_position(tauri::LogicalPosition::new(14.0, 14.0));
+
+        builder
+            .build()
+            .map_err(|e| format!("Failed to create SFTP connect window: {}", e))
     };
-
-    if let Some(existing) = app.get_webview_window(SFTP_CONNECT_WINDOW_LABEL) {
-        SFTP_CONNECT_QUEUE.queue(&app, payload);
-        let _ = existing.show();
-        let _ = existing.set_focus();
-        return Ok(());
-    }
-
-    let url = tauri::WebviewUrl::App("index.html?view=sftp-connect".into());
-    let builder = configure_modal_utility_window(
-        &app,
-        tauri::WebviewWindowBuilder::new(&app, SFTP_CONNECT_WINDOW_LABEL, url),
-    )
-    .title("Add SFTP Server")
-    .inner_size(460.0, 600.0);
-
-    #[cfg(target_os = "macos")]
-    let builder = builder
-        .title_bar_style(tauri::TitleBarStyle::Overlay)
-        .hidden_title(true)
-        .traffic_light_position(tauri::LogicalPosition::new(14.0, 14.0));
-
-    SFTP_CONNECT_QUEUE.set_ready(false);
-
-    builder
-        .build()
-        .map_err(|e| format!("Failed to create SFTP connect window: {}", e))?;
-
-    SFTP_CONNECT_QUEUE.queue(&app, payload);
-    Ok(())
+    SFTP_CONNECT_REQUEST
+        .ask(
+            &app,
+            &SFTP_CONNECT_QUEUE,
+            build,
+            |request_id| SftpConnectInitPayload {
+                initial_hostname,
+                initial_port,
+                initial_username,
+                request_id,
+            },
+        )
+        .await
 }
 
 /// Close the SFTP connect window
@@ -8007,11 +8094,27 @@ pub fn hide_sftp_connect_window(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Bring the SFTP connect window to the front, for a read that waits on its request.
+#[command]
+pub fn show_sftp_connect_window(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(SFTP_CONNECT_WINDOW_LABEL) {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+    Ok(())
+}
+
 /// Mark SFTP connect window as ready
 #[command]
 pub fn sftp_connect_window_ready(app: AppHandle) -> Result<(), String> {
     SFTP_CONNECT_QUEUE.set_ready(true);
     SFTP_CONNECT_QUEUE.try_emit(&app);
+    Ok(())
+}
+
+#[command]
+pub fn sftp_connect_window_connected(request_id: u64, address: String) -> Result<(), String> {
+    SFTP_CONNECT_REQUEST.connect(request_id, address);
     Ok(())
 }
 
@@ -8853,5 +8956,59 @@ mod trash_tests {
         assert!(file.exists());
 
         mount.unmount().await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod connect_window_tests {
+    use super::ConnectWindowRequest;
+    use tokio::sync::oneshot::error::TryRecvError;
+
+    #[tokio::test]
+    async fn a_newer_request_ends_the_older_one_with_nothing() {
+        let requests = ConnectWindowRequest::new();
+        let (_first_id, first) = requests.start();
+        let (second_id, second) = requests.start();
+
+        assert!(first.await.is_err());
+        requests.connect(second_id, "sftp://u@h/".to_string());
+        assert_eq!(second.await.unwrap(), "sftp://u@h/");
+    }
+
+    #[tokio::test]
+    async fn a_late_answer_to_a_replaced_request_does_not_end_the_newer_one() {
+        let requests = ConnectWindowRequest::new();
+        let (first_id, _first) = requests.start();
+        let (second_id, mut second) = requests.start();
+
+        requests.connect(first_id, "sftp://old/".to_string());
+        assert!(matches!(second.try_recv(), Err(TryRecvError::Empty)));
+
+        requests.connect(second_id, "sftp://u@h/".to_string());
+        assert_eq!(second.await.unwrap(), "sftp://u@h/");
+    }
+
+    #[tokio::test]
+    async fn close_ends_the_current_request_with_nothing() {
+        let requests = ConnectWindowRequest::new();
+        let (_id, receiver) = requests.start();
+
+        requests.close();
+
+        assert!(receiver.await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_request_ends_once() {
+        let requests = ConnectWindowRequest::new();
+        let (id, receiver) = requests.start();
+        requests.connect(id, "smb://server/".to_string());
+        requests.close();
+        assert_eq!(receiver.await.unwrap(), "smb://server/");
+
+        let (id, mut receiver) = requests.start();
+        requests.close();
+        requests.connect(id, "smb://server/later".to_string());
+        assert!(matches!(receiver.try_recv(), Err(TryRecvError::Closed)));
     }
 }

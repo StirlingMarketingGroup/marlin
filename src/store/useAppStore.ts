@@ -33,6 +33,7 @@ import { useUndoStore, pushUndoAndShowToast, undoFromToast } from './useUndoStor
 import { parseGoogleDriveUrl } from '@/utils/googleDriveUrl';
 import { buildArchiveUri, parseArchiveUri } from '@/utils/archiveUri';
 import { withGoogleSignInCheck } from '@/utils/googleSignIn';
+import { withServerSignInCheck, type ConnectWindow } from '@/utils/serverSignIn';
 import { withSftpHostKeyCheck } from '@/utils/sftpHostKey';
 import { DEFAULT_THEME_IDS } from '@/themes';
 
@@ -232,8 +233,6 @@ const isPathInsideRepo = (path: string, repoRoot: string): boolean => {
 type FolderRead =
   | { outcome: 'listed' }
   | { outcome: 'failed'; reason: string }
-  // A sign-in window opens instead. The folder opens once the user signs in.
-  | { outcome: 'signInRequested' }
   // The user opened another folder while this one was read.
   | { outcome: 'superseded' }
   // The location is there and is a file: the backend answered `[ENOTDIR]`.
@@ -337,17 +336,9 @@ interface AppState {
 
   // SMB network shares
   smbServers: SmbServerInfo[];
-  // Pending credential request (when navigating to an SMB path without stored credentials)
-  pendingSmbCredentialRequest: { hostname: string; targetPath: string } | null;
 
   // SFTP servers
   sftpServers: SftpServerInfo[];
-  pendingSftpCredentialRequest: {
-    hostname: string;
-    port: number;
-    username?: string;
-    targetPath: string;
-  } | null;
 
   // Clipboard state
   clipboardMode: 'copy' | 'cut' | null;
@@ -449,9 +440,6 @@ interface AppState {
     domain?: string
   ) => Promise<SmbServerInfo>;
   removeSmbServer: (hostname: string) => Promise<void>;
-  setPendingSmbCredentialRequest: (
-    request: { hostname: string; targetPath: string } | null
-  ) => void;
   // SFTP servers
   loadSftpServers: () => Promise<void>;
   addSftpServer: (
@@ -463,9 +451,6 @@ interface AppState {
     keyPath: string | null
   ) => Promise<SftpServerInfo>;
   removeSftpServer: (hostname: string, port: number) => Promise<void>;
-  setPendingSftpCredentialRequest: (
-    request: { hostname: string; port: number; username?: string; targetPath: string } | null
-  ) => void;
   // Clipboard actions
   copySelectedFiles: () => Promise<void>;
   cutSelectedFiles: () => Promise<void>;
@@ -694,9 +679,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   googleAccounts: [],
   googleAccountsError: undefined,
   smbServers: [],
-  pendingSmbCredentialRequest: null,
   sftpServers: [],
-  pendingSftpCredentialRequest: null,
 
   // Clipboard initial state
   clipboardMode: null,
@@ -1111,19 +1094,56 @@ export const useAppStore = create<AppState>((set, get) => ({
   refreshCurrentDirectory: async () => {
     const { currentPath, setLoading, setError } = get();
     // A username can contain `@`. The host starts after the last one, as in `parse_authority` in the `marlin-sftp` crate.
-    const sftpMatch = currentPath.match(/^sftp:\/\/(?:([^/]+)@)?([^/:@]+)(?::(\d+))?/);
+    // A scheme matches in any letter case, as the backend reads it.
+    const sftpMatch = currentPath.match(/^sftp:\/\/(?:([^/]+)@)?([^/:@]+)(?::(\d+))?/i);
     const sftpPort = sftpMatch?.[3] ? parseInt(sftpMatch[3], 10) : 22;
+    const smbHost = currentPath.match(/^smb:\/\/([^/]+)/i)?.[1];
     const gdriveEmail = currentPath.match(/^gdrive:\/\/([^/]+)/)?.[1];
     try {
       setLoading(true);
       setError(undefined);
       const readDirectory = () =>
         invoke<DirectoryListingResponse>('read_directory', { path: currentPath });
+      // A read the user left must not take or raise the connect window: it serves the folder
+      // they open now.
+      const connectWindow = (
+        openCommand: string,
+        showCommand: string,
+        args: Record<string, unknown>
+      ): ConnectWindow => ({
+        open: () =>
+          get().currentPath === currentPath
+            ? invoke<string | null>(openCommand, args)
+            : Promise.resolve(null),
+        show: () => (get().currentPath === currentPath ? invoke(showCommand) : Promise.resolve()),
+      });
+      // Nothing is read while the user signs in, so the folder on screen stays in view.
+      const waitingForSignIn = (waiting: boolean) => {
+        if (get().currentPath === currentPath) setLoading(!waiting);
+      };
       const listing = sftpMatch
-        ? await withSftpHostKeyCheck(sftpMatch[2], sftpPort, readDirectory)
-        : gdriveEmail
-          ? await withGoogleSignInCheck(gdriveEmail, get().addGoogleAccount, readDirectory)
-          : await readDirectory();
+        ? await withServerSignInCheck(
+            `sftp://${sftpMatch[2].toLowerCase()}:${sftpPort}`,
+            connectWindow('open_sftp_connect_window', 'show_sftp_connect_window', {
+              initialHostname: sftpMatch[2],
+              initialPort: sftpPort,
+              initialUsername: sftpMatch[1] || undefined,
+            }),
+            () => withSftpHostKeyCheck(sftpMatch[2], sftpPort, readDirectory),
+            waitingForSignIn
+          )
+        : smbHost
+          ? await withServerSignInCheck(
+              `smb://${smbHost.toLowerCase()}`,
+              connectWindow('open_smb_connect_window', 'show_smb_connect_window', {
+                initialHostname: smbHost,
+              }),
+              readDirectory,
+              waitingForSignIn
+            )
+          : gdriveEmail
+            ? await withGoogleSignInCheck(gdriveEmail, get().addGoogleAccount, readDirectory)
+            : await readDirectory();
 
       // The user opened another folder while this one was being read.
       if (get().currentPath !== currentPath) return { outcome: 'superseded' };
@@ -1150,6 +1170,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           pathHistory: updatedHistory,
           // A listing of the current folder ends any pending navigation.
           navigation: null,
+          loading: false,
         };
       });
 
@@ -1163,47 +1184,14 @@ export const useAppStore = create<AppState>((set, get) => ({
       const msg = err instanceof Error ? err.message : String(err);
       console.error('❌ refreshCurrentDirectory failed:', msg);
 
-      // The user opened another folder while this one was being read.
+      // The user opened another folder while this one was being read. That folder's load owns
+      // the loading state, so a superseded read leaves it alone.
       if (get().currentPath !== currentPath) return { outcome: 'superseded' };
+      setLoading(false);
       if (msg.startsWith('[ENOTDIR]')) return { outcome: 'notAFolder' };
-
-      // Check if this is an SMB "no credentials" error
-      if (msg.includes('[SMB_NO_CREDENTIALS]')) {
-        // Extract hostname from the current path (smb://hostname/...)
-        const smbMatch = currentPath.match(/^smb:\/\/([^/]+)/);
-        if (smbMatch) {
-          const hostname = smbMatch[1];
-          // Set pending credential request to trigger the dialog
-          set({
-            pendingSmbCredentialRequest: { hostname, targetPath: currentPath },
-            error: undefined, // Don't show error, we'll show the dialog instead
-          });
-          return { outcome: 'signInRequested' };
-        }
-      }
-
-      // Check if this is an SFTP "no credentials" error
-      if (msg.includes('[SFTP_NO_CREDENTIALS]')) {
-        if (sftpMatch) {
-          const username = sftpMatch[1] || undefined;
-          const hostname = sftpMatch[2];
-          set({
-            pendingSftpCredentialRequest: {
-              hostname,
-              port: sftpPort,
-              username,
-              targetPath: currentPath,
-            },
-            error: undefined,
-          });
-          return { outcome: 'signInRequested' };
-        }
-      }
 
       setError(msg);
       return { outcome: 'failed', reason: msg };
-    } finally {
-      setLoading(false);
     }
   },
 
@@ -2341,10 +2329,6 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
-  setPendingSmbCredentialRequest: (request) => {
-    set({ pendingSmbCredentialRequest: request });
-  },
-
   // SFTP servers
   loadSftpServers: async () => {
     try {
@@ -2396,10 +2380,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       console.error('Failed to remove SFTP server:', error);
       throw error;
     }
-  },
-
-  setPendingSftpCredentialRequest: (request) => {
-    set({ pendingSftpCredentialRequest: request });
   },
 
   // Clipboard actions

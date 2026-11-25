@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { emit, listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { CircleNotch, Terminal, CheckCircle, X } from 'phosphor-react';
-import type { SftpConnectInitPayload, SftpConnectSuccessPayload, SftpServerInfo } from '@/types';
+import type { SftpConnectInitPayload, SftpServerInfo } from '@/types';
 import { SFTP_CONNECT_INIT_EVENT, SFTP_CONNECT_SUCCESS_EVENT } from '@/utils/events';
 import { withSftpHostKeyCheck } from '@/utils/sftpHostKey';
 import { WINDOW_CONTENT_TOP_PADDING } from '@/windows/windowLayout';
@@ -12,9 +12,9 @@ export default function SftpConnectWindow() {
   const windowRef = getCurrentWindow();
   const hostnameInputRef = useRef<HTMLInputElement>(null);
   const usernameInputRef = useRef<HTMLInputElement>(null);
+  const requestIdRef = useRef<number | undefined>(undefined);
 
   const [initialHostname, setInitialHostname] = useState<string | undefined>();
-  const [targetPath, setTargetPath] = useState<string | undefined>();
 
   const [hostname, setHostname] = useState('');
   const [port, setPort] = useState(22);
@@ -26,7 +26,9 @@ export default function SftpConnectWindow() {
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | undefined>();
 
-  const hostnameLocked = useMemo(() => Boolean(initialHostname), [initialHostname]);
+  // The app asks for the server an address names. A sign-in to another host or port would leave
+  // that address without one, so the main window's read would fail again.
+  const serverLocked = useMemo(() => Boolean(initialHostname), [initialHostname]);
 
   useEffect(() => {
     let unlistenInit: (() => void) | undefined;
@@ -36,8 +38,8 @@ export default function SftpConnectWindow() {
       try {
         unlistenInit = await listen<SftpConnectInitPayload>(SFTP_CONNECT_INIT_EVENT, (event) => {
           const p = event.payload;
+          requestIdRef.current = p?.requestId;
           setInitialHostname(p?.initialHostname ?? undefined);
-          setTargetPath(p?.targetPath ?? undefined);
           setHostname(p?.initialHostname ?? '');
           setPort(p?.initialPort ?? 22);
           setUsername(p?.initialUsername ?? '');
@@ -94,13 +96,13 @@ export default function SftpConnectWindow() {
 
   useEffect(() => {
     window.setTimeout(() => {
-      if (hostnameLocked) {
+      if (serverLocked) {
         usernameInputRef.current?.focus();
       } else {
         hostnameInputRef.current?.focus();
       }
     }, 50);
-  }, [hostnameLocked, initialHostname]);
+  }, [serverLocked, initialHostname]);
 
   const closeWindow = useCallback(async () => {
     try {
@@ -132,6 +134,7 @@ export default function SftpConnectWindow() {
       return;
     }
 
+    const requestId = requestIdRef.current;
     setIsConnecting(true);
     try {
       const trimmedHostname = hostname.trim();
@@ -162,27 +165,27 @@ export default function SftpConnectWindow() {
         keyPath: effectiveKeyPath,
       });
 
+      // Every window's sidebar lists the saved server.
+      await emit(SFTP_CONNECT_SUCCESS_EVENT);
+      // A newer request took this window while the server was saved: the form is the new one's now.
+      if (requestIdRef.current !== requestId) return;
       const portSuffix = server.port === 22 ? '' : `:${server.port}`;
-      const payload: SftpConnectSuccessPayload = {
-        hostname: server.hostname,
-        port: server.port,
-        username: server.username,
-        targetPath: targetPath || `sftp://${server.username}@${server.hostname}${portSuffix}/`,
-      };
-
+      await invoke('sftp_connect_window_connected', {
+        requestId,
+        address: `sftp://${server.username}@${server.hostname}${portSuffix}/`,
+      });
       setConnected(true);
-      await emit(SFTP_CONNECT_SUCCESS_EVENT, payload);
-
       window.setTimeout(() => {
         void closeWindow();
       }, 450);
     } catch (err) {
+      if (requestIdRef.current !== requestId) return;
       const message = err instanceof Error ? err.message : String(err);
       // The tag tells the main window to open this form. Here the user is already in it.
       setError(message.replace(/^\[SFTP_NO_CREDENTIALS\] /, ''));
       setIsConnecting(false);
     }
-  }, [closeWindow, hostname, port, username, authMethod, password, keyPath, targetPath]);
+  }, [closeWindow, hostname, port, username, authMethod, password, keyPath]);
 
   const handleFormSubmit = useCallback(
     (e: FormEvent) => {
@@ -239,7 +242,7 @@ export default function SftpConnectWindow() {
                 onChange={(e) => setHostname(e.target.value)}
                 placeholder="host.example.com"
                 className="w-full px-3 py-2 text-sm bg-app-gray border border-app-border rounded-md focus:outline-none focus:ring-2 focus:ring-accent/50 focus:border-accent disabled:opacity-70"
-                disabled={isConnecting || hostnameLocked}
+                disabled={isConnecting || serverLocked}
                 autoComplete="off"
                 autoCorrect="off"
                 autoCapitalize="off"
@@ -257,7 +260,7 @@ export default function SftpConnectWindow() {
                 value={port}
                 onChange={(e) => setPort(parseInt(e.target.value, 10) || 22)}
                 className="w-full px-3 py-2 text-sm bg-app-gray border border-app-border rounded-md focus:outline-none focus:ring-2 focus:ring-accent/50 focus:border-accent disabled:opacity-70"
-                disabled={isConnecting}
+                disabled={isConnecting || serverLocked}
                 min={1}
                 max={65535}
                 data-tauri-drag-region={false}
