@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
@@ -225,5 +226,88 @@ test('a copied file pastes into a long folder', async () => {
         ((await row.getAttribute('class')) ?? '').includes('bg-accent-selected'),
       { timeout: 10_000, timeoutMsg: 'the pasted file never scrolled into view' }
     );
+  }
+});
+
+// Copies `name` from `from` and pastes it into `to`, which holds an item of the same name, picking Replace in the conflict window.
+async function pasteWithReplace(from: string, to: string, name: string): Promise<void> {
+  const { browser } = app;
+  await openFolder(browser, from);
+  await fileRow(browser, name).click();
+  await browser.keys([commandOrControl, 'c']);
+  await browser.waitUntil(
+    async () =>
+      isDeepStrictEqual(await runCommand(browser, 'clipboard_get_contents'), {
+        hasFiles: true,
+        hasImage: false,
+        filePaths: [path.join(from, name)],
+        isCut: false,
+      }),
+    { timeout: 10_000, timeoutMsg: 'the copy never reached the clipboard' }
+  );
+
+  await openFolder(browser, to);
+  await fileRow(browser, name).waitForExist({
+    timeout: 10_000,
+    timeoutMsg: 'the destination never showed',
+  });
+  await browser.keys([commandOrControl, 'v']);
+  await browser.waitUntil(
+    async () => (await browser.getWindowHandles()).includes('conflict-dialog'),
+    { timeout: 10_000, timeoutMsg: 'the conflict window never opened' }
+  );
+  await browser.switchWindow('conflict-dialog');
+  const replaceOption = browser.$('input[name="conflict-action"][value="replace"]');
+  await replaceOption.waitForExist({
+    timeout: 10_000,
+    timeoutMsg: 'the replace choice never showed',
+  });
+  await replaceOption.click();
+  await browser.$('//button[text()="Continue"]').click();
+  await browser.switchWindow('main');
+}
+
+test('a pasted file replaces the file of the same name when Replace is picked', async () => {
+  const from = path.join(app.files, 'replace-from');
+  const to = path.join(app.files, 'replace-to');
+  await fs.mkdir(from);
+  await fs.mkdir(to);
+  await fs.writeFile(path.join(from, 'notes.txt'), 'new\n');
+  await fs.writeFile(path.join(to, 'notes.txt'), 'old\n');
+
+  await pasteWithReplace(from, to, 'notes.txt');
+
+  await app.browser.waitUntil(
+    async () => (await fs.readFile(path.join(to, 'notes.txt'), 'utf8')) === 'new\n',
+    { timeout: 10_000, timeoutMsg: 'the paste never replaced the file' }
+  );
+  expect(await fs.readdir(to)).toEqual(['notes.txt']);
+  expect(await fs.readFile(path.join(from, 'notes.txt'), 'utf8')).toBe('new\n');
+});
+
+test('a Replace whose copy fails keeps the file it would replace', async () => {
+  const from = path.join(app.files, 'replace-fail-from');
+  const to = path.join(app.files, 'replace-fail-to');
+  await fs.mkdir(from);
+  await fs.mkdir(to);
+  await fs.writeFile(path.join(to, 'data'), 'old\n');
+  // A socket is not a file, a folder, or a link, so its copy always fails, for root too.
+  const socket = net.createServer();
+  await new Promise<void>((resolve, reject) => {
+    socket.once('error', reject);
+    socket.listen(path.join(from, 'data'), resolve);
+  });
+  try {
+    await pasteWithReplace(from, to, 'data');
+
+    await app.browser.waitUntil(
+      async () =>
+        (await app.browser.execute(() => document.body.innerText)).includes('could not be pasted'),
+      { timeout: 10_000, timeoutMsg: 'the failed paste never said so' }
+    );
+    expect(await fs.readFile(path.join(to, 'data'), 'utf8')).toBe('old\n');
+    expect(await fs.readdir(to)).toEqual(['data']);
+  } finally {
+    socket.close();
   }
 });
