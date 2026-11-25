@@ -5,7 +5,7 @@ use crate::VfsError;
 
 /// The provider's own id for one item.
 ///
-/// A provider should use an id that stays with the item when it is renamed or moved (Google Drive's file id does). The core then keeps the item's node and open handles across the rename. A provider that only has paths (SFTP) uses the path, and for it a rename that another client makes looks like one item removed and another added: the old node and any handle on it start failing with whatever the provider returns for the old path. For a rename this mount makes, see [`Provider::rename`].
+/// A provider should use an id that stays with the item when it is renamed or moved (Google Drive's file id does), and the core then keeps the item's node and open handles across the rename. A provider that only has paths (SFTP, SMB) uses the path, and once it can write it answers `true` to [`Provider::ids_are_paths`]. For such a provider, a rename that another client makes looks like one item removed and another added.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ItemId(pub String);
 
@@ -100,6 +100,11 @@ pub trait Provider: Send + Sync + 'static {
         false
     }
 
+    /// Whether an item's id is its path: `/` for the folder at the top, and the folder's id joined to the item's name with `/` for an item in it (`/{name}` in the top folder). A rename then changes the id of the item and of everything inside it, and a path that this mount removed or replaced can name another item later. A provider whose ids stay with their items, as Google Drive's do, leaves this at `false`. Only this mount's own changes depend on it, so a provider that cannot write can leave it too.
+    fn ids_are_paths(&self) -> bool {
+        false
+    }
+
     /// Makes an empty folder named `name` in `parent`, and returns it. The core has checked that its own listing of `parent` holds no such name. A remote that keeps one name per folder answers [`VfsError::Conflict`] when the name is taken.
     async fn create_folder(&self, parent: &ItemId, name: &str) -> Result<Item, VfsError> {
         let _ = (parent, name);
@@ -114,7 +119,7 @@ pub trait Provider: Send + Sync + 'static {
 
     /// Moves `id` out of the folder `from` into the folder `to`, names it `name`, and returns the item as the remote now has it. For a plain rename `from` and `to` are the same folder. An item that is no longer in `from` is [`VfsError::NotFound`] when the provider can tell. A move of a folder into itself, or into a folder inside it, is [`VfsError::NotSupported`].
     ///
-    /// The returned item keeps its id when the remote's ids allow it. When the id changed, the core moves the item's node and open handles to the new id.
+    /// The returned item keeps its id when the remote's ids allow it. A provider whose ids are paths ([`Self::ids_are_paths`]) returns the new path, and the core moves every node at or under the old path to the new one. Any other provider that returns a new id, as Google Drive does for a file moved between My Drive and a shared drive, changes that one item's id, and the core moves its node.
     ///
     /// When `replace` names an item, it is the item the mount shows under the name, and it is gone when the call succeeds: a remote that has a trash moves it there. On a remote that allows two items with one name, its remote name can differ from `name`. The provider swaps the two in one step when the remote can. When it cannot, it moves `id` first and removes `replace` second, so a call that fails halfway leaves both items and never leaves the name with none. A `replace` item that is no longer in `to` is [`VfsError::NotFound`] when the provider can tell, and a folder to replace that holds anything is [`VfsError::NotEmpty`]: in both cases nothing changes. With no `replace`, the call never removes or overwrites another item: a remote that keeps one name per folder answers [`VfsError::Conflict`] when the name is taken.
     async fn rename(
