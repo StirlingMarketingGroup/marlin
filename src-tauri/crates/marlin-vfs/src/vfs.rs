@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -149,8 +149,8 @@ enum Identity {
     /// An item the provider has. `place` is where this mount last showed it: `None` only for the root.
     Item { id: ItemId, place: Option<Place> },
 
-    /// An item this mount removed, or replaced by a rename. Calls on it get what the provider answers for the id, and its bytes never go anywhere.
-    Removed(ItemId),
+    /// An item this mount removed, or replaced by a rename. Its bytes never go anywhere. With an id, calls on it get what the provider answers for that id. On a provider whose ids are paths the path can name another item now, so the node keeps no id, and a call that would ask the provider is [`VfsError::StaleHandle`].
+    Removed(Option<ItemId>),
 
     /// A file that is only in the spool.
     New(Place),
@@ -160,11 +160,11 @@ enum Identity {
 }
 
 impl Identity {
-    /// The id the provider knows this node by. A file that is only in the spool has none.
+    /// The id the provider knows this node by. A file that is only in the spool has none, and so does an item this mount removed on a provider whose ids are paths.
     fn remote_id(&self) -> Option<&ItemId> {
         match self {
-            Identity::Item { id, .. } | Identity::Removed(id) => Some(id),
-            Identity::New(_) | Identity::Unnamed => None,
+            Identity::Item { id, .. } | Identity::Removed(Some(id)) => Some(id),
+            Identity::Removed(None) | Identity::New(_) | Identity::Unnamed => None,
         }
     }
 }
@@ -322,7 +322,8 @@ impl Listing {
 
 struct State {
     nodes: HashMap<NodeId, Node>,
-    by_item: HashMap<ItemId, NodeId>,
+    /// Ordered, so the ids at and under a path are one range ([`held_under`]).
+    by_item: BTreeMap<ItemId, NodeId>,
     next_node: u64,
     handles: HashMap<HandleId, Opened>,
     next_handle: u64,
@@ -332,6 +333,9 @@ struct State {
 
     /// When this mount last changed what a folder holds, or tried to. A listing the core asked for at or before that time, and that answers after it, is not kept. Entries older than the call time limit are dropped: no listing still in flight can be older.
     changed: HashMap<ItemId, Instant>,
+
+    /// When this mount last dropped the listings at and under a path, on a provider whose ids are paths ([`forget_paths`]). A listing the core asked for at or before that time, and that answers after it, is not kept: its folder's path may name another folder now, or none.
+    paths_changed: Option<Instant>,
 
     spools: HashMap<SpoolId, SpoolFile>,
 
@@ -351,6 +355,10 @@ const PIECE: u32 = 4 * 1024 * 1024;
 /// The mount core. With a spool it can create, write, cut, rename, and remove a file locally, and [`Vfs::run_uploads`] sends those files. Adapters share one value across tasks. The state lock is never held across a provider call. Three spool file calls run under it: deleting a spool file, and reading its length and modified time for its record and writing the record. `take_writes` also reads the spool folder under it, before any other call can run. A separate lock, `changes`, is held across the provider call of a name change, and across the confirm of an upload.
 pub struct Vfs {
     provider: Arc<dyn Provider>,
+
+    /// The provider's ids are paths ([`Provider::ids_are_paths`]). Read once, when the mount starts.
+    paths: bool,
+
     rules: NameRules,
     options: Options,
     permits: Semaphore,
@@ -391,8 +399,9 @@ impl Vfs {
     /// Starts a mount on `provider` using these name rules and limits. It takes no writes until [`Self::take_writes`].
     pub fn new(provider: Arc<dyn Provider>, rules: NameRules, options: Options) -> Self {
         let root = provider.root();
+        let paths = provider.ids_are_paths();
         let mut nodes = HashMap::new();
-        let mut by_item = HashMap::new();
+        let mut by_item = BTreeMap::new();
         nodes.insert(
             Self::ROOT,
             Node {
@@ -410,6 +419,7 @@ impl Vfs {
         by_item.insert(root, Self::ROOT);
         Self {
             provider,
+            paths,
             rules,
             permits: Semaphore::new(options.max_calls),
             options,
@@ -424,6 +434,7 @@ impl Vfs {
                 space: None,
                 generation: 0,
                 changed: HashMap::new(),
+                paths_changed: None,
                 spools: HashMap::new(),
                 new_files: HashMap::new(),
                 spool_used: 0,
@@ -491,16 +502,23 @@ impl Vfs {
 
     /// Finds `name` in `parent` and adds one lookup to the item's node.
     pub async fn lookup(&self, parent: NodeId, name: &str) -> Result<Entry, VfsError> {
-        let parent_item = self.folder_of(parent)?;
-        let listing = self.listing(&parent_item).await?;
-        let mut state = self.state.lock().unwrap();
-        // The holder and the lookup share this lock, so a remove cannot drop a new file between them.
-        let Some(holder) = resolve(&state, &self.rules, &parent_item, &listing, name) else {
-            return Err(VfsError::NotFound);
-        };
-        let entry = entry_for(&mut state, &self.rules, &parent_item, &listing, holder);
-        state.nodes.get_mut(&entry.node).unwrap().lookups += 1;
-        Ok(entry)
+        loop {
+            let parent_item = self.folder_of(parent)?;
+            let listing = self.listing(&parent_item).await;
+            let mut state = self.state.lock().unwrap();
+            // A rename on a provider whose ids are paths can move the folder while its listing is asked for. The answer, or the error, is about the old path.
+            if folder_id(&state, parent)? != parent_item {
+                continue;
+            }
+            let listing = listing?;
+            // The holder and the lookup share this lock, so a remove cannot drop a new file between them.
+            let Some(holder) = resolve(&state, &self.rules, &parent_item, &listing, name) else {
+                return Err(VfsError::NotFound);
+            };
+            let entry = entry_for(&mut state, &self.rules, &parent_item, &listing, holder);
+            state.nodes.get_mut(&entry.node).unwrap().lookups += 1;
+            return Ok(entry);
+        }
     }
 
     /// Gives `lookups` lookups back. The node goes away when nothing holds it: no lookup, no open handle, and no spool file it owns as an item or a new file.
@@ -515,38 +533,45 @@ impl Vfs {
 
     /// This node's attributes. A spooled file answers from the spool. Anything else is the answer the node holds while it is fresh, or a new one from the provider.
     pub async fn attributes(&self, node: NodeId) -> Result<Attributes, VfsError> {
-        let (item, at, generation) = {
-            let state = self.state.lock().unwrap();
-            let Some(found) = state.nodes.get(&node) else {
-                return Err(VfsError::StaleHandle);
-            };
-            if let Some(attributes) = spool_attributes(&state, node) {
-                return Ok(attributes);
-            }
-            if let Some((held, attributes)) = found.attributes.clone() {
-                if held.is_fresh(state.generation, self.options.attributes_ttl) {
+        loop {
+            let (item, at, generation) = {
+                let state = self.state.lock().unwrap();
+                let Some(found) = state.nodes.get(&node) else {
+                    return Err(VfsError::StaleHandle);
+                };
+                if let Some(attributes) = spool_attributes(&state, node) {
                     return Ok(attributes);
                 }
-            }
-            let Some(item) = found.identity.remote_id() else {
-                return Err(VfsError::StaleHandle);
+                if let Some((held, attributes)) = found.attributes.clone() {
+                    if held.is_fresh(state.generation, self.options.attributes_ttl) {
+                        return Ok(attributes);
+                    }
+                }
+                let Some(item) = found.identity.remote_id() else {
+                    return Err(VfsError::StaleHandle);
+                };
+                (item.clone(), Instant::now(), state.generation)
             };
-            (item.clone(), Instant::now(), state.generation)
-        };
-        let attributes = self.call(self.provider.item(&item)).await?.attributes;
-        let asked = Asked {
-            at,
-            generation,
-            answered: Instant::now(),
-        };
-        let mut state = self.state.lock().unwrap();
-        if let Some(spooled) = spool_attributes(&state, node) {
-            return Ok(spooled);
+            let answer = self.call(self.provider.item(&item)).await;
+            let asked = Asked {
+                at,
+                generation,
+                answered: Instant::now(),
+            };
+            let mut state = self.state.lock().unwrap();
+            if let Some(spooled) = spool_attributes(&state, node) {
+                return Ok(spooled);
+            }
+            if !state.nodes.contains_key(&node) {
+                return answer.map(|answer| answer.attributes);
+            }
+            // The node's path moved while this call waited, so the answer, or the error, is about the old path.
+            if !holds_id(&state, node, &item) {
+                continue;
+            }
+            let found = state.nodes.get_mut(&node).unwrap();
+            return Ok(remember(&mut found.attributes, asked, answer?.attributes));
         }
-        let Some(found) = state.nodes.get_mut(&node) else {
-            return Ok(attributes);
-        };
-        Ok(remember(&mut found.attributes, asked, attributes))
     }
 
     /// Opens a folder. The handle holds no listing until [`Self::rewind_folder`] takes one: an adapter calls it for every read from offset 0. The folder keeps a handle reference until `release`. A file is [`VfsError::NotAFolder`].
@@ -570,29 +595,36 @@ impl Vfs {
 
     /// Takes the folder's listing into an open folder handle and freezes it there, as a read from offset 0 asks: the first read and every rewind. Each item in the new listing gains a handle reference, and each item in the one it replaces loses one. New files are part of the frozen copy. An unknown handle, or one that is not a folder, is [`VfsError::StaleHandle`].
     pub async fn rewind_folder(&self, handle: HandleId) -> Result<(), VfsError> {
-        let node = match self.state.lock().unwrap().handles.get(&handle) {
-            Some(Opened::Folder { node, .. }) => *node,
-            _ => return Err(VfsError::StaleHandle),
-        };
-        let item = self.folder_of(node)?;
-        let listing = self.listing(&item).await?;
-        let mut state = self.state.lock().unwrap();
-        // The handle can be released while the listing is fetched.
-        if !matches!(state.handles.get(&handle), Some(Opened::Folder { .. })) {
-            return Err(VfsError::StaleHandle);
+        loop {
+            let node = match self.state.lock().unwrap().handles.get(&handle) {
+                Some(Opened::Folder { node, .. }) => *node,
+                _ => return Err(VfsError::StaleHandle),
+            };
+            let item = self.folder_of(node)?;
+            let listing = self.listing(&item).await;
+            let mut state = self.state.lock().unwrap();
+            // The handle can be released while the listing is fetched.
+            if !matches!(state.handles.get(&handle), Some(Opened::Folder { .. })) {
+                return Err(VfsError::StaleHandle);
+            }
+            // A rename on a provider whose ids are paths can move the folder while its listing is asked for. The answer, or the error, is about the old path.
+            if folder_id(&state, node)? != item {
+                continue;
+            }
+            let listing = listing?;
+            let entries = folder_entries(&mut state, &self.rules, &item, &listing);
+            let Some(Opened::Folder { entries: held, .. }) = state.handles.get_mut(&handle) else {
+                unreachable!("the handle was checked under this lock");
+            };
+            // The new references come first, so an item in both listings keeps its node.
+            let old = std::mem::replace(held, entries);
+            drop_handle_refs(
+                &mut state,
+                &self.room,
+                old.into_iter().map(|entry| entry.node),
+            );
+            return Ok(());
         }
-        let entries = folder_entries(&mut state, &self.rules, &item, &listing);
-        let Some(Opened::Folder { entries: held, .. }) = state.handles.get_mut(&handle) else {
-            unreachable!("the handle was checked under this lock");
-        };
-        // The new references come first, so an item in both listings keeps its node.
-        let old = std::mem::replace(held, entries);
-        drop_handle_refs(
-            &mut state,
-            &self.room,
-            old.into_iter().map(|entry| entry.node),
-        );
-        Ok(())
     }
 
     /// Returns one stored page of a folder handle. Past the end is empty, and these entries are not lookups.
@@ -678,7 +710,16 @@ impl Vfs {
                     }
                 }
                 ReadSource::Remote(id) => {
-                    return self.call(self.provider.read(&id, offset, length)).await
+                    let read = self.call(self.provider.read(&id, offset, length)).await;
+                    let state = self.state.lock().unwrap();
+                    // The node's path moved while this read waited, so the answer, or the error, is about the old path. The next pass reads where the node's bytes are now.
+                    let moved = match state.handles.get(&handle) {
+                        Some(Opened::File { node, .. }) => !holds_id(&state, *node, &id),
+                        _ => false,
+                    };
+                    if !moved {
+                        return read;
+                    }
                 }
             }
         }
@@ -982,6 +1023,8 @@ impl Vfs {
             remote.retain(|item| item.id != created.id);
             remote.push(created.clone());
         });
+        // A folder this mount just made is empty, and a listing or a node under its path belonged to a folder another client had there.
+        self.take_path(&mut state, &created.id);
         let node = node_for(&mut state, created.id);
         set_place(&mut state, node, &parent_item, remote_name);
         let found_node = state.nodes.get_mut(&node).unwrap();
@@ -1056,11 +1099,11 @@ impl Vfs {
         change_listing(&mut state, &self.rules, &parent_item, |remote| {
             remote.retain(|listed| listed.id != item.id)
         });
-        mark_removed(&mut state, &self.room, item.id);
+        self.mark_removed(&mut state, item.id);
         Ok(())
     }
 
-    /// Renames `name` in `parent` to `new_name` in `new_parent`. The names are the names the OS sent, and the provider gets `new_name` unescaped: moving a duplicate shown as `a (2).txt` names the remote item `a (2).txt`. `if_exists` says what to do when `new_name` is taken. A rename of an item onto a name that another item in the destination also holds on the remote is [`VfsError::Conflict`]. A new file renamed over an item keeps its own node and bytes and takes that item's id. A new file renamed over an item the provider marks read-only is [`VfsError::AccessDenied`], and nothing is spooled for that item. Replacing a folder that holds a new file is [`VfsError::NotEmpty`].
+    /// Renames `name` in `parent` to `new_name` in `new_parent`. The names are the names the OS sent, and the provider gets `new_name` unescaped: moving a duplicate shown as `a (2).txt` names the remote item `a (2).txt`. `if_exists` says what to do when `new_name` is taken. A rename of an item onto a name that another item in the destination also holds on the remote is [`VfsError::Conflict`]. A new file renamed over an item keeps its own node and bytes and takes that item's id. A new file renamed over an item the provider marks read-only is [`VfsError::AccessDenied`], and nothing is spooled for that item. Replacing a folder that holds a new file is [`VfsError::NotEmpty`]. On a provider whose ids are paths, a rename moves every node, new file, and place at or under the old path to the new one.
     pub async fn rename(
         &self,
         parent: NodeId,
@@ -1161,33 +1204,14 @@ impl Vfs {
             });
             remote.push(moved.clone());
         });
-        // The replaced item goes first: a provider whose ids are paths gives the moved item the replaced item's id.
+        // The replaced item goes first: a provider whose ids are paths gives the moved item the replaced item's path.
         match target {
-            Some(Holder::Item(item)) => mark_removed(&mut state, &self.room, item.id),
+            Some(Holder::Item(item)) => self.mark_removed(&mut state, item.id),
             Some(Holder::New { node, .. }) => unname(&mut state, &self.rules, &self.room, node),
             None => {}
         }
-        if moved.id != source.id && !state.by_item.contains_key(&moved.id) {
-            if let Some(node) = state.by_item.remove(&source.id) {
-                if let Identity::Item { id, .. } = &mut state.nodes.get_mut(&node).unwrap().identity
-                {
-                    *id = moved.id.clone();
-                }
-                state.by_item.insert(moved.id.clone(), node);
-            }
-            // The new files in a moved folder follow it to its new id.
-            if let Some(children) = state.new_files.remove(&source.id) {
-                for child in children.values() {
-                    let found = state.nodes.get_mut(child).unwrap();
-                    if let Identity::New(place) = &mut found.identity {
-                        place.folder = moved.id.clone();
-                    }
-                    if let Bytes::Spooled(spool_id) = found.bytes {
-                        let _ = save_record(&mut state, spool_id);
-                    }
-                }
-                state.new_files.insert(moved.id.clone(), children);
-            }
+        if moved.id != source.id {
+            self.move_paths(&mut state, &source.id, &moved.id);
         }
         if let Some(node) = state.by_item.get(&moved.id).copied() {
             set_place(&mut state, node, &to, remote_name);
@@ -1206,17 +1230,9 @@ impl Vfs {
         Ok(())
     }
 
-    /// The folder's item id. A new file is not a folder. A node that is gone is [`VfsError::StaleHandle`].
+    /// [`folder_id`], under the state lock.
     fn folder_of(&self, node: NodeId) -> Result<ItemId, VfsError> {
-        let state = self.state.lock().unwrap();
-        let Some(found) = state.nodes.get(&node) else {
-            return Err(VfsError::StaleHandle);
-        };
-        found
-            .identity
-            .remote_id()
-            .cloned()
-            .ok_or(VfsError::NotAFolder)
+        folder_id(&self.state.lock().unwrap(), node)
     }
 
     /// Runs one provider call inside the mount's limits. Dropping the returned future cancels the call.
@@ -1276,7 +1292,7 @@ impl Vfs {
             .then(|| held.clone())
     }
 
-    /// A new listing of `folder` from the provider. The core keeps it, unless a refresh, a later listing, or a change of the folder came after it was asked for.
+    /// A new listing of `folder` from the provider. The core keeps it, unless a refresh, a later listing, a change of the folder, or a path change that covers it came after it was asked for.
     async fn ask_listing(&self, folder: &ItemId) -> Result<Listing, VfsError> {
         let ttl = self.options.listing_ttl;
         let (at, generation) = {
@@ -1299,7 +1315,8 @@ impl Vfs {
             .changed
             .get(folder)
             .is_some_and(|changed| *changed >= at);
-        if state.generation != generation || later || changed {
+        let paths = state.paths_changed.is_some_and(|changed| changed >= at);
+        if state.generation != generation || later || changed || paths {
             return Ok(listing);
         }
         if state.listings.len() >= self.options.max_listings {
@@ -1423,17 +1440,19 @@ impl Vfs {
         // A copy bases the spool on the revision of the bytes it copies, so it asks for the item before it reads when the held answer is stale. A revision taken before the read can only cause a needless conflict copy, never a lost edit.
         let fresh = match fresh {
             None if needed > 0 => {
-                let answer = self.call(self.provider.item(&item)).await?;
+                let answer = self.call(self.provider.item(&item)).await;
                 let asked = Asked {
                     at,
                     generation,
                     answered: Instant::now(),
                 };
                 let mut state = self.state.lock().unwrap();
-                let Some(found) = state.nodes.get_mut(&node) else {
-                    return Err(VfsError::StaleHandle);
-                };
-                Some(remember(&mut found.attributes, asked, answer.attributes))
+                // The node's path moved while this call waited, so the answer, or the error, is about the old path.
+                if !holds_id(&state, node, &item) {
+                    return Ok(Fetched::Replaced);
+                }
+                let found = state.nodes.get_mut(&node).unwrap();
+                Some(remember(&mut found.attributes, asked, answer?.attributes))
             }
             fresh => fresh,
         };
@@ -1461,7 +1480,13 @@ impl Vfs {
         let mut offset = 0;
         while offset < needed {
             let length = u64::from(PIECE).min(needed - offset) as u32;
-            let data = self.call(self.provider.read(&item, offset, length)).await?;
+            let data = match self.call(self.provider.read(&item, offset, length)).await {
+                Ok(data) => data,
+                Err(_) if !holds_id(&self.state.lock().unwrap(), node, &item) => {
+                    return Ok(Fetched::Replaced);
+                }
+                Err(error) => return Err(error),
+            };
             let read = data.len() as u64;
             let data = Arc::new(data);
             self.apply(spool_id, &Edit::Write { offset, data }).await?;
@@ -1472,10 +1497,12 @@ impl Vfs {
         }
         self.apply(spool_id, edit).await?;
         let mut state = self.state.lock().unwrap();
-        let published = matches!(
-            state.nodes.get(&node).map(|found| &found.bytes),
-            Some(Bytes::Fetching(_))
-        );
+        // A rename can move the node's path while the pieces are read, and bytes from two paths are never published.
+        let published = holds_id(&state, node, &item)
+            && matches!(
+                state.nodes.get(&node).map(|found| &found.bytes),
+                Some(Bytes::Fetching(_))
+            );
         attempt.spool = None;
         if !published {
             discard(&mut state, &self.room, spool_id);
@@ -1623,7 +1650,7 @@ impl Vfs {
         }
     }
 
-    /// Renames a new file. Nothing reaches the provider. A new file renamed over an item takes that item's id, so its bytes become the item's next bytes and the item keeps its id (decision 0005, choice 9). The node the item had is retired. A handle still open on it reads the old bytes until the new ones upload: once they have, that handle reads the item's id, and the id has the new bytes. An item the provider marks read-only is [`VfsError::AccessDenied`]: the new file stays as it is.
+    /// Renames a new file. Nothing reaches the provider. A new file renamed over an item takes that item's id, so its bytes become the item's next bytes and the item keeps its id (decision 0005, choice 9). The node the item had is retired. A spooled handle on it reads its own bytes. On a provider whose ids stay with their items, a clean handle on it reads the item by id, so it reads the new bytes once they upload. On a provider whose ids are paths, a clean handle on it is [`VfsError::StaleHandle`] at once. An item the provider marks read-only is [`VfsError::AccessDenied`]: the new file stays as it is.
     fn rename_new(
         &self,
         node: NodeId,
@@ -1649,7 +1676,7 @@ impl Vfs {
                     drop_unreferenced(&mut state, &self.room, target_node);
                     return Err(VfsError::AccessDenied);
                 }
-                mark_removed(&mut state, &self.room, item.id.clone());
+                self.mark_removed(&mut state, item.id.clone());
                 unlist(&mut state, &self.rules, node);
                 state.nodes.get_mut(&node).unwrap().identity = Identity::Item {
                     id: item.id.clone(),
@@ -1673,15 +1700,121 @@ impl Vfs {
             }
         }
         // The name is part of what a create sends, so a try that already started stops and the file waits again. A new name is also a reason to send a refused file again.
-        upload::stop_attempt(&mut state, spool_id);
-        let _ = save_record(&mut state, spool_id);
-        upload::try_again(
+        upload::send_again(
             &mut state,
             &self.uploads,
             spool_id,
             Instant::now() + self.options.settle,
         );
         Ok(())
+    }
+
+    /// This mount removed `id`, or replaced it by a rename. The node that held it is retired: it keeps the id for its open handles on a provider whose ids stay with their items, and keeps none on a provider whose ids are paths, where the listings at and under `id` are dropped too. Its bytes go nowhere.
+    fn mark_removed(&self, state: &mut State, id: ItemId) {
+        if let Some(node) = state.by_item.remove(&id) {
+            state.nodes.get_mut(&node).unwrap().identity =
+                Identity::Removed((!self.paths).then(|| id.clone()));
+            if let Bytes::Spooled(spool_id) = state.nodes[&node].bytes {
+                upload::stop_attempt(state, spool_id);
+                let _ = save_record(state, spool_id);
+            }
+            drop_unreferenced(state, &self.room, node);
+        }
+        if self.paths {
+            forget_paths(state, &id);
+        }
+    }
+
+    /// On a provider whose ids are paths, this mount is about to give `path` to a node: a folder it made, a file an upload made, or the new path of a rename. The listings at and under it are dropped. A node that still holds the path, or one inside it, was left there by another client's change. A spooled one whose bytes upload becomes a new file beside it, named as a conflict copy, so its unsent bytes still upload and never overwrite what is at the path now (decision 0005, choices 7 and 8). Any other one, clean or under a name that stays on this computer, is retired with no id.
+    fn take_path(&self, state: &mut State, path: &ItemId) {
+        if !self.paths {
+            return;
+        }
+        forget_paths(state, path);
+        for (id, node) in held_under(state, path) {
+            let spooled = match state.nodes[&node].bytes {
+                Bytes::Spooled(spool_id) => self
+                    .sends(state, spool_id)
+                    .map(|(_, place)| (spool_id, place)),
+                _ => None,
+            };
+            let Some((spool_id, place)) = spooled else {
+                self.mark_removed(state, id);
+                continue;
+            };
+            state.by_item.remove(&id);
+            let copy = upload::stamped_name(&place.name, "conflict", chrono::Local::now());
+            list(
+                state,
+                &self.rules,
+                node,
+                &place.folder,
+                &escape(&copy, &self.rules),
+            );
+            let spool = state.spools.get_mut(&spool_id).unwrap();
+            spool.base = None;
+            spool.sent = Sent::Never;
+            upload::send_again(
+                state,
+                &self.uploads,
+                spool_id,
+                Instant::now() + self.options.settle,
+            );
+        }
+    }
+
+    /// A rename moved the item at `from` to `to`. On a provider whose ids are paths, every path inside the item moved with it. On any other provider only the item's own id changed, as Google Drive's does for a file moved between My Drive and a shared drive. Moves each node, each new file's folder, and each place at or under `from` to the same place under `to`. A spooled file whose id or folder moved stops its try, because the try sends to the old path, and is sent again to the new one, as a renamed file is. On a provider whose ids are paths, the listings at and under both paths are dropped: the item's own come again from the provider at their new paths.
+    fn move_paths(&self, state: &mut State, from: &ItemId, to: &ItemId) {
+        if self.paths {
+            forget_paths(state, from);
+        }
+        // What is at or under `to` belonged to the item the rename replaced, or was left there by another client's change.
+        self.take_path(state, to);
+        for spool in state.spools.values_mut() {
+            if let Some(attempt) = &mut spool.attempt {
+                attempt.moves.push((from.clone(), to.clone()));
+            }
+        }
+        let moves = [(from.clone(), to.clone())];
+        let moving = held_under(state, from);
+        // An item inside a moved folder has both its id and its place moved, and is sent again once.
+        let mut changed = BTreeSet::new();
+        for (old_id, node) in moving {
+            state.by_item.remove(&old_id);
+            let new_id = moved_path(&moves, &old_id);
+            if let Identity::Item { id, .. } = &mut state.nodes.get_mut(&node).unwrap().identity {
+                *id = new_id.clone();
+            }
+            state.by_item.insert(new_id, node);
+            changed.insert(node);
+        }
+        for (node, found) in &mut state.nodes {
+            let place = match &mut found.identity {
+                Identity::Item {
+                    place: Some(place), ..
+                }
+                | Identity::New(place) => place,
+                _ => continue,
+            };
+            if under(&place.folder, from).is_some() {
+                place.folder = moved_path(&moves, &place.folder);
+                changed.insert(*node);
+            }
+        }
+        for (folder, children) in std::mem::take(&mut state.new_files) {
+            let folder = moved_path(&moves, &folder);
+            state.new_files.entry(folder).or_default().extend(children);
+        }
+        for node in changed {
+            if let Bytes::Spooled(spool_id) = state.nodes[&node].bytes {
+                upload::send_again(
+                    state,
+                    &self.uploads,
+                    spool_id,
+                    Instant::now() + self.options.settle,
+                );
+            }
+        }
     }
 }
 
@@ -1711,7 +1844,7 @@ enum Fetched {
     /// The node's bytes are the new spool file, with the edit in it.
     Published,
 
-    /// Another fetch got there first, or the node is gone. The edit is not in the node's bytes yet.
+    /// Another fetch got there first, the node is gone, or a rename moved its path. The edit is not in the node's bytes yet.
     Replaced,
 }
 
@@ -1963,17 +2096,65 @@ fn set_place(state: &mut State, node: NodeId, folder: &ItemId, remote_name: Stri
     }
 }
 
-/// This mount removed `id`, or replaced it by a rename. Its node keeps the id for the handles still open on it, and its bytes go nowhere.
-fn mark_removed(state: &mut State, room: &Notify, id: ItemId) {
-    let Some(node) = state.by_item.remove(&id) else {
-        return;
-    };
-    state.nodes.get_mut(&node).unwrap().identity = Identity::Removed(id);
-    if let Bytes::Spooled(spool_id) = state.nodes[&node].bytes {
-        upload::stop_attempt(state, spool_id);
-        let _ = save_record(state, spool_id);
+/// What `id` holds after `path`, when `id` is `path` itself or inside it: `""`, or `/` and the rest. `path` is never the top of the mount, which no change can name.
+fn under<'a>(id: &'a ItemId, path: &ItemId) -> Option<&'a str> {
+    let rest = id.0.strip_prefix(path.0.as_str())?;
+    (rest.is_empty() || rest.starts_with('/')).then_some(rest)
+}
+
+/// On a provider whose ids are paths, `path` and every path inside it may name other folders now. Drops the cached listings at and under it, and keeps a listing in flight from being kept ([`State::paths_changed`]).
+fn forget_paths(state: &mut State, path: &ItemId) {
+    state
+        .listings
+        .retain(|folder, _| under(folder, path).is_none());
+    state.paths_changed = Some(Instant::now());
+}
+
+/// The nodes that hold `path` or a path inside it. `by_item` is ordered, so the paths inside are one range, and nothing else is read: an upload's confirm asks this for every file it makes.
+fn held_under(state: &State, path: &ItemId) -> Vec<(ItemId, NodeId)> {
+    let inside = format!("{}/", path.0);
+    let exact = state.by_item.get_key_value(path);
+    let below = state
+        .by_item
+        .range(ItemId(inside.clone())..)
+        .take_while(|(id, _)| id.0.starts_with(&inside));
+    exact
+        .into_iter()
+        .chain(below)
+        .map(|(id, node)| (id.clone(), *node))
+        .collect()
+}
+
+/// Applies each move in order. A path at or under `from` becomes `to` plus the same rest.
+fn moved_path(moves: &[(ItemId, ItemId)], id: &ItemId) -> ItemId {
+    let mut current = id.clone();
+    for (from, to) in moves {
+        if let Some(rest) = under(&current, from) {
+            current = ItemId(format!("{}{rest}", to.0));
+        }
     }
-    drop_unreferenced(state, room, node);
+    current
+}
+
+/// Whether `node` still has the id a call asked the provider about. On a provider whose ids are paths, a rename can move the node, or retire it, while the call waits.
+fn holds_id(state: &State, node: NodeId, id: &ItemId) -> bool {
+    state
+        .nodes
+        .get(&node)
+        .and_then(|found| found.identity.remote_id())
+        == Some(id)
+}
+
+/// The folder's item id. A new file is not a folder. A node that is gone, or a removed item that kept no id, is [`VfsError::StaleHandle`].
+fn folder_id(state: &State, node: NodeId) -> Result<ItemId, VfsError> {
+    let Some(found) = state.nodes.get(&node) else {
+        return Err(VfsError::StaleHandle);
+    };
+    match &found.identity {
+        Identity::Item { id, .. } | Identity::Removed(Some(id)) => Ok(id.clone()),
+        Identity::Removed(None) => Err(VfsError::StaleHandle),
+        Identity::New(_) | Identity::Unnamed => Err(VfsError::NotAFolder),
+    }
 }
 
 /// Gives a new file the name `name`, as the OS sent it, in `folder`.
@@ -2129,12 +2310,14 @@ fn read_only(found: &Node) -> bool {
             .is_some_and(|(_, attributes)| attributes.read_only)
 }
 
-/// The kind `node` holds, with no provider call. The root is a folder. A spooled node, and a new file, is a file. An item uses the kind it already holds, however old that answer is. `None` when the node holds no answer.
+/// The kind `node` holds, with no provider call. The root is a folder. A spooled node, and a new file, is a file. Anything else uses the kind its held attributes give, however old that answer is. `None` when the node holds no answer.
 fn held_kind(node: NodeId, found: &Node) -> Option<Kind> {
     if node == Vfs::ROOT {
         return Some(Kind::Folder);
     }
-    if matches!(found.bytes, Bytes::Spooled(_)) || found.identity.remote_id().is_none() {
+    if matches!(found.bytes, Bytes::Spooled(_))
+        || matches!(found.identity, Identity::New(_) | Identity::Unnamed)
+    {
         return Some(Kind::File);
     }
     found

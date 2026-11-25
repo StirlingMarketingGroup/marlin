@@ -9,8 +9,8 @@ use crate::{spool, Item, ItemId, Revision, VfsError};
 
 use super::record::save_record;
 use super::{
-    change_listing, discard, drop_unreferenced, note_changed, remember, unlist, unname, Asked,
-    Bytes, Identity, NodeId, Place, Sent, SpoolId, State, Vfs, PIECE,
+    change_listing, discard, drop_unreferenced, moved_path, note_changed, remember, unlist, unname,
+    Asked, Bytes, Identity, NodeId, Place, Sent, SpoolId, State, Vfs, PIECE,
 };
 
 /// How long the first retry waits. Each later wait is twice the one before, up to [`RETRY_MAX`].
@@ -73,6 +73,13 @@ pub(super) fn try_again(state: &mut State, uploads: &Notify, spool_id: SpoolId, 
     schedule(state, uploads, spool_id, at);
 }
 
+/// The file sends somewhere else now: a new name, a new path, or a conflict copy. A try that runs stops, the record names the new target, and the file is sent again at `at`, also after a refusal.
+pub(super) fn send_again(state: &mut State, uploads: &Notify, spool_id: SpoolId, at: Instant) {
+    stop_attempt(state, spool_id);
+    let _ = save_record(state, spool_id);
+    try_again(state, uploads, spool_id, at);
+}
+
 /// The one try a spool file has running. It stays until the try's task ends, so a second try never starts while the first one's answer may still be applied.
 pub(super) struct Attempt {
     /// Something asked the try to stop: an edit, a rename of a new file, a remove, or a discard. The file is no longer shown as uploading.
@@ -83,6 +90,9 @@ pub(super) struct Attempt {
 
     /// When `sent` last grew, or when the current provider call began.
     moved: Instant,
+
+    /// The ids this mount moved while the try ran, oldest first: a rename that changes an item's id moves it, and on a provider whose ids are paths everything inside it too. What the try sent, and what the provider answered about, moved with them.
+    pub(super) moves: Vec<(ItemId, ItemId)>,
 
     stop: Arc<Notify>,
 }
@@ -95,6 +105,21 @@ pub(super) enum Target {
 
     /// A file the remote does not have yet.
     Create { folder: ItemId, name: String },
+}
+
+impl Target {
+    /// The target after the paths this mount moved while the try ran.
+    fn moved_by(&self, moves: &[(ItemId, ItemId)]) -> Self {
+        match self {
+            Target::Replace { id } => Target::Replace {
+                id: moved_path(moves, id),
+            },
+            Target::Create { folder, name } => Target::Create {
+                folder: moved_path(moves, folder),
+                name: name.clone(),
+            },
+        }
+    }
 }
 
 /// What a provider's answer made on the remote.
@@ -113,6 +138,37 @@ enum Landed {
         folder: ItemId,
         remote: Option<(Asked, Item)>,
     },
+}
+
+impl Landed {
+    /// The answer after the paths this mount moved while the try ran.
+    fn moved_by(&self, moves: &[(ItemId, ItemId)]) -> Self {
+        match self {
+            Landed::Replaced => Landed::Replaced,
+            Landed::Created { folder, gone } => Landed::Created {
+                folder: moved_path(moves, folder),
+                gone: gone.as_ref().map(|id| moved_path(moves, id)),
+            },
+            Landed::Copied { folder, remote } => Landed::Copied {
+                folder: moved_path(moves, folder),
+                remote: remote.as_ref().map(|(asked, item)| {
+                    let mut item = item.clone();
+                    item.id = moved_path(moves, &item.id);
+                    (*asked, item)
+                }),
+            },
+        }
+    }
+}
+
+/// The paths recorded on the try that is running for `spool_id`, oldest first.
+fn paths_moved(state: &State, spool_id: SpoolId) -> Vec<(ItemId, ItemId)> {
+    state
+        .spools
+        .get(&spool_id)
+        .and_then(|spool| spool.attempt.as_ref())
+        .map(|attempt| attempt.moves.clone())
+        .unwrap_or_default()
 }
 
 /// One try's view of its spool file, taken when it starts.
@@ -273,6 +329,7 @@ impl Vfs {
                         stopped: false,
                         sent: 0,
                         moved: now,
+                        moves: Vec::new(),
                         stop,
                     });
                     if spool.sent == Sent::Never {
@@ -523,10 +580,12 @@ impl Vfs {
         }
     }
 
-    /// Where a second call of a replace (a conflict copy or a re-create) puts the file: the item's current place. `None` when the file no longer sends to this item.
+    /// Where a second call of a replace (a conflict copy or a re-create) puts the file: the item's current place. `None` when the file no longer sends to this item. `id` is followed through the paths this mount moved while the try ran.
     fn place_now(&self, job: &Job, id: &ItemId) -> Option<Place> {
-        match self.sends(&self.state.lock().unwrap(), job.spool_id)? {
-            (Target::Replace { id: now }, place) if &now == id => Some(place),
+        let state = self.state.lock().unwrap();
+        let id = moved_path(&paths_moved(&state, job.spool_id), id);
+        match self.sends(&state, job.spool_id)? {
+            (Target::Replace { id: now }, place) if now == id => Some(place),
             _ => None,
         }
     }
@@ -572,14 +631,19 @@ impl Vfs {
     }
 
     /// The provider took the bytes. When the file still sends what the try began with, the node is tied to the item, and the spool file goes if these were its bytes.
-    async fn confirm(self: &Arc<Self>, job: &Job, item: Item, landed: Landed) {
+    async fn confirm(self: &Arc<Self>, job: &Job, mut item: Item, landed: Landed) {
         let stray = {
             // A name change resolves a name, then acts on it, under this lock. Turning a new file into an item inside that would break the change.
             let _changes = self.changes.lock().await;
             let mut state = self.state.lock().unwrap();
+            // A rename can move the path after the try captured it and before this lock. The bytes that landed moved with the rename.
+            let moves = paths_moved(&state, job.spool_id);
+            let target = job.target.moved_by(&moves);
+            item.id = moved_path(&moves, &item.id);
+            let landed = landed.moved_by(&moves);
             let current = self
                 .sends(&state, job.spool_id)
-                .filter(|(target, _)| *target == job.target)
+                .filter(|(now, _)| *now == target)
                 .map(|(_, place)| place);
             let sent_now = current.is_some() && state.spools[&job.spool_id].version == job.version;
             match (landed, current) {
@@ -599,7 +663,8 @@ impl Vfs {
                             if let Some(entry) =
                                 listed.iter_mut().find(|entry| entry.id == remote.id)
                             {
-                                *entry = remote;
+                                // The listing keeps the name it holds: a rename this mount made while the try ran is in it already.
+                                entry.attributes = remote.attributes;
                             }
                         });
                     }
@@ -621,6 +686,7 @@ impl Vfs {
                                 state.by_item.remove(gone);
                             }
                         }
+                        self.take_path(&mut state, &item.id);
                         state.by_item.insert(item.id.clone(), job.node);
                         state.nodes.get_mut(&job.node).unwrap().identity = Identity::Item {
                             id: item.id.clone(),
@@ -639,7 +705,8 @@ impl Vfs {
                             if let Some(listed) =
                                 remote.iter_mut().find(|listed| listed.id == item.id)
                             {
-                                *listed = item.clone();
+                                // The listing keeps the name it holds: a rename this mount made while the try ran is in it already.
+                                listed.attributes = item.attributes.clone();
                             }
                         });
                     }

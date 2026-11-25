@@ -29,11 +29,16 @@ struct Inner {
     largest_read: u32,
 }
 
-/// A provider that keeps its tree in memory, for tests. Like Google Drive, it allows two items with one name in a folder and any character in a name.
+/// A provider that keeps its tree in memory, for tests.
+///
+/// [`Self::new`] gives ids that stay with their items, as Google Drive's do, and allows two items with one name in a folder and any character in a name. [`Self::with_path_ids`] gives ids that are paths, as SFTP's are: an item's id is its folder's id joined to its name with `/`, a rename changes the ids of the item and of everything inside it, and a folder holds each name once.
 ///
 /// A metadata or read call works out its answer when it starts and returns it after the delay. So a change made while a call waits shows up on the next call, as it would with a real remote. A byte call checks for a failure and changes the tree only when its upload delay ends.
 pub struct MemoryProvider {
     inner: Mutex<Inner>,
+
+    /// Ids are paths ([`Provider::ids_are_paths`]).
+    paths: bool,
 }
 
 /// Counts one provider call as in flight until it is dropped, which also covers a call the caller cancels.
@@ -48,9 +53,18 @@ impl Drop for InFlight<'_> {
 impl MemoryProvider {
     /// An empty root folder whose ID is `root`.
     pub fn new() -> Self {
+        Self::empty(false)
+    }
+
+    /// An empty root folder whose ID is `/`, on a provider whose ids are paths, as SFTP's are: an item's id is its folder's id joined to its name with `/`, a rename changes the ids of the item and of everything inside it, a folder holds each name once, and a path that is removed can be made again.
+    pub fn with_path_ids() -> Self {
+        Self::empty(true)
+    }
+
+    fn empty(paths: bool) -> Self {
         let root = Stored {
             item: Item {
-                id: ItemId("root".to_string()),
+                id: ItemId(if paths { "/" } else { "root" }.to_string()),
                 name: String::new(),
                 attributes: Attributes {
                     kind: Kind::Folder,
@@ -64,6 +78,7 @@ impl MemoryProvider {
             contents: Vec::new(),
         };
         Self {
+            paths,
             inner: Mutex::new(Inner {
                 stored: vec![root],
                 added: 0,
@@ -105,13 +120,16 @@ impl MemoryProvider {
         stored.item.attributes.revision = Some(revision);
     }
 
-    /// Moves an item and gives it a new name behind the mount's back. No provider call is counted, and its id stays the same.
+    /// Moves an item and gives it a new name behind the mount's back. No provider call is counted. Its id stays the same, unless ids are paths: then it and everything inside it get their new paths.
     pub fn remote_rename(&self, id: &ItemId, new_parent: &ItemId, new_name: &str) {
         let mut inner = self.inner.lock().unwrap();
         let stored = inner.stored.iter_mut().find(|stored| stored.item.id == *id);
         let stored = stored.expect("no item has this ID");
         stored.item.name = new_name.to_string();
         stored.parent = Some(new_parent.clone());
+        if self.paths {
+            rekey(&mut inner.stored, id, &path_of(new_parent, new_name));
+        }
     }
 
     /// While on, `replace_bytes` of the file answers [`VfsError::AccessDenied`], as Google Drive does for a file the account may only view. `item` and `list` report it. The other calls do not look at it.
@@ -122,13 +140,16 @@ impl MemoryProvider {
         stored.item.attributes.read_only = on;
     }
 
-    /// Removes one item behind the mount's back. No provider call is counted.
+    /// Removes one item behind the mount's back, and with ids that are paths everything inside it. No provider call is counted.
     pub fn remote_remove(&self, id: &ItemId) {
         let mut inner = self.inner.lock().unwrap();
-        inner.stored.retain(|stored| stored.item.id != *id);
+        let inside = format!("{}/", id.0);
+        inner.stored.retain(|stored| {
+            stored.item.id != *id && !(self.paths && stored.item.id.0.starts_with(&inside))
+        });
     }
 
-    /// While on, [`Provider::rename`] gives the moved item a new id, as a remote whose ids are paths would: the replaced item's id when it replaces one, and a fresh id otherwise. Off by default.
+    /// While on, [`Provider::rename`] gives the moved item a fresh id, as Google Drive does for a file moved between My Drive and a shared drive. What a folder holds follows it. Off by default. With ids that are paths it changes nothing: there a rename always gives the new path.
     pub fn rename_changes_ids(&self, on: bool) {
         self.inner.lock().unwrap().rename_changes_ids = on;
     }
@@ -194,7 +215,21 @@ impl MemoryProvider {
 
     fn add(&self, parent: &ItemId, name: &str, kind: Kind, contents: &[u8]) -> ItemId {
         let mut inner = self.inner.lock().unwrap();
-        allocate(&mut inner, Some(parent.clone()), name, kind, contents).id
+        let taken = self.paths && find(&inner.stored, &path_of(parent, name)).is_ok();
+        assert!(!taken, "a test added a name twice");
+        assert!(
+            !self.paths || fits_a_path(name),
+            "a path cannot hold this name"
+        );
+        allocate(
+            &mut inner,
+            Some(parent.clone()),
+            name,
+            kind,
+            contents,
+            self.paths,
+        )
+        .id
     }
 
     /// Runs one provider call: works out the answer now, then returns it after the delay.
@@ -253,18 +288,52 @@ impl MemoryProvider {
     }
 }
 
-/// Stores a new item and returns it. Its id and its modified time come from `added`.
+/// Whether a remote whose ids are paths can hold `name`: a name with `/`, and `.` and `..`, would make a path that names another item.
+fn fits_a_path(name: &str) -> bool {
+    !name.contains('/') && name != "." && name != ".."
+}
+
+/// An item's path: `/{name}` in the top folder, and `{folder}/{name}` below it.
+fn path_of(folder: &ItemId, name: &str) -> ItemId {
+    if folder.0 == "/" {
+        ItemId(format!("/{name}"))
+    } else {
+        ItemId(format!("{}/{name}", folder.0))
+    }
+}
+
+/// Gives every stored id and parent at or under `from` the same place under `to`. Written apart from the core's own rule, so a test catches a mistake in it.
+fn rekey(stored: &mut [Stored], from: &ItemId, to: &ItemId) {
+    let inside = format!("{}/", from.0);
+    let moved = |id: &ItemId| match id.0.strip_prefix(&inside) {
+        Some(rest) => ItemId(format!("{}/{rest}", to.0)),
+        None if id == from => to.clone(),
+        None => id.clone(),
+    };
+    for stored in stored {
+        stored.item.id = moved(&stored.item.id);
+        stored.parent = stored.parent.as_ref().map(moved);
+    }
+}
+
+/// Stores a new item and returns it. Its id and its modified time come from `added`, unless ids are paths: then the id is the item's path.
 fn allocate(
     inner: &mut Inner,
     parent: Option<ItemId>,
     name: &str,
     kind: Kind,
     contents: &[u8],
+    paths: bool,
 ) -> Item {
     inner.added += 1;
     let number = inner.added;
+    let id = if paths {
+        path_of(parent.as_ref().expect("a path id needs a folder"), name)
+    } else {
+        ItemId(format!("item-{number}"))
+    };
     let item = Item {
-        id: ItemId(format!("item-{number}")),
+        id,
         name: name.to_string(),
         attributes: Attributes {
             kind,
@@ -298,7 +367,11 @@ fn find<'a>(stored: &'a [Stored], id: &ItemId) -> Result<&'a Stored, VfsError> {
 #[async_trait::async_trait]
 impl Provider for MemoryProvider {
     fn root(&self) -> ItemId {
-        ItemId("root".to_string())
+        ItemId(if self.paths { "/" } else { "root" }.to_string())
+    }
+
+    fn ids_are_paths(&self) -> bool {
+        self.paths
     }
 
     async fn item(&self, id: &ItemId) -> Result<Item, VfsError> {
@@ -377,13 +450,15 @@ impl Provider for MemoryProvider {
             if find(&inner.stored, parent)?.item.attributes.kind != Kind::Folder {
                 return Err(VfsError::NotAFolder);
             }
-            Ok(allocate(
-                inner,
-                Some(parent.clone()),
-                name,
-                Kind::Folder,
-                &[],
-            ))
+            if self.paths && !fits_a_path(name) {
+                return Err(VfsError::NotSupported);
+            }
+            // A remote whose ids are paths keeps one name per folder.
+            if self.paths && find(&inner.stored, &path_of(parent, name)).is_ok() {
+                return Err(VfsError::Conflict);
+            }
+            let parent = Some(parent.clone());
+            Ok(allocate(inner, parent, name, Kind::Folder, &[], self.paths))
         })
         .await
     }
@@ -438,29 +513,30 @@ impl Provider for MemoryProvider {
                 }
                 inner.stored.retain(|stored| stored.item.id != *replace);
             }
-            let fresh_id = inner.rename_changes_ids.then(|| {
-                replace.cloned().unwrap_or_else(|| {
-                    inner.added += 1;
-                    ItemId(format!("item-{}", inner.added))
-                })
-            });
+            if self.paths && !fits_a_path(name) {
+                return Err(VfsError::NotSupported);
+            }
+            let new_id = if self.paths {
+                path_of(to, name)
+            } else if inner.rename_changes_ids {
+                inner.added += 1;
+                ItemId(format!("item-{}", inner.added))
+            } else {
+                id.clone()
+            };
+            // A remote whose ids are paths keeps one name per folder.
+            if replace.is_none() && new_id != *id && find(&inner.stored, &new_id).is_ok() {
+                return Err(VfsError::Conflict);
+            }
             let stored = inner.stored.iter_mut().find(|stored| stored.item.id == *id);
             let stored = stored.expect("the item was found before anything changed");
             stored.parent = Some(to.clone());
             stored.item.name = name.to_string();
-            if let Some(fresh_id) = &fresh_id {
-                stored.item.id = fresh_id.clone();
+            if new_id != *id {
+                // What the item holds follows it to its new id.
+                rekey(&mut inner.stored, id, &new_id);
             }
-            let moved = stored.item.clone();
-            if let Some(fresh_id) = fresh_id {
-                // What a folder holds follows it to its new id.
-                for child in &mut inner.stored {
-                    if child.parent.as_ref() == Some(id) {
-                        child.parent = Some(fresh_id.clone());
-                    }
-                }
-            }
-            Ok(moved)
+            Ok(find(&inner.stored, &new_id)?.item.clone())
         })
         .await
     }
@@ -477,8 +553,22 @@ impl Provider for MemoryProvider {
             if find(&inner.stored, parent)?.item.attributes.kind != Kind::Folder {
                 return Err(VfsError::NotAFolder);
             }
+            if self.paths && !fits_a_path(name) {
+                return Err(VfsError::NotSupported);
+            }
+            // A remote whose ids are paths keeps one name per folder.
+            if self.paths && find(&inner.stored, &path_of(parent, name)).is_ok() {
+                return Err(VfsError::Conflict);
+            }
             let bytes = std::fs::read(from).map_err(|error| VfsError::Other(error.to_string()))?;
-            allocate(inner, Some(parent.clone()), name, Kind::File, &bytes);
+            allocate(
+                inner,
+                Some(parent.clone()),
+                name,
+                Kind::File,
+                &bytes,
+                self.paths,
+            );
             let stored = inner.stored.last_mut().expect("the file was just added");
             stored.item.attributes.modified = modified;
             progress(bytes.len() as u64);
