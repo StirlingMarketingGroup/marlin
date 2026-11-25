@@ -9,7 +9,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use marlin_mount::protocol::{error_codes, MountState, MountStatus, ReadOnly};
+use marlin_mount::protocol::{error_codes, MountState, MountStatus};
 use marlin_mount::{
     Adapter, Config, LinkedProviders, MountError, OsAdapter, Server, Session, SmbConfig,
     MOUNT_FOLDER_MARKER,
@@ -573,48 +573,18 @@ fn server_files(root: &Path) {
     std::fs::create_dir_all(files.join("sub")).unwrap();
     std::fs::write(files.join("big.bin"), pattern(300_000)).unwrap();
     std::fs::write(files.join("small.txt"), b"small-text\n").unwrap();
-}
-
-/// Each name in `dir`, with the bytes of each file.
-async fn snapshot(dir: &Path) -> Vec<(String, Option<Vec<u8>>)> {
-    let dir = dir.to_path_buf();
-    tokio::task::spawn_blocking(move || {
-        let mut found = Vec::new();
-        for entry in std::fs::read_dir(dir).unwrap() {
-            let entry = entry.unwrap();
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let bytes = if entry.file_type().unwrap().is_file() {
-                Some(std::fs::read(entry.path()).unwrap())
-            } else {
-                None
-            };
-            found.push((name, bytes));
-        }
-        found.sort();
-        found
-    })
-    .await
-    .unwrap()
-}
-
-/// The OS error a file system call that must fail gets.
-async fn os_error(call: impl FnOnce() -> std::io::Result<()> + Send + 'static) -> Option<i32> {
-    tokio::task::spawn_blocking(call)
-        .await
-        .unwrap()
-        .unwrap_err()
-        .raw_os_error()
+    std::fs::write(files.join("sub").join("inside.txt"), b"inside\n").unwrap();
 }
 
 #[ignore = "mounts for real: run crates/marlin-fuse/test-in-docker.sh on Linux, crates/marlin-fuse/test-on-mac.sh on a Mac"]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_saved_server_mounts_read_only_and_reads_through_fuse() {
+async fn a_saved_server_mounts_and_takes_writes_through_fuse() {
     within(Duration::from_secs(120), async {
         let lab = Lab::start(Arc::new(OsAdapter), 1, Options::default()).await;
         server_files(lab.sshd.root());
         let (account, status, files) = lab.mount(0).await;
         assert_eq!(status.state, MountState::Mounted);
-        assert_eq!(status.read_only, Some(ReadOnly::Provider));
+        assert_eq!(status.read_only, None);
         let point = PathBuf::from(&status.mount_point);
         assert_eq!(
             point,
@@ -653,34 +623,93 @@ async fn a_saved_server_mounts_read_only_and_reads_through_fuse() {
         assert_eq!(piece, pattern(300_000)[200_000..201_000]);
 
         let on_server = lab.sshd.root().join("files");
-        let before = snapshot(&on_server).await;
-        let small = files.join("small.txt");
-        let path = files.join("new.txt");
-        assert_eq!(
-            os_error(move || std::fs::write(path, b"x")).await,
-            Some(libc::EROFS)
+        let big = pattern(300_000);
+        tokio::task::spawn_blocking({
+            let files = files.clone();
+            move || {
+                std::fs::write(files.join("new.txt"), b"made here").unwrap();
+                std::fs::write(files.join("small.txt"), b"changed").unwrap();
+                std::fs::create_dir(files.join("made")).unwrap();
+                std::fs::rename(files.join("big.bin"), files.join("moved.bin")).unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        // Uploads start 2 seconds after the last close.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let ready = tokio::task::spawn_blocking({
+                let on_server = on_server.clone();
+                let big = big.clone();
+                move || {
+                    std::fs::read(on_server.join("new.txt")).ok().as_deref() == Some(b"made here")
+                        && std::fs::read(on_server.join("small.txt")).ok().as_deref()
+                            == Some(b"changed")
+                        && on_server.join("made").is_dir()
+                        && std::fs::read(on_server.join("moved.bin")).ok().as_deref()
+                            == Some(big.as_slice())
+                        && !on_server.join("big.bin").exists()
+                }
+            })
+            .await
+            .unwrap();
+            if ready {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the server did not show the writes"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        tokio::task::spawn_blocking({
+            let files = files.clone();
+            move || std::fs::remove_file(files.join("new.txt")).unwrap()
+        })
+        .await
+        .unwrap();
+        // The remove reaches the server at once, unless it came before the core confirmed the upload: then the core removes the uploaded file when the confirm lands.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while on_server.join("new.txt").exists() {
+            assert!(
+                Instant::now() < deadline,
+                "the remove did not reach the server"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // A process whose working folder is inside a folder renamed through the mount keeps working.
+        let listed = tokio::task::spawn_blocking({
+            let files = files.clone();
+            move || {
+                use std::io::Write;
+                // The process lists its folder only after the rename, when it reads a line.
+                let mut child = Command::new("sh")
+                    .arg("-c")
+                    .arg("read line; ls")
+                    .current_dir(files.join("sub"))
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .unwrap();
+                std::fs::rename(files.join("sub"), files.join("sub2")).unwrap();
+                child.stdin.take().unwrap().write_all(b"\n").unwrap();
+                child.wait_with_output().unwrap()
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            listed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&listed.stderr)
         );
-        let path = small.clone();
-        assert_eq!(
-            os_error(move || std::fs::write(path, b"changed")).await,
-            Some(libc::EROFS)
+        assert!(
+            String::from_utf8_lossy(&listed.stdout).contains("inside.txt"),
+            "{}",
+            String::from_utf8_lossy(&listed.stdout)
         );
-        let path = small.clone();
-        assert_eq!(
-            os_error(move || std::fs::remove_file(path)).await,
-            Some(libc::EROFS)
-        );
-        let (from, to) = (small.clone(), files.join("other.txt"));
-        assert_eq!(
-            os_error(move || std::fs::rename(from, to)).await,
-            Some(libc::EROFS)
-        );
-        let path = files.join("made");
-        assert_eq!(
-            os_error(move || std::fs::create_dir(path)).await,
-            Some(libc::EROFS)
-        );
-        assert_eq!(snapshot(&on_server).await, before);
 
         lab.client
             .call::<Value>("unmount", json!({"provider": "sftp", "account": account}))

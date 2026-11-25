@@ -29,6 +29,15 @@ pub struct Sshd {
 
 impl Sshd {
     pub async fn start() -> Self {
+        Self::start_inner(None).await
+    }
+
+    /// Starts the same server with `Subsystem sftp internal-sftp -P {requests}`. OpenSSH refuses those requests by name with permission denied.
+    pub async fn start_denying(requests: &str) -> Self {
+        Self::start_inner(Some(requests)).await
+    }
+
+    async fn start_inner(deny: Option<&str>) -> Self {
         assert!(
             Path::new(SSHD).exists(),
             "Install OpenSSH's server: {SSHD} does not exist."
@@ -67,11 +76,12 @@ impl Sshd {
             .unwrap()
             .port();
         let root_text = root.display();
+        let denied = deny.map_or(String::new(), |requests| format!(" -P {requests}"));
         let config = root.join("sshd_config");
         fs::write(
             &config,
             format!(
-                "Port {port}\nListenAddress 127.0.0.1\nHostKey {root_text}/host_key\nPidFile {root_text}/sshd.pid\nAuthorizedKeysFile {root_text}/authorized_keys\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nPubkeyAuthentication yes\nUsePAM no\nStrictModes no\nSubsystem sftp internal-sftp\n"
+                "Port {port}\nListenAddress 127.0.0.1\nHostKey {root_text}/host_key\nPidFile {root_text}/sshd.pid\nAuthorizedKeysFile {root_text}/authorized_keys\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nPubkeyAuthentication yes\nUsePAM no\nStrictModes no\nSubsystem sftp internal-sftp{denied}\n"
             ),
         )
         .unwrap();
@@ -221,8 +231,13 @@ impl Proxy {
     }
 
     pub fn cut(&self) {
-        for relay in self.relays.lock().unwrap().drain(..) {
-            relay.abort();
+        self.cutter().cut();
+    }
+
+    /// A [`Cutter`] that calls [`Self::cut`]. Dropping it leaves the relay running, so a `'static` callback can hold one.
+    pub fn cutter(&self) -> Cutter {
+        Cutter {
+            relays: Arc::clone(&self.relays),
         }
     }
 
@@ -242,5 +257,19 @@ impl Drop for Proxy {
     fn drop(&mut self) {
         self.listening.abort();
         self.cut();
+    }
+}
+
+/// Calls [`Proxy::cut`](Proxy::cut). A clone shares that cut and does not own the proxy.
+#[derive(Clone)]
+pub struct Cutter {
+    relays: Arc<Mutex<Vec<JoinHandle<()>>>>,
+}
+
+impl Cutter {
+    pub fn cut(&self) {
+        for relay in self.relays.lock().unwrap().drain(..) {
+            relay.abort();
+        }
     }
 }
