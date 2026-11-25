@@ -73,10 +73,25 @@ pub fn get_fs_info(path: &Path) -> Result<FsInfo, String> {
         })
         .unwrap_or_default();
 
-    // Type names as /proc/self/mountinfo shows them on real mounts (Linux 7.0, 2026-11-24): `nfs`, `nfs4`, `cifs`, `smb3`, and `fuse.sshfs`. Marlin's mounts are `fuse.marlin`, or `fuse` when mounted as root. `9p` (a VM's shared folder, WSL2's `/mnt/c`) and `ceph` are the kernel's type names, not checked on a real mount.
+    // Type names as /proc/self/mountinfo shows them on real mounts (Linux 7.0, 2026-11-24): `nfs`, `nfs4`, `cifs`, `smb3`, and `fuse.sshfs`. Marlin's mounts are `fuse.marlin`, or `fuse` when mounted as root. `9p` (a VM's shared folder, WSL2's `/mnt/c`), `virtiofs` and `vboxsf` (a VM's shared folder), and the network and cluster filesystems `ceph`, `afs`, `coda`, `lustre`, `beegfs`, `gpfs`, and `pvfs2` (OrangeFS) are the type names their kernel modules register, not checked on a real mount.
     let is_network_or_fuse = matches!(
         fs_type.as_str(),
-        "nfs" | "nfs4" | "cifs" | "smb3" | "9p" | "ceph" | "fuse" | "fuseblk"
+        "nfs"
+            | "nfs4"
+            | "cifs"
+            | "smb3"
+            | "9p"
+            | "virtiofs"
+            | "vboxsf"
+            | "ceph"
+            | "afs"
+            | "coda"
+            | "lustre"
+            | "beegfs"
+            | "gpfs"
+            | "pvfs2"
+            | "fuse"
+            | "fuseblk"
     ) || fs_type.starts_with("fuse.");
 
     Ok(FsInfo {
@@ -248,7 +263,7 @@ pub(crate) fn device(metadata: &fs::Metadata) -> u64 {
     metadata.dev()
 }
 
-/// Windows has no device ID here, so every entry of a local folder is read inside (#706), and a move does not see another volume mounted inside the source.
+/// Windows has no device ID here, so every entry of a local folder is read inside (#706), a move does not see another volume mounted inside the source, and Move to Trash does not see a volume mounted in the folder.
 #[cfg(not(unix))]
 pub(crate) fn device(_metadata: &fs::Metadata) -> u64 {
     0

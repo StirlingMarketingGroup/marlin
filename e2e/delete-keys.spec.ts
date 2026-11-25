@@ -82,6 +82,25 @@ test.describe('Delete keys', () => {
       expect(await dialogMessages(page)).toEqual([]);
     });
 
+    test('Cmd+Backspace in a folder with no Trash asks once, as Finder does', async ({ page }) => {
+      await page.evaluate(() => {
+        (window as unknown as { __MOCK_NO_TRASH__?: string }).__MOCK_NO_TRASH__ = 'remote';
+      });
+      await page.locator('[data-testid="file-item"][data-name="sample.pdf"]').click();
+      await page.keyboard.press('Meta+Backspace');
+
+      await expect
+        .poll(() => dialogMessages(page))
+        .toEqual(['This item will be deleted immediately. You can’t undo this action.']);
+      const deleted = await page.evaluate(() => {
+        const log =
+          (window as unknown as { __TAURI_INVOKE_LOG__?: { cmd: string }[] })
+            .__TAURI_INVOKE_LOG__ ?? [];
+        return log.some((entry) => entry.cmd === 'delete_paths_permanently');
+      });
+      expect(deleted).toBe(false);
+    });
+
     test('Cmd+Option+Backspace asks before it deletes permanently', async ({ page }) => {
       await page.locator('[data-testid="file-item"][data-name="sample.pdf"]').click();
       await page.keyboard.press('Meta+Alt+Backspace');

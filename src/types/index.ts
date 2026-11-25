@@ -239,10 +239,13 @@ export interface ClipboardProgressUpdatePayload {
   error?: string;
 }
 
+/** Why Move to Trash left the items where they are. Move to Trash then asks whether to delete them in place; an undo of a copy says why and leaves the copies. */
+export type NoTrash = 'refused' | 'remote' | 'googleDrive';
+
 export interface TrashPathsResponse {
   trashed: string[];
   undoToken?: string;
-  fallbackToPermanent: boolean;
+  noTrash: NoTrash | null;
 }
 
 export interface UndoTrashResponse {

@@ -5,7 +5,7 @@
 On Linux and macOS it can mount a Google account, a saved SFTP server, or a saved SMB server: see [Providers](#providers), the [Linux mount adapter](mount-linux.md), and the [macOS mount adapter](mount-macos.md). The helper does not run on Windows (#375). The app starts the helper on the first command that sends it a request: see [The app side](#the-app-side). No part of the UI sends one yet (#377). The app bundle holds the helper: see [Building and bundling](#building-and-bundling).
 
 **Covers:** `src-tauri/crates/marlin-mount/`, `src-tauri/crates/marlin-mount-client/`, `src-tauri/src/mount_helper.rs`, `src-tauri/build.rs`, `scripts/run-tauri.mjs`, `scripts/check-bundled-mount-helper.mjs`
-**Checked against the code:** 2026-11-24
+**Checked against the code:** 2026-11-25
 
 The design is in [decision 0001](decisions/0001-mount-architecture.md), choices 3 to 6. The helper builds each mount on the [mount core](mount-core.md).
 
@@ -164,7 +164,7 @@ The app talks to the helper through `Client` in `marlin-mount-client`. `src-taur
 | `refresh_mount`       | `refresh`       | nothing                  |
 | `find_mount`          | none            | `MountedPath`, or `null` |
 
-**The mount table.** The app lists the mounts when it connects, then keeps the latest status of each: from every answer to `list_mounts`, `get_mount_status`, and `mount_account`, and from every `mount-changed`. An answer can arrive after a newer notification, so an answer never replaces what a notification that arrived after the request said. The table is emptied on `mount-helper-closed`. `MountTable::holding` gives the mount that holds a path, and the path inside it. Only a mount that is up holds a path, and a path with `..` in it is in no mount, because the path is never resolved on the disk. `find_mount` is that function for the frontend. Neither one starts a helper. So before the first command that sends a request, the table is empty, and `find_mount` answers `null` even for a mount that is up, as after an app restart. A caller that needs the answer at launch calls `list_mounts` first.
+**The mount table.** The app lists the mounts when it connects, then keeps the latest status of each: from every answer to `list_mounts`, `get_mount_status`, and `mount_account`, and from every `mount-changed`. An answer can arrive after a newer notification, so an answer never replaces what a notification that arrived after the request said. The table is emptied on `mount-helper-closed`. `MountTable::holding` gives the mount that holds a path, and the path inside it. Only a mount that is up holds a path, and a path with `..` in it is in no mount, because the path is never resolved on the disk. `find_mount` is that function for the frontend. Move to Trash (`trash_paths` in `commands.rs`) also reads it to word its question for a Google Drive mount. None of them starts a helper. So before the first command that sends a request, the table is empty, and `find_mount` answers `null` even for a mount that is up, as after an app restart. A caller that needs the answer at launch calls `list_mounts` first.
 
 `locate_in_mount` takes `{provider, account, reference}`: the helper's `ref` is `reference` in the command, because `ref` is a Rust keyword. The other three take the helper's own names: `identify_in_mount` `{provider, account, path}`, `refresh_mount` `{provider, account}`, and `find_mount` `{path}`.
 

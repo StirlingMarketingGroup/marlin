@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
 import { useToastStore } from './useToastStore';
-import type { UndoTrashResponse } from '../types';
+import type { TrashPathsResponse, UndoTrashResponse } from '../types';
 
 export interface UndoMoveRecord {
   type: 'move';
@@ -44,12 +44,15 @@ interface UndoState {
   popUndo: () => UndoStackEntry | undefined;
   removeById: (id: string) => void;
   executeUndo: () => Promise<void>;
-  executeUndoRecord: (record: UndoRecord) => Promise<void>;
+  executeUndoEntry: (id: string) => Promise<void>;
   getValidStack: () => UndoStackEntry[];
 }
 
 // Helper to generate unique IDs
 const generateId = () => crypto.randomUUID();
+
+// An undo that fails the same way on every try. Its entry leaves the stack, so it does not block the undos under it.
+class CannotUndoError extends Error {}
 
 // Execute the undo for a specific record (internal helper)
 // Returns the paths it put back, for the view to reveal
@@ -69,7 +72,19 @@ async function executeUndoRecordInternal(record: UndoRecord): Promise<string[]> 
     }
     case 'copy': {
       // Send copied files to trash
-      await invoke('trash_paths', { paths: record.copiedPaths });
+      const response = await invoke<TrashPathsResponse>('trash_paths', {
+        paths: record.copiedPaths,
+      });
+      // A refusal can pass once the user grants access, so that undo stays.
+      if (response.noTrash === 'refused') {
+        throw new Error('The copies could not be moved to the Trash.');
+      }
+      // Without a Trash a delete would be final, and after a Merge `copiedPaths` holds the whole destination folder with the files that were there before (#712).
+      if (response.noTrash) {
+        throw new CannotUndoError(
+          'The copies are in a folder with no Trash, so they were left in place.'
+        );
+      }
       return [];
     }
     case 'rename': {
@@ -81,9 +96,13 @@ async function executeUndoRecordInternal(record: UndoRecord): Promise<string[]> 
       return [record.originalPath];
     }
     case 'trash': {
-      // Restore from trash using the undo token
-      const result = await invoke<UndoTrashResponse>('undo_trash', { token: record.undoToken });
-      return result.restored;
+      // Restore from trash using the undo token. `undo_trash` spends the token even when the restore fails, so no retry can work.
+      try {
+        const result = await invoke<UndoTrashResponse>('undo_trash', { token: record.undoToken });
+        return result.restored;
+      } catch (error) {
+        throw new CannotUndoError(error instanceof Error ? error.message : String(error));
+      }
     }
   }
 }
@@ -103,6 +122,13 @@ async function executeUndoRecordAndRefresh(record: UndoRecord): Promise<void> {
   }
 
   appStore.revealInOpenFolder(restoredPaths);
+}
+
+/** A toast's Undo button. While another undo runs, the click does nothing and the button stays. */
+export function undoFromToast(undoId: string, toastId: string): void {
+  if (useUndoStore.getState().undoInProgress) return;
+  useToastStore.getState().removeToast(toastId);
+  void useUndoStore.getState().executeUndoEntry(undoId);
 }
 
 /**
@@ -146,15 +172,7 @@ export function pushUndoAndShowToast(
     duration: 8000,
     action: {
       label: 'Undo',
-      onClick: () => {
-        toastStore.removeToast(toastId);
-        const freshUndoStore = useUndoStore.getState();
-        const entry = freshUndoStore.stack.find((e) => e.id === undoId);
-        if (entry) {
-          freshUndoStore.removeById(undoId);
-          void freshUndoStore.executeUndoRecord(entry.record);
-        }
-      },
+      onClick: () => undoFromToast(undoId, toastId),
     },
   });
 }
@@ -222,59 +240,44 @@ export const useUndoStore = create<UndoState>((set, get) => ({
   },
 
   executeUndo: async () => {
-    const state = get();
-    const toastStore = useToastStore.getState();
+    if (get().undoInProgress) return;
 
-    if (state.undoInProgress) return;
-
-    // Peek at the most recent valid entry without removing it
-    const validStack = state.getValidStack();
+    const validStack = get().getValidStack();
     if (validStack.length === 0) {
       set({ stack: [] });
-      toastStore.addToast({ type: 'info', message: 'Nothing to undo.', duration: 3000 });
+      useToastStore
+        .getState()
+        .addToast({ type: 'info', message: 'Nothing to undo.', duration: 3000 });
       return;
     }
 
-    const entry = validStack[validStack.length - 1];
+    await get().executeUndoEntry(validStack[validStack.length - 1].id);
+  },
 
-    // Remove and execute — on failure, push back
-    set((s) => ({
-      undoInProgress: true,
-      stack: s.stack.filter((e) => e.id !== entry.id),
-    }));
+  // Runs one entry's undo: the latest for Cmd+Z, or the one a toast's Undo button names.
+  // The entry stays on the stack until its undo is done, or fails in a way no retry can fix.
+  executeUndoEntry: async (id) => {
+    const entry = get()
+      .getValidStack()
+      .find((e) => e.id === id);
+    if (get().undoInProgress || !entry) return;
 
+    set({ undoInProgress: true });
+    const toastStore = useToastStore.getState();
     try {
       await executeUndoRecordAndRefresh(entry.record);
+      get().removeById(id);
       toastStore.addToast({
         type: 'success',
         message: `Undone: ${entry.description}`,
         duration: 4000,
       });
     } catch (error) {
-      // Restore the entry so user can retry
-      set((s) => ({ stack: [...s.stack, entry] }));
+      if (error instanceof CannotUndoError) {
+        get().removeById(id);
+      }
       const message = error instanceof Error ? error.message : String(error);
       toastStore.addToast({ type: 'error', message: `Undo failed: ${message}`, duration: 6000 });
-    } finally {
-      set({ undoInProgress: false });
-    }
-  },
-
-  // Execute a specific undo record (called from toast action buttons)
-  executeUndoRecord: async (record: UndoRecord) => {
-    const state = get();
-    if (state.undoInProgress) return;
-
-    set({ undoInProgress: true });
-
-    try {
-      await executeUndoRecordAndRefresh(record);
-      useToastStore.getState().addToast({ type: 'success', message: 'Undone', duration: 4000 });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      useToastStore
-        .getState()
-        .addToast({ type: 'error', message: `Undo failed: ${message}`, duration: 6000 });
     } finally {
       set({ undoInProgress: false });
     }

@@ -5,7 +5,7 @@
 The helper mounts a Google account or a saved SFTP server through it: see [Providers](mount-helper.md#providers). No part of the UI asks for a mount yet (#377).
 
 **Covers:** `src-tauri/crates/marlin-fuse/src/lib.rs`, `src-tauri/crates/marlin-fuse/src/macos.rs`, `src-tauri/crates/marlin-fuse/src/macos/`, `src-tauri/crates/marlin-fuse/test-on-mac.sh`
-**Checked against the code:** 2026-11-24
+**Checked against the code:** 2026-11-25
 
 The design is in [decision 0001](decisions/0001-mount-architecture.md), choices 2 and 6.
 
@@ -75,7 +75,7 @@ macFUSE keeps every extended attribute in a `._name` file beside the item, becau
 - Removing a folder that holds only `._name` files works. The core answers "not empty", and macOS removes the `._name` files and tries again.
 - **Finder copies through placeholders.** It makes an empty file for each item first, then removes each one and writes the real file. When the copy takes longer than the settle time, a placeholder uploads empty, is removed on the remote, and the real file uploads under a new ID (#629).
 - **Finder checks the free space first.** When a copy needs more than `statfs` reports free, Finder stops before it writes a byte, with "An item with the same name already exists". The empty placeholder files and the folders it made stay, and upload.
-- Move to Trash on a mount removes the item at once. Finder makes no `.Trashes` folder.
+- Move to Trash on a mount asks first, then removes the item at once. Finder asks "Are you sure you want to delete “name”?" with "This item will be deleted immediately. You can’t undo this action." (macOS 27.2), and makes no `.Trashes` folder. `trashItemAtURL` refuses the item with "the volume doesn’t have one". Marlin asks the same question ([Architecture](architecture.md), "Move to Trash where there is no trash").
 - A Cocoa app's safe save (`NSDocument`, as TextEdit does) writes the new file into a folder named `(A Document Being Saved By <app>)` at the mount's root, renames it over the old file, and removes the folder. The saved file keeps its ID, because it is still only in the spool when it is renamed ([decision 0005](decisions/0005-mount-writes.md), choice 9). But the folder is made on the remote and removed there on every save: two provider calls, and on Google Drive a folder in the trash (#628).
 - Foundation's atomic write writes `<name>.sb-<random>` in the same folder, then renames it over `<name>`.
 
