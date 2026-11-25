@@ -5,7 +5,7 @@ edition = "2021"
 license = "MIT"
 publish = false
 rust-version = "1.89"
-description = "Marlin's saved SFTP servers, their host key check, the connection, and the read-only provider for mounts."
+description = "Marlin's saved SFTP servers, their host key check, the connection, and the provider for mounts."
 
 [dependencies]
 russh = "0.61"

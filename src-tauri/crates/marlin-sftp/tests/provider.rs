@@ -5,21 +5,21 @@
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::future::Future;
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use marlin_sftp::{add_server, Config, SftpAccount, SftpProvider};
 use marlin_test_sshd::{Proxy, Sshd};
-use marlin_vfs::{ItemId, Kind, Provider, Space, VfsError};
+use marlin_vfs::{ItemId, Kind, Provider, Revision, Space, VfsError};
 use russh::keys::{Algorithm, PrivateKey};
 use russh::server::{Auth, Handler, Msg, Server, Session};
 use russh::{Channel, ChannelId};
 use russh_sftp::protocol::{
-    Attrs, Data, FileAttributes, Handle, OpenFlags, Packet, Status, StatusCode, Version,
+    Attrs, Data, File, FileAttributes, Handle, Name, OpenFlags, Packet, Status, StatusCode, Version,
 };
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
@@ -54,7 +54,10 @@ struct Harness {
 
 impl Harness {
     async fn start() -> Self {
-        let sshd = Sshd::start().await;
+        Self::start_with(Sshd::start().await).await
+    }
+
+    async fn start_with(sshd: Sshd) -> Self {
         let proxy = Proxy::start(sshd.port()).await;
         let known_hosts = sshd.root().join("known_hosts");
         fs::write(&known_hosts, sshd.known_hosts_line(proxy.port())).unwrap();
@@ -384,7 +387,7 @@ async fn a_connection_that_goes_silent_ends_and_the_call_runs_again() {
     .await;
 }
 
-/// An SSH server inside the test, with password sign-in. Its SFTP server has no extensions, so no `statvfs` and no `limits`, and it answers one request at a time.
+/// An SSH server inside the test, with password sign-in. Its SFTP server offers only `posix-rename@openssh.com` (and `statvfs@openssh.com` when asked), so no `limits`, and it answers one request at a time.
 struct Fake {
     port: u16,
     server: FakeServer,
@@ -411,6 +414,10 @@ struct FakeServer {
     offers_statvfs: Arc<AtomicBool>,
     /// How many `statvfs` requests came. Each answers that the user may not ask.
     statvfs_asked: Arc<AtomicUsize>,
+    /// How many `mkdir` requests came.
+    mkdirs: Arc<AtomicUsize>,
+    /// How many opens asked to write.
+    writes: Arc<AtomicUsize>,
     channels: Arc<Mutex<HashMap<ChannelId, Channel<Msg>>>>,
 }
 
@@ -479,6 +486,8 @@ impl Handler for FakeServer {
                 lost_once: Arc::clone(&self.lost_once),
                 offers_statvfs: Arc::clone(&self.offers_statvfs),
                 statvfs_asked: Arc::clone(&self.statvfs_asked),
+                mkdirs: Arc::clone(&self.mkdirs),
+                writes: Arc::clone(&self.writes),
             },
         )
         .await;
@@ -493,6 +502,8 @@ struct FakeSftp {
     lost_once: Arc<AtomicBool>,
     offers_statvfs: Arc<AtomicBool>,
     statvfs_asked: Arc<AtomicUsize>,
+    mkdirs: Arc<AtomicUsize>,
+    writes: Arc<AtomicUsize>,
 }
 
 impl russh_sftp::server::Handler for FakeSftp {
@@ -508,6 +519,9 @@ impl russh_sftp::server::Handler for FakeSftp {
         _extensions: HashMap<String, String>,
     ) -> Result<Version, Self::Error> {
         let mut version = Version::new();
+        // So a replace gets past its first check, to the link rule the fake's `/link` tests.
+        let posix_rename = ("posix-rename@openssh.com".to_string(), "1".to_string());
+        version.extensions.extend([posix_rename]);
         if self.offers_statvfs.load(Ordering::SeqCst) {
             let statvfs = ("statvfs@openssh.com".to_string(), "2".to_string());
             version.extensions.extend([statvfs]);
@@ -523,6 +537,35 @@ impl russh_sftp::server::Handler for FakeSftp {
     ) -> Result<Packet, Self::Error> {
         self.statvfs_asked.fetch_add(1, Ordering::SeqCst);
         Err(StatusCode::PermissionDenied)
+    }
+
+    async fn lstat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
+        if path == "/link" {
+            let mut attrs = FileAttributes::empty();
+            attrs.set_symlink(true);
+            return Ok(Attrs { id, attrs });
+        }
+        self.stat(id, path).await
+    }
+
+    async fn realpath(&mut self, id: u32, path: String) -> Result<Name, Self::Error> {
+        if path == "/link" {
+            return Ok(Name {
+                id,
+                files: vec![File::dummy("/link")],
+            });
+        }
+        Err(self.unimplemented())
+    }
+
+    async fn mkdir(
+        &mut self,
+        _id: u32,
+        _path: String,
+        _attrs: FileAttributes,
+    ) -> Result<Status, Self::Error> {
+        self.mkdirs.fetch_add(1, Ordering::SeqCst);
+        Err(StatusCode::ConnectionLost)
     }
 
     async fn stat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
@@ -551,9 +594,12 @@ impl russh_sftp::server::Handler for FakeSftp {
         &mut self,
         id: u32,
         filename: String,
-        _flags: OpenFlags,
+        flags: OpenFlags,
         _attrs: FileAttributes,
     ) -> Result<Handle, Self::Error> {
+        if flags.contains(OpenFlags::WRITE) {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+        }
         match filename.as_str() {
             "/hang" => {
                 self.hang.notify_one();
@@ -619,6 +665,8 @@ impl Fake {
             lost_once: Arc::new(AtomicBool::new(false)),
             offers_statvfs: Arc::new(AtomicBool::new(false)),
             statvfs_asked: Arc::new(AtomicUsize::new(0)),
+            mkdirs: Arc::new(AtomicUsize::new(0)),
+            writes: Arc::new(AtomicUsize::new(0)),
             channels: Arc::new(Mutex::new(HashMap::new())),
         };
         let fake = server.clone();
@@ -990,6 +1038,648 @@ async fn dropping_a_provider_closes_its_connection() {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         drop(account);
+    })
+    .await;
+}
+
+fn names_of(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+fn temporary_names(dir: &Path) -> Vec<String> {
+    let mut found = Vec::new();
+    for entry in fs::read_dir(dir).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with(".marlin-") {
+            found.push(entry.path().to_string_lossy().into_owned());
+        }
+        if entry.file_type().unwrap().is_dir() {
+            found.extend(temporary_names(&entry.path()));
+        }
+    }
+    found
+}
+
+/// The guard removes a temporary file from a spawned task, so a failure can leave one for a moment.
+async fn wait_until_no_temporary(dir: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let left = temporary_names(dir);
+        if left.is_empty() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "a temporary file was still in {}: {left:?}",
+            dir.display()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+fn mode_of(path: &Path) -> u32 {
+    fs::metadata(path).unwrap().permissions().mode() & 0o7777
+}
+
+#[tokio::test]
+async fn sshd_makes_moves_and_removes_folders_and_files() {
+    marlin_test_keychain::install();
+    within(async {
+        let harness = Harness::start().await;
+        harness.save("ed25519");
+        let provider = harness.provider(Duration::from_secs(60));
+        let folder = harness.root.join("work");
+        fs::create_dir(&folder).unwrap();
+        let parent = id_of(&folder);
+
+        let made = provider.create_folder(&parent, "box").await.unwrap();
+        assert_eq!(made.attributes.kind, Kind::Folder);
+        assert_eq!(made.id, id_of(&folder.join("box")));
+        assert!(folder.join("box").is_dir());
+        assert_eq!(
+            provider.create_folder(&parent, "box").await,
+            Err(VfsError::Conflict)
+        );
+        for name in ["a/b", ".", ".."] {
+            assert_eq!(
+                provider.create_folder(&parent, name).await,
+                Err(VfsError::NotSupported),
+                "{name}"
+            );
+        }
+
+        fs::write(folder.join("note.txt"), b"hello").unwrap();
+        let note = id_of(&folder.join("note.txt"));
+        let moved = provider
+            .rename(&note, &parent, &parent, "gone.txt", None)
+            .await
+            .unwrap();
+        assert_eq!(moved.id, id_of(&folder.join("gone.txt")));
+        assert!(!folder.join("note.txt").exists());
+        assert_eq!(fs::read(folder.join("gone.txt")).unwrap(), b"hello");
+
+        fs::write(folder.join("taken.txt"), b"old").unwrap();
+        assert_eq!(
+            provider
+                .rename(&moved.id, &parent, &parent, "taken.txt", None)
+                .await,
+            Err(VfsError::Conflict)
+        );
+        assert_eq!(fs::read(folder.join("gone.txt")).unwrap(), b"hello");
+        assert_eq!(fs::read(folder.join("taken.txt")).unwrap(), b"old");
+        assert_eq!(
+            provider
+                .rename(
+                    &moved.id,
+                    &id_of(&folder.join("box")),
+                    &parent,
+                    "elsewhere.txt",
+                    None
+                )
+                .await,
+            Err(VfsError::NotFound)
+        );
+
+        let replaced = provider
+            .rename(
+                &moved.id,
+                &parent,
+                &parent,
+                "taken.txt",
+                Some(&id_of(&folder.join("taken.txt"))),
+            )
+            .await
+            .unwrap();
+        assert_eq!(replaced.id, id_of(&folder.join("taken.txt")));
+        assert!(!folder.join("gone.txt").exists());
+        assert_eq!(fs::read(folder.join("taken.txt")).unwrap(), b"hello");
+        assert_eq!(
+            names_of(&folder)
+                .into_iter()
+                .filter(|name| folder.join(name).is_file())
+                .count(),
+            1
+        );
+
+        provider.create_folder(&parent, "full").await.unwrap();
+        fs::write(folder.join("full").join("inner.txt"), b"in").unwrap();
+        provider.create_folder(&parent, "empty").await.unwrap();
+        let over = provider
+            .rename(
+                &id_of(&folder.join("full")),
+                &parent,
+                &parent,
+                "empty",
+                Some(&id_of(&folder.join("empty"))),
+            )
+            .await
+            .unwrap();
+        assert_eq!(over.id, id_of(&folder.join("empty")));
+        assert!(!folder.join("full").exists());
+        assert_eq!(
+            fs::read(folder.join("empty").join("inner.txt")).unwrap(),
+            b"in"
+        );
+
+        provider.create_folder(&parent, "other").await.unwrap();
+        assert_eq!(
+            provider
+                .rename(
+                    &id_of(&folder.join("other")),
+                    &parent,
+                    &parent,
+                    "empty",
+                    Some(&over.id),
+                )
+                .await,
+            Err(VfsError::NotEmpty)
+        );
+        assert!(folder.join("other").is_dir());
+        assert_eq!(
+            fs::read(folder.join("empty").join("inner.txt")).unwrap(),
+            b"in"
+        );
+
+        provider
+            .remove(&id_of(&folder.join("taken.txt")), &parent)
+            .await
+            .unwrap();
+        assert!(!folder.join("taken.txt").exists());
+        provider.create_folder(&parent, "vacant").await.unwrap();
+        provider
+            .remove(&id_of(&folder.join("vacant")), &parent)
+            .await
+            .unwrap();
+        assert!(!folder.join("vacant").exists());
+        assert_eq!(
+            provider
+                .remove(&id_of(&folder.join("empty")), &parent)
+                .await,
+            Err(VfsError::NotEmpty)
+        );
+        assert_eq!(
+            fs::read(folder.join("empty").join("inner.txt")).unwrap(),
+            b"in"
+        );
+        assert_eq!(
+            provider
+                .remove(&id_of(&folder.join("missing")), &parent)
+                .await,
+            Err(VfsError::NotFound)
+        );
+
+        fs::write(folder.join("target.txt"), b"keep").unwrap();
+        symlink("target.txt", folder.join("the-link")).unwrap();
+        provider
+            .remove(&id_of(&folder.join("the-link")), &parent)
+            .await
+            .unwrap();
+        assert!(!folder.join("the-link").exists());
+        assert_eq!(fs::read(folder.join("target.txt")).unwrap(), b"keep");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn sshd_uploads_through_a_temporary_name_and_keeps_permissions() {
+    marlin_test_keychain::install();
+    within(async {
+        let harness = Harness::start().await;
+        harness.save("ed25519");
+        let provider = harness.provider(Duration::from_secs(60));
+        let folder = harness.root.join("uploads");
+        fs::create_dir(&folder).unwrap();
+        let parent = id_of(&folder);
+        let scratch = tempfile::tempdir().unwrap();
+        let source = scratch.path().join("source.bin");
+        let bytes = pattern(0, 300_000);
+        fs::write(&source, &bytes).unwrap();
+        let modified = UNIX_EPOCH + Duration::from_secs(1_710_000_000);
+        let sent = Arc::new(AtomicU64::new(0));
+        let progress = {
+            let sent = Arc::clone(&sent);
+            move |n: u64| {
+                sent.store(n, Ordering::SeqCst);
+            }
+        };
+        let made = provider
+            .create_file(&parent, "made.bin", &source, modified, &progress)
+            .await
+            .unwrap();
+        assert_eq!(fs::read(folder.join("made.bin")).unwrap(), bytes);
+        assert_eq!(
+            made.attributes
+                .modified
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            1_710_000_000
+        );
+        assert_eq!(provider.item(&made.id).await.unwrap(), made);
+        assert_eq!(sent.load(Ordering::SeqCst), 300_000);
+        assert!(names_of(&folder)
+            .iter()
+            .all(|name| !name.starts_with(".marlin-")));
+
+        fs::write(folder.join("kept.bin"), b"stay").unwrap();
+        let again = scratch.path().join("again.bin");
+        fs::write(&again, b"new").unwrap();
+        assert_eq!(
+            provider
+                .create_file(&parent, "kept.bin", &again, modified, &|_| {})
+                .await,
+            Err(VfsError::Conflict)
+        );
+        assert_eq!(fs::read(folder.join("kept.bin")).unwrap(), b"stay");
+        assert_eq!(
+            provider
+                .create_file(&parent, "bad\u{FFFD}name", &source, modified, &|_| {})
+                .await,
+            Err(VfsError::NotSupported)
+        );
+
+        let private = folder.join("private.bin");
+        fs::write(&private, b"old-bytes").unwrap();
+        fs::set_permissions(&private, fs::Permissions::from_mode(0o640)).unwrap();
+        let before = provider.item(&id_of(&private)).await.unwrap();
+        let base = before.attributes.revision.clone().unwrap();
+        let replacement = scratch.path().join("replacement.bin");
+        let replaced_bytes = pattern(9, 300_000);
+        fs::write(&replacement, &replaced_bytes).unwrap();
+        let next_modified = UNIX_EPOCH + Duration::from_secs(1_720_000_000);
+        let saw_private = Arc::new(AtomicBool::new(false));
+        let progress = {
+            let saw_private = Arc::clone(&saw_private);
+            let folder = folder.clone();
+            move |_n: u64| {
+                if saw_private.swap(true, Ordering::SeqCst) {
+                    return;
+                }
+                let temporary = names_of(&folder)
+                    .into_iter()
+                    .find(|name| name.starts_with(".marlin-"))
+                    .expect("the upload had no temporary file at the first progress");
+                assert_eq!(mode_of(&folder.join(temporary)), 0o600);
+            }
+        };
+        let updated = provider
+            .replace_bytes(
+                &id_of(&private),
+                &replacement,
+                &base,
+                next_modified,
+                &progress,
+            )
+            .await
+            .unwrap();
+        assert!(saw_private.load(Ordering::SeqCst));
+        assert_eq!(fs::read(&private).unwrap(), replaced_bytes);
+        assert_eq!(mode_of(&private), 0o640);
+        assert_eq!(
+            updated
+                .attributes
+                .modified
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            1_720_000_000
+        );
+        assert_ne!(updated.attributes.revision.as_ref().unwrap(), &base);
+        assert_eq!(
+            provider
+                .replace_bytes(&id_of(&private), &source, &base, modified, &|_| {})
+                .await,
+            Err(VfsError::Conflict)
+        );
+        assert_eq!(fs::read(&private).unwrap(), replaced_bytes);
+        assert_eq!(
+            provider
+                .replace_bytes(
+                    &id_of(&folder.join("missing.bin")),
+                    &source,
+                    &base,
+                    modified,
+                    &|_| {}
+                )
+                .await,
+            Err(VfsError::NotFound)
+        );
+
+        fs::write(folder.join("link-target.bin"), b"target-old").unwrap();
+        symlink("link-target.bin", folder.join("the-link")).unwrap();
+        let link = id_of(&folder.join("the-link"));
+        let link_item = provider.item(&link).await.unwrap();
+        let link_base = link_item.attributes.revision.unwrap();
+        let link_bytes = scratch.path().join("link-bytes.bin");
+        fs::write(&link_bytes, b"target-new").unwrap();
+        provider
+            .replace_bytes(&link, &link_bytes, &link_base, next_modified, &|_| {})
+            .await
+            .unwrap();
+        assert_eq!(
+            fs::read(folder.join("link-target.bin")).unwrap(),
+            b"target-new"
+        );
+        assert!(fs::symlink_metadata(folder.join("the-link"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+
+        // A link pointed elsewhere during the upload, and its old target removed, is a conflict, and the new target does not change.
+        fs::write(folder.join("other-target.bin"), b"other").unwrap();
+        let link_item = provider.item(&link).await.unwrap();
+        let progress = {
+            let folder = folder.clone();
+            move |_n: u64| {
+                if fs::read_link(folder.join("the-link")).unwrap() == Path::new("link-target.bin") {
+                    fs::remove_file(folder.join("the-link")).unwrap();
+                    symlink("other-target.bin", folder.join("the-link")).unwrap();
+                    fs::remove_file(folder.join("link-target.bin")).unwrap();
+                }
+            }
+        };
+        assert_eq!(
+            provider
+                .replace_bytes(
+                    &link,
+                    &link_bytes,
+                    link_item.attributes.revision.as_ref().unwrap(),
+                    next_modified,
+                    &progress,
+                )
+                .await,
+            Err(VfsError::Conflict)
+        );
+        assert!(!folder.join("link-target.bin").exists());
+        assert_eq!(fs::read(folder.join("other-target.bin")).unwrap(), b"other");
+
+        let locked = folder.join("locked.bin");
+        fs::write(&locked, b"locked").unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o444)).unwrap();
+        let locked_item = provider.item(&id_of(&locked)).await.unwrap();
+        assert_eq!(
+            provider
+                .replace_bytes(
+                    &id_of(&locked),
+                    &source,
+                    locked_item.attributes.revision.as_ref().unwrap(),
+                    modified,
+                    &|_| {}
+                )
+                .await,
+            Err(VfsError::AccessDenied)
+        );
+        assert_eq!(fs::read(&locked).unwrap(), b"locked");
+
+        // A replace keeps the old file's group, and a normal write clears set-ID bits. The new file starts with the group the folder gives it, so the old file gets another group of the user's.
+        let grouped = folder.join("grouped.bin");
+        fs::write(&grouped, b"group-old").unwrap();
+        let groups = Command::new("id").arg("-G").output().unwrap().stdout;
+        let first = fs::metadata(&grouped).unwrap().gid();
+        let other = String::from_utf8(groups)
+            .unwrap()
+            .split_whitespace()
+            .map(|gid| gid.parse::<u32>().unwrap())
+            .find(|gid| *gid != first);
+        if let Some(gid) = other {
+            let status = Command::new("chgrp")
+                .arg(gid.to_string())
+                .arg(&grouped)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+        fs::set_permissions(&grouped, fs::Permissions::from_mode(0o4750)).unwrap();
+        let group_before = fs::metadata(&grouped).unwrap().gid();
+        let grouped_item = provider.item(&id_of(&grouped)).await.unwrap();
+        provider
+            .replace_bytes(
+                &id_of(&grouped),
+                &replacement,
+                grouped_item.attributes.revision.as_ref().unwrap(),
+                modified,
+                &|_| {},
+            )
+            .await
+            .unwrap();
+        assert_eq!(fs::metadata(&grouped).unwrap().gid(), group_before);
+        assert_eq!(mode_of(&grouped), 0o750);
+
+        // A mode another client changes during the upload is the mode the new file gets. A mode change leaves the size and the time, so the revision, as they were.
+        let shared = folder.join("shared.bin");
+        fs::write(&shared, b"shared-old").unwrap();
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o644)).unwrap();
+        let shared_item = provider.item(&id_of(&shared)).await.unwrap();
+        let progress = {
+            let shared = shared.clone();
+            move |_n: u64| fs::set_permissions(&shared, fs::Permissions::from_mode(0o600)).unwrap()
+        };
+        provider
+            .replace_bytes(
+                &id_of(&shared),
+                &replacement,
+                shared_item.attributes.revision.as_ref().unwrap(),
+                modified,
+                &progress,
+            )
+            .await
+            .unwrap();
+        assert_eq!(fs::read(&shared).unwrap(), replaced_bytes);
+        assert_eq!(mode_of(&shared), 0o600);
+        wait_until_no_temporary(&folder).await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_connection_cut_during_an_upload_leaves_the_old_file_whole() {
+    marlin_test_keychain::install();
+    within(async {
+        let harness = Harness::start().await;
+        harness.save("ed25519");
+        let provider = harness.provider(Duration::from_secs(60));
+        let folder = harness.root.join("cuts");
+        fs::create_dir(&folder).unwrap();
+        let old = pattern(0, 100_000);
+        fs::write(folder.join("whole.bin"), &old).unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let big = scratch.path().join("big.bin");
+        fs::write(&big, pattern(0, 16 * 1024 * 1024)).unwrap();
+        let item = provider
+            .item(&id_of(&folder.join("whole.bin")))
+            .await
+            .unwrap();
+        // The provider future is `'static`, so the callback owns a cutter instead of borrowing the proxy.
+        let cutter = harness.proxy.cutter();
+        let cut = Arc::new(AtomicBool::new(false));
+        let progress = {
+            let cutter = cutter.clone();
+            let cut = Arc::clone(&cut);
+            move |_n: u64| {
+                if !cut.swap(true, Ordering::SeqCst) {
+                    cutter.cut();
+                }
+            }
+        };
+        assert_eq!(
+            provider
+                .replace_bytes(
+                    &item.id,
+                    &big,
+                    item.attributes.revision.as_ref().unwrap(),
+                    UNIX_EPOCH + Duration::from_secs(1_700_000_100),
+                    &progress
+                )
+                .await,
+            Err(VfsError::Offline)
+        );
+        assert_eq!(fs::read(folder.join("whole.bin")).unwrap(), old);
+
+        let cut = Arc::new(AtomicBool::new(false));
+        let progress = {
+            let cutter = cutter.clone();
+            let cut = Arc::clone(&cut);
+            move |_n: u64| {
+                if !cut.swap(true, Ordering::SeqCst) {
+                    cutter.cut();
+                }
+            }
+        };
+        assert_eq!(
+            provider
+                .create_file(
+                    &id_of(&folder),
+                    "fresh.bin",
+                    &big,
+                    UNIX_EPOCH + Duration::from_secs(1_700_000_100),
+                    &progress
+                )
+                .await,
+            Err(VfsError::Offline)
+        );
+        assert!(!folder.join("fresh.bin").exists());
+
+        // The cut uploads left their temporary files on the server. The next upload removes them.
+        let small = scratch.path().join("small.bin");
+        fs::write(&small, b"small").unwrap();
+        provider
+            .create_file(&id_of(&folder), "after.bin", &small, UNIX_EPOCH, &|_| {})
+            .await
+            .unwrap();
+        wait_until_no_temporary(&folder).await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_server_that_denies_posix_rename_replaces_nothing() {
+    marlin_test_keychain::install();
+    within(async {
+        let harness = Harness::start_with(Sshd::start_denying("posix-rename").await).await;
+        harness.save("ed25519");
+        let provider = harness.provider(Duration::from_secs(60));
+        let folder = harness.root.join("denied");
+        fs::create_dir(&folder).unwrap();
+        fs::write(folder.join("one.bin"), b"one").unwrap();
+        fs::write(folder.join("two.bin"), b"two").unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let source = scratch.path().join("source.bin");
+        fs::write(&source, b"replaced").unwrap();
+        let one = provider
+            .item(&id_of(&folder.join("one.bin")))
+            .await
+            .unwrap();
+        // By its version, OpenSSH either does not advertise an extension `-P` denies, so the provider sends none (`NotSupported`), or advertises it and refuses the request (`AccessDenied`).
+        let refused =
+            |answer| matches!(answer, Err(VfsError::NotSupported | VfsError::AccessDenied));
+        let replaced = provider
+            .replace_bytes(
+                &one.id,
+                &source,
+                one.attributes.revision.as_ref().unwrap(),
+                UNIX_EPOCH + Duration::from_secs(1_700_000_200),
+                &|_| {},
+            )
+            .await;
+        assert!(refused(replaced.clone()), "{replaced:?}");
+        assert_eq!(fs::read(folder.join("one.bin")).unwrap(), b"one");
+        let renamed = provider
+            .rename(
+                &id_of(&folder.join("one.bin")),
+                &id_of(&folder),
+                &id_of(&folder),
+                "two.bin",
+                Some(&id_of(&folder.join("two.bin"))),
+            )
+            .await;
+        assert!(refused(renamed.clone()), "{renamed:?}");
+        assert_eq!(fs::read(folder.join("one.bin")).unwrap(), b"one");
+        assert_eq!(fs::read(folder.join("two.bin")).unwrap(), b"two");
+        wait_until_no_temporary(&folder).await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_change_runs_once_more_only_while_nothing_changed() {
+    marlin_test_keychain::install();
+    within(async {
+        let harness = Harness::start().await;
+        harness.save("ed25519");
+        let provider = harness.provider(Duration::from_secs(60));
+        provider.list(&provider.root()).await.unwrap();
+        harness.proxy.freeze();
+        let started = Instant::now();
+        let made = provider
+            .create_folder(&id_of(&harness.root), "after-the-freeze")
+            .await
+            .unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(harness.proxy.accepted(), 2);
+        assert_eq!(made.attributes.kind, Kind::Folder);
+        assert!(harness.root.join("after-the-freeze").is_dir());
+
+        let (fake, provider) = Fake::signed_in().await;
+        assert_eq!(
+            provider.create_folder(&ItemId("/".into()), "made").await,
+            Err(VfsError::Offline)
+        );
+        assert_eq!(fake.server.mkdirs.load(Ordering::SeqCst), 1);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_link_the_server_does_not_resolve_is_not_replaced() {
+    marlin_test_keychain::install();
+    within(async {
+        let (fake, provider) = Fake::signed_in().await;
+        let scratch = tempfile::tempdir().unwrap();
+        let source = scratch.path().join("source.bin");
+        fs::write(&source, b"bytes").unwrap();
+        assert_eq!(
+            provider
+                .replace_bytes(
+                    &ItemId("/link".into()),
+                    &source,
+                    &Revision("0:0".into()),
+                    UNIX_EPOCH,
+                    &|_| {}
+                )
+                .await,
+            Err(VfsError::NotSupported)
+        );
+        assert_eq!(fake.server.writes.load(Ordering::SeqCst), 0);
     })
     .await;
 }
