@@ -20,18 +20,24 @@ pub fn start() -> Result<(), marlin_smb_client::StartError> {
 ///
 /// A download, an upload, and a copy have no time limit. A partial download has
 /// 5 minutes. Every other method has 30 seconds.
-pub fn call_method<P: Serialize, R: DeserializeOwned>(
+pub fn call<P: Serialize, R: DeserializeOwned>(
     method: &str,
     params: P,
-) -> Result<R, String> {
+) -> Result<R, marlin_smb_client::CallError> {
     let limit = match method {
         methods::DOWNLOAD_FILE | methods::UPLOAD_FILE | methods::COPY => None,
         methods::DOWNLOAD_PARTIAL => Some(Duration::from_secs(5 * 60)),
         _ => Some(Duration::from_secs(30)),
     };
-    SIDECAR
-        .call(method, params, limit)
-        .map_err(|err| err.to_string())
+    SIDECAR.call(method, params, limit)
+}
+
+/// [`call`], with the error as its text.
+pub fn call_method<P: Serialize, R: DeserializeOwned>(
+    method: &str,
+    params: P,
+) -> Result<R, String> {
+    call(method, params).map_err(|err| err.to_string())
 }
 
 /// Find the sidecar binary.

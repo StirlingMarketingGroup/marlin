@@ -2,11 +2,13 @@ pub mod client;
 
 use crate::fs_utils::FileItem;
 use crate::locations::{
-    Location, LocationCapabilities, LocationProvider, LocationSummary, ProviderDirectoryEntries,
+    not_a_folder, Location, LocationCapabilities, LocationProvider, LocationSummary,
+    ProviderDirectoryEntries,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use marlin_smb_client::protocol::methods;
+use marlin_smb_client::protocol::{error_codes, methods};
+use marlin_smb_client::CallError;
 
 /// The saved sign-in for `hostname`. It starts `marlin-smb` first, so a missing helper or a
 /// missing Samba is the error, not a missing password: the app answers a missing password
@@ -67,13 +69,17 @@ impl LocationProvider for SmbProvider {
 
         // Call sidecar
         let result: serde_json::Value = tokio::task::spawn_blocking(move || {
-            client::call_method::<serde_json::Value, serde_json::Value>(
-                methods::READ_DIRECTORY,
-                params,
-            )
+            client::call::<serde_json::Value, serde_json::Value>(methods::READ_DIRECTORY, params)
         })
         .await
-        .map_err(|e| format!("SMB task failed: {}", e))??;
+        .map_err(|e| format!("SMB task failed: {}", e))?
+        .map_err(|error| match error {
+            CallError::Failed {
+                code: error_codes::SMB_NOT_A_FOLDER,
+                ..
+            } => not_a_folder(location.raw()),
+            error => error.to_string(),
+        })?;
 
         // Parse result
         let entries = result

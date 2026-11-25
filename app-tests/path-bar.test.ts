@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { afterAll, beforeAll, expect, test } from 'vitest';
-import { openFolder, rowNames, runCommand, startApp } from './app';
+import { fileRow, openFolder, rowNames, runCommand, startApp } from './app';
 
 let app: Awaited<ReturnType<typeof startApp>>;
 
@@ -47,4 +47,47 @@ test('a typed folder that does not exist stays in the path bar, and the list sta
     async () => (await runCommand(browser, 'is_watching_directory', { path: files })) === true,
     { timeout: 10_000, timeoutMsg: 'the window never went back to the folder' }
   );
+});
+
+test('a typed file address opens its folder with the file selected, and a path under the file fails', async () => {
+  const { browser, files } = app;
+  const sub = path.join(files, 'sub');
+  await fs.mkdir(sub);
+  await fs.writeFile(path.join(sub, 'pick.txt'), 'pick\n');
+  await fs.writeFile(path.join(sub, 'other.txt'), 'other\n');
+  await openFolder(browser, files);
+
+  const pathInput = browser.$('[data-testid="path-input"]');
+  const fileAddress = path.join(sub, 'pick.txt');
+  await pathInput.click();
+  await pathInput.setValue(fileAddress);
+  await browser.keys('Enter');
+
+  await browser.waitUntil(async () => (await pathInput.getValue()) === sub, {
+    timeout: 10_000,
+    timeoutMsg: `the path bar never showed ${sub}`,
+  });
+  await browser.waitUntil(
+    async () => (await runCommand(browser, 'is_watching_directory', { path: sub })) === true,
+    { timeout: 10_000, timeoutMsg: 'the window never opened the folder' }
+  );
+  await browser.waitUntil(
+    async () =>
+      (await fileRow(browser, 'pick.txt').getAttribute('class'))?.includes('bg-accent-selected') ===
+      true,
+    { timeout: 10_000, timeoutMsg: 'pick.txt was never selected' }
+  );
+
+  const under = path.join(fileAddress, 'more');
+  await pathInput.click();
+  await pathInput.setValue(under);
+  await browser.keys('Enter');
+
+  const failure = browser.$('[data-testid="path-bar-failure"]');
+  await failure.waitForDisplayed({ timeout: 10_000 });
+  const text = await browser.execute(
+    () => document.querySelector('[data-testid="path-bar-failure"]')?.textContent ?? ''
+  );
+  expect(text).toContain('does not exist');
+  expect(await pathInput.getValue()).toBe(under);
 });

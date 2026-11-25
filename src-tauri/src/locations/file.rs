@@ -5,7 +5,8 @@ use async_trait::async_trait;
 use tauri::async_runtime::spawn_blocking;
 
 use super::{
-    Location, LocationCapabilities, LocationProvider, LocationSummary, ProviderDirectoryEntries,
+    not_a_folder, Location, LocationCapabilities, LocationProvider, LocationSummary,
+    ProviderDirectoryEntries,
 };
 use crate::fs_utils::{
     create_directory, delete_file_or_directory, expand_path, get_file_info,
@@ -79,7 +80,7 @@ impl LocationProvider for FileSystemProvider {
                 return Err("Path does not exist".to_string());
             }
             if !path.is_dir() {
-                return Err("Path is not a directory".to_string());
+                return Err(not_a_folder(&path.to_string_lossy()));
             }
 
             let entries = read_directory_contents(&path)?;
@@ -172,5 +173,30 @@ impl LocationProvider for FileSystemProvider {
         spawn_blocking(move || transfer(&from_path, &to_path, Transfer::Move))
             .await
             .map_err(|e| format!("Task join error: {}", e))?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::locations::LocationInput;
+
+    /// The error a folder read of `path` fails with.
+    async fn read_error(path: &Path) -> String {
+        let location = LocationInput::Raw(path.to_string_lossy().into())
+            .into_location()
+            .unwrap();
+        FileSystemProvider.read_directory(&location).await.err().unwrap()
+    }
+
+    #[tokio::test]
+    async fn only_a_path_that_is_a_file_is_not_a_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("note.txt");
+        std::fs::write(&file, "note\n").unwrap();
+
+        assert_eq!(read_error(&file).await, not_a_folder(&file.to_string_lossy()));
+        assert_eq!(read_error(&file.join("more")).await, "Path does not exist");
+        assert_eq!(read_error(&dir.path().join("missing")).await, "Path does not exist");
     }
 }

@@ -16,7 +16,7 @@ import { ask, message, open as openDialog } from '@tauri-apps/plugin-dialog';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { platform } from '@tauri-apps/plugin-os';
 import { getEffectiveExtension, isArchiveFile } from './utils/fileTypes';
-import { basename, dirname } from './utils/pathUtils';
+import { basename, dirname, parentPath } from './utils/pathUtils';
 import { applyAccentVariables, DEFAULT_ACCENT, normalizeHexColor } from '@/utils/accent';
 import { getSuggestedZipName } from './utils/zipNaming';
 import { matchesFilter } from '@/utils/filterMatch';
@@ -42,8 +42,6 @@ import type {
 
 // Error codes matching backend (src-tauri/src/commands.rs)
 const ErrorCodes = {
-  ENOENT: 'ENOENT', // Path does not exist
-  ENOTDIR: 'ENOTDIR', // Path is not a directory
   EPERM: 'EPERM', // Permission denied / Operation not permitted
 } as const;
 
@@ -174,7 +172,6 @@ function App() {
   const currentAccentRef = useRef<string | null>(null);
   const saveGlobalPrefsTimeoutRef = useRef<number | null>(null);
   const currentDirectoryPreference = directoryPreferences[currentPath];
-  const pendingFileSelectionRef = useRef<string | null>(null);
   const smartDefaultsPathRef = useRef<string | null>(null);
   // The folder a failed navigation returned to, with its list still on screen, so it is not
   // read again. Any load clears it.
@@ -512,6 +509,8 @@ function App() {
             if (read.outcome === 'failed') {
               throw new Error(read.reason);
             }
+            // A start path that names a file fails like a missing one, so the next one is tried.
+            if (read.outcome === 'notAFolder') return false;
 
             if (hasUriScheme(path)) {
               await applySmartViewDefaults(path, useAppStore.getState().files);
@@ -722,6 +721,12 @@ function App() {
         const read = await useAppStore.getState().refreshCurrentDirectoryStreaming();
         // Another folder's load owns the window now, or a sign-in window opens instead.
         if (read.outcome === 'superseded' || read.outcome === 'signInRequested') return;
+        // The address names a file: open the folder that holds it, with the file selected. A
+        // root is always a folder, so a file has a folder that holds it.
+        if (read.outcome === 'notAFolder') {
+          useAppStore.getState().openFolderInstead(parentPath(currentPath)!, basename(currentPath));
+          return;
+        }
         if (read.outcome === 'failed') {
           throw new Error(read.reason);
         }
@@ -732,45 +737,10 @@ function App() {
         }
 
         setError(undefined); // Clear any previous errors on success
-
-        // Check if we have a pending file selection (from navigating to a file path)
-        // Note: With streaming, files may not be loaded yet, so we poll until found
-        if (pendingFileSelectionRef.current) {
-          const fileToSelect = pendingFileSelectionRef.current;
-          pendingFileSelectionRef.current = null;
-          // Poll for the file to appear as batches are loaded
-          const intervalId = setInterval(() => {
-            const { files, isStreamingComplete } = useAppStore.getState();
-            const file = files.find((f: FileItem) => f.name === fileToSelect);
-
-            if (file || isStreamingComplete) {
-              clearInterval(intervalId);
-              if (file) {
-                useAppStore.getState().setSelectedFiles([file.path]);
-              }
-            }
-          }, 100);
-        }
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
         const errorCode = parseErrorCode(error);
         console.error('Failed to load directory:', currentPath, error);
-
-        // Handle file path: navigate to parent directory and select the file
-        if (errorCode === ErrorCodes.ENOTDIR) {
-          // Extract parent directory and filename
-          const normalized = currentPath.replace(/\\/g, '/').replace(/\/+$/g, '');
-          const lastSlash = normalized.lastIndexOf('/');
-          if (lastSlash >= 0) {
-            // Handle root directory case: /file.txt -> parent is "/"
-            const parentDir = lastSlash === 0 ? '/' : normalized.slice(0, lastSlash);
-            const fileName = normalized.slice(lastSlash + 1);
-            // Set pending file selection and navigate to parent
-            pendingFileSelectionRef.current = fileName;
-            navigateTo(parentDir);
-            return; // Exit early, don't show error dialog
-          }
-        }
 
         // A folder the system refuses can ask for access, then be read again.
         const isPermissionError = isPermissionErrorMessage(errorCode, errorMessage);
@@ -829,7 +799,7 @@ function App() {
     }
 
     loadDirectory();
-  }, [currentPath, navigateTo, setError, setLoading, setCurrentPath]);
+  }, [currentPath, setError, setLoading, setCurrentPath]);
 
   // The listing streams in after the load call returns, and the smart defaults need all of it.
   // A refresh of the folder on screen does not re-apply them.

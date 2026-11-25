@@ -47,6 +47,14 @@ export function parentPath(path: string): string | undefined {
 }
 
 /**
+ * Whether `path` is an item of `folder`. The folder is compared as parentPath writes one:
+ * `/` separators and no trailing one.
+ */
+export function isInFolder(path: string, folder: string): boolean {
+  return parentPath(path) === (folder.replace(/\\/g, '/').replace(/\/+$/, '') || '/');
+}
+
+/**
  * The `server/share/folder` part of an SMB address, however it was written:
  * \\server\share\folder, smb://server/share/folder, or either with mixed slashes.
  * A user name and password before an @ are dropped, so they never reach a path or a saved server name.

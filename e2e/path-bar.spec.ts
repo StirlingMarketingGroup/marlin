@@ -307,6 +307,22 @@ test.describe('Path bar', () => {
     ).toBeVisible({ timeout: 5000 });
   });
 
+  test('a typed file address opens its folder with the file selected', async ({ page }) => {
+    const pathInput = page.locator('[data-testid="path-input"]');
+    await pathInput.fill(`${MOCK_DOWNLOADS_DIR}/sample.pdf`);
+    await pathInput.press('Enter');
+
+    await expect(pathInput).toHaveValue(MOCK_DOWNLOADS_DIR);
+    const selected = page.locator('[data-testid="file-item"].bg-accent-selected');
+    await expect(selected).toHaveCount(1);
+    await expect(selected).toHaveAttribute('data-name', 'sample.pdf');
+    await expect(page.locator('[data-testid="path-bar-failure"]')).toHaveCount(0);
+
+    // History holds no entry for the file, so Back returns to the folder before.
+    await page.getByTitle(/^Back/).click();
+    await expect(pathInput).toHaveValue(MOCK_HOME_DIR);
+  });
+
   test.describe('an SFTP address with no user', () => {
     type SftpTestWindow = Window & {
       __SIGNED_IN__?: boolean;
@@ -332,6 +348,9 @@ test.describe('Path bar', () => {
           const port = Number(url.port || 22);
           if (!w.__SIGNED_IN__) {
             throw `[SFTP_NO_CREDENTIALS] No credentials stored for server: 10.5.0.247:${port}`;
+          }
+          if (url.pathname.endsWith('/report.txt')) {
+            throw `[ENOTDIR] Not a folder: ${path}`;
           }
           const folder = url.pathname || '/';
           const raw = `sftp://admin@10.5.0.247:${port}${folder}`;
@@ -414,6 +433,22 @@ test.describe('Path bar', () => {
 
       await expect(page.locator('[data-testid="file-item"][data-name="report.txt"]')).toBeVisible();
       await expect(pathInput).toHaveValue('sftp://admin@10.5.0.247:2222/some/folder');
+    });
+
+    test('a file address opens its folder as the listing names it, with the file selected', async ({
+      page,
+    }) => {
+      await page.evaluate(() => {
+        (window as SftpTestWindow).__SIGNED_IN__ = true;
+      });
+      const pathInput = page.locator('[data-testid="path-input"]');
+      await pathInput.fill('sftp://10.5.0.247/some/folder/report.txt');
+      await pathInput.press('Enter');
+
+      await expect(pathInput).toHaveValue('sftp://admin@10.5.0.247:22/some/folder');
+      const selected = page.locator('[data-testid="file-item"].bg-accent-selected');
+      await expect(selected).toHaveCount(1);
+      await expect(selected).toHaveAttribute('data-name', 'report.txt');
     });
   });
 });

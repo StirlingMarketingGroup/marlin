@@ -5,8 +5,7 @@
 // Export constants for use in test files
 export const MOCK_HOME_DIR = '/Users/testuser';
 export const MOCK_DOWNLOADS_DIR = `${MOCK_HOME_DIR}/Downloads`;
-// Not a folder: a typo of Downloads. Listing it fails as a missing folder does, so a spec can
-// fix the typo in the path bar.
+// Not there: a typo of Downloads. Listing it fails, so a spec can fix the typo in the path bar.
 export const MOCK_MISSING_DIR = `${MOCK_HOME_DIR}/Downloadz`;
 // The host of remote addresses that cannot be reached: listing one fails.
 export const MOCK_DOWN_HOST = 'down.example';
@@ -331,6 +330,10 @@ export function getTauriMockScript(viewMode: 'list' | 'grid' = 'list'): string {
         const authority = (path || '').split('://')[1]?.split('/')[0] ?? '';
         if (authority.split('@').pop().split(':')[0] === mockDownHost) {
           throw 'Could not connect to ' + mockDownHost;
+        }
+        // A file in Downloads is there and is not a folder.
+        if (mockDownloadsFiles.some((file) => !file.is_directory && file.path === normalizedPath)) {
+          throw '[ENOTDIR] Not a folder: ' + path;
         }
       }
 

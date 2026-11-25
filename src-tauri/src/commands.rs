@@ -48,7 +48,7 @@ use crate::locations::gdrive::{
     remove_google_account as remove_gdrive_account, GoogleAccountInfo,
 };
 use crate::locations::{
-    resolve_location, Location, LocationCapabilities, LocationInput, LocationSummary,
+    not_a_folder, resolve_location, Location, LocationCapabilities, LocationInput, LocationSummary,
 };
 #[cfg(target_os = "macos")]
 use crate::macos_security;
@@ -100,7 +100,6 @@ const COMPRESS_PROGRESS_WINDOW_LABEL: &str = "compress-progress";
 
 // Error codes for structured error handling
 // These constants define the API contract with the frontend
-#[allow(dead_code)]
 pub mod error_codes {
     pub const ENOENT: &str = "ENOENT"; // Path does not exist
     pub const ENOTDIR: &str = "ENOTDIR"; // Path is not a directory
@@ -110,8 +109,7 @@ pub mod error_codes {
 
 /// Format an error with a code prefix for structured error handling
 /// Format: "[CODE] Human readable message"
-#[allow(dead_code)] // Will be used by future location providers
-fn format_error(code: &str, message: &str) -> String {
+pub(crate) fn format_error(code: &str, message: &str) -> String {
     format!("[{code}] {message}")
 }
 // Always emit progress updates - even small batches of large files benefit from progress indication
@@ -1592,7 +1590,7 @@ pub async fn read_directory_streaming_command(
         return Err("Path does not exist".to_string());
     }
     if !expanded_path.is_dir() {
-        return Err("Path is not a directory".to_string());
+        return Err(not_a_folder(&expanded_path.to_string_lossy()));
     }
 
     #[cfg(target_os = "macos")]
