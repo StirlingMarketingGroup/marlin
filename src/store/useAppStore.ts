@@ -11,7 +11,7 @@ import {
   MetadataBatch,
   LocationCapabilities,
   TrashPathsResponse,
-  UndoTrashResponse,
+  NoTrash,
   DeletePathsResponse,
   DeleteItemPayload,
   GoogleAccountInfo,
@@ -29,7 +29,7 @@ import { getPlatform } from '@/hooks/usePlatform';
 import { getExtractableArchiveFormat, isArchiveFile, isMacOSBundle } from '@/utils/fileTypes';
 import { basename, parentPath, resolveTypedPath } from '@/utils/pathUtils';
 import { useToastStore } from './useToastStore';
-import { useUndoStore, pushUndoAndShowToast } from './useUndoStore';
+import { useUndoStore, pushUndoAndShowToast, undoFromToast } from './useUndoStore';
 import { parseGoogleDriveUrl } from '@/utils/googleDriveUrl';
 import { buildArchiveUri, parseArchiveUri } from '@/utils/archiveUri';
 import { withGoogleSignInCheck } from '@/utils/googleSignIn';
@@ -252,6 +252,9 @@ const holdsOwnCut = (
   );
 };
 
+/** Why a delete in place is asked: the user chose Delete Permanently, or Move to Trash could not use the Trash. */
+type DeleteReason = 'chosen' | NoTrash;
+
 interface AppState {
   // Navigation
   currentPath: string;
@@ -415,6 +418,7 @@ interface AppState {
   compressSelectedToZip: (suggestedName: string) => Promise<void>;
   trashSelected: () => Promise<void>;
   deleteSelectedPermanently: () => Promise<void>;
+  deletePaths: (paths: string[], reason: DeleteReason) => Promise<void>;
   fetchAppIcon: (path: string, size?: number) => Promise<string | undefined>;
   resetDirectoryPreferences: () => void;
   refreshGitStatus: (options?: { force?: boolean; path?: string }) => Promise<void>;
@@ -480,6 +484,8 @@ interface AppState {
 
   // Animation actions
   markFilesEntering: (paths: string[]) => void;
+  /** Takes items a delete or Move to Trash removed out of the selection, then fades them out, or reads the folder again for a big batch or reduced motion. */
+  removeFromView: (paths: string[]) => Promise<void>;
   markFilesExiting: (paths: string[]) => void;
   clearEnteringState: (paths: string[]) => void;
   removeExitedFiles: (paths: string[]) => void;
@@ -1365,57 +1371,18 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     const toastStore = useToastStore.getState();
 
-    // Check if we should use animations (skip for batch operations or reduced motion)
-    const prefersReducedMotion =
-      typeof window !== 'undefined' &&
-      typeof window.matchMedia === 'function' &&
-      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    const useAnimation = selectedPaths.length <= 10 && !prefersReducedMotion;
-
     try {
       const response = await invoke<TrashPathsResponse>('trash_paths', { paths: selectedPaths });
 
-      if (response.fallbackToPermanent) {
-        const count = selectedPaths.length;
-        const targetLabel =
-          count === 1 ? (selectedItems[0]?.name ?? basename(selectedPaths[0])) : `${count} items`;
-
-        const confirmed = await ask(
-          `Unable to move ${targetLabel} to the Trash.\nDelete permanently instead?`,
-          {
-            title: 'Delete Permanently',
-            kind: 'warning',
-            okLabel: 'Delete',
-            cancelLabel: 'Cancel',
-          }
-        ).catch((dialogErr) => {
-          console.warn('Failed to present permanent delete prompt:', dialogErr);
-          return false;
-        });
-
-        if (confirmed) {
-          await get().deleteSelectedPermanently();
-        }
+      if (response.noTrash) {
+        await get().deletePaths(selectedPaths, response.noTrash);
         return;
       }
 
-      // Clear selection immediately
-      state.setSelectedFiles([]);
-
-      // Use the actual trashed paths from backend response (may be subset if some failed)
+      // The backend answers with every path, or fails (#747 tracks a Trash that takes only some).
       const trashedPaths = response.trashed;
       const trashedCount = trashedPaths.length;
-
-      // Use animation for small batches, or refresh for large batches
-      // Also refresh if backend returned fewer files than requested (partial failure)
-      if (useAnimation && trashedCount === selectedPaths.length) {
-        // Mark files as exiting to trigger fade-out animation
-        // The removeExitedFiles action will remove them from the files array after animation
-        state.markFilesExiting(trashedPaths);
-      } else {
-        // For large batches, reduced motion, or partial failures - refresh to sync state
-        await state.refreshCurrentDirectoryStreaming();
-      }
+      await get().removeFromView(trashedPaths);
 
       const messageText =
         trashedCount === 1
@@ -1444,40 +1411,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           duration: 8000,
           action: {
             label: 'Undo',
-            onClick: () => {
-              toastStore.removeToast(toastId);
-              // Remove from undo stack and execute directly
-              const undoStore = useUndoStore.getState();
-              const entry = undoStore.stack.find((e) => e.id === undoId);
-              if (entry) {
-                undoStore.removeById(undoId);
-                void (async () => {
-                  try {
-                    const undoResult = await invoke<UndoTrashResponse>('undo_trash', {
-                      token: undoToken,
-                    });
-                    await state.refreshCurrentDirectoryStreaming();
-                    state.revealInOpenFolder(undoResult.restored);
-                    toastStore.addToast({
-                      type: 'success',
-                      message:
-                        undoResult.restored.length <= 1
-                          ? 'Item restored from Trash.'
-                          : `${undoResult.restored.length} items restored from Trash.`,
-                      duration: 5000,
-                    });
-                  } catch (undoErr) {
-                    const undoMessage =
-                      undoErr instanceof Error ? undoErr.message : String(undoErr);
-                    toastStore.addToast({
-                      type: 'error',
-                      message: `Undo failed: ${undoMessage}`,
-                      duration: 6000,
-                    });
-                  }
-                })();
-              }
-            },
+            onClick: () => undoFromToast(undoId, toastId),
           },
         });
       } else {
@@ -1498,21 +1432,56 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   deleteSelectedPermanently: async () => {
+    await get().deletePaths(get().selectedFiles.slice(), 'chosen');
+  },
+
+  deletePaths: async (paths, reason) => {
     const state = get();
-    const selectedPaths = state.selectedFiles.slice();
-    if (!selectedPaths.length) return;
+    if (!paths.length) return;
 
     const fileMap = new Map(state.files.map((file) => [file.path, file]));
-    const selectedItems = selectedPaths.map((path) => fileMap.get(path));
+    const names = paths.map((path) => fileMap.get(path)?.name ?? basename(path));
 
-    const count = selectedPaths.length;
-    const targetLabel =
-      count === 1 ? (selectedItems[0]?.name ?? basename(selectedPaths[0])) : `${count} items`;
+    const count = paths.length;
+    const one = count === 1;
+    const targetLabel = one ? names[0] : `${count} items`;
+    // Finder's words for Move to Trash on an SMB share or a macFUSE mount (macOS 27.2).
+    const areYouSure = one
+      ? `Are you sure you want to delete “${names[0]}”?`
+      : `Are you sure you want to delete the ${count} selected items?`;
+    const wordings: Record<DeleteReason, { title: string; question: string; done: string }> = {
+      chosen: {
+        title: 'Delete Permanently',
+        question: `Permanently delete ${targetLabel}? This action cannot be undone.`,
+        done: 'deleted permanently',
+      },
+      refused: {
+        title: 'Delete Permanently',
+        question: `Unable to move ${targetLabel} to the Trash.\nDelete permanently instead?`,
+        done: 'deleted permanently',
+      },
+      remote: {
+        title: areYouSure,
+        question: one
+          ? 'This item will be deleted immediately. You can’t undo this action.'
+          : `${count} items will be deleted immediately. You can’t undo this action.`,
+        done: 'deleted permanently',
+      },
+      // A new file, or a change to a file, that has not finished uploading is removed on this computer only. Only what Google Drive already has goes to its trash, so the toast promises nothing.
+      googleDrive: {
+        title: areYouSure,
+        question: one
+          ? 'This item will be moved to the Google Drive trash. Anything in it that has not finished uploading will be lost.'
+          : `${count} items will be moved to the Google Drive trash. Anything in them that has not finished uploading will be lost.`,
+        done: 'deleted',
+      },
+    };
+    const { title, question, done } = wordings[reason];
 
     let confirmed = false;
     try {
-      confirmed = await ask(`Permanently delete ${targetLabel}? This action cannot be undone.`, {
-        title: 'Delete Permanently',
+      confirmed = await ask(question, {
+        title,
         kind: 'warning',
         okLabel: 'Delete',
         cancelLabel: 'Cancel',
@@ -1525,11 +1494,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       return;
     }
 
-    const deleteItems: DeleteItemPayload[] = selectedPaths.map((path) => {
+    const deleteItems: DeleteItemPayload[] = paths.map((path, index) => {
       const item = fileMap.get(path);
       return {
         path,
-        name: item?.name ?? basename(path),
+        name: names[index],
         isDirectory: item?.is_directory ?? false,
       };
     });
@@ -1558,39 +1527,21 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     const toastStore = useToastStore.getState();
 
-    // Check if we should use animations (skip for batch operations or reduced motion)
-    const prefersReducedMotion =
-      typeof window !== 'undefined' &&
-      typeof window.matchMedia === 'function' &&
-      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    const useAnimation = selectedPaths.length <= 10 && !prefersReducedMotion;
-
     try {
       const response = await invoke<DeletePathsResponse>('delete_paths_permanently', {
-        paths: selectedPaths,
+        paths,
         requestId,
       });
 
-      // Clear selection immediately
-      state.setSelectedFiles([]);
-
-      // Use the actual deleted paths from backend response (may be subset if some failed)
+      // The backend answers with every path, or fails.
       const deletedPaths = response.deleted;
       const deletedCount = deletedPaths.length;
-
-      // Use animation for small batches, or refresh for large batches
-      // Also refresh if backend returned fewer files than requested (partial failure)
-      if (useAnimation && deletedCount === selectedPaths.length) {
-        // Mark files as exiting to trigger fade-out animation
-        state.markFilesExiting(deletedPaths);
-      } else {
-        await state.refreshCurrentDirectoryStreaming();
-      }
+      await get().removeFromView(deletedPaths);
 
       const messageText =
         deletedCount === 1
-          ? `${selectedItems[0]?.name ?? basename(deletedPaths[0])} deleted permanently.`
-          : `${deletedCount} items deleted permanently.`;
+          ? `${fileMap.get(deletedPaths[0])?.name ?? basename(deletedPaths[0])} ${done}.`
+          : `${deletedCount} items ${done}.`;
 
       toastStore.addToast({
         type: 'success',
@@ -3135,15 +3086,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           duration: 8000,
           action: {
             label: 'Undo',
-            onClick: () => {
-              renameToastStore.removeToast(renameToastId);
-              const freshUndoStore = useUndoStore.getState();
-              const entry = freshUndoStore.stack.find((e) => e.id === undoId);
-              if (entry) {
-                freshUndoStore.removeById(undoId);
-                void freshUndoStore.executeUndoRecord(entry.record);
-              }
-            },
+            onClick: () => undoFromToast(undoId, renameToastId),
           },
         });
       }
@@ -3198,6 +3141,23 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
       return { animationState: { entering, exiting }, _animationTimers: timers };
     }),
+
+  removeFromView: async (paths) => {
+    // The user may have selected other items while a slow delete ran, so only what is gone leaves the selection.
+    const gone = new Set(paths);
+    get().setSelectedFiles(get().selectedFiles.filter((path) => !gone.has(path)));
+
+    const prefersReducedMotion =
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (paths.length <= 10 && !prefersReducedMotion) {
+      // removeExitedFiles takes them out of the list when the fade ends.
+      get().markFilesExiting(paths);
+    } else {
+      await get().refreshCurrentDirectoryStreaming();
+    }
+  },
 
   markFilesExiting: (paths: string[]) =>
     set((state) => {

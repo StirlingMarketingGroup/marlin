@@ -6,7 +6,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { ask, message } from '@tauri-apps/plugin-dialog';
 import { open as openShell } from '@tauri-apps/plugin-shell';
 import { getPlatform } from '@/hooks/usePlatform';
-import { FileItem } from '@/types';
+import { FileItem, NoTrash } from '@/types';
 import { buildArchiveUri } from '@/utils/archiveUri';
 
 vi.mock('@tauri-apps/api/core');
@@ -1295,7 +1295,7 @@ describe('useAppStore', () => {
           return Promise.resolve({
             trashed: ['/test/file.txt'],
             undoToken: 'test-token',
-            fallbackToPermanent: false,
+            noTrash: null,
           });
         }
         if (cmd === 'read_directory') {
@@ -1320,20 +1320,97 @@ describe('useAppStore', () => {
       expect(mockInvoke).not.toHaveBeenCalledWith('trash_paths', expect.anything());
     });
 
-    it('should prompt for permanent delete when trash fails with permission error', async () => {
+    function answerTrash(noTrash: NoTrash, deleted: string[]) {
       mockInvoke.mockImplementation((cmd) => {
         if (cmd === 'trash_paths') {
-          return Promise.resolve({
-            trashed: [],
-            undoToken: null,
-            fallbackToPermanent: true,
-          });
+          return Promise.resolve({ trashed: [], undoToken: null, noTrash });
         }
         if (cmd === 'delete_paths_permanently') {
-          return Promise.resolve({ deleted: ['/test/file.txt'] });
+          return Promise.resolve({ deleted });
         }
         if (cmd === 'read_directory') {
           return Promise.resolve([]);
+        }
+        return Promise.resolve(undefined);
+      });
+    }
+
+    it('asks once, in Finder’s words, then deletes when the folder has no Trash', async () => {
+      useUndoStore.setState({ stack: [] });
+      answerTrash('remote', ['/test/file.txt']);
+      mockAsk.mockResolvedValue(true);
+
+      await useAppStore.getState().trashSelected();
+
+      expect(mockAsk).toHaveBeenCalledTimes(1);
+      expect(mockAsk).toHaveBeenCalledWith(
+        'This item will be deleted immediately. You can’t undo this action.',
+        expect.objectContaining({
+          title: 'Are you sure you want to delete “file.txt”?',
+          okLabel: 'Delete',
+        })
+      );
+      expect(mockInvoke).toHaveBeenCalledWith(
+        'delete_paths_permanently',
+        expect.objectContaining({ paths: ['/test/file.txt'] })
+      );
+      expect(useUndoStore.getState().stack).toEqual([]);
+    });
+
+    it('leaves the items when the user says no', async () => {
+      answerTrash('remote', ['/test/file.txt']);
+      mockAsk.mockResolvedValue(false);
+
+      await useAppStore.getState().trashSelected();
+
+      expect(mockInvoke).not.toHaveBeenCalledWith('delete_paths_permanently', expect.anything());
+    });
+
+    it('says a Google Drive delete goes to the Google Drive trash', async () => {
+      const second = { ...mockFile, path: '/test/other.txt', name: 'other.txt' };
+      useAppStore.setState({
+        files: [mockFile, second],
+        selectedFiles: ['/test/file.txt', '/test/other.txt'],
+      });
+      useToastStore.setState({ toasts: [] });
+      answerTrash('googleDrive', ['/test/file.txt', '/test/other.txt']);
+      mockAsk.mockResolvedValue(true);
+
+      await useAppStore.getState().trashSelected();
+
+      expect(mockAsk).toHaveBeenCalledTimes(1);
+      expect(mockAsk).toHaveBeenCalledWith(
+        '2 items will be moved to the Google Drive trash. Anything in them that has not finished uploading will be lost.',
+        expect.objectContaining({
+          title: 'Are you sure you want to delete the 2 selected items?',
+        })
+      );
+      expect(useToastStore.getState().toasts.map((toast) => toast.message)).toContain(
+        '2 items deleted.'
+      );
+    });
+
+    it('asks once when the Trash refuses', async () => {
+      answerTrash('refused', ['/test/file.txt']);
+      mockAsk.mockResolvedValue(true);
+
+      await useAppStore.getState().trashSelected();
+
+      expect(mockAsk).toHaveBeenCalledTimes(1);
+      expect(mockAsk).toHaveBeenCalledWith(
+        'Unable to move file.txt to the Trash.\nDelete permanently instead?',
+        expect.anything()
+      );
+    });
+
+    it('deletes the paths trash_paths judged, not a selection that changed after', async () => {
+      mockInvoke.mockImplementation((cmd) => {
+        if (cmd === 'trash_paths') {
+          useAppStore.setState({ selectedFiles: ['/test/other.txt'] });
+          return Promise.resolve({ trashed: [], undoToken: null, noTrash: 'remote' });
+        }
+        if (cmd === 'delete_paths_permanently') {
+          return Promise.resolve({ deleted: ['/test/file.txt'] });
         }
         return Promise.resolve(undefined);
       });
@@ -1341,8 +1418,11 @@ describe('useAppStore', () => {
 
       await useAppStore.getState().trashSelected();
 
-      expect(mockAsk).toHaveBeenCalled();
-      expect(mockInvoke).toHaveBeenCalledWith('delete_paths_permanently', expect.anything());
+      expect(mockInvoke).toHaveBeenCalledWith(
+        'delete_paths_permanently',
+        expect.objectContaining({ paths: ['/test/file.txt'] })
+      );
+      expect(useAppStore.getState().selectedFiles).toEqual(['/test/other.txt']);
     });
   });
 
@@ -2418,7 +2498,7 @@ describe('useAppStore', () => {
         selectedFiles: ['/test/a.txt'],
       });
       answerCommands({
-        trash_paths: { trashed: ['/test/a.txt'], undoToken: 'token', fallbackToPermanent: false },
+        trash_paths: { trashed: ['/test/a.txt'], undoToken: 'token', noTrash: null },
         undo_trash: { restored: ['/test/a.txt'] },
       });
       await useAppStore.getState().trashSelected();

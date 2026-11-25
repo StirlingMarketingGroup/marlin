@@ -509,11 +509,10 @@ export function getTauriMockScript(viewMode: 'list' | 'grid' = 'list'): string {
           };
         },
         cancel_directory_stream: () => undefined,
-        trash_paths: (args) => ({
-          trashed: args.paths,
-          undoToken: 'mock-undo-token',
-          fallbackToPermanent: false,
-        }),
+        trash_paths: (args) =>
+          window.__MOCK_NO_TRASH__
+            ? { trashed: [], undoToken: null, noTrash: window.__MOCK_NO_TRASH__ }
+            : { trashed: args.paths, undoToken: 'mock-undo-token', noTrash: null },
         clipboard_get_contents: () =>
           window.__MOCK_CLIPBOARD__ || { hasFiles: false, hasImage: false, filePaths: [], isCut: false },
         paste_items_to_location: (args) => {

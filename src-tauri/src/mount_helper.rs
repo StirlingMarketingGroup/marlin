@@ -131,7 +131,7 @@ impl MountTable {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MountedPath {
-    mount: MountStatus,
+    pub(crate) mount: MountStatus,
     path: String,
 }
 

@@ -6,7 +6,8 @@ use log::{info, warn};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, HashSet};
 #[cfg(target_os = "linux")]
 use std::env;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -723,7 +724,20 @@ pub struct CompressToZipResponse {
 pub struct TrashPathsResponse {
     trashed: Vec<String>,
     undo_token: Option<String>,
-    fallback_to_permanent: bool,
+    no_trash: Option<NoTrash>,
+}
+
+/// Why Move to Trash left the items where they are. Move to Trash then asks whether to delete them in place; an undo of a copy says why and leaves the copies.
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum NoTrash {
+    /// macOS refused to move the items to the Trash.
+    #[cfg(target_os = "macos")]
+    Refused,
+    /// The items are on a network or FUSE filesystem. Marlin never makes a trash folder there, as Finder never does on a network volume, so a delete is final.
+    Remote,
+    /// The items are in a Google Drive mount, where a delete moves each item to the Google Drive trash.
+    GoogleDrive,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -2033,13 +2047,75 @@ pub async fn delete_file(path: LocationInput) -> Result<(), String> {
     provider.delete(&location).await
 }
 
+/// Whether the OS trash can take an item at `place`, on the filesystem `info` describes, without making a trash folder on a remote.
+fn has_os_trash(place: &Path, info: &fs_utils::FsInfo) -> bool {
+    // A FUSE filesystem on a disk of this computer, such as ntfs-3g's NTFS (`fuseblk`), keeps its trash folder on that disk, like any USB drive.
+    if !info.is_network_or_fuse || info.fs_type == "fuseblk" {
+        return true;
+    }
+    // A home folder on a network filesystem holds the desktop's trash, `$XDG_DATA_HOME/Trash`, and the OS trash moves an item from inside the home folder into it. The `trash` crate picks a trash by the mount point of the item's real folder, so a place reached through a link, or another mount of the same remote with the same device, would get a trash folder of its own: only a place whose real path is inside the home folder qualifies.
+    #[cfg(target_os = "linux")]
+    if dirs::home_dir()
+        .and_then(|home| fs::canonicalize(home).ok())
+        .zip(fs::canonicalize(place).ok())
+        .is_some_and(|(home, place)| place.starts_with(home))
+        && dirs::data_dir()
+            .and_then(|data| fs::metadata(data).ok())
+            .is_some_and(|data| fs_utils::device(&data) == info.volume)
+    {
+        return true;
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = place;
+    false
+}
+
+impl NoTrash {
+    /// The answer for an item on the filesystem `info` describes, at `place`: `None` when the OS trash may take it.
+    fn on(place: &Path, info: &fs_utils::FsInfo) -> Option<Self> {
+        if has_os_trash(place, info) {
+            return None;
+        }
+        // A place reached through a link is looked up by its real path too.
+        let mounted = crate::mount_helper::find_mount(place.to_string_lossy().into_owned())
+            .or_else(|| {
+                let real = fs::canonicalize(place).ok()?;
+                crate::mount_helper::find_mount(real.to_string_lossy().into_owned())
+            });
+        if mounted.is_some_and(|mounted| mounted.mount.provider == "gdrive") {
+            Some(Self::GoogleDrive)
+        } else {
+            Some(Self::Remote)
+        }
+    }
+
+    /// The answer for items in several folders, from each folder's own answer. A mix gets the answer that warns the most.
+    fn of(folders: &[Option<Self>]) -> Option<Self> {
+        if folders.iter().all(Option::is_none) {
+            None
+        } else if folders.iter().all(|folder| *folder == Some(Self::GoogleDrive)) {
+            Some(Self::GoogleDrive)
+        } else {
+            Some(Self::Remote)
+        }
+    }
+}
+
 #[command]
 pub async fn trash_paths(app: AppHandle, paths: Vec<String>) -> Result<TrashPathsResponse, String> {
+    trash_items(&app.state::<TrashUndoState>(), paths).await
+}
+
+/// The body of `trash_paths`. It takes the undo state instead of the app, so a test can run it.
+async fn trash_items(
+    state: &TrashUndoState,
+    paths: Vec<String>,
+) -> Result<TrashPathsResponse, String> {
     if paths.is_empty() {
         return Ok(TrashPathsResponse {
             trashed: Vec::new(),
             undo_token: None,
-            fallback_to_permanent: false,
+            no_trash: None,
         });
     }
 
@@ -2052,13 +2128,45 @@ pub async fn trash_paths(app: AppHandle, paths: Vec<String>) -> Result<TrashPath
         expanded.push(path_buf);
     }
 
+    // The folder that holds an item decides, so a link on the disk to an item in a mount goes to the Trash like any link. Items of one folder share its answer.
+    let mut folders: BTreeMap<&Path, fs_utils::FsInfo> = BTreeMap::new();
+    for path in &expanded {
+        let folder = path.parent().unwrap_or(path);
+        let info = match folders.entry(folder) {
+            Entry::Occupied(known) => known.into_mut(),
+            Entry::Vacant(slot) => slot.insert(fs_utils::get_fs_info(folder)?),
+        };
+        // A remote volume mounted in the folder is not one of its items. The OS trash would make its trash folder on that volume, then fail to move it.
+        let metadata = fs::symlink_metadata(path)
+            .map_err(|err| format!("Failed to get metadata: {err}"))?;
+        if metadata.is_dir()
+            && fs_utils::device(&metadata) != info.volume
+            && !has_os_trash(path, &fs_utils::get_fs_info(path)?)
+        {
+            return Err(format!(
+                "{}: it is another drive or volume, so it was left in place",
+                path.display()
+            ));
+        }
+    }
+    let answers: Vec<Option<NoTrash>> = folders
+        .iter()
+        .map(|(folder, info)| NoTrash::on(folder, info))
+        .collect();
+    if let Some(no_trash) = NoTrash::of(&answers) {
+        return Ok(TrashPathsResponse {
+            trashed: Vec::new(),
+            undo_token: None,
+            no_trash: Some(no_trash),
+        });
+    }
+
     let original_paths: Vec<String> = expanded
         .iter()
         .map(|path| path.to_string_lossy().to_string())
         .collect();
 
     let delete_targets: Vec<PathBuf> = expanded.clone();
-    let state = app.state::<TrashUndoState>();
 
     // Capture trash state BEFORE deletion on Windows/Linux for undo tracking
     #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -2083,7 +2191,7 @@ pub async fn trash_paths(app: AppHandle, paths: Vec<String>) -> Result<TrashPath
                     return Ok(TrashPathsResponse {
                         trashed: Vec::new(),
                         undo_token: None,
-                        fallback_to_permanent: true,
+                        no_trash: Some(NoTrash::Refused),
                     });
                 }
                 return Err(err);
@@ -2103,7 +2211,7 @@ pub async fn trash_paths(app: AppHandle, paths: Vec<String>) -> Result<TrashPath
         }
     }
 
-    cleanup_trash_undo_records(&state);
+    cleanup_trash_undo_records(state);
 
     let undo_token: Option<String> = {
         #[cfg(target_os = "macos")]
@@ -2167,7 +2275,7 @@ pub async fn trash_paths(app: AppHandle, paths: Vec<String>) -> Result<TrashPath
     Ok(TrashPathsResponse {
         trashed: original_paths,
         undo_token,
-        fallback_to_permanent: false,
+        no_trash: None,
     })
 }
 
@@ -8647,5 +8755,133 @@ mod rar_tests {
         extract_rar_contents(&copy, &output, |_| {}).unwrap();
 
         assert_eq!(fs::read(output.join("notes.txt")).unwrap(), b"top level\n");
+    }
+}
+
+#[cfg(test)]
+mod trash_tests {
+    use super::{has_os_trash, NoTrash};
+    use crate::fs_utils::FsInfo;
+
+    #[test]
+    fn only_a_remote_filesystem_has_no_os_trash() {
+        let on = |fs_type: &str, is_network_or_fuse| FsInfo {
+            volume: 1,
+            fs_type: fs_type.to_string(),
+            is_network_or_fuse,
+        };
+        // Outside every home folder, so the Linux home rule has no say.
+        let place = std::path::Path::new("/");
+
+        assert!(has_os_trash(place, &on("apfs", false)));
+        assert!(has_os_trash(place, &on("ext4", false)));
+        assert!(has_os_trash(place, &on("fuseblk", true)));
+        assert!(!has_os_trash(place, &on("nfs4", true)));
+        assert!(!has_os_trash(place, &on("smbfs", true)));
+        assert!(!has_os_trash(place, &on("fuse.marlin", true)));
+        assert!(!has_os_trash(place, &on("macfuse", true)));
+    }
+
+    #[test]
+    fn several_folders_get_the_answer_that_warns_the_most() {
+        use NoTrash::{GoogleDrive, Remote};
+
+        assert_eq!(NoTrash::of(&[]), None);
+        assert_eq!(NoTrash::of(&[None, None]), None);
+        assert_eq!(NoTrash::of(&[Some(Remote)]), Some(Remote));
+        assert_eq!(
+            NoTrash::of(&[Some(GoogleDrive), Some(GoogleDrive)]),
+            Some(GoogleDrive)
+        );
+        // Today's callers pass one folder's items, so these mixes do not happen. Each gets the answer that warns the most.
+        assert_eq!(NoTrash::of(&[Some(GoogleDrive), Some(Remote)]), Some(Remote));
+        assert_eq!(NoTrash::of(&[None, Some(Remote)]), Some(Remote));
+        assert_eq!(NoTrash::of(&[None, Some(GoogleDrive)]), Some(Remote));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[ignore = "mounts for real: run src-tauri/test-in-docker.sh"]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_trash_in_a_fuse_mount_asks_and_leaves_no_trash_folder() {
+        use std::sync::Arc;
+
+        use marlin_vfs::Provider;
+
+        let memory = Arc::new(marlin_vfs::MemoryProvider::new());
+        memory.add_file(&memory.root(), "a.txt", b"aaa");
+        let spool = tempfile::tempdir().unwrap();
+        let vfs = Arc::new(
+            marlin_vfs::Vfs::new(
+                memory.clone(),
+                marlin_vfs::POSIX,
+                marlin_vfs::Options::default(),
+            )
+            .take_writes(marlin_vfs::Spool {
+                folder: spool.path().to_path_buf(),
+                limit: 1024 * 1024 * 1024,
+                stays_local: marlin_fuse::stays_local,
+            })
+            .unwrap(),
+        );
+        tokio::spawn(Arc::clone(&vfs).run_uploads());
+
+        let dir = tempfile::tempdir().unwrap();
+        let point = dir.path().join("mnt");
+        std::fs::create_dir(&point).unwrap();
+        let mut mount = marlin_fuse::mount(vfs, &point).await.unwrap();
+
+        let file = point.join("a.txt");
+        let answer = super::trash_items(
+            &super::TrashUndoState::default(),
+            vec![file.to_string_lossy().into_owned()],
+        )
+        .await
+        .unwrap();
+        assert_eq!(answer.no_trash, Some(NoTrash::Remote));
+        assert!(answer.trashed.is_empty());
+        assert!(answer.undo_token.is_none());
+        assert!(file.exists());
+
+        // The mount point, selected in the local folder that holds it.
+        let refused = super::trash_items(
+            &super::TrashUndoState::default(),
+            vec![point.to_string_lossy().into_owned()],
+        )
+        .await
+        .unwrap_err();
+        assert!(refused.ends_with("it is another drive or volume, so it was left in place"));
+
+        let top_names: Vec<String> = std::fs::read_dir(&point)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            top_names.iter().all(|name| !name.starts_with(".Trash")),
+            "{top_names:?}"
+        );
+        let listed = memory.list(&memory.root()).await.unwrap();
+        assert_eq!(
+            listed
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            ["a.txt"]
+        );
+
+        let home = tempfile::tempdir_in(std::env::var("HOME").unwrap()).unwrap();
+        let link = home.path().join("link-to-a.txt");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        let answer = super::trash_items(
+            &super::TrashUndoState::default(),
+            vec![link.to_string_lossy().into_owned()],
+        )
+        .await
+        .unwrap();
+        assert_eq!(answer.no_trash, None);
+        assert!(answer.undo_token.is_some());
+        assert!(std::fs::symlink_metadata(&link).is_err());
+        assert!(file.exists());
+
+        mount.unmount().await.unwrap();
     }
 }
