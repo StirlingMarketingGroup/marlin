@@ -395,3 +395,122 @@ test(
     );
   }
 );
+
+test(
+  'with no server saved, a typed address asks in the connect window: closing it puts the address back, and after a sign-in a file opens its folder and a missing folder fails',
+  { timeout: 60_000 },
+  async () => {
+    const { browser, files } = app!;
+    // No server is saved: the app starts with an empty home, and the test before removes its
+    // server. The connect window's own host key prompt is a system dialog WebDriver cannot
+    // reach, so the key is trusted here when this test runs alone.
+    const tried = await runCommand(browser, 'test_sftp_connection', {
+      hostname: '127.0.0.1',
+      port,
+      username,
+      password: 'marlin test passphrase',
+      authMethod: 'key',
+      keyPath: path.join(dir!, 'client_key'),
+    });
+    if (String(tried).includes('[SFTP_HOST_KEY_UNKNOWN]')) {
+      await runCommand(browser, 'trust_sftp_host_key', {
+        hostname: '127.0.0.1',
+        port,
+        fingerprint,
+      });
+    }
+
+    const byHost = `sftp://127.0.0.1:${port}${served}`;
+    const remote = `sftp://${username}@127.0.0.1:${port}${served}`;
+    await openFolder(browser, files);
+
+    const pathInput = browser.$('[data-testid="path-input"]');
+    await pathInput.click();
+    await pathInput.setValue(byHost);
+    await browser.keys('Enter');
+    await browser.waitUntil(
+      async () => (await browser.getWindowHandles()).includes('sftp-connect'),
+      { timeout: 10_000, timeoutMsg: 'the connect window never opened' }
+    );
+    await browser.switchWindow('sftp-connect');
+    await browser.$('button=Cancel').click();
+    await browser.waitUntil(
+      async () => !(await browser.getWindowHandles()).includes('sftp-connect'),
+      { timeout: 10_000, timeoutMsg: 'the connect window never closed' }
+    );
+    await browser.switchWindow('main');
+    const failure = browser.$('[data-testid="path-bar-failure"]');
+    await failure.waitForDisplayed({ timeout: 10_000 });
+    const text = await browser.execute(
+      () => document.querySelector('[data-testid="path-bar-failure"]')?.textContent ?? ''
+    );
+    expect(text).toContain('Sign-in was cancelled.');
+    expect(await pathInput.getValue()).toBe(byHost);
+    expect(await runCommand(browser, 'is_watching_directory', { path: files })).toBe(true);
+
+    // Types an address into the path bar, then signs in with the key in the connect window
+    // it opens.
+    const signInAfterTyping = async (address: string) => {
+      await pathInput.click();
+      await pathInput.setValue(address);
+      await browser.keys('Enter');
+      await browser.waitUntil(
+        async () => (await browser.getWindowHandles()).includes('sftp-connect'),
+        { timeout: 10_000, timeoutMsg: `the connect window never opened for ${address}` }
+      );
+      await browser.switchWindow('sftp-connect');
+      await browser.$('#sftp-username').setValue(username);
+      // A click on an <option> does not change its <select> under this WebDriver (docs/testing.md).
+      await browser.execute(() => {
+        const select = document.querySelector('#sftp-auth-method') as HTMLSelectElement;
+        const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set;
+        setter?.call(select, 'key');
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+      await browser.$('#sftp-key-path').waitForExist({ timeout: 10_000 });
+      await browser.$('#sftp-key-path').setValue(path.join(dir!, 'client_key'));
+      await browser.$('#sftp-key-passphrase').setValue('marlin test passphrase');
+      await browser.$('button=Connect').click();
+      await browser.waitUntil(
+        async () => !(await browser.getWindowHandles()).includes('sftp-connect'),
+        { timeout: 10_000, timeoutMsg: 'the connect window never closed after signing in' }
+      );
+      await browser.switchWindow('main');
+    };
+
+    // A file opens its folder with the file selected, and Back returns to the folder before.
+    await signInAfterTyping(`${byHost}/hello.txt`);
+    await browser.waitUntil(async () => (await pathInput.getValue()) === remote, {
+      timeout: 10_000,
+      timeoutMsg: `the path bar never showed ${remote}`,
+    });
+    await browser.waitUntil(
+      async () =>
+        (await fileRow(browser, 'hello.txt').getAttribute('class'))?.includes(
+          'bg-accent-selected'
+        ) === true,
+      { timeout: 10_000, timeoutMsg: 'hello.txt was never selected' }
+    );
+    await browser.$('[title^="Back"]').click();
+    await browser.waitUntil(async () => (await pathInput.getValue()) === files, {
+      timeout: 10_000,
+      timeoutMsg: `the path bar never showed ${files}`,
+    });
+
+    // A folder that fails after the sign-in goes back to the path bar with its reason.
+    await runCommand(browser, 'remove_sftp_server', { hostname: '127.0.0.1', port });
+    const missing = `${byHost}/missing`;
+    await signInAfterTyping(missing);
+    await browser.waitUntil(
+      async () =>
+        (
+          await browser.execute(
+            () => document.querySelector('[data-testid="path-bar-failure"]')?.textContent ?? ''
+          )
+        ).includes('Failed to read directory'),
+      { timeout: 10_000, timeoutMsg: 'the failure never came back to the path bar' }
+    );
+    expect(await pathInput.getValue()).toBe(missing);
+    expect(await runCommand(browser, 'is_watching_directory', { path: files })).toBe(true);
+  }
+);

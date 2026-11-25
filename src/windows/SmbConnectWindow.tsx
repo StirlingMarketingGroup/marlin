@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { emit, listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { CircleNotch, ShareNetwork, CheckCircle, X } from 'phosphor-react';
-import type { SmbConnectInitPayload, SmbConnectSuccessPayload, SmbServerInfo } from '@/types';
+import type { SmbConnectInitPayload, SmbServerInfo } from '@/types';
 import { SMB_CONNECT_INIT_EVENT, SMB_CONNECT_SUCCESS_EVENT } from '@/utils/events';
 import { smbServerAndFolders } from '@/utils/pathUtils';
 import { WINDOW_CONTENT_TOP_PADDING } from '@/windows/windowLayout';
@@ -12,9 +12,9 @@ export default function SmbConnectWindow() {
   const windowRef = getCurrentWindow();
   const hostnameInputRef = useRef<HTMLInputElement>(null);
   const usernameInputRef = useRef<HTMLInputElement>(null);
+  const requestIdRef = useRef<number | undefined>(undefined);
 
   const [initialHostname, setInitialHostname] = useState<string | undefined>();
-  const [targetPath, setTargetPath] = useState<string | undefined>();
 
   const [hostname, setHostname] = useState('');
   const [username, setUsername] = useState('');
@@ -34,10 +34,9 @@ export default function SmbConnectWindow() {
       try {
         unlistenInit = await listen<SmbConnectInitPayload>(SMB_CONNECT_INIT_EVENT, (event) => {
           const nextHostname = event.payload?.initialHostname ?? undefined;
-          const nextTargetPath = event.payload?.targetPath ?? undefined;
+          requestIdRef.current = event.payload?.requestId;
 
           setInitialHostname(nextHostname);
-          setTargetPath(nextTargetPath);
           setHostname(nextHostname ?? '');
           setUsername('');
           setPassword('');
@@ -109,6 +108,7 @@ export default function SmbConnectWindow() {
       return;
     }
 
+    const requestId = requestIdRef.current;
     setIsConnecting(true);
     try {
       const server = await invoke<SmbServerInfo>('add_smb_server', {
@@ -118,23 +118,25 @@ export default function SmbConnectWindow() {
         domain: domain.trim() || undefined,
       });
 
-      const payload: SmbConnectSuccessPayload = {
-        hostname: server.hostname,
-        targetPath: targetPath || `smb://${server.hostname}/${folders.join('/')}`,
-      };
-
+      // Every window's sidebar lists the saved server.
+      await emit(SMB_CONNECT_SUCCESS_EVENT);
+      // A newer request took this window while the server was saved: the form is the new one's now.
+      if (requestIdRef.current !== requestId) return;
+      await invoke('smb_connect_window_connected', {
+        requestId,
+        address: `smb://${server.hostname}/${folders.join('/')}`,
+      });
       setConnected(true);
-      await emit(SMB_CONNECT_SUCCESS_EVENT, payload);
-
       window.setTimeout(() => {
         void closeWindow();
       }, 450);
     } catch (err) {
+      if (requestIdRef.current !== requestId) return;
       const message = err instanceof Error ? err.message : String(err);
       setError(message);
       setIsConnecting(false);
     }
-  }, [closeWindow, domain, hostname, password, targetPath, username]);
+  }, [closeWindow, domain, hostname, password, username]);
 
   const handleFormSubmit = useCallback(
     (e: FormEvent) => {

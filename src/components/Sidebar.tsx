@@ -78,13 +78,9 @@ export default function Sidebar() {
     smbServers,
     loadSmbServers,
     removeSmbServer,
-    pendingSmbCredentialRequest,
-    setPendingSmbCredentialRequest,
     sftpServers,
     loadSftpServers,
     removeSftpServer,
-    pendingSftpCredentialRequest,
-    setPendingSftpCredentialRequest,
   } = useAppStore();
 
   const [systemDrives, setSystemDrives] = useState<SystemDrive[]>([]);
@@ -123,40 +119,6 @@ export default function Sidebar() {
     setIsDragOver(true);
   }, []);
   const handleDragLeave = useCallback(() => setIsDragOver(false), []);
-
-  useEffect(() => {
-    if (!pendingSmbCredentialRequest) return;
-
-    (async () => {
-      try {
-        await invoke('open_smb_connect_window', {
-          initialHostname: pendingSmbCredentialRequest.hostname,
-          targetPath: pendingSmbCredentialRequest.targetPath,
-        });
-        setPendingSmbCredentialRequest(null);
-      } catch (error) {
-        console.warn('Failed to open SMB connect window:', error);
-      }
-    })();
-  }, [pendingSmbCredentialRequest, setPendingSmbCredentialRequest]);
-
-  useEffect(() => {
-    if (!pendingSftpCredentialRequest) return;
-
-    (async () => {
-      try {
-        await invoke('open_sftp_connect_window', {
-          initialHostname: pendingSftpCredentialRequest.hostname,
-          initialPort: pendingSftpCredentialRequest.port,
-          initialUsername: pendingSftpCredentialRequest.username,
-          targetPath: pendingSftpCredentialRequest.targetPath,
-        });
-        setPendingSftpCredentialRequest(null);
-      } catch (error) {
-        console.warn('Failed to open SFTP connect window:', error);
-      }
-    })();
-  }, [pendingSftpCredentialRequest, setPendingSftpCredentialRequest]);
 
   useSidebarDropZone(
     async (paths) => {
@@ -789,7 +751,14 @@ export default function Sidebar() {
 
         {/* Add Network Share button */}
         <button
-          onClick={() => void invoke('open_smb_connect_window', {})}
+          onClick={async () => {
+            try {
+              const address = await invoke<string | null>('open_smb_connect_window', {});
+              if (address) await navigateTo(address);
+            } catch (error) {
+              console.warn('Failed to open SMB connect window:', error);
+            }
+          }}
           className="w-full flex items-center gap-2 px-1.5 py-1 rounded-md text-left leading-5 text-[13px] text-app-muted hover:bg-app-light/70 hover:text-app-text transition-colors"
           data-tauri-drag-region={false}
         >
@@ -861,7 +830,14 @@ export default function Sidebar() {
 
         {/* Add SFTP Server button */}
         <button
-          onClick={() => void invoke('open_sftp_connect_window', {})}
+          onClick={async () => {
+            try {
+              const address = await invoke<string | null>('open_sftp_connect_window', {});
+              if (address) await navigateTo(address);
+            } catch (error) {
+              console.warn('Failed to open SFTP connect window:', error);
+            }
+          }}
           className="w-full flex items-center gap-2 px-1.5 py-1 rounded-md text-left leading-5 text-[13px] text-app-muted hover:bg-app-light/70 hover:text-app-text transition-colors"
           data-tauri-drag-region={false}
         >

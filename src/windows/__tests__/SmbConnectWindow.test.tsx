@@ -7,7 +7,12 @@ import { SMB_CONNECT_SUCCESS_EVENT } from '@/utils/events';
 
 vi.mock('@tauri-apps/api/event', () => ({
   emit: vi.fn(),
-  listen: vi.fn(async () => () => {}),
+  listen: vi.fn(
+    async (_event: string, handler: (event: { payload: { requestId: number } }) => void) => {
+      handler({ payload: { requestId: 7 } });
+      return () => {};
+    }
+  ),
 }));
 
 vi.mock('@tauri-apps/api/window', () => ({
@@ -46,11 +51,12 @@ describe('SmbConnectWindow', () => {
         'add_smb_server',
         expect.objectContaining({ hostname: 'server' })
       );
+      expect(mockInvoke).toHaveBeenCalledWith('smb_connect_window_connected', {
+        requestId: 7,
+        address: 'smb://server/share/folder',
+      });
     });
-    expect(mockEmit).toHaveBeenCalledWith(
-      SMB_CONNECT_SUCCESS_EVENT,
-      expect.objectContaining({ targetPath: 'smb://server/share/folder' })
-    );
+    expect(mockEmit).toHaveBeenCalledWith(SMB_CONNECT_SUCCESS_EVENT);
   });
 
   it('keeps a user name and password out of the saved server name', async () => {
@@ -68,10 +74,11 @@ describe('SmbConnectWindow', () => {
     await submit('server');
 
     await waitFor(() => {
-      expect(mockEmit).toHaveBeenCalledWith(
-        SMB_CONNECT_SUCCESS_EVENT,
-        expect.objectContaining({ targetPath: 'smb://server/' })
-      );
+      expect(mockInvoke).toHaveBeenCalledWith('smb_connect_window_connected', {
+        requestId: 7,
+        address: 'smb://server/',
+      });
     });
+    expect(mockEmit).toHaveBeenCalledWith(SMB_CONNECT_SUCCESS_EVENT);
   });
 });

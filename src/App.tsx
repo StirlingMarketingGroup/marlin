@@ -22,6 +22,7 @@ import { getSuggestedZipName } from './utils/zipNaming';
 import { matchesFilter } from '@/utils/filterMatch';
 import { revealInFileBrowser } from '@/utils/fileBrowser';
 import { GOOGLE_SIGN_IN_CANCELLED } from '@/utils/googleSignIn';
+import { SIGN_IN_CANCELLED } from '@/utils/serverSignIn';
 
 import Toast from './components/Toast';
 import FilterInput from './components/FilterInput';
@@ -35,8 +36,6 @@ import type {
   DirectoryListingResponse,
   FileItem,
   PersistedPreferences,
-  SmbConnectSuccessPayload,
-  SftpConnectSuccessPayload,
   ViewPreferences,
 } from './types';
 
@@ -336,29 +335,19 @@ function App() {
     void checkAndShowFullDiskAccessPrompt();
   }, []);
 
-  // Handle SMB connect flow coming from the SMB connect window
+  // Every window's sidebar lists the saved servers, so each window reloads its list after a connect.
   useEffect(() => {
     let unlisten: (() => void) | undefined;
 
     (async () => {
       try {
-        unlisten = await listen<SmbConnectSuccessPayload>(
-          SMB_CONNECT_SUCCESS_EVENT,
-          async (evt) => {
-            const payload = evt.payload;
-            if (!payload?.hostname) return;
-
-            const state = useAppStore.getState();
-            try {
-              await state.loadSmbServers();
-            } catch (error) {
-              console.warn('Failed to refresh SMB server list after connect:', error);
-            }
-
-            state.setPendingSmbCredentialRequest(null);
-            await state.navigateTo(payload.targetPath || `smb://${payload.hostname}/`);
+        unlisten = await listen(SMB_CONNECT_SUCCESS_EVENT, async () => {
+          try {
+            await useAppStore.getState().loadSmbServers();
+          } catch (error) {
+            console.warn('Failed to refresh SMB server list after connect:', error);
           }
-        );
+        });
       } catch (error) {
         console.warn('Failed to listen for SMB connect success:', error);
       }
@@ -371,33 +360,19 @@ function App() {
     };
   }, []);
 
-  // Handle SFTP connect flow coming from the SFTP connect window
+  // Every window's sidebar lists the saved servers, so each window reloads its list after a connect.
   useEffect(() => {
     let unlisten: (() => void) | undefined;
 
     (async () => {
       try {
-        unlisten = await listen<SftpConnectSuccessPayload>(
-          SFTP_CONNECT_SUCCESS_EVENT,
-          async (evt) => {
-            const payload = evt.payload;
-            if (!payload?.hostname) return;
-
-            const state = useAppStore.getState();
-            try {
-              await state.loadSftpServers();
-            } catch (error) {
-              console.warn('Failed to refresh SFTP server list after connect:', error);
-            }
-
-            state.setPendingSftpCredentialRequest(null);
-
-            const portSuffix = payload.port === 22 ? '' : `:${payload.port}`;
-            await state.navigateTo(
-              payload.targetPath || `sftp://${payload.username}@${payload.hostname}${portSuffix}/`
-            );
+        unlisten = await listen(SFTP_CONNECT_SUCCESS_EVENT, async () => {
+          try {
+            await useAppStore.getState().loadSftpServers();
+          } catch (error) {
+            console.warn('Failed to refresh SFTP server list after connect:', error);
           }
-        );
+        });
       } catch (error) {
         console.warn('Failed to listen for SFTP connect success:', error);
       }
@@ -508,6 +483,11 @@ function App() {
             const read = await useAppStore.getState().refreshCurrentDirectoryStreaming();
             if (read.outcome === 'failed') {
               throw new Error(read.reason);
+            }
+            // The user opened another folder while this one loaded, for example while a sign-in
+            // window waited. Nothing else reads it before the app is ready, so read it here.
+            if (read.outcome === 'superseded') {
+              return tryLoadPath(useAppStore.getState().currentPath);
             }
             // A start path that names a file fails like a missing one, so the next one is tried.
             if (read.outcome === 'notAFolder') return false;
@@ -719,8 +699,8 @@ function App() {
 
         // The streaming read hands a remote folder to `refreshCurrentDirectory`.
         const read = await useAppStore.getState().refreshCurrentDirectoryStreaming();
-        // Another folder's load owns the window now, or a sign-in window opens instead.
-        if (read.outcome === 'superseded' || read.outcome === 'signInRequested') return;
+        // Another folder's load owns the window now.
+        if (read.outcome === 'superseded') return;
         // The address names a file: open the folder that holds it, with the file selected. A
         // root is always a folder, so a file has a folder that holds it.
         if (read.outcome === 'notAFolder') {
@@ -787,7 +767,7 @@ function App() {
         }
 
         // A cancelled sign-in already asked the user.
-        if (errorMessage !== GOOGLE_SIGN_IN_CANCELLED) {
+        if (errorMessage !== GOOGLE_SIGN_IN_CANCELLED && errorMessage !== SIGN_IN_CANCELLED) {
           await message(`Cannot access: ${currentPath}\n\n${errorMessage}`, {
             title: 'Directory Error',
             okLabel: 'OK',

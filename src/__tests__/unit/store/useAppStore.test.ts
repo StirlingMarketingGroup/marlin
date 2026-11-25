@@ -575,7 +575,65 @@ describe('useAppStore', () => {
       expect(useAppStore.getState().files).toEqual([kept]);
     });
 
-    it('asks for a sign-in and leaves the pending navigation when a share has no saved sign-in', async () => {
+    it('keeps the folder in view while the connect window is open, then reads the share again', async () => {
+      const smbPath = 'smb://server/share';
+      useAppStore.setState({
+        currentPath: smbPath,
+        currentLocationRaw: smbPath,
+        pathHistory: [smbPath],
+        historyIndex: 0,
+        error: undefined,
+      });
+      let reads = 0;
+      let loadingWhileOpen: boolean | undefined;
+      mockInvoke.mockImplementation((cmd) => {
+        if (cmd === 'read_directory') {
+          reads += 1;
+          if (reads === 1) {
+            return Promise.reject(new Error('[SMB_NO_CREDENTIALS] server'));
+          }
+          return Promise.resolve({
+            entries: [
+              {
+                name: 'notes.txt',
+                path: 'smb://server/share/notes.txt',
+                size: 1,
+                modified: '2024-01-01T00:00:00.000Z',
+                is_directory: false,
+                is_hidden: false,
+                is_symlink: false,
+                is_git_repo: false,
+              },
+            ],
+            location: {
+              raw: smbPath,
+              scheme: 'smb',
+              authority: 'server',
+              path: '/share',
+              displayPath: smbPath,
+            },
+            capabilities: { scheme: 'smb', displayName: 'SMB' },
+          });
+        }
+        if (cmd === 'open_smb_connect_window') {
+          loadingWhileOpen = useAppStore.getState().loading;
+          return Promise.resolve('smb://server/');
+        }
+        return Promise.resolve(undefined);
+      });
+
+      await expect(useAppStore.getState().refreshCurrentDirectory()).resolves.toEqual({
+        outcome: 'listed',
+      });
+
+      expect(mockInvoke).toHaveBeenCalledWith('open_smb_connect_window', {
+        initialHostname: 'server',
+      });
+      expect(loadingWhileOpen).toBe(false);
+      expect(reads).toBe(2);
+    });
+
+    it('fails with a cancelled sign-in and leaves the pending navigation when the window closes', async () => {
       const smbPath = 'smb://server/share';
       const navigation = {
         path: smbPath,
@@ -600,19 +658,64 @@ describe('useAppStore', () => {
         if (cmd === 'read_directory') {
           return Promise.reject(new Error('[SMB_NO_CREDENTIALS] server'));
         }
+        if (cmd === 'open_smb_connect_window') {
+          return Promise.resolve(null);
+        }
         return Promise.resolve(undefined);
       });
 
       await expect(useAppStore.getState().refreshCurrentDirectory()).resolves.toEqual({
-        outcome: 'signInRequested',
+        outcome: 'failed',
+        reason: 'Sign-in was cancelled.',
       });
 
       expect(useAppStore.getState().navigation).toEqual(navigation);
-      expect(useAppStore.getState().pendingSmbCredentialRequest).toEqual({
-        hostname: 'server',
-        targetPath: smbPath,
+    });
+
+    it('opens no connect window for a read the user already left, and leaves its loading alone', async () => {
+      const smbPath = 'smb://server/share';
+      useAppStore.setState({
+        currentPath: smbPath,
+        currentLocationRaw: smbPath,
+        error: undefined,
       });
-      expect(useAppStore.getState().error).toBeUndefined();
+      mockInvoke.mockImplementation((cmd) => {
+        if (cmd === 'read_directory') {
+          // The folder the user opened is still loading.
+          useAppStore.setState({ currentPath: '/other', loading: true });
+          return Promise.reject(new Error('[SMB_NO_CREDENTIALS] server'));
+        }
+        return Promise.resolve(undefined);
+      });
+
+      await expect(useAppStore.getState().refreshCurrentDirectory()).resolves.toEqual({
+        outcome: 'superseded',
+      });
+
+      expect(mockInvoke).not.toHaveBeenCalledWith('open_smb_connect_window', expect.anything());
+      expect(useAppStore.getState().loading).toBe(true);
+    });
+
+    it('asks for a sign-in when the address writes its scheme in capitals', async () => {
+      const smbPath = 'SMB://server/share';
+      useAppStore.setState({ currentPath: smbPath, currentLocationRaw: smbPath, error: undefined });
+      mockInvoke.mockImplementation((cmd) => {
+        if (cmd === 'read_directory') {
+          return Promise.reject(new Error('[SMB_NO_CREDENTIALS] server'));
+        }
+        if (cmd === 'open_smb_connect_window') {
+          return Promise.resolve(null);
+        }
+        return Promise.resolve(undefined);
+      });
+
+      await expect(useAppStore.getState().refreshCurrentDirectory()).resolves.toEqual({
+        outcome: 'failed',
+        reason: 'Sign-in was cancelled.',
+      });
+      expect(mockInvoke).toHaveBeenCalledWith('open_smb_connect_window', {
+        initialHostname: 'server',
+      });
     });
 
     it('answers notAFolder for a file, remote or local, and shows no error', async () => {
