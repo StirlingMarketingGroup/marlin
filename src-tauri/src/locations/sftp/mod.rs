@@ -3,7 +3,8 @@ pub mod pool;
 
 use crate::fs_utils::FileItem;
 use crate::locations::{
-    Location, LocationCapabilities, LocationProvider, LocationSummary, ProviderDirectoryEntries,
+    not_a_folder, Location, LocationCapabilities, LocationProvider, LocationSummary,
+    ProviderDirectoryEntries,
 };
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
@@ -54,10 +55,16 @@ impl LocationProvider for SftpProvider {
 
         let sftp = pool::get_sftp_session(&hostname, port).await?;
 
-        let entries = sftp
-            .read_dir(remote_path)
-            .await
-            .map_err(|e| format!("Failed to read directory: {}", e))?;
+        let entries = match sftp.read_dir(remote_path).await {
+            Ok(entries) => entries,
+            // OpenSSH answers "No such file" for a file as for a missing path. A stat on the same session tells them apart.
+            Err(e) => {
+                return Err(match sftp.metadata(remote_path).await {
+                    Ok(attrs) if !attrs.is_dir() => not_a_folder(location.raw()),
+                    _ => format!("Failed to read directory: {}", e),
+                })
+            }
+        };
 
         let mut items: Vec<FileItem> = Vec::new();
 

@@ -304,6 +304,14 @@ pub struct ProviderDirectoryEntries {
     pub entries: Vec<FileItem>,
 }
 
+/// What a folder read answers for a path that is there and is not a folder, such as a file or a link to one. The `file`, `sftp`, and `smb` providers answer it. A navigation that gets the `[ENOTDIR]` code opens the folder that holds the item and selects it.
+pub fn not_a_folder(path: &str) -> String {
+    crate::commands::format_error(
+        crate::commands::error_codes::ENOTDIR,
+        &format!("Not a folder: {path}"),
+    )
+}
+
 #[async_trait]
 pub trait LocationProvider: Send + Sync {
     fn scheme(&self) -> &'static str;
@@ -423,6 +431,11 @@ pub fn remove_temp_copy(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn not_a_folder_names_the_path() {
+        assert_eq!(not_a_folder("/a/b.txt"), "[ENOTDIR] Not a folder: /a/b.txt");
+    }
 
     #[test]
     fn parse_file_paths() {

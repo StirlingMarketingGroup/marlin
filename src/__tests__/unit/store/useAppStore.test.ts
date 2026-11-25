@@ -77,7 +77,7 @@ describe('useAppStore', () => {
       directoryPreferences: {},
       files: [],
       selectedFiles: [],
-      pendingRevealTargets: undefined,
+      pendingReveal: undefined,
       loading: false,
       pathHistory: ['/test'],
       historyIndex: 0,
@@ -614,6 +614,28 @@ describe('useAppStore', () => {
       });
       expect(useAppStore.getState().error).toBeUndefined();
     });
+
+    it('answers notAFolder for a file, remote or local, and shows no error', async () => {
+      mockInvoke.mockImplementation((cmd) => {
+        if (cmd === 'read_directory' || cmd === 'read_directory_streaming_command') {
+          return Promise.reject(new Error('[ENOTDIR] Not a folder: /a/file.txt'));
+        }
+        return Promise.resolve(undefined);
+      });
+
+      useAppStore.setState({ currentPath: 'sftp://u@h/a/file.txt', error: undefined });
+      await expect(useAppStore.getState().refreshCurrentDirectory()).resolves.toEqual({
+        outcome: 'notAFolder',
+      });
+      expect(useAppStore.getState().error).toBeUndefined();
+
+      useAppStore.setState({ currentPath: '/a/file.txt', error: undefined });
+      await expect(useAppStore.getState().refreshCurrentDirectoryStreaming()).resolves.toEqual({
+        outcome: 'notAFolder',
+      });
+      expect(useAppStore.getState().error).toBeUndefined();
+      expect(useAppStore.getState().loading).toBe(false);
+    });
   });
 
   describe('Google accounts', () => {
@@ -805,12 +827,12 @@ describe('useAppStore', () => {
     });
 
     it('clears a pending reveal target', () => {
-      useAppStore.setState({ pendingRevealTargets: ['/a/b'] });
+      useAppStore.setState({ pendingReveal: { paths: ['/a/b'] } });
 
       useAppStore.getState().navigateTo('/x');
 
       expect(useAppStore.getState().currentPath).toBe('/x');
-      expect(useAppStore.getState().pendingRevealTargets).toBeUndefined();
+      expect(useAppStore.getState().pendingReveal).toBeUndefined();
     });
 
     it('returns to the folder it left, with its list, filter, and history, when the new one fails', () => {
@@ -848,6 +870,75 @@ describe('useAppStore', () => {
       expect(useAppStore.getState().failedAddress).toEqual({
         text: '~/Missing ',
         reason: 'Path does not exist',
+      });
+    });
+
+    describe('openFolderInstead', () => {
+      function listedFolder() {
+        useAppStore.setState({
+          currentPath: '/a',
+          currentLocationRaw: 'file:///a',
+          pathHistory: ['/a'],
+          historyIndex: 0,
+          loading: false,
+          isMetadataComplete: true,
+          error: undefined,
+        });
+      }
+
+      it('puts the folder in the file address place and keeps the name', () => {
+        listedFolder();
+        useAppStore.getState().navigateTo('/a/b/file.txt', { typed: true });
+        const pending = useAppStore.getState().navigation;
+
+        useAppStore.getState().openFolderInstead('/a/b', 'file.txt');
+
+        const state = useAppStore.getState();
+        expect(state.currentPath).toBe('/a/b');
+        expect(state.pathHistory).toEqual(['/a', '/a/b']);
+        expect(state.historyIndex).toBe(1);
+        expect(state.navigation?.path).toBe('/a/b');
+        expect(state.navigation?.typedText).toBe('/a/b/file.txt');
+        expect(state.navigation?.before).toEqual(pending?.before);
+        expect(state.pendingReveal).toEqual({ name: 'file.txt' });
+      });
+
+      it('a failure after it puts the folder the user left back', () => {
+        listedFolder();
+        useAppStore.getState().navigateTo('/a/b/file.txt', { typed: true });
+        useAppStore.getState().openFolderInstead('/a/b', 'file.txt');
+        useAppStore.getState().returnFromFailedNavigation('Permission denied');
+
+        const state = useAppStore.getState();
+        expect(state.currentPath).toBe('/a');
+        expect(state.failedAddress).toEqual({
+          text: '/a/b/file.txt',
+          reason: 'Permission denied',
+        });
+        expect(state.pendingReveal).toBeUndefined();
+      });
+
+      it('replaces the history entry when nothing is pending', () => {
+        useAppStore.setState({
+          pathHistory: ['/x', '/a/b/file.txt'],
+          historyIndex: 1,
+          currentPath: '/a/b/file.txt',
+          navigation: null,
+        });
+
+        useAppStore.getState().openFolderInstead('/a/b', 'file.txt');
+
+        const state = useAppStore.getState();
+        expect(state.currentPath).toBe('/a/b');
+        expect(state.pathHistory).toEqual(['/x', '/a/b']);
+        expect(state.navigation).toBeNull();
+        expect(state.pendingReveal).toEqual({ name: 'file.txt' });
+      });
+
+      it('normalizes a drive root', () => {
+        useAppStore.getState().openFolderInstead('C:', 'pick.txt');
+
+        expect(useAppStore.getState().currentPath).toBe('C:/');
       });
     });
 
@@ -964,17 +1055,17 @@ describe('useAppStore', () => {
         pathHistory: ['/a', '/b', '/c'],
         historyIndex: 1,
         currentPath: '/b',
-        pendingRevealTargets: ['/b/child'],
+        pendingReveal: { paths: ['/b/child'] },
       });
 
       useAppStore.getState().goBack();
       expect(useAppStore.getState().currentPath).toBe('/a');
-      expect(useAppStore.getState().pendingRevealTargets).toBeUndefined();
+      expect(useAppStore.getState().pendingReveal).toBeUndefined();
 
-      useAppStore.setState({ pendingRevealTargets: ['/a/child'] });
+      useAppStore.setState({ pendingReveal: { paths: ['/a/child'] } });
       useAppStore.getState().goForward();
       expect(useAppStore.getState().currentPath).toBe('/b');
-      expect(useAppStore.getState().pendingRevealTargets).toBeUndefined();
+      expect(useAppStore.getState().pendingReveal).toBeUndefined();
     });
   });
 
@@ -985,7 +1076,7 @@ describe('useAppStore', () => {
       useAppStore.getState().goUp();
 
       expect(useAppStore.getState().currentPath).toBe('/a');
-      expect(useAppStore.getState().pendingRevealTargets).toEqual(['/a/b']);
+      expect(useAppStore.getState().pendingReveal).toEqual({ paths: ['/a/b'] });
     });
 
     it('reveals the archive file when leaving an archive root', () => {
@@ -994,7 +1085,7 @@ describe('useAppStore', () => {
       useAppStore.getState().goUp();
 
       expect(useAppStore.getState().currentPath).toBe('/a');
-      expect(useAppStore.getState().pendingRevealTargets).toEqual(['/a/pack.zip']);
+      expect(useAppStore.getState().pendingReveal).toEqual({ paths: ['/a/pack.zip'] });
     });
 
     it('reveals the folder left inside an archive', () => {
@@ -1004,7 +1095,7 @@ describe('useAppStore', () => {
       useAppStore.getState().goUp();
 
       expect(useAppStore.getState().currentPath).toBe(buildArchiveUri('/a/pack.zip', '/inner'));
-      expect(useAppStore.getState().pendingRevealTargets).toEqual([current]);
+      expect(useAppStore.getState().pendingReveal).toEqual({ paths: [current] });
     });
 
     it('leaves a nested archive root for the folder that holds the inner archive', () => {
@@ -1014,17 +1105,17 @@ describe('useAppStore', () => {
       useAppStore.getState().goUp();
 
       expect(useAppStore.getState().currentPath).toBe(buildArchiveUri('/a/outer.zip', '/dir'));
-      expect(useAppStore.getState().pendingRevealTargets).toEqual([innerFile]);
+      expect(useAppStore.getState().pendingReveal).toEqual({ paths: [innerFile] });
     });
 
     it('does nothing at a root', () => {
       for (const path of ['/', 'smb://server', 'smb://server/', 'gdrive://me@example.com/']) {
-        useAppStore.setState({ currentPath: path, pendingRevealTargets: ['/keep'] });
+        useAppStore.setState({ currentPath: path, pendingReveal: { paths: ['/keep'] } });
 
         useAppStore.getState().goUp();
 
         expect(useAppStore.getState().currentPath).toBe(path);
-        expect(useAppStore.getState().pendingRevealTargets).toEqual(['/keep']);
+        expect(useAppStore.getState().pendingReveal).toEqual({ paths: ['/keep'] });
       }
     });
 
@@ -2283,15 +2374,15 @@ describe('useAppStore', () => {
 
       useAppStore.getState().revealInOpenFolder(['/test/a.txt', '/other/b.txt', '/test/sub/c.txt']);
 
-      expect(useAppStore.getState().pendingRevealTargets).toEqual(['/test/a.txt']);
+      expect(useAppStore.getState().pendingReveal).toEqual({ paths: ['/test/a.txt'] });
     });
 
     it('asks for nothing when every item is in another folder', () => {
-      useAppStore.setState({ currentPath: '/test', pendingRevealTargets: undefined });
+      useAppStore.setState({ currentPath: '/test', pendingReveal: undefined });
 
       useAppStore.getState().revealInOpenFolder(['/other/b.txt']);
 
-      expect(useAppStore.getState().pendingRevealTargets).toBeUndefined();
+      expect(useAppStore.getState().pendingReveal).toBeUndefined();
     });
 
     it('keeps a file in the root', () => {
@@ -2299,7 +2390,7 @@ describe('useAppStore', () => {
 
       useAppStore.getState().revealInOpenFolder(['/a.txt']);
 
-      expect(useAppStore.getState().pendingRevealTargets).toEqual(['/a.txt']);
+      expect(useAppStore.getState().pendingReveal).toEqual({ paths: ['/a.txt'] });
     });
 
     it('matches a Windows path', () => {
@@ -2307,7 +2398,7 @@ describe('useAppStore', () => {
 
       useAppStore.getState().revealInOpenFolder(['C:\\Users\\me\\a.txt']);
 
-      expect(useAppStore.getState().pendingRevealTargets).toEqual(['C:\\Users\\me\\a.txt']);
+      expect(useAppStore.getState().pendingReveal).toEqual({ paths: ['C:\\Users\\me\\a.txt'] });
     });
   });
 
@@ -2326,7 +2417,7 @@ describe('useAppStore', () => {
         fromPath: '/test/old.txt',
         toPath: '/test/new.txt',
       });
-      expect(useAppStore.getState().pendingRevealTargets).toEqual(['/test/new.txt']);
+      expect(useAppStore.getState().pendingReveal).toEqual({ paths: ['/test/new.txt'] });
     });
   });
 
@@ -2358,7 +2449,9 @@ describe('useAppStore', () => {
 
       await useAppStore.getState().pasteFiles();
 
-      expect(useAppStore.getState().pendingRevealTargets).toEqual(['/test/a.txt', '/test/b.txt']);
+      expect(useAppStore.getState().pendingReveal).toEqual({
+        paths: ['/test/a.txt', '/test/b.txt'],
+      });
     });
 
     it('deletes the remote originals of its own cut once the paste is done', async () => {
@@ -2487,7 +2580,9 @@ describe('useAppStore', () => {
 
       await useUndoStore.getState().executeUndo();
 
-      expect(useAppStore.getState().pendingRevealTargets).toEqual(['/test/a.txt', '/test/b.txt']);
+      expect(useAppStore.getState().pendingReveal).toEqual({
+        paths: ['/test/a.txt', '/test/b.txt'],
+      });
     });
 
     it("reveals what the trash toast's Undo restores", async () => {
@@ -2507,7 +2602,7 @@ describe('useAppStore', () => {
       toast!.action!.onClick();
 
       await vi.waitFor(() =>
-        expect(useAppStore.getState().pendingRevealTargets).toEqual(['/test/a.txt'])
+        expect(useAppStore.getState().pendingReveal).toEqual({ paths: ['/test/a.txt'] })
       );
     });
   });
@@ -2519,7 +2614,7 @@ describe('useAppStore', () => {
 
       await useAppStore.getState().compressSelectedToZip('a.zip');
 
-      expect(useAppStore.getState().pendingRevealTargets).toEqual(['/test/a.zip']);
+      expect(useAppStore.getState().pendingReveal).toEqual({ paths: ['/test/a.zip'] });
     });
   });
 
@@ -2532,7 +2627,7 @@ describe('useAppStore', () => {
         .getState()
         .extractArchive(fileItem({ name: 'a.zip', path: '/test/a.zip', extension: 'zip' }));
 
-      expect(useAppStore.getState().pendingRevealTargets).toEqual(['/test/a']);
+      expect(useAppStore.getState().pendingReveal).toEqual({ paths: ['/test/a'] });
     });
   });
 });

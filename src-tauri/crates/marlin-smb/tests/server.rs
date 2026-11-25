@@ -394,6 +394,14 @@ fn read_directory_errors() {
         "{response}"
     );
 
+    // A path under a file is missing, not a file.
+    let response = listed(SHARE, "/small.txt/more", PASSWORD);
+    assert_eq!(
+        code(&response),
+        i64::from(error_codes::SMB_PATH_NOT_FOUND),
+        "{response}"
+    );
+
     let response = listed(DENIED_SHARE, "/", PASSWORD);
     assert_eq!(
         code(&response),

@@ -27,7 +27,7 @@ import { open as openShell } from '@tauri-apps/plugin-shell';
 import { ask, message, open as openDialog } from '@tauri-apps/plugin-dialog';
 import { getPlatform } from '@/hooks/usePlatform';
 import { getExtractableArchiveFormat, isArchiveFile, isMacOSBundle } from '@/utils/fileTypes';
-import { basename, parentPath, resolveTypedPath } from '@/utils/pathUtils';
+import { basename, isInFolder, parentPath, resolveTypedPath } from '@/utils/pathUtils';
 import { useToastStore } from './useToastStore';
 import { useUndoStore, pushUndoAndShowToast, undoFromToast } from './useUndoStore';
 import { parseGoogleDriveUrl } from '@/utils/googleDriveUrl';
@@ -235,7 +235,14 @@ type FolderRead =
   // A sign-in window opens instead. The folder opens once the user signs in.
   | { outcome: 'signInRequested' }
   // The user opened another folder while this one was read.
-  | { outcome: 'superseded' };
+  | { outcome: 'superseded' }
+  // The location is there and is a file: the backend answered `[ENOTDIR]`.
+  | { outcome: 'notAFolder' };
+
+// What to select and scroll to once the open folder lists it (see useRevealTarget). `paths` are
+// full paths. `name` is the file a file address named, after the folder that holds it opened in
+// its place (see openFolderInstead).
+type PendingReveal = { paths: string[] } | { name: string };
 
 // Whether the OS clipboard still holds the cut Marlin wrote. A remote cut puts temp copies on
 // the clipboard (`clipboardTempPaths`), and a local cut puts the files themselves.
@@ -394,6 +401,7 @@ interface AppState {
   clearFilter: () => void;
   navigateTo: (path: string, options?: { reveal?: string; typed?: boolean }) => Promise<void>;
   returnFromFailedNavigation: (reason: string) => void;
+  openFolderInstead: (folder: string, name: string) => void;
   clearFailedAddress: () => void;
   goBack: () => void;
   goForward: () => void;
@@ -472,11 +480,11 @@ interface AppState {
   beginRenameSelected: () => void;
   cancelRename: () => Promise<void>;
   renameFile: (newName: string) => Promise<void>;
-  // The items to select and scroll to once they are listed (see useRevealTarget). They are full
-  // paths, so they match only in the folder that holds them. The next navigation replaces them.
-  // While the view shows none of them they stay, so turning hidden files on still selects them.
-  pendingRevealTargets?: string[];
-  setPendingRevealTargets: (paths?: string[]) => void;
+  // The items to select and scroll to once the open folder lists them. Full paths match only in
+  // the folder that holds them. The next navigation replaces them. While the view shows none of
+  // them they stay, so turning hidden files on still selects them.
+  pendingReveal?: PendingReveal;
+  setPendingReveal: (reveal?: PendingReveal) => void;
   // Asks the view to select and show what an action made or moved. Only the items in the open
   // folder count: a paste that ends after the user left, an undo that puts items back in another
   // folder, or a rename into a subfolder has nothing to show here.
@@ -871,7 +879,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       showFilterInput: false,
       justCreatedPath: undefined,
       renameTargetPath: undefined,
-      pendingRevealTargets: options?.reveal ? [options.reveal] : undefined,
+      pendingReveal: options?.reveal ? { paths: [options.reveal] } : undefined,
       // Opening the folder already open leaves no other folder to return to, so it starts
       // nothing to undo. A navigation that starts while another is pending keeps the folder
       // that one left, because the pending folder never reached the screen.
@@ -921,7 +929,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       files: before.files,
       filterText: before.filterText,
       showFilterInput: before.showFilterInput,
-      pendingRevealTargets: undefined,
+      pendingReveal: undefined,
       navigation: null,
       failedAddress: typedText === undefined ? null : { text: typedText, reason },
     });
@@ -939,6 +947,26 @@ export const useAppStore = create<AppState>((set, get) => ({
       });
     }
   },
+
+  // The location being opened is a file. The folder that holds it takes its place on screen, in
+  // history, and as the target of a pending navigation, so a failure there still goes back to the
+  // folder the user left, with a typed address back in the bar. The file is selected once its
+  // folder lists it.
+  openFolderInstead: (folder, name) =>
+    set((state) => {
+      const location = normalizePath(folder);
+      const pathHistory = [...state.pathHistory];
+      pathHistory[state.historyIndex] = location;
+      return {
+        currentPath: location,
+        currentLocationRaw: /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(location)
+          ? location
+          : toFileUri(location),
+        pathHistory,
+        navigation: state.navigation && { ...state.navigation, path: location },
+        pendingReveal: { name },
+      };
+    }),
 
   clearFailedAddress: () => set({ failedAddress: null }),
 
@@ -960,7 +988,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         historyIndex: newIndex,
         justCreatedPath: undefined,
         renameTargetPath: undefined,
-        pendingRevealTargets: undefined,
+        pendingReveal: undefined,
         failedAddress: null,
       });
       const scheme = getUriScheme(newPath);
@@ -988,7 +1016,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         historyIndex: newIndex,
         justCreatedPath: undefined,
         renameTargetPath: undefined,
-        pendingRevealTargets: undefined,
+        pendingReveal: undefined,
         failedAddress: null,
       });
       const scheme = getUriScheme(newPath);
@@ -1137,6 +1165,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
       // The user opened another folder while this one was being read.
       if (get().currentPath !== currentPath) return { outcome: 'superseded' };
+      if (msg.startsWith('[ENOTDIR]')) return { outcome: 'notAFolder' };
 
       // Check if this is an SMB "no credentials" error
       if (msg.includes('[SMB_NO_CREDENTIALS]')) {
@@ -1261,8 +1290,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       // The user opened another folder while this one was being read. Its read owns the
       // loading state and the error.
       if (get().currentPath !== currentPath) return { outcome: 'superseded' };
-      setError(msg);
       set({ loading: false });
+      if (msg.startsWith('[ENOTDIR]')) return { outcome: 'notAFolder' };
+      setError(msg);
       return { outcome: 'failed', reason: msg };
     }
     // `loading` stays true after a successful start: the first directory batch clears it, so
@@ -2930,7 +2960,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   justCreatedPath: undefined,
   renameTargetPath: undefined,
   renameLoading: false,
-  pendingRevealTargets: undefined,
+  pendingReveal: undefined,
   setRenameTarget: (path?: string) => set({ renameTargetPath: path, renameLoading: false }),
   beginRenameSelected: () => {
     const { selectedFiles } = get();
@@ -3112,12 +3142,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
     }
   },
-  setPendingRevealTargets: (paths?: string[]) => set({ pendingRevealTargets: paths }),
+  setPendingReveal: (reveal) => set({ pendingReveal: reveal }),
   revealInOpenFolder: (paths: string[]) => {
-    // parentPath gives `/` separators and no trailing one, so compare the open folder the same way.
-    const openFolder = get().currentPath.replace(/\\/g, '/').replace(/\/+$/, '') || '/';
-    const inOpenFolder = paths.filter((path) => parentPath(path) === openFolder);
-    if (inOpenFolder.length > 0) set({ pendingRevealTargets: inOpenFolder });
+    const inOpenFolder = paths.filter((path) => isInFolder(path, get().currentPath));
+    if (inOpenFolder.length > 0) set({ pendingReveal: { paths: inOpenFolder } });
   },
 
   // Animation actions

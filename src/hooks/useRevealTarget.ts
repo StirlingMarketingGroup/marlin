@@ -2,6 +2,7 @@ import { useEffect, type RefObject } from 'react';
 import type { Virtualizer } from '@tanstack/react-virtual';
 import type { FileItem } from '@/types';
 import { useAppStore } from '@/store/useAppStore';
+import { isInFolder } from '@/utils/pathUtils';
 
 export function useRevealTarget(
   filteredFiles: FileItem[],
@@ -10,20 +11,37 @@ export function useRevealTarget(
   itemsPerRow: number
 ): void {
   const files = useAppStore((state) => state.files);
-  const pendingRevealTargets = useAppStore((state) => state.pendingRevealTargets);
+  const currentPath = useAppStore((state) => state.currentPath);
+  const pendingReveal = useAppStore((state) => state.pendingReveal);
   const isMetadataComplete = useAppStore((state) => state.isMetadataComplete);
   const setSelectedFiles = useAppStore((state) => state.setSelectedFiles);
   const setSelectionAnchor = useAppStore((state) => state.setSelectionAnchor);
   const setSelectionLead = useAppStore((state) => state.setSelectionLead);
-  const setPendingRevealTargets = useAppStore((state) => state.setPendingRevealTargets);
+  const setPendingReveal = useAppStore((state) => state.setPendingReveal);
+
+  // A file address opened its folder. The listing can name the folder another way than the
+  // address did, so the item is found by its name among the open folder's items. A disk that
+  // ignores case or Unicode form can hold `Café.pdf` for a typed `café.pdf`, so with no exact
+  // name, a name that differs only in those counts. That waits for the whole listing, because
+  // the exact name can come in a later batch.
+  useEffect(() => {
+    if (!pendingReveal || !('name' in pendingReveal)) return;
+    const { name } = pendingReveal;
+    const inFolder = files.filter((file) => isInFolder(file.path, currentPath));
+    const loose = (text: string) => text.normalize('NFC').toLowerCase();
+    const item =
+      inFolder.find((file) => file.name === name) ??
+      (isMetadataComplete ? inFolder.find((file) => loose(file.name) === loose(name)) : undefined);
+    if (item) setPendingReveal({ paths: [item.path] });
+  }, [pendingReveal, currentPath, files, isMetadataComplete, setPendingReveal]);
 
   useEffect(() => {
-    if (!pendingRevealTargets) return;
+    if (!pendingReveal || !('paths' in pendingReveal)) return;
     // Sizes and dates arrive last and can reorder the list, so the order is right only then.
     if (!isMetadataComplete) return;
 
     // On Windows, currentPath uses `/` and a listed path uses `\`.
-    const targets = new Set(pendingRevealTargets.map((path) => path.replace(/\\/g, '/')));
+    const targets = new Set(pendingReveal.paths.map((path) => path.replace(/\\/g, '/')));
     // The folder watcher can list a drop's items over two reads. Wait for all of them, or only the
     // first would be selected.
     const listed = files.filter((file) => targets.has(file.path.replace(/\\/g, '/')));
@@ -56,9 +74,9 @@ export function useRevealTarget(
       virtualizer.scrollToIndex(Math.floor(index / itemsPerRow), { align: 'center' });
     });
 
-    setPendingRevealTargets(undefined);
+    setPendingReveal(undefined);
   }, [
-    pendingRevealTargets,
+    pendingReveal,
     isMetadataComplete,
     filteredFiles,
     files,
@@ -68,6 +86,6 @@ export function useRevealTarget(
     setSelectedFiles,
     setSelectionAnchor,
     setSelectionLead,
-    setPendingRevealTargets,
+    setPendingReveal,
   ]);
 }

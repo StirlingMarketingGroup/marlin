@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { isDeepStrictEqual, promisify } from 'node:util';
 import { afterAll, beforeAll, expect, test } from 'vitest';
-import { freePort, rowNames, runCommand, startApp } from './app';
+import { fileRow, freePort, openFolder, rowNames, runCommand, startApp } from './app';
 
 const execFileAsync = promisify(execFile);
 const sshdPath = '/usr/sbin/sshd';
@@ -243,6 +243,33 @@ test(
       timeout: 10_000,
       timeoutMsg: `the path bar never showed ${remote}`,
     });
+
+    // A file read as a folder answers [ENOTDIR]; a missing path and a path under the file do not.
+    const fileAsFolder = await runCommand(browser, 'read_directory', {
+      path: `${remote}/hello.txt`,
+    });
+    expect(fileAsFolder).toMatch(/^\[ENOTDIR\] /);
+    for (const missing of [`${remote}/hello.txt/more`, `${remote}/missing.txt`]) {
+      expect(await runCommand(browser, 'read_directory', { path: missing })).toMatch(
+        /^Failed to read directory: /
+      );
+    }
+
+    await openFolder(browser, files);
+    await pathInput.click();
+    await pathInput.setValue(`${byHost}/hello.txt`);
+    await browser.keys('Enter');
+    await browser.waitUntil(async () => (await pathInput.getValue()) === remote, {
+      timeout: 10_000,
+      timeoutMsg: `the path bar never showed ${remote}`,
+    });
+    await browser.waitUntil(
+      async () =>
+        (await fileRow(browser, 'hello.txt').getAttribute('class'))?.includes(
+          'bg-accent-selected'
+        ) === true,
+      { timeout: 10_000, timeoutMsg: 'hello.txt was never selected' }
+    );
 
     const listing = await runCommand(browser, 'read_directory', { path: remote });
     expect(listing).toMatchObject({
