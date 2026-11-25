@@ -2690,8 +2690,13 @@ pub async fn paste_items_to_location(
                     };
                     let candidate = dest_dir.join(&name);
                     let source_path = PathBuf::from(source_location.to_path_string());
+                    let kind = if is_cut {
+                        fs_utils::Transfer::Move
+                    } else {
+                        fs_utils::Transfer::Copy
+                    };
 
-                    if source_path
+                    let placement = if source_path
                         .canonicalize()
                         .ok()
                         .and_then(|path| path.parent().map(Path::to_path_buf))
@@ -2708,7 +2713,7 @@ pub async fn paste_items_to_location(
                         .zip(source_path.canonicalize().ok())
                         .is_some_and(|(candidate, source)| candidate == source)
                     {
-                        Ok(None)
+                        Ok(Placement::Skip)
                     } else if candidate.exists() {
                         // Conflict detected — resolve it
                         let (action, custom_name) = if let Some(ref stored) = apply_to_all_action {
@@ -2753,31 +2758,24 @@ pub async fn paste_items_to_location(
                             }
                         };
 
-                        execute_local_conflict_action(
+                        local_conflict_placement(
                             &action,
                             custom_name.as_deref(),
                             &source_path,
                             dest_dir,
                             &name,
-                            is_cut,
-                            source_provider.as_ref(),
-                            &source_location,
+                            kind,
                         )
-                        .await
                     } else {
-                        // No conflict — proceed normally
-                        let dest_raw = candidate.to_string_lossy().to_string();
-                        let (_, dest_item_location) = resolve_location(LI::Raw(dest_raw.clone()))?;
-                        let op = if is_cut {
-                            source_provider
-                                .move_item(&source_location, &dest_item_location)
-                                .await
-                        } else {
-                            source_provider
-                                .copy(&source_location, &dest_item_location)
-                                .await
-                        };
-                        op.map(|()| Some(dest_raw))
+                        Ok(Placement::TransferTo(candidate))
+                    };
+                    match placement {
+                        Ok(placement) => tokio::task::spawn_blocking(move || {
+                            place_local_item(&source_path, placement, kind)
+                        })
+                        .await
+                        .unwrap_or_else(|err| Err(format!("Task join error: {err}"))),
+                        Err(err) => Err(err),
                     }
                 }
                 (src, dst) if src == dst => {
@@ -8242,48 +8240,31 @@ fn sanitize_conflict_name(name: &str) -> Result<String, String> {
     Ok(sanitized)
 }
 
-/// Execute the resolved conflict action for a local-to-local file operation.
-/// Returns Ok(Some(dest_path)) on success, Ok(None) if skipped.
-pub(crate) async fn execute_local_conflict_action(
+/// Where a local paste puts one item.
+#[derive(Debug)]
+pub(crate) enum Placement {
+    /// Nowhere: the item stays where it is.
+    Skip,
+    /// At a path where nothing is.
+    TransferTo(PathBuf),
+    /// In place of the item at the path, which keeps its name until the new one is whole.
+    ReplaceAt(PathBuf),
+    /// Into the folder at the path, entry by entry.
+    MergeInto(PathBuf),
+}
+
+/// Where a local paste puts the item at `source_path` when `name` is taken in `dest_dir`, by the user's answer to the conflict.
+pub(crate) fn local_conflict_placement(
     action: &ConflictAction,
     custom_name: Option<&str>,
     source_path: &Path,
     dest_dir: &Path,
     name: &str,
-    is_cut: bool,
-    source_provider: &dyn crate::locations::LocationProvider,
-    source_location: &Location,
-) -> Result<Option<String>, String> {
-    use crate::locations::LocationInput as LI;
-
+    kind: fs_utils::Transfer,
+) -> Result<Placement, String> {
     match action {
-        ConflictAction::Skip => Ok(None),
-        ConflictAction::Replace => {
-            let dest_path = dest_dir.join(name);
-            // Guard: don't delete+copy if source IS the destination (same-folder paste)
-            // Use canonicalize to handle case-insensitivity on macOS/Windows
-            let source_canon =
-                fs::canonicalize(source_path).unwrap_or_else(|_| source_path.to_path_buf());
-            let dest_canon = fs::canonicalize(&dest_path).unwrap_or_else(|_| dest_path.clone());
-
-            if source_canon == dest_canon {
-                return Ok(Some(dest_path.to_string_lossy().to_string()));
-            }
-            // Delete the existing destination
-            delete_file_or_directory(&dest_path)?;
-            let dest_raw = dest_path.to_string_lossy().to_string();
-            let (_, dest_item_location) = resolve_location(LI::Raw(dest_raw.clone()))?;
-            if is_cut {
-                source_provider
-                    .move_item(source_location, &dest_item_location)
-                    .await?;
-            } else {
-                source_provider
-                    .copy(source_location, &dest_item_location)
-                    .await?;
-            }
-            Ok(Some(dest_raw))
-        }
+        ConflictAction::Skip => Ok(Placement::Skip),
+        ConflictAction::Replace => Ok(Placement::ReplaceAt(dest_dir.join(name))),
         ConflictAction::Rename => {
             let raw_name = custom_name.ok_or("Rename requires a custom name")?;
             let safe_name = sanitize_conflict_name(raw_name)?;
@@ -8291,18 +8272,7 @@ pub(crate) async fn execute_local_conflict_action(
             if dest_path.exists() {
                 return Err(format!("A file named '{safe_name}' already exists"));
             }
-            let dest_raw = dest_path.to_string_lossy().to_string();
-            let (_, dest_item_location) = resolve_location(LI::Raw(dest_raw.clone()))?;
-            if is_cut {
-                source_provider
-                    .move_item(source_location, &dest_item_location)
-                    .await?;
-            } else {
-                source_provider
-                    .copy(source_location, &dest_item_location)
-                    .await?;
-            }
-            Ok(Some(dest_raw))
+            Ok(Placement::TransferTo(dest_path))
         }
         // Directory merge: recursively combine contents. Only real folders on both sides: a merge through a link would move or fill the folder the link points to.
         ConflictAction::Merge
@@ -8311,46 +8281,48 @@ pub(crate) async fn execute_local_conflict_action(
                     .is_ok_and(|metadata| metadata.is_dir()) =>
         {
             let dest_path = dest_dir.join(name);
-            // Guard: don't merge a directory into itself
             let source_canon =
                 fs::canonicalize(source_path).unwrap_or_else(|_| source_path.to_path_buf());
             let dest_canon = fs::canonicalize(&dest_path).unwrap_or_else(|_| dest_path.clone());
-            if source_canon == dest_canon {
-                return Ok(Some(dest_path.to_string_lossy().to_string()));
-            }
-            let kind = if is_cut {
-                fs_utils::Transfer::Move
-            } else {
-                fs_utils::Transfer::Copy
-            };
             // Checked before anything moves: inside the merge, the entry that holds the destination would fail only after the entries before it moved.
             if dest_canon.starts_with(&source_canon) {
                 return Err(format!("Cannot {} {name} into itself", kind.verb()));
             }
-            merge_local_directory(source_path, &dest_path, kind)?;
-            if is_cut {
-                // Source directory should be empty after merge
-                let _ = fs::remove_dir(source_path);
-            }
-            Ok(Some(dest_path.to_string_lossy().to_string()))
+            Ok(Placement::MergeInto(dest_path))
         }
         // Merge on files (or non-matching dirs) falls back to KeepBoth
         ConflictAction::Merge | ConflictAction::KeepBoth => {
-            let dest_path = allocate_unique_path(dest_dir, name)?;
-            let dest_raw = dest_path.to_string_lossy().to_string();
-            let (_, dest_item_location) = resolve_location(LI::Raw(dest_raw.clone()))?;
-            if is_cut {
-                source_provider
-                    .move_item(source_location, &dest_item_location)
-                    .await?;
-            } else {
-                source_provider
-                    .copy(source_location, &dest_item_location)
-                    .await?;
-            }
-            Ok(Some(dest_raw))
+            Ok(Placement::TransferTo(allocate_unique_path(dest_dir, name)?))
         }
     }
+}
+
+/// Copies or moves `source` where `placement` puts it, and returns that path, or `None` for `Skip`. It blocks, so the paste runs it on a blocking thread.
+fn place_local_item(
+    source: &Path,
+    placement: Placement,
+    kind: fs_utils::Transfer,
+) -> Result<Option<String>, String> {
+    let to = match placement {
+        Placement::Skip => return Ok(None),
+        Placement::TransferTo(to) => {
+            fs_utils::transfer(source, &to, kind)?;
+            to
+        }
+        Placement::ReplaceAt(to) => {
+            fs_utils::replace(source, &to, kind)?;
+            to
+        }
+        Placement::MergeInto(to) => {
+            merge_local_directory(source, &to, kind)?;
+            if kind == fs_utils::Transfer::Move {
+                // Only an empty folder goes: an entry the merge left keeps it.
+                let _ = fs::remove_dir(source);
+            }
+            to
+        }
+    };
+    Ok(Some(to.to_string_lossy().to_string()))
 }
 
 /// Merges `source` into the folder `dest`: a subfolder whose name is a folder in `dest` merges into it, and every other entry is copied or moved there with `transfer`.

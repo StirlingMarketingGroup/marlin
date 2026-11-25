@@ -75,6 +75,7 @@ psd = "0.3"
 # File system watching
 notify = { version = "8.2", default-features = false, features = ["macos_fsevent"] }
 walkdir = "2.5"
+same-file = "1.0"
 libc = "0.2"
 zip = { version = "9.0", default-features = false, features = ["deflate", "bzip2", "zstd"] }
 tar = "0.4"
