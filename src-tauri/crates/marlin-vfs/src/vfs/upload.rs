@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime};
 use tokio::sync::Notify;
 use tokio::time::Instant;
 
-use crate::{spool, Item, ItemId, Revision, VfsError};
+use crate::{escape, spool, Item, ItemId, NameRules, Revision, VfsError};
 
 use super::record::save_record;
 use super::{
@@ -30,9 +30,34 @@ pub struct Unsent {
     /// The name of the file whose edit is unsent, as the remote gets it: the shown name, unescaped. While a conflict copy uploads, the copy goes up under another name.
     pub name: String,
 
+    /// The file's path in this mount, as [`Vfs::locate`] writes one: the shown names from the top of the mount down, joined with `/`. `None` when the core holds no node for a folder on the way: it lets a folder's node go once the OS forgets it, and a file recovered from an earlier run can sit in a folder nothing has opened since.
+    pub path: Option<String>,
+
     pub size: u64,
 
     pub state: UnsentState,
+}
+
+/// The path of the file at `place`, from the nodes the core holds: see [`Unsent::path`].
+fn mount_path(state: &State, rules: &NameRules, place: &Place) -> Option<String> {
+    let mut names = vec![escape(&place.name, rules)];
+    let mut folder = &place.folder;
+    loop {
+        let node = state.nodes.get(state.by_item.get(folder)?)?;
+        match &node.identity {
+            // Only the root has no place.
+            Identity::Item { place: None, .. } => break,
+            Identity::Item {
+                place: Some(above), ..
+            } => {
+                names.push(escape(&above.name, rules));
+                folder = &above.folder;
+            }
+            _ => return None,
+        }
+    }
+    names.reverse();
+    Some(names.join("/"))
 }
 
 /// Where an [`Unsent`] file is in its upload.
@@ -426,10 +451,12 @@ impl Vfs {
                         None => UnsentState::Waiting,
                     },
                 };
+                let path = mount_path(&state, &self.rules, &place);
                 Some(Unsent {
                     node,
                     folder: place.folder,
                     name: place.name,
+                    path,
                     size: file.size,
                     state: upload,
                 })

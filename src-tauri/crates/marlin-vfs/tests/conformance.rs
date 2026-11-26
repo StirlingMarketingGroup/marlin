@@ -3110,6 +3110,31 @@ async fn unsent_shows_open_waiting_and_uploading() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn unsent_names_a_files_path_while_the_mount_holds_its_folders() {
+    let (_provider, vfs, _dir) = spooled_mount(Options::default(), 1024, never_local);
+    let folder = vfs.create_folder(Vfs::ROOT, "docs").await.unwrap();
+    let inner = vfs.create_folder(folder.node, "sub").await.unwrap();
+    // The remote name `a/b.txt` shows escaped, and the path holds the shown name.
+    let (_made, nested) = vfs
+        .create(inner.node, "a%2Fb.txt", Access::Write)
+        .await
+        .unwrap();
+    let (_made, root) = vfs.create(Vfs::ROOT, "b.txt", Access::Write).await.unwrap();
+    // `unsent` lists in node order, so a/b.txt comes first.
+    let paths =
+        || -> Vec<Option<String>> { vfs.unsent().into_iter().map(|file| file.path).collect() };
+    assert_eq!(
+        paths(),
+        [Some("docs/sub/a%2Fb.txt".into()), Some("b.txt".into())]
+    );
+    vfs.release(nested);
+    vfs.release(root);
+    // With no lookup and no handle, the top folder's node goes, and the walk up from `sub` stops there.
+    vfs.forget(folder.node, u64::MAX);
+    assert_eq!(paths(), [None, Some("b.txt".into())]);
+}
+
+#[tokio::test(start_paused = true)]
 async fn retry_now_sends_a_failed_file_at_once() {
     let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
     let _uploads = start_uploads(&vfs);

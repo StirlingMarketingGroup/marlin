@@ -179,7 +179,7 @@ export async function startFakeGoogle(): Promise<{ address: string; stop: () => 
 
 // The helper's command line holds its socket, which is under `root`. `root` comes from mkdtemp,
 // so it holds no regex character. pgrep exits with 1 when nothing matches.
-function helperPids(root: string): string[] {
+export function helperPids(root: string): string[] {
   const found = spawnSync('pgrep', ['-f', `marlin-mount --socket ${root}/`], { encoding: 'utf8' });
   if (found.status !== 0 && found.status !== 1) {
     throw new Error(`pgrep failed (${found.status ?? found.error}): ${found.stderr}`);

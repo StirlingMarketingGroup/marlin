@@ -23,6 +23,7 @@ import {
 } from 'phosphor-react';
 import GitRepoBadge from './GitRepoBadge';
 import SymlinkBadge from './SymlinkBadge';
+import UnsentFiles from './UnsentFiles';
 import type { IconProps } from 'phosphor-react';
 import { useAppStore } from '../store/useAppStore';
 import { useCallback, useEffect, useState, MouseEvent, useRef } from 'react';
@@ -36,6 +37,7 @@ import {
 } from '../types';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useToastStore } from '../store/useToastStore';
+import { followMounts } from '../store/useMountStore';
 import { useDragStore } from '../store/useDragStore';
 import { useSidebarDropZone } from '../hooks/useDragDetector';
 import { usePlatform } from '@/hooks/usePlatform';
@@ -225,6 +227,12 @@ export default function Sidebar() {
     loadSmbServers();
     loadSftpServers();
   }, [fetchSystemDrives, loadGoogleAccounts, loadSmbServers, loadSftpServers]);
+
+  // With a saved account the window lists the helper's mounts, which starts the helper. With none, it sends no mount command and starts no helper.
+  const hasSavedAccount = googleAccounts.length + smbServers.length + sftpServers.length > 0;
+  useEffect(() => {
+    void followMounts(hasSavedAccount);
+  }, [hasSavedAccount]);
 
   // Removable drives can mount after the sidebar is already rendered.
   useEffect(() => {
@@ -647,6 +655,12 @@ export default function Sidebar() {
                     </span>
                   </button>
 
+                  <UnsentFiles
+                    provider="gdrive"
+                    account={account.email}
+                    label={account.displayName || account.email}
+                  />
+
                   <button
                     onClick={(e) => handleDisconnectGoogleAccount(account, e)}
                     disabled={isDisconnecting}
@@ -731,6 +745,8 @@ export default function Sidebar() {
                     </span>
                   </button>
 
+                  <UnsentFiles provider="smb" account={server.hostname} label={displayName} />
+
                   <button
                     onClick={(e) => handleDisconnectSmbServer(server, e)}
                     disabled={isDisconnecting}
@@ -809,6 +825,12 @@ export default function Sidebar() {
                       {displayName}
                     </span>
                   </button>
+
+                  <UnsentFiles
+                    provider="sftp"
+                    account={`${server.username}@${server.hostname}${portSuffix}`}
+                    label={displayName}
+                  />
 
                   <button
                     onClick={(e) => handleDisconnectSftpServer(server, e)}

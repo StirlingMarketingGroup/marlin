@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 pub const JSONRPC_VERSION: &str = "2.0";
 
 /// Protocol number the helper and the app speak. Raised when the control API changes.
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 11;
 
 /// JSON-RPC and helper error codes.
 pub mod error_codes {
@@ -215,8 +215,11 @@ pub struct UnsentFiles {
 pub struct UnsentFile {
     /// The core's node number. Only means something together with `mount_id`.
     pub node: u64,
-    /// The file's name as the remote gets it. No folder.
+    /// The file's name as the remote gets it. `path` holds its folder, when known.
     pub name: String,
+    /// The file's path in the mount, as `locate` answers one. Missing when the mount no longer holds a folder on the way, as for a file recovered from an earlier run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     pub size: u64,
     #[serde(flatten)]
     pub state: UnsentState,
@@ -361,6 +364,7 @@ mod tests {
             .map(|(node, state)| UnsentFile {
                 node: node as u64,
                 name: "a.txt".into(),
+                path: (node == 0).then(|| "My Drive/a.txt".into()),
                 size: 5,
                 state,
             })
@@ -375,7 +379,7 @@ mod tests {
                 "account": "ana@example.com",
                 "mountId": "00000000-0000-4000-8000-000000000000",
                 "files": [
-                    {"node": 0, "name": "a.txt", "size": 5, "state": "open"},
+                    {"node": 0, "name": "a.txt", "path": "My Drive/a.txt", "size": 5, "state": "open"},
                     {"node": 1, "name": "a.txt", "size": 5, "state": "waiting"},
                     {"node": 2, "name": "a.txt", "size": 5, "state": "uploading", "sent": 3},
                     {"node": 3, "name": "a.txt", "size": 5, "state": "failed", "error": "offline"},
