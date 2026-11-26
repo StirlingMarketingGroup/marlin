@@ -17,9 +17,9 @@ use tokio::sync::{mpsc, oneshot, Notify};
 use crate::log;
 use crate::mounts::{Adapter, Mounts, Notice, Providers};
 use crate::protocol::{
-    error_codes, methods, AccountParams, HelloParams, HelloResult, IdentifyParams, LocateParams,
-    MountParams, Request, Response, RpcError, ThumbnailParams, UnsentParams, JSONRPC_VERSION,
-    PROTOCOL_VERSION,
+    error_codes, methods, AccountParams, CopyParams, HelloParams, HelloResult, IdentifyParams,
+    LocateParams, MountParams, Request, Response, RpcError, ThumbnailParams, UnsentParams,
+    JSONRPC_VERSION, PROTOCOL_VERSION,
 };
 
 /// The longest request line a client may send, in bytes.
@@ -395,6 +395,22 @@ async fn answer(
                     .thumbnail(&provider, &account, &path, size, Path::new(&file))
                     .await?
             )
+        }
+        methods::COPY => {
+            let CopyParams {
+                provider,
+                account,
+                from,
+                to,
+            } = serde_json::from_value(params).map_err(invalid_params)?;
+            // A `to` with no final name names no copy. An empty `from` is the top of the mount, which holds every `to`.
+            if from.is_empty() || to.is_empty() || to.ends_with('/') {
+                return Err(RpcError {
+                    code: error_codes::INVALID_PARAMS,
+                    message: "invalid params".to_string(),
+                });
+            }
+            json!(mounts.copy(&provider, &account, &from, &to).await?)
         }
         _ => {
             return Err(RpcError {

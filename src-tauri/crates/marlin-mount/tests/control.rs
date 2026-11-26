@@ -13,7 +13,9 @@ use marlin_mount::protocol::PROTOCOL_VERSION;
 use marlin_mount::{
     Adapter, BindError, Config, MountError, Opened, Providers, Server, Session, MOUNT_FOLDER_MARKER,
 };
-use marlin_vfs::{Access, ItemId, MemoryProvider, Options, Provider, Thumbnail, Vfs, VfsError};
+use marlin_vfs::{
+    Access, Item, ItemId, Kind, MemoryProvider, Options, Provider, Thumbnail, Vfs, VfsError,
+};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -1707,6 +1709,14 @@ async fn a_file_where_the_spool_folder_should_be_mounts_read_only() {
     // A read-only mount answers the requests about its items too.
     let top = client.call("identify", item_call("ana", "path", "")).await;
     assert_eq!(top["result"], json!({"item": "remote"}));
+    let memory = provider(&harness, "ana");
+    memory.add_file(&memory.root(), "notes.txt", b"notes");
+    let before = remote_tree(&memory).await;
+    let copied = client
+        .call("copy", copy_call("ana", "notes.txt", "notes copy.txt"))
+        .await;
+    assert_eq!(copied["result"], json!({"copy": "not-eligible"}));
+    assert_eq!(remote_tree(&memory).await, before);
 }
 
 #[tokio::test]
@@ -2187,6 +2197,14 @@ async fn requests_about_items_need_a_mount_that_is_up() {
         -1018
     );
     assert_eq!(code(&client.call("refresh", account("ana")).await), -1018);
+    assert_eq!(
+        code(
+            &client
+                .call("copy", copy_call("ana", "a.txt", "b.txt"))
+                .await
+        ),
+        -1018
+    );
 
     *harness.fake.fail_mount.lock().unwrap() = Some(MountError::Adapter("no".into()));
     assert_eq!(
@@ -2224,5 +2242,256 @@ async fn requests_about_items_need_a_mount_that_is_up() {
     assert_eq!(
         code(&client.call("locate", item_call("ana", "ref", "x")).await),
         -1014
+    );
+}
+
+fn copy_call(account: &str, from: &str, to: &str) -> Value {
+    json!({"provider": "memory", "account": account, "from": from, "to": to})
+}
+
+async fn child(provider: &MemoryProvider, folder: &ItemId, name: &str) -> Item {
+    provider
+        .list(folder)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|item| item.name == name)
+        .unwrap_or_else(|| panic!("no item named {name}"))
+}
+
+/// Every remote item as `(path, bytes)`. A folder's bytes are empty. The order is sorted, so a copy that changes nothing compares equal.
+async fn remote_tree(provider: &MemoryProvider) -> Vec<(String, Vec<u8>)> {
+    let mut found = Vec::new();
+    let mut pending = vec![(provider.root(), String::new())];
+    while let Some((folder, prefix)) = pending.pop() {
+        for item in provider.list(&folder).await.unwrap() {
+            let path = if prefix.is_empty() {
+                item.name.clone()
+            } else {
+                format!("{prefix}/{}", item.name)
+            };
+            if item.attributes.kind == Kind::Folder {
+                found.push((path.clone(), Vec::new()));
+                pending.push((item.id, path));
+            } else {
+                found.push((path, provider.contents(&item.id)));
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+#[tokio::test]
+async fn a_file_copy_is_the_providers_copy_and_shows_at_once() {
+    let harness = start();
+    let mut client = Client::connect(&harness.socket).await;
+    client.call("mount", mount("ana", "drive")).await;
+    let memory = provider(&harness, "ana");
+    let projects = memory.add_folder(&memory.root(), "Projects");
+    memory.add_file(&projects, "notes.txt", b"notes");
+    // The core holds the Projects listing, so the copy can show in it without asking again.
+    client
+        .call("identify", item_call("ana", "path", "Projects/notes.txt"))
+        .await;
+
+    let answer = client
+        .call(
+            "copy",
+            copy_call("ana", "Projects/notes.txt", "Projects/notes copy.txt"),
+        )
+        .await;
+    assert_eq!(
+        answer["result"],
+        json!({"copy": "copied", "path": "Projects/notes copy.txt"})
+    );
+    assert_eq!(memory.uploads(), 0);
+    assert_eq!(memory.largest_read(), 0);
+    let calls = memory.calls();
+    let found = client
+        .call(
+            "identify",
+            item_call("ana", "path", "Projects/notes copy.txt"),
+        )
+        .await;
+    assert_eq!(memory.calls(), calls);
+    let copy = child(&memory, &projects, "notes copy.txt").await;
+    assert_eq!(found["result"], json!({"item": "remote", "ref": copy.id.0}));
+    assert_eq!(memory.contents(&copy.id), b"notes");
+}
+
+#[tokio::test]
+async fn a_folder_copy_copies_every_file_inside_it() {
+    let harness = start();
+    let mut client = Client::connect(&harness.socket).await;
+    client.call("mount", mount("ana", "drive")).await;
+    let memory = provider(&harness, "ana");
+    let album = memory.add_folder(&memory.root(), "Album");
+    memory.add_file(&album, "a.jpg", b"aaa");
+    let sub = memory.add_folder(&album, "Sub");
+    memory.add_file(&sub, "b.jpg", b"bbb");
+
+    let answer = client
+        .call("copy", copy_call("ana", "Album", "Album copy"))
+        .await;
+    assert_eq!(
+        answer["result"],
+        json!({"copy": "copied", "path": "Album copy"})
+    );
+    assert_eq!(memory.uploads(), 0);
+    assert_eq!(memory.largest_read(), 0);
+    let copied = child(&memory, &memory.root(), "Album copy").await;
+    let photo = child(&memory, &copied.id, "a.jpg").await;
+    assert_eq!(memory.contents(&photo.id), b"aaa");
+    let nested = child(&memory, &copied.id, "Sub").await;
+    let other = child(&memory, &nested.id, "b.jpg").await;
+    assert_eq!(memory.contents(&other.id), b"bbb");
+}
+
+#[tokio::test]
+async fn a_copy_of_unsent_bytes_changes_nothing() {
+    let harness = start();
+    let mut client = Client::connect(&harness.socket).await;
+    client.call("mount", mount("ana", "drive")).await;
+    let memory = provider(&harness, "ana");
+    let photo = memory.add_file(&memory.root(), "photo.jpg", b"photo");
+    // The edit stays in the spool: a confirm would change the tree the copy must leave alone.
+    memory.set_upload_delay(Duration::from_secs(60));
+    let vfs = harness.fake.vfs.lock().unwrap()["drive"].clone();
+    let entry = vfs.lookup(Vfs::ROOT, "photo.jpg").await.unwrap();
+    let handle = vfs.open(entry.node, Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"new".to_vec()).await.unwrap();
+    vfs.release(handle);
+    vfs.forget(entry.node, 1);
+    let before = remote_tree(&memory).await;
+    let answer = client
+        .call("copy", copy_call("ana", "photo.jpg", "photo copy.jpg"))
+        .await;
+    assert_eq!(answer["result"], json!({"copy": "not-eligible"}));
+    assert_eq!(remote_tree(&memory).await, before);
+    assert_eq!(memory.contents(&photo), b"photo");
+
+    write_bytes(&vfs, "draft.txt", b"draft").await;
+    let before = remote_tree(&memory).await;
+    let answer = client
+        .call("copy", copy_call("ana", "draft.txt", "draft copy.txt"))
+        .await;
+    assert_eq!(answer["result"], json!({"copy": "not-eligible"}));
+    assert_eq!(remote_tree(&memory).await, before);
+
+    let folder = memory.add_folder(&memory.root(), "Album");
+    let nested = memory.add_folder(&folder, "Sub");
+    memory.add_file(&nested, "a.jpg", b"aaa");
+    // The earlier copies listed the root, so the folder added after that is not in the listing yet.
+    vfs.refresh();
+    let album = vfs.lookup(Vfs::ROOT, "Album").await.unwrap();
+    let sub = vfs.lookup(album.node, "Sub").await.unwrap();
+    let file = vfs.lookup(sub.node, "a.jpg").await.unwrap();
+    let handle = vfs.open(file.node, Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"new".to_vec()).await.unwrap();
+    vfs.release(handle);
+    vfs.forget(file.node, 1);
+    vfs.forget(sub.node, 1);
+    vfs.forget(album.node, 1);
+    let before = remote_tree(&memory).await;
+    let answer = client
+        .call("copy", copy_call("ana", "Album", "Album copy"))
+        .await;
+    assert_eq!(answer["result"], json!({"copy": "not-eligible"}));
+    assert_eq!(remote_tree(&memory).await, before);
+    assert!(before.iter().all(|(path, _)| path != "Album copy"));
+}
+
+#[tokio::test]
+async fn a_copy_into_a_place_that_takes_no_new_item_is_not_eligible() {
+    let harness = start();
+    let mut client = Client::connect(&harness.socket).await;
+    client.call("mount", mount("ana", "drive")).await;
+    let memory = provider(&harness, "ana");
+    memory.add_file(&memory.root(), "notes.txt", b"notes");
+    let locked = memory.add_folder(&memory.root(), "Locked");
+    memory.set_read_only(&locked, true);
+    let closed = memory.add_folder(&memory.root(), "Closed");
+    memory.refuse_new_items(&closed, true);
+
+    let before = remote_tree(&memory).await;
+    let answer = client
+        .call("copy", copy_call("ana", "notes.txt", "Locked/notes.txt"))
+        .await;
+    assert_eq!(answer["result"], json!({"copy": "not-eligible"}));
+    let answer = client
+        .call("copy", copy_call("ana", "notes.txt", "Closed/notes.txt"))
+        .await;
+    assert_eq!(answer["result"], json!({"copy": "not-eligible"}));
+    assert_eq!(remote_tree(&memory).await, before);
+}
+
+#[tokio::test]
+async fn a_copy_onto_a_taken_name_changes_nothing() {
+    let harness = start();
+    let mut client = Client::connect(&harness.socket).await;
+    client.call("mount", mount("ana", "drive")).await;
+    let memory = provider(&harness, "ana");
+    let projects = memory.add_folder(&memory.root(), "Projects");
+    let kept = memory.add_file(&projects, "notes.txt", b"kept");
+    memory.add_file(&projects, "other.txt", b"other");
+    let before = remote_tree(&memory).await;
+    let answer = client
+        .call(
+            "copy",
+            copy_call("ana", "Projects/other.txt", "Projects/notes.txt"),
+        )
+        .await;
+    assert_eq!(code(&answer), -1020);
+    assert_eq!(remote_tree(&memory).await, before);
+    assert_eq!(memory.contents(&kept), b"kept");
+
+    // The name is checked before the source, so a source that may not use the copy still hears that the name is taken.
+    let vfs = harness.fake.vfs.lock().unwrap()["drive"].clone();
+    write_bytes(&vfs, "draft.txt", b"draft").await;
+    let answer = client
+        .call("copy", copy_call("ana", "draft.txt", "Projects/notes.txt"))
+        .await;
+    assert_eq!(code(&answer), -1020);
+    assert_eq!(memory.contents(&kept), b"kept");
+}
+
+#[tokio::test]
+async fn a_missing_copy_path_is_no_such_item() {
+    let harness = start();
+    let mut client = Client::connect(&harness.socket).await;
+    client.call("mount", mount("ana", "drive")).await;
+    let memory = provider(&harness, "ana");
+    memory.add_file(&memory.root(), "notes.txt", b"notes");
+    let before = remote_tree(&memory).await;
+    let missing = client
+        .call("copy", copy_call("ana", "missing.txt", "copy.txt"))
+        .await;
+    assert_eq!(code(&missing), -1019);
+    let no_folder = client
+        .call("copy", copy_call("ana", "notes.txt", "Nope/copy.txt"))
+        .await;
+    assert_eq!(code(&no_folder), -1019);
+    assert_eq!(remote_tree(&memory).await, before);
+}
+
+#[tokio::test]
+async fn a_copy_that_names_no_item_is_invalid_params() {
+    let harness = start();
+    let mut client = Client::connect(&harness.socket).await;
+    client.call("mount", mount("ana", "drive")).await;
+    let memory = provider(&harness, "ana");
+    memory.add_file(&memory.root(), "notes.txt", b"notes");
+    let empty = client.call("copy", copy_call("ana", "notes.txt", "")).await;
+    assert_eq!(code(&empty), -32602);
+    let top = client.call("copy", copy_call("ana", "", "copy")).await;
+    assert_eq!(code(&top), -32602);
+    let slash = client
+        .call("copy", copy_call("ana", "notes.txt", "Projects/"))
+        .await;
+    assert_eq!(code(&slash), -32602);
+    assert_eq!(
+        remote_tree(&memory).await,
+        vec![("notes.txt".into(), b"notes".to_vec())]
     );
 }

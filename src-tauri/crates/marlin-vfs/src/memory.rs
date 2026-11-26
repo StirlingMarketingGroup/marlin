@@ -139,7 +139,7 @@ impl MemoryProvider {
         }
     }
 
-    /// While on, models a Google Drive item the account may only view. On a file, `replace_bytes` answers [`VfsError::AccessDenied`]. On a folder, `create_folder` and `create_file` in it, and a `rename` that moves an item into it from another folder, answer [`VfsError::AccessDenied`], as Google Drive does for a folder the account may only view. `check_new_item` does not look at the mark: only the remote knows it. `item` and `list` report it. A rename inside the folder is allowed, as Drive allows renaming an item the account may rename.
+    /// While on, models a Google Drive item the account may only view. On a file, `replace_bytes` answers [`VfsError::AccessDenied`]. On a folder, `create_folder`, `create_file`, and `copy_file` in it, and a `rename` that moves an item into it from another folder, answer [`VfsError::AccessDenied`], as Google Drive does for a folder the account may only view. `check_new_item` does not look at the mark: only the remote knows it. `item` and `list` report it. A rename inside the folder is allowed, as Drive allows renaming an item the account may rename.
     pub fn set_read_only(&self, id: &ItemId, on: bool) {
         let mut inner = self.inner.lock().unwrap();
         let stored = inner.stored.iter_mut().find(|stored| stored.item.id == *id);
@@ -147,7 +147,7 @@ impl MemoryProvider {
         stored.item.attributes.read_only = on;
     }
 
-    /// While on, the folder `folder` takes no new item, as an SMB server's list of shares does: `check_new_item`, `create_folder`, and `create_file` in it, and a `rename` into it, answer [`VfsError::NotSupported`]. The mark stays with the folder when it is renamed.
+    /// While on, the folder `folder` takes no new item, as an SMB server's list of shares does: `check_new_item`, `create_folder`, `create_file`, and `copy_file` in it, and a `rename` into it, answer [`VfsError::NotSupported`]. The mark stays with the folder when it is renamed.
     pub fn refuse_new_items(&self, folder: &ItemId, on: bool) {
         let mut inner = self.inner.lock().unwrap();
         let stored = inner
@@ -164,6 +164,22 @@ impl MemoryProvider {
             find(&inner.stored, folder).is_ok_and(|stored| stored.takes_nothing_new);
         if (self.paths && !fits_a_path(name)) || takes_nothing_new {
             return Err(VfsError::NotSupported);
+        }
+        Ok(())
+    }
+
+    /// Whether `folder` can hold a new item named `name`: it is a folder, [`Self::check_new`] allows the name, it is not read-only, and on path ids the path is free.
+    fn takes_new_item(&self, inner: &Inner, folder: &ItemId, name: &str) -> Result<(), VfsError> {
+        if find(&inner.stored, folder)?.item.attributes.kind != Kind::Folder {
+            return Err(VfsError::NotAFolder);
+        }
+        self.check_new(inner, folder, name)?;
+        if find(&inner.stored, folder)?.item.attributes.read_only {
+            return Err(VfsError::AccessDenied);
+        }
+        // A remote whose ids are paths keeps one name per folder.
+        if self.paths && find(&inner.stored, &path_of(folder, name)).is_ok() {
+            return Err(VfsError::Conflict);
         }
         Ok(())
     }
@@ -493,19 +509,35 @@ impl Provider for MemoryProvider {
         true
     }
 
+    fn can_copy(&self) -> bool {
+        true
+    }
+
+    async fn copy_file(&self, id: &ItemId, to: &ItemId, name: &str) -> Result<Item, VfsError> {
+        self.answer(|inner| {
+            let contents = {
+                let source = find(&inner.stored, id)?;
+                if source.item.attributes.kind != Kind::File {
+                    return Err(VfsError::IsAFolder);
+                }
+                source.contents.clone()
+            };
+            self.takes_new_item(inner, to, name)?;
+            Ok(allocate(
+                inner,
+                Some(to.clone()),
+                name,
+                Kind::File,
+                &contents,
+                self.paths,
+            ))
+        })
+        .await
+    }
+
     async fn create_folder(&self, parent: &ItemId, name: &str) -> Result<Item, VfsError> {
         self.answer(|inner| {
-            if find(&inner.stored, parent)?.item.attributes.kind != Kind::Folder {
-                return Err(VfsError::NotAFolder);
-            }
-            self.check_new(inner, parent, name)?;
-            if find(&inner.stored, parent)?.item.attributes.read_only {
-                return Err(VfsError::AccessDenied);
-            }
-            // A remote whose ids are paths keeps one name per folder.
-            if self.paths && find(&inner.stored, &path_of(parent, name)).is_ok() {
-                return Err(VfsError::Conflict);
-            }
+            self.takes_new_item(inner, parent, name)?;
             let parent = Some(parent.clone());
             Ok(allocate(inner, parent, name, Kind::Folder, &[], self.paths))
         })
@@ -600,17 +632,7 @@ impl Provider for MemoryProvider {
         progress: &Progress,
     ) -> Result<Item, VfsError> {
         self.upload(from, progress, |inner| {
-            if find(&inner.stored, parent)?.item.attributes.kind != Kind::Folder {
-                return Err(VfsError::NotAFolder);
-            }
-            self.check_new(inner, parent, name)?;
-            if find(&inner.stored, parent)?.item.attributes.read_only {
-                return Err(VfsError::AccessDenied);
-            }
-            // A remote whose ids are paths keeps one name per folder.
-            if self.paths && find(&inner.stored, &path_of(parent, name)).is_ok() {
-                return Err(VfsError::Conflict);
-            }
+            self.takes_new_item(inner, parent, name)?;
             let bytes = std::fs::read(from).map_err(|error| VfsError::Other(error.to_string()))?;
             allocate(
                 inner,

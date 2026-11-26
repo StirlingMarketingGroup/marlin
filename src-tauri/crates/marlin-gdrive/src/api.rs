@@ -150,11 +150,20 @@ impl DriveProvider {
         self.request_url(method, &url, query, body, range).await
     }
 
-    /// Sends one request until Google answers it, the token is rejected twice, or the retries run out. Every request takes this path but an upload's `PUT`s, which have their own rules in `upload.rs`.
-    ///
-    /// A 416 is an answer only when a range was sent: only a ranged read can get one. A 409 is not sent again: Google sends it only when a create's pre-made id is already in use.
-    ///
-    /// A request that gets no answer is `Offline`, and so is a body that stops arriving. The only time limit here is on connecting, so a timeout also means Google could not be reached.
+    /// [`Self::request`] for a request that makes an item with no pre-made id. A 500 to 599 is not sent again: Google may have made the item before it failed, and a resend would make a second one. A rate limit and a 401 are still sent again, because Google made nothing then.
+    pub(crate) async fn request_without_server_retry(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        query: &[(&str, &str)],
+        body: Option<&serde_json::Value>,
+    ) -> Result<reqwest::Response, VfsError> {
+        let url = format!("{}{path}", self.config.api);
+        self.send_request(method, &url, query, body, None, false)
+            .await
+    }
+
+    /// [`Self::send_request`] with a server error sent again.
     pub(crate) async fn request_url(
         &self,
         method: reqwest::Method,
@@ -162,6 +171,24 @@ impl DriveProvider {
         query: &[(&str, &str)],
         body: Option<&serde_json::Value>,
         range: Option<&str>,
+    ) -> Result<reqwest::Response, VfsError> {
+        self.send_request(method, url, query, body, range, true)
+            .await
+    }
+
+    /// Sends one request until Google answers it, the token is rejected twice, or the retries run out. Every request takes this path but an upload's `PUT`s, which have their own rules in `upload.rs`.
+    ///
+    /// A 416 is an answer only when a range was sent: only a ranged read can get one. A 409 is not sent again: Google sends it only when a create's or a copy's pre-made id is already in use. When `resend_after_server_error` is false, a 500 to 599 ends the call at once. A rate limit and a 401 are still sent again, because Google made no change then.
+    ///
+    /// A request that gets no answer is `Offline`, and so is a body that stops arriving. The only time limit here is on connecting, so a timeout also means Google could not be reached.
+    async fn send_request(
+        &self,
+        method: reqwest::Method,
+        url: &str,
+        query: &[(&str, &str)],
+        body: Option<&serde_json::Value>,
+        range: Option<&str>,
+        resend_after_server_error: bool,
     ) -> Result<reqwest::Response, VfsError> {
         let mut rejected = false;
         let mut retries = 0;
@@ -195,6 +222,9 @@ impl DriveProvider {
                 StatusCode::CONFLICT => return Err(VfsError::Conflict),
                 _ => match failure(response).await {
                     Failure::Limited => limiting(),
+                    Failure::Server(status) if !resend_after_server_error => {
+                        return Err(answered(status));
+                    }
                     Failure::Server(status) => answered(status),
                     Failure::Unread => return Err(VfsError::Offline),
                     Failure::Final(error) => return Err(error),
