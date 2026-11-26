@@ -127,6 +127,17 @@ pub trait Provider: Send + Sync + 'static {
         Ok(())
     }
 
+    /// Whether this provider has [`Self::copy_file`]. A provider whose remote cannot copy a file itself leaves this at `false`, and the core never asks it to copy.
+    fn can_copy(&self) -> bool {
+        false
+    }
+
+    /// Makes a copy of the file `id` on the remote, named `name` in the folder `to`, and returns the copy. No bytes pass through this computer. `name` is a remote name. The core asks only about a file whose current bytes the remote has, and has checked that its own listing of `to` holds no such name. A remote that keeps one name per folder answers [`VfsError::Conflict`] when the name is taken. A file the account may not copy is [`VfsError::AccessDenied`]. A provider that leaves this out answers [`VfsError::NotSupported`].
+    async fn copy_file(&self, id: &ItemId, to: &ItemId, name: &str) -> Result<Item, VfsError> {
+        let _ = (id, to, name);
+        Err(VfsError::NotSupported)
+    }
+
     /// Makes an empty folder named `name` in `parent`, and returns it. The core has checked that its own listing of `parent` holds no such name. A remote that keeps one name per folder answers [`VfsError::Conflict`] when the name is taken.
     async fn create_folder(&self, parent: &ItemId, name: &str) -> Result<Item, VfsError> {
         let _ = (parent, name);

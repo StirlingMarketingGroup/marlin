@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
 
 use marlin_vfs::{
-    finder_files, Access, Attributes, IfExists, Item, ItemId, Kind, MemoryProvider, NodeId,
+    finder_files, Access, Attributes, Copied, IfExists, Item, ItemId, Kind, MemoryProvider, NodeId,
     Options, Provider, Space, Spool, UnsentState, Vfs, VfsError, POSIX,
 };
 
@@ -5214,4 +5214,140 @@ async fn a_rename_onto_a_path_another_client_freed_retires_the_node_left_there()
         .await
         .unwrap();
     assert_eq!(vfs.read(handle, 0, 3).await, Err(VfsError::StaleHandle));
+}
+
+/// Forwards every call and can write, but has no [`Provider::copy_file`].
+struct NoCopy(Arc<MemoryProvider>);
+
+#[async_trait::async_trait]
+impl Provider for NoCopy {
+    fn root(&self) -> ItemId {
+        self.0.root()
+    }
+
+    fn can_write(&self) -> bool {
+        true
+    }
+
+    async fn item(&self, id: &ItemId) -> Result<Item, VfsError> {
+        self.0.item(id).await
+    }
+
+    async fn list(&self, folder: &ItemId) -> Result<Vec<Item>, VfsError> {
+        self.0.list(folder).await
+    }
+
+    async fn read(&self, id: &ItemId, offset: u64, length: u32) -> Result<Vec<u8>, VfsError> {
+        self.0.read(id, offset, length).await
+    }
+
+    async fn space(&self) -> Result<Space, VfsError> {
+        self.0.space().await
+    }
+}
+
+#[tokio::test]
+async fn a_folder_copy_leaves_out_a_new_file_whose_name_stays_on_this_computer() {
+    let (provider, vfs, _dir) = spooled_mount(Options::default(), 1024 * 1024, finder_files);
+    let album = provider.add_folder(&provider.root(), "Album");
+    provider.add_file(&album, "a.jpg", b"aaa");
+    let sub = provider.add_folder(&album, "Sub");
+    provider.add_file(&sub, "b.jpg", b"bbb");
+    let folder = vfs.lookup(Vfs::ROOT, "Album").await.unwrap();
+    let (made, handle) = vfs
+        .create(folder.node, ".DS_Store", Access::Write)
+        .await
+        .unwrap();
+    vfs.write(handle, 0, b"store").await.unwrap();
+    vfs.release(handle);
+    vfs.forget(made.node, 1);
+
+    let before: Vec<_> = root_items(&provider)
+        .await
+        .into_iter()
+        .map(|item| item.name)
+        .collect();
+    assert_eq!(vfs.copy("Album", "._x").await.unwrap(), Copied::NotEligible);
+    let after: Vec<_> = root_items(&provider)
+        .await
+        .into_iter()
+        .map(|item| item.name)
+        .collect();
+    assert_eq!(after, before);
+
+    assert_eq!(
+        vfs.copy("Album", "Album copy").await.unwrap(),
+        Copied::To("Album copy".into())
+    );
+    let copied = root_items(&provider)
+        .await
+        .into_iter()
+        .find(|item| item.name == "Album copy")
+        .unwrap();
+    let children = provider.list(&copied.id).await.unwrap();
+    let names: Vec<_> = children.iter().map(|item| item.name.as_str()).collect();
+    assert_eq!(names, ["a.jpg", "Sub"]);
+    let photo = children.iter().find(|item| item.name == "a.jpg").unwrap();
+    assert_eq!(provider.contents(&photo.id), b"aaa");
+    let nested = children.iter().find(|item| item.name == "Sub").unwrap();
+    let inside = provider.list(&nested.id).await.unwrap();
+    assert_eq!(inside.len(), 1);
+    assert_eq!(inside[0].name, "b.jpg");
+    assert_eq!(provider.contents(&inside[0].id), b"bbb");
+}
+
+#[tokio::test]
+async fn a_provider_that_cannot_copy_is_not_eligible() {
+    let memory = Arc::new(MemoryProvider::new());
+    memory.add_file(&memory.root(), "a.txt", b"a");
+    let dir = tempfile::tempdir().unwrap();
+    let vfs = Vfs::new(
+        Arc::new(NoCopy(Arc::clone(&memory))),
+        POSIX,
+        Options::default(),
+    )
+    .take_writes(Spool {
+        folder: dir.path().to_path_buf(),
+        limit: 1024,
+        stays_local: never_local,
+    })
+    .unwrap();
+    assert_eq!(
+        vfs.copy("a.txt", "b.txt").await.unwrap(),
+        Copied::NotEligible
+    );
+    let items = memory.list(&memory.root()).await.unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].name, "a.txt");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_copy_is_of_the_remote_as_its_items_were_listed() {
+    let (provider, vfs, _dir) = spooled_mount(Options::default(), 1024 * 1024, never_local);
+    let folder = provider.add_folder(&provider.root(), "Folder");
+    provider.add_file(&folder, "a.txt", b"old");
+    let entry = vfs.lookup(Vfs::ROOT, "Folder").await.unwrap();
+    let file = vfs.lookup(entry.node, "a.txt").await.unwrap();
+    vfs.attributes(Vfs::ROOT).await.unwrap();
+    // The copy checks the root and plans from what the core holds, so its first provider call makes the new folder. The edit starts while that call waits.
+    provider.set_delay(Duration::from_secs(1));
+    let copying = tokio::spawn({
+        let vfs = Arc::clone(&vfs);
+        async move { vfs.copy("Folder", "Folder copy").await }
+    });
+    until_in_flight(&provider, 1).await;
+    let handle = vfs.open(file.node, Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"new").await.unwrap();
+    vfs.release(handle);
+    assert_eq!(
+        copying.await.unwrap().unwrap(),
+        Copied::To("Folder copy".into())
+    );
+    let copied = root_items(&provider)
+        .await
+        .into_iter()
+        .find(|item| item.name == "Folder copy")
+        .unwrap();
+    let children = provider.list(&copied.id).await.unwrap();
+    assert_eq!(provider.contents(&children[0].id), b"old");
 }

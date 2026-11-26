@@ -17,6 +17,6 @@ pub use provider::{
 };
 pub use spool::Spool;
 pub use vfs::{
-    Access, Entry, HandleId, Identified, IfExists, NodeId, Options, Thumbnailed, Unsent,
+    Access, Copied, Entry, HandleId, Identified, IfExists, NodeId, Options, Thumbnailed, Unsent,
     UnsentState, Vfs,
 };

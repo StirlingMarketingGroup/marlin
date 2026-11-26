@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 pub const JSONRPC_VERSION: &str = "2.0";
 
 /// Protocol number the helper and the app speak. Raised when the control API changes.
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// JSON-RPC and helper error codes.
 pub mod error_codes {
@@ -39,6 +39,8 @@ pub mod error_codes {
     pub const NOT_MOUNTED: i32 = -1018;
     /// The mount shows no item at that path, or the account has no item with that ID.
     pub const NO_SUCH_ITEM: i32 = -1019;
+    /// An item already holds the name a `copy` would give its copy.
+    pub const NAME_TAKEN: i32 = -1020;
 }
 
 /// Control methods and the notifications the helper sends.
@@ -57,6 +59,7 @@ pub mod methods {
     pub const IDENTIFY: &str = "identify";
     pub const REFRESH: &str = "refresh";
     pub const THUMBNAIL: &str = "thumbnail";
+    pub const COPY: &str = "copy";
     pub const MOUNT_CHANGED: &str = "mountChanged";
     pub const UNSENT_CHANGED: &str = "unsentChanged";
 }
@@ -304,6 +307,26 @@ pub enum Thumbnailed {
     NotEligible,
 }
 
+/// Body of a `copy` request. `from` and `to` are mount-relative paths, read as for `identify`. `to` ends with the copy's name, which must be free.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CopyParams {
+    pub provider: String,
+    pub account: String,
+    pub from: String,
+    pub to: String,
+}
+
+/// The answer to `copy`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "copy", rename_all = "kebab-case")]
+pub enum Copied {
+    /// The remote made the copy. `path` is where the mount shows it, mount-relative.
+    Copied { path: String },
+    /// The copy may not use the provider's copy (decision 0009, choice 7), and nothing changed. The caller copies through the filesystem.
+    NotEligible,
+}
+
 /// A dead mount under the mount folder: its server was killed, and the OS still lists it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -461,5 +484,46 @@ mod tests {
             serde_json::from_value::<ThumbnailParams>(wire).unwrap(),
             params
         );
+    }
+
+    #[test]
+    fn copy_keeps_its_shape_on_the_wire() {
+        use super::{Copied, CopyParams};
+
+        let copied = Copied::Copied {
+            path: "Projects/a copy.txt".into(),
+        };
+        let wire = serde_json::to_value(&copied).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({"copy": "copied", "path": "Projects/a copy.txt"})
+        );
+        assert_eq!(serde_json::from_value::<Copied>(wire).unwrap(), copied);
+
+        let not_eligible = Copied::NotEligible;
+        let wire = serde_json::to_value(&not_eligible).unwrap();
+        assert_eq!(wire, serde_json::json!({"copy": "not-eligible"}));
+        assert_eq!(
+            serde_json::from_value::<Copied>(wire).unwrap(),
+            not_eligible
+        );
+
+        let params = CopyParams {
+            provider: "gdrive".into(),
+            account: "ana".into(),
+            from: "Projects/a.txt".into(),
+            to: "Projects/a copy.txt".into(),
+        };
+        let wire = serde_json::to_value(&params).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({
+                "provider": "gdrive",
+                "account": "ana",
+                "from": "Projects/a.txt",
+                "to": "Projects/a copy.txt",
+            })
+        );
+        assert_eq!(serde_json::from_value::<CopyParams>(wire).unwrap(), params);
     }
 }

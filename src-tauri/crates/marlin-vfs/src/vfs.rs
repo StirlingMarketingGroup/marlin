@@ -38,6 +38,16 @@ pub enum Identified {
     New,
 }
 
+/// What [`Vfs::copy`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Copied {
+    /// The remote made the copy. The path the mount shows it at, read as [`Vfs::identify`] reads a path.
+    To(String),
+
+    /// The copy may not use the provider's copy (decision 0009, choice 7), and nothing changed. The caller copies through the filesystem instead.
+    NotEligible,
+}
+
 /// What [`Vfs::thumbnail`] found for the item at a path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Thumbnailed {
@@ -371,7 +381,7 @@ struct State {
 /// How much of a remote file one fetch reads at a time. A stored size never limits a read, so the piece size is the only cap.
 const PIECE: u32 = 4 * 1024 * 1024;
 
-/// The mount core. With a spool it can create, write, cut, rename, and remove a file locally, and [`Vfs::run_uploads`] sends those files. Adapters share one value across tasks. The state lock is never held across a provider call. Three spool file calls run under it: deleting a spool file, and reading its length and modified time for its record and writing the record. `take_writes` also reads the spool folder under it, before any other call can run. A separate lock, `changes`, is held across the provider call of a name change, and across the confirm of an upload.
+/// The mount core. With a spool it can create, write, cut, rename, and remove a file locally, and [`Vfs::run_uploads`] sends those files. Adapters share one value across tasks. The state lock is never held across a provider call. Three spool file calls run under it: deleting a spool file, and reading its length and modified time for its record and writing the record. `take_writes` also reads the spool folder under it, before any other call can run. A separate lock, `changes`, is held across the provider call of a name change and of each item a copy makes, and across the confirm of an upload.
 pub struct Vfs {
     provider: Arc<dyn Provider>,
 
@@ -1072,22 +1082,132 @@ impl Vfs {
         if kind == Kind::Folder {
             return Ok(Thumbnailed::NoPicture);
         }
-        // Decision 0009, choice 7: an item may use a provider call only when the remote has it with no unsent changes. Bytes in the spool, or a write fetching them, are not the bytes the remote has.
-        let unsent = {
-            let state = self.state.lock().unwrap();
-            state
-                .by_item
-                .get(&id)
-                .copied()
-                .is_some_and(|node| !matches!(state.nodes[&node].bytes, Bytes::Clean))
-        };
-        if unsent {
+        if has_unsent_bytes(&self.state.lock().unwrap(), &id) {
             return Ok(Thumbnailed::NotEligible);
         }
         match self.call(self.provider.thumbnail(&id, size)).await? {
             Some(picture) => Ok(Thumbnailed::Picture(picture)),
             None => Ok(Thumbnailed::NoPicture),
         }
+    }
+
+    /// Copies the item at `from` to `to` with the provider's own copy, so no bytes pass through this computer. Both are paths read as [`Self::identify`] reads a path, and `to` ends with the copy's name. A folder copies as a new folder and a provider copy of each file inside it, at every depth. One place decides, before anything changes, whether the copy may use the provider's copy, and answers [`Copied::NotEligible`] when it may not: the provider has no copy, the mount takes no writes, the copy's name stays on this computer, the destination takes no new item there, or a file has bytes the remote does not have or is only in the spool. The destination is checked first, so a copy that may not go there lists nothing of the source. A new file inside a folder whose name stays on this computer is left out: it never reaches the remote, and it is gone after an unmount (decision 0005, choice 14). An item already holding the name is [`VfsError::Conflict`].
+    ///
+    /// Which items are copied, and under which names, is fixed when they are listed, before anything is made, so a folder copied into itself copies what it held before. Each file copies the bytes the remote has when the provider copies it: a file edited after it was listed copies them, as a filesystem copy that read it just before the edit would. Each item is made under the changes lock, one at a time, so a long copy never holds up the mount's other changes for its whole length. A copy that fails partway leaves what it made at `to`, and the caller removes it, as it removes a partial filesystem copy.
+    pub async fn copy(&self, from: &str, to: &str) -> Result<Copied, VfsError> {
+        if !self.provider.can_copy() || !self.writable() {
+            return Ok(Copied::NotEligible);
+        }
+        let (folder_path, to_name) = to.rsplit_once('/').unwrap_or(("", to));
+        let name = unescape(to_name, &self.rules);
+        // A filesystem copy keeps a file under such a name on this computer.
+        if (self.spool()?.stays_local)(&name) {
+            return Ok(Copied::NotEligible);
+        }
+
+        let mut walked = Walked {
+            vfs: self,
+            nodes: Vec::new(),
+        };
+        let mut folder_node = Self::ROOT;
+        if !folder_path.is_empty() {
+            for step in folder_path.split('/') {
+                let entry = self.lookup(folder_node, step).await?;
+                walked.nodes.push(entry.node);
+                if entry.attributes.kind != Kind::Folder {
+                    return Err(VfsError::NotAFolder);
+                }
+                folder_node = entry.node;
+            }
+        }
+        let folder = self.folder_of(folder_node)?;
+        match self.check_new_file(folder_node, &folder, to_name).await {
+            Ok(()) => {}
+            // The destination takes no new item (decision 0011, #769), and a filesystem copy gets the same refusal from the mount.
+            Err(VfsError::AccessDenied | VfsError::NotSupported) => {
+                return Ok(Copied::NotEligible);
+            }
+            Err(error) => return Err(error),
+        }
+        if self.find(&folder, to_name).await?.1.is_some() {
+            return Err(VfsError::Conflict);
+        }
+
+        let Some((id, kind)) = self.item_at(from).await? else {
+            return Ok(Copied::NotEligible);
+        };
+        let mut plan = vec![Planned {
+            id,
+            kind,
+            name,
+            folder: None,
+        }];
+        // A folder's items are added when the walk reaches the folder, so each comes after it.
+        let mut at = 0;
+        while at < plan.len() {
+            let planned_id = plan[at].id.clone();
+            if plan[at].kind == Kind::File {
+                if has_unsent_bytes(&self.state.lock().unwrap(), &planned_id) {
+                    return Ok(Copied::NotEligible);
+                }
+            } else {
+                // Asked before the listing: a new file whose upload lands while the listing is on its way would be in neither.
+                let sends_a_new_file = {
+                    let state = self.state.lock().unwrap();
+                    state.new_files.get(&planned_id).is_some_and(|files| {
+                        files.values().any(|node| {
+                            matches!(state.nodes[node].bytes, Bytes::Spooled(spool_id) if self.sends(&state, spool_id).is_some())
+                        })
+                    })
+                };
+                if sends_a_new_file {
+                    return Ok(Copied::NotEligible);
+                }
+                let listing = self.listing(&planned_id).await?;
+                plan.extend(listing.remote.iter().map(|item| Planned {
+                    id: item.id.clone(),
+                    kind: item.attributes.kind,
+                    name: item.name.clone(),
+                    folder: Some(at),
+                }));
+            }
+            at += 1;
+        }
+
+        let mut made: Vec<ItemId> = Vec::with_capacity(plan.len());
+        for planned in &plan {
+            let _changes = self.lock_changes().await?;
+            let parent = match planned.folder {
+                Some(at) => made[at].clone(),
+                // Another change can take the name while the source is listed. Under the lock the make runs in, nothing can take it after this.
+                None => {
+                    if self.find(&folder, to_name).await?.1.is_some() {
+                        return Err(VfsError::Conflict);
+                    }
+                    folder.clone()
+                }
+            };
+            let (item, _) = match planned.kind {
+                Kind::Folder => {
+                    self.make_item(&parent, self.provider.create_folder(&parent, &planned.name))
+                        .await?
+                }
+                Kind::File => {
+                    let work = self.provider.copy_file(&planned.id, &parent, &planned.name);
+                    self.make_item(&parent, work).await?
+                }
+            };
+            made.push(item.id);
+        }
+        let shown = self
+            .held_listing(&folder)
+            .and_then(|listing| self.shown_name(&folder, &listing, &made[0]))
+            .unwrap_or_else(|| to_name.to_string());
+        Ok(Copied::To(if folder_path.is_empty() {
+            shown
+        } else {
+            format!("{folder_path}/{shown}")
+        }))
     }
 
     /// Makes an empty folder named `name` in `parent` and returns it. `name` is the name the OS sent. A name already in the listing, including a new file, is [`VfsError::Conflict`].
@@ -1099,30 +1219,13 @@ impl Vfs {
         if existing.is_some() {
             return Err(VfsError::Conflict);
         }
-        let (at, generation) = {
-            let state = self.state.lock().unwrap();
-            (Instant::now(), state.generation)
-        };
-        let unsettled = Unsettled {
-            vfs: self,
-            folders: vec![parent_item.clone()],
-            settled: false,
-        };
-        let created = self
-            .call(self.provider.create_folder(&parent_item, &remote_name))
+        let (created, asked) = self
+            .make_item(
+                &parent_item,
+                self.provider.create_folder(&parent_item, &remote_name),
+            )
             .await?;
-        let asked = Asked {
-            at,
-            generation,
-            answered: Instant::now(),
-        };
-        let mut state = unsettled.confirmed();
-        change_listing(&mut state, &self.rules, &parent_item, |remote| {
-            remote.retain(|item| item.id != created.id);
-            remote.push(created.clone());
-        });
-        // A folder this mount just made is empty, and a listing or a node under its path belonged to a folder another client had there.
-        self.take_path(&mut state, &created.id);
+        let mut state = self.state.lock().unwrap();
         let node = node_for(&mut state, created.id);
         set_place(&mut state, node, &parent_item, remote_name);
         let found_node = state.nodes.get_mut(&node).unwrap();
@@ -1353,11 +1456,42 @@ impl Vfs {
         result
     }
 
-    /// `create`, `create_folder`, `remove`, `rename`, and `discard_unsent` take this for the whole change. A wait that runs out is [`VfsError::TimedOut`].
+    /// `create`, `create_folder`, `remove`, `rename`, `discard_unsent`, and each item of a `copy` take this. A copy takes it for one item at a time. A wait that runs out is [`VfsError::TimedOut`].
     async fn lock_changes(&self) -> Result<tokio::sync::MutexGuard<'_, ()>, VfsError> {
         tokio::time::timeout(self.options.call_timeout, self.changes.lock())
             .await
             .map_err(|_| VfsError::TimedOut)
+    }
+
+    /// Runs `work`, a provider call that makes one item in `folder`, and shows the item in the folder's listing at once. On a provider whose ids are paths, the item takes its path. Returns the item and when the call was asked.
+    async fn make_item(
+        &self,
+        folder: &ItemId,
+        work: impl Future<Output = Result<Item, VfsError>>,
+    ) -> Result<(Item, Asked), VfsError> {
+        let (at, generation) = {
+            let state = self.state.lock().unwrap();
+            (Instant::now(), state.generation)
+        };
+        let unsettled = Unsettled {
+            vfs: self,
+            folders: vec![folder.clone()],
+            settled: false,
+        };
+        let created = self.call(work).await?;
+        let asked = Asked {
+            at,
+            generation,
+            answered: Instant::now(),
+        };
+        let mut state = unsettled.confirmed();
+        change_listing(&mut state, &self.rules, folder, |remote| {
+            remote.retain(|item| item.id != created.id);
+            remote.push(created.clone());
+        });
+        // The item is new, so a listing or a node at or under its path belonged to an item another client had there.
+        self.take_path(&mut state, &created.id);
+        Ok((created, asked))
     }
 
     /// The holder of `name` in `folder`, as the mount shows it, and the listing it was found in. A lookup and every change resolve a name here, so they always agree on which item a name means.
@@ -2316,6 +2450,31 @@ fn discard(state: &mut State, room: &Notify, id: SpoolId) {
     let _ = std::fs::remove_file(spool::record_path(&spool.path));
 }
 
+/// One item a copy makes, in the order it makes them: a folder before what it holds.
+struct Planned {
+    /// The item copied.
+    id: ItemId,
+    kind: Kind,
+    /// The copy's remote name.
+    name: String,
+    /// Where in the plan the folder it goes in is. `None` for the copy's top item, which goes in `to`'s folder.
+    folder: Option<usize>,
+}
+
+/// The nodes a walk of a path looked up. Dropping it gives each lookup back, on every way out.
+struct Walked<'a> {
+    vfs: &'a Vfs,
+    nodes: Vec<NodeId>,
+}
+
+impl Drop for Walked<'_> {
+    fn drop(&mut self) {
+        for node in &self.nodes {
+            self.vfs.forget(*node, 1);
+        }
+    }
+}
+
 /// A change the provider was asked to make. It ends one of two ways: `confirmed`, or dropped. Dropped (an error, the time limit, or a cancelled call), the remote may or may not have changed, so the cached listing of each folder it names is forgotten.
 struct Unsettled<'a> {
     vfs: &'a Vfs,
@@ -2405,6 +2564,15 @@ fn remember<T: Clone>(held: &mut Option<(Asked, T)>, asked: Asked, answer: T) ->
     }
     *held = Some((asked, answer.clone()));
     answer
+}
+
+/// Whether the item `id` has bytes the remote does not have: bytes in the spool, or a write fetching them to change them (decision 0009, choice 7). An item with no node has none.
+fn has_unsent_bytes(state: &State, id: &ItemId) -> bool {
+    state
+        .by_item
+        .get(id)
+        .copied()
+        .is_some_and(|node| !matches!(state.nodes[&node].bytes, Bytes::Clean))
 }
 
 /// Whether the provider's latest answer about this node marks it read-only. A file whose bytes are in the spool is not: the spool is the file. A node with no answer is not: the provider's own answer decides when the bytes reach it.

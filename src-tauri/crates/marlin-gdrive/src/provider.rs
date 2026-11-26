@@ -22,6 +22,9 @@ const MY_DRIVE: &str = "root";
 /// The MIME type of a Drive folder.
 const FOLDER_TYPE: &str = "application/vnd.google-apps.folder";
 
+/// The MIME type of a Drive shortcut.
+const SHORTCUT_TYPE: &str = "application/vnd.google-apps.shortcut";
+
 /// The fields `item`, the change calls, and an upload's answer ask for: what an item is built from, plus `trashed` and `driveId` for their checks.
 ///
 /// `headRevisionId` changes only when the bytes change. `version` also changes on a rename or a share, so it is not here. `canModifyContent` says whether the account may give a file new bytes. `canAddChildren` says whether the account may add an item to a folder. `canEdit` is wider, and other things can limit it.
@@ -66,7 +69,7 @@ impl Default for Config {
 
 /// One Google account through the Drive API. It shows My Drive and the shared drives.
 ///
-/// It can make a folder, rename or move an item, trash one, and write a file's bytes. `can_write` is true. A mount still takes writes only when it has a spool.
+/// It can make a folder, rename or move an item, trash one, write a file's bytes, and copy a file on Drive. `can_write` is true. A mount still takes writes only when it has a spool.
 pub struct DriveProvider {
     pub(crate) tokens: Arc<dyn AccessTokens>,
     pub(crate) config: Config,
@@ -397,9 +400,9 @@ impl DriveProvider {
         Ok(())
     }
 
-    /// One id from `files.generateIds`. The same id goes out on every try of the create, so a retry cannot make a second item.
-    async fn new_file_id(&self) -> Result<String, VfsError> {
-        let query = [("count", "1"), ("space", "drive"), ("type", "files")];
+    /// One id from `files.generateIds`, of the kind `items` (`files` or `shortcuts`). The same id goes out on every try of the create or the copy, so a retry cannot make a second item.
+    async fn new_file_id(&self, items: &str) -> Result<String, VfsError> {
+        let query = [("count", "1"), ("space", "drive"), ("type", items)];
         let response = self
             .request(Method::GET, "/files/generateIds", &query, None, None)
             .await?;
@@ -737,13 +740,67 @@ impl Provider for DriveProvider {
         true
     }
 
+    fn can_copy(&self) -> bool {
+        true
+    }
+
     fn check_new_item(&self, folder: &ItemId, _name: &str) -> Result<(), VfsError> {
         destination(folder).map(|_| ())
     }
 
+    async fn copy_file(&self, id: &ItemId, to: &ItemId, name: &str) -> Result<Item, VfsError> {
+        let (to_drive, to_file) = destination(to)?;
+        // Asking `canCopy` first would cost one more request per file. Google's 403 `cannotCopyFile` is the same refusal, and it makes nothing.
+        let (file, drive_name, premade) = match place(id) {
+            Place::Top | Place::SharedDrives => return Err(VfsError::IsAFolder),
+            Place::File { file, .. } => (file, name, Some("files")),
+            Place::Link { file, .. } => {
+                let found = self.file_of(id, ITEM_FIELDS).await?;
+                // Drive stores a link file's name without the ending the mount adds. A name without that ending would not show back as the name asked for, and a duplicate's `Notes.document (2).html` is such a name.
+                let ending = link_ending(&found.mime_type).ok_or(VfsError::NotSupported)?;
+                let drive_name = name.strip_suffix(&ending).ok_or(VfsError::NotSupported)?;
+                let premade = (found.mime_type == SHORTCUT_TYPE).then_some("shortcuts");
+                (file, drive_name, premade)
+            }
+        };
+        let query = [("supportsAllDrives", "true"), ("fields", ITEM_FIELDS)];
+        let path = format!("/files/{file}/copy");
+        let mut body = serde_json::json!({ "name": drive_name, "parents": [to_file] });
+        let Some(id_type) = premade else {
+            // A Google editor file cannot take a pre-made id, so a resend after a server error could make a second copy. Drive picks the id.
+            let response = self
+                .request_without_server_retry(Method::POST, &path, &query, Some(&body))
+                .await?;
+            let answer: DriveFile = api::json(response).await?;
+            return Ok(item_from(to_drive, answer.id.clone(), answer));
+        };
+        let new_id = self.new_file_id(id_type).await?;
+        body["id"] = serde_json::json!(new_id);
+        match self
+            .request(Method::POST, &path, &query, Some(&body), None)
+            .await
+        {
+            Ok(response) => Ok(item_from(to_drive, new_id, api::json(response).await?)),
+            // The same id goes out on every try, so a 409 means this call's copy landed and its answer was lost.
+            Err(VfsError::Conflict) => {
+                let response = self
+                    .request(
+                        Method::GET,
+                        &format!("/files/{new_id}"),
+                        &[("fields", ITEM_FIELDS), ("supportsAllDrives", "true")],
+                        None,
+                        None,
+                    )
+                    .await?;
+                Ok(item_from(to_drive, new_id, api::json(response).await?))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     async fn create_folder(&self, parent: &ItemId, name: &str) -> Result<Item, VfsError> {
         let (drive, parent_file) = destination(parent)?;
-        let id = self.new_file_id().await?;
+        let id = self.new_file_id("files").await?;
         let body = serde_json::json!({
             "id": &id,
             "name": name,
@@ -874,7 +931,7 @@ impl Provider for DriveProvider {
         progress: &Progress,
     ) -> Result<Item, VfsError> {
         let (drive, parent_file) = destination(parent)?;
-        let id = self.new_file_id().await?;
+        let id = self.new_file_id("files").await?;
         let upload = Upload::Create {
             id: &id,
             name,

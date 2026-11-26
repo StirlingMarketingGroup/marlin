@@ -7,8 +7,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use marlin_gdrive::{AccessTokens, Config, DriveProvider};
 use marlin_vfs::{
-    Access, Identified, IfExists, Item, ItemId, Kind, Options, Provider, Revision, Space, Spool,
-    Thumbnail, Vfs, VfsError, POSIX,
+    Access, Copied, Identified, IfExists, Item, ItemId, Kind, Options, Provider, Revision, Space,
+    Spool, Thumbnail, Vfs, VfsError, POSIX,
 };
 use serde_json::{json, Value};
 use wiremock::matchers::{header, method, path, query_param};
@@ -4004,4 +4004,303 @@ async fn thumbnail_keeps_a_link_with_no_size_as_it_is() {
             dimensions: None,
         })
     );
+}
+
+const SHORTCUT: &str = "application/vnd.google-apps.shortcut";
+
+fn copy_query(request: &Request) {
+    let query = query_of(request);
+    assert_eq!(query.get("supportsAllDrives").unwrap(), "true");
+    assert_eq!(query.get("fields").unwrap(), ITEM_FIELDS);
+}
+
+#[tokio::test]
+async fn a_file_copied_in_my_drive_sends_the_generated_id() {
+    let server = MockServer::start().await;
+    mount_path(
+        &server,
+        "/files/generateIds",
+        ok_json(json!({ "ids": ["new-1"] })),
+    )
+    .await;
+    mount_method(
+        &server,
+        "POST",
+        "/files/file-1/copy",
+        ok_json(plain("new-1", "copy.txt")),
+    )
+    .await;
+    let provider = drive(&server);
+    let made = provider
+        .copy_file(&id("file-1"), &id("root"), "copy.txt")
+        .await
+        .unwrap();
+    assert_eq!(made.id, id("new-1"));
+    assert_eq!(made.name, "copy.txt");
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].method.as_str(), "GET");
+    assert_eq!(requests[0].url.path(), "/files/generateIds");
+    let query = query_of(&requests[0]);
+    assert_eq!(query.get("count").unwrap(), "1");
+    assert_eq!(query.get("space").unwrap(), "drive");
+    assert_eq!(query.get("type").unwrap(), "files");
+    assert_eq!(requests[1].method.as_str(), "POST");
+    assert_eq!(requests[1].url.path(), "/files/file-1/copy");
+    copy_query(&requests[1]);
+    assert_eq!(
+        body_of(&requests[1]),
+        json!({ "id": "new-1", "name": "copy.txt", "parents": ["root"] })
+    );
+}
+
+#[tokio::test]
+async fn a_file_copied_into_a_shared_drive_uses_that_folders_id_as_the_parent() {
+    let server = MockServer::start().await;
+    mount_path(
+        &server,
+        "/files/generateIds",
+        ok_json(json!({ "ids": ["new-1"] })),
+    )
+    .await;
+    mount_method(
+        &server,
+        "POST",
+        "/files/src/copy",
+        ok_json(plain("new-1", "copy.txt")),
+    )
+    .await;
+    let provider = drive(&server);
+    let made = provider
+        .copy_file(&id("d/src"), &id("d/folder"), "copy.txt")
+        .await
+        .unwrap();
+    assert_eq!(made.id, id("d/new-1"));
+    let posts = sent(&server, "POST").await;
+    assert_eq!(posts.len(), 1);
+    assert_eq!(posts[0].url.path(), "/files/src/copy");
+    copy_query(&posts[0]);
+    assert_eq!(
+        body_of(&posts[0]),
+        json!({ "id": "new-1", "name": "copy.txt", "parents": ["folder"] })
+    );
+    assert_eq!(
+        query_of(&sent(&server, "GET").await[0])
+            .get("type")
+            .unwrap(),
+        "files"
+    );
+}
+
+#[tokio::test]
+async fn a_google_doc_copies_without_a_premade_id() {
+    let server = MockServer::start().await;
+    mount_held(&server, "doc", "Notes", DOC, &["folder"], None).await;
+    let made = file_json("newdoc", "Notes copy", DOC, "0");
+    mount_method(&server, "POST", "/files/doc/copy", ok_json(made)).await;
+    let provider = drive(&server);
+    let copied = provider
+        .copy_file(&id("doc#doc"), &id("folder"), "Notes copy.document.html")
+        .await
+        .unwrap();
+    assert_eq!(copied.id, id("newdoc#newdoc"));
+    assert_eq!(copied.name, "Notes copy.document.html");
+    let requests = server.received_requests().await.unwrap();
+    assert!(requests
+        .iter()
+        .all(|request| request.url.path() != "/files/generateIds"));
+    let gets: Vec<_> = requests
+        .iter()
+        .filter(|request| request.method.as_str() == "GET")
+        .collect();
+    assert_eq!(gets.len(), 1);
+    assert_eq!(gets[0].url.path(), "/files/doc");
+    let posts = sent(&server, "POST").await;
+    assert_eq!(posts.len(), 1);
+    assert_eq!(posts[0].url.path(), "/files/doc/copy");
+    copy_query(&posts[0]);
+    assert_eq!(
+        body_of(&posts[0]),
+        json!({ "name": "Notes copy", "parents": ["folder"] })
+    );
+
+    let refused = provider
+        .copy_file(&id("doc#doc"), &id("folder"), "Notes copy.html")
+        .await;
+    assert_eq!(refused, Err(VfsError::NotSupported));
+    assert_eq!(sent(&server, "POST").await.len(), 1);
+
+    let failed = MockServer::start().await;
+    mount_held(&failed, "doc", "Notes", DOC, &["folder"], None).await;
+    Mock::given(method("POST"))
+        .and(path("/files/doc/copy"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(1)
+        .mount(&failed)
+        .await;
+    let provider = drive(&failed);
+    let copied = provider
+        .copy_file(&id("doc#doc"), &id("folder"), "Notes copy.document.html")
+        .await;
+    assert_eq!(
+        copied,
+        Err(VfsError::Other(
+            "Google Drive answered 500 Internal Server Error".into()
+        ))
+    );
+}
+
+#[tokio::test]
+async fn a_shortcut_copies_with_a_shortcut_id() {
+    let server = MockServer::start().await;
+    let mut shortcut = file_json("sc", "Link", SHORTCUT, "0");
+    shortcut["shortcutDetails"] = json!({ "targetId": "target" });
+    mount_path(&server, "/files/sc", ok_json(shortcut)).await;
+    mount_path(
+        &server,
+        "/files/generateIds",
+        ok_json(json!({ "ids": ["new-1"] })),
+    )
+    .await;
+    let mut made = file_json("new-1", "Link copy", SHORTCUT, "0");
+    made["shortcutDetails"] = json!({ "targetId": "target" });
+    mount_method(&server, "POST", "/files/sc/copy", ok_json(made)).await;
+    let provider = drive(&server);
+    let copied = provider
+        .copy_file(&id("sc#target"), &id("folder"), "Link copy.shortcut.html")
+        .await
+        .unwrap();
+    assert_eq!(copied.id, id("new-1#target"));
+    assert_eq!(copied.name, "Link copy.shortcut.html");
+    let generated = sent(&server, "GET")
+        .await
+        .into_iter()
+        .find(|request| request.url.path() == "/files/generateIds")
+        .unwrap();
+    assert_eq!(query_of(&generated).get("type").unwrap(), "shortcuts");
+    let posts = sent(&server, "POST").await;
+    assert_eq!(posts.len(), 1);
+    copy_query(&posts[0]);
+    assert_eq!(
+        body_of(&posts[0]),
+        json!({ "id": "new-1", "name": "Link copy", "parents": ["folder"] })
+    );
+}
+
+#[tokio::test]
+async fn a_copy_answered_500_then_409_returns_the_copy_the_first_try_made() {
+    let server = MockServer::start().await;
+    mount_path(
+        &server,
+        "/files/generateIds",
+        ok_json(json!({ "ids": ["new-1"] })),
+    )
+    .await;
+    let answers = vec![ResponseTemplate::new(500), ResponseTemplate::new(409)];
+    mount_answers(&server, "POST", "/files/file-1/copy", answers).await;
+    mount_path(&server, "/files/new-1", ok_json(plain("new-1", "copy.txt"))).await;
+    let provider = drive(&server);
+    let made = provider
+        .copy_file(&id("file-1"), &id("root"), "copy.txt")
+        .await
+        .unwrap();
+    assert_eq!(made.id, id("new-1"));
+    assert_eq!(made.name, "copy.txt");
+    let posts = sent(&server, "POST").await;
+    assert_eq!(posts.len(), 2);
+    assert_eq!(body_of(&posts[0])["id"], "new-1");
+    assert_eq!(body_of(&posts[1])["id"], "new-1");
+    let read = sent(&server, "GET")
+        .await
+        .into_iter()
+        .find(|request| request.url.path() == "/files/new-1")
+        .unwrap();
+    let query = query_of(&read);
+    assert_eq!(query.get("fields").unwrap(), ITEM_FIELDS);
+    assert_eq!(query.get("supportsAllDrives").unwrap(), "true");
+}
+
+#[tokio::test]
+async fn a_refused_copy_is_access_denied() {
+    let server = MockServer::start().await;
+    mount_path(
+        &server,
+        "/files/generateIds",
+        ok_json(json!({ "ids": ["new-1"] })),
+    )
+    .await;
+    let body = json!({ "error": { "errors": [{ "reason": "cannotCopyFile" }] } });
+    mount_method(
+        &server,
+        "POST",
+        "/files/file-1/copy",
+        ResponseTemplate::new(403).set_body_json(body),
+    )
+    .await;
+    let provider = drive(&server);
+    let copied = provider
+        .copy_file(&id("file-1"), &id("folder"), "copy.txt")
+        .await;
+    assert_eq!(copied, Err(VfsError::AccessDenied));
+    assert_eq!(sent(&server, "POST").await.len(), 1);
+}
+
+#[tokio::test]
+async fn a_copy_through_the_core_shows_the_file_without_listing_again() {
+    let server = MockServer::start().await;
+    mount_path(
+        &server,
+        "/files/root",
+        ok_json(folder_json("alias-root", "My Drive")),
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(query_param("q", "'root' in parents and trashed = false"))
+        .respond_with(ok_json(file_page(vec![plain("file-1", "a.txt")], None)))
+        .mount(&server)
+        .await;
+    mount_path(
+        &server,
+        "/files/generateIds",
+        ok_json(json!({ "ids": ["new-1"] })),
+    )
+    .await;
+    mount_method(
+        &server,
+        "POST",
+        "/files/file-1/copy",
+        ok_json(plain("new-1", "b.txt")),
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let vfs = Vfs::new(Arc::new(drive(&server)), POSIX, Options::default())
+        .take_writes(Spool {
+            folder: dir.path().to_path_buf(),
+            limit: 1024 * 1024,
+            stays_local: |_| false,
+        })
+        .unwrap();
+    assert_eq!(
+        vfs.copy("My Drive/a.txt", "My Drive/b.txt").await.unwrap(),
+        Copied::To("My Drive/b.txt".into())
+    );
+    let requests = server.received_requests().await.unwrap();
+    assert!(requests
+        .iter()
+        .all(|request| { !request.url.query().unwrap_or("").contains("alt=media") }));
+    let my_drive = vfs.lookup(Vfs::ROOT, "My Drive").await.unwrap();
+    let found = vfs.lookup(my_drive.node, "b.txt").await.unwrap();
+    assert_eq!(found.name, "b.txt");
+    let lists = server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|request| {
+            query_of(request)
+                .get("q")
+                .is_some_and(|query| query.contains("'root' in parents"))
+        })
+        .count();
+    assert_eq!(lists, 1);
 }

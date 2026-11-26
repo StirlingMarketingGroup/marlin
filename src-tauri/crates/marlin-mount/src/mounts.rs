@@ -15,8 +15,8 @@ use uuid::Uuid;
 
 use crate::log::{self, redact};
 use crate::protocol::{
-    error_codes, DeadMount, Dimensions, Identified, MountState, MountStatus, ReadOnly, RpcError,
-    Thumbnailed, UnsentFile, UnsentFiles, UnsentState,
+    error_codes, Copied, DeadMount, Dimensions, Identified, MountState, MountStatus, ReadOnly,
+    RpcError, Thumbnailed, UnsentFile, UnsentFiles, UnsentState,
 };
 
 /// The file that marks the mount folder as the helper's. The helper sweeps, and mounts in, only a mount folder that has it, so a folder of the user's with the same name is never changed: on a Mac's disk, which ignores letter case, a checkout of Marlin at `~/marlin` is `~/Marlin` (#541).
@@ -91,6 +91,8 @@ pub enum MountError {
     NotMounted,
     /// The mount has no such item.
     NoSuchItem,
+    /// An item already holds the name a copy would give its copy.
+    NameTaken,
 }
 
 impl fmt::Display for MountError {
@@ -119,6 +121,7 @@ impl fmt::Display for MountError {
             ),
             Self::NotMounted => f.write_str("the account has no mount that is up"),
             Self::NoSuchItem => f.write_str("the mount has no such item"),
+            Self::NameTaken => f.write_str("an item already has that name"),
         }
     }
 }
@@ -153,6 +156,7 @@ impl From<MountError> for RpcError {
                 MountError::MountFolderTaken(_) => error_codes::MOUNT_FOLDER_TAKEN,
                 MountError::NotMounted => error_codes::NOT_MOUNTED,
                 MountError::NoSuchItem => error_codes::NO_SUCH_ITEM,
+                MountError::NameTaken => error_codes::NAME_TAKEN,
             },
         }
     }
@@ -866,6 +870,25 @@ impl Mounts {
         }
     }
 
+    /// Copies the item at the mount-relative path `from` to `to` with the provider's own copy. `to` ends with the copy's name. See [`marlin_vfs::Vfs::copy`].
+    pub async fn copy(
+        &self,
+        provider: &str,
+        account: &str,
+        from: &str,
+        to: &str,
+    ) -> Result<Copied, MountError> {
+        let copied = self
+            .mounted_core(provider, account)?
+            .copy(from, to)
+            .await
+            .map_err(copy_error)?;
+        Ok(match copied {
+            marlin_vfs::Copied::To(path) => Copied::Copied { path },
+            marlin_vfs::Copied::NotEligible => Copied::NotEligible,
+        })
+    }
+
     /// Makes the mount drop its cached listings and stored answers, so its next listing asks the remote.
     pub fn refresh(&self, provider: &str, account: &str) -> Result<(), MountError> {
         self.mounted_core(provider, account)?.refresh();
@@ -1062,6 +1085,15 @@ fn log_state(status: &MountStatus) {
         "info"
     };
     log::write(level, "mount.state", serde_json::json!(status));
+}
+
+/// The error a `copy` answers when its core call fails. A path the mount does not show, or a source item gone partway, is no such item. A name already taken is its own error. Anything else is the remote's own failure, so a copy the remote refuses is access denied, a gone sign-in needs a new sign-in, and no answer means the remote could not be reached.
+fn copy_error(error: VfsError) -> MountError {
+    match error {
+        VfsError::NotFound | VfsError::NotAFolder => MountError::NoSuchItem,
+        VfsError::Conflict => MountError::NameTaken,
+        error => remote_error(error),
+    }
 }
 
 /// The error a `locate`, `identify`, or `thumbnail` answers when its core call fails. A remote that says no is no such item for the caller: an unknown ID, one the account may not see, and a path through a file.
