@@ -5822,7 +5822,7 @@ pub async fn request_thumbnail(
 
     let request = crate::thumbnails::ThumbnailRequest {
         id: crate::thumbnails::generate_request_id(),
-        path,
+        path: crate::locations::without_password(&path),
         size: size.unwrap_or(128),
         quality,
         priority,

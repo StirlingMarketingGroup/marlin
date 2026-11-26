@@ -211,27 +211,19 @@ impl LocationInput {
     pub fn into_location(self) -> Result<Location, String> {
         match self {
             LocationInput::Raw(value) => parse_raw_location(value),
-            LocationInput::Descriptor(descriptor) => {
-                let scheme = descriptor
-                    .scheme
-                    .unwrap_or_else(|| "file".to_string())
-                    .to_ascii_lowercase();
-                let authority = descriptor.authority.filter(|s| !s.is_empty());
-                let path = sanitize_path(descriptor.path);
-                let raw = compose_raw_uri(&scheme, authority.as_deref(), &path);
-                Ok(Location {
-                    scheme,
-                    authority,
-                    path,
-                    raw,
-                })
-            }
+            // A descriptor is read as the address it spells, so one function builds every Location.
+            LocationInput::Descriptor(descriptor) => parse_raw_location(compose_raw_uri(
+                descriptor.scheme.as_deref().unwrap_or("file"),
+                descriptor.authority.as_deref().filter(|s| !s.is_empty()),
+                &descriptor.path,
+            )),
         }
     }
 }
 
 fn parse_raw_location(value: String) -> Result<Location, String> {
-    let trimmed = value.trim();
+    let kept = without_password(value.trim());
+    let trimmed = kept.as_str();
     if trimmed.is_empty() {
         return Ok(Location {
             scheme: "file".to_string(),
@@ -272,6 +264,41 @@ fn parse_raw_location(value: String) -> Result<Location, String> {
             raw,
         })
     }
+}
+
+/// The part of an address's authority that Marlin keeps. Marlin signs in with the keychain, never with an address, so a password goes. An SMB server is signed in to by its host alone, so an `smb` authority keeps only the host, as `smbServerAndFolders` does in the frontend. Any other user stays: an `sftp` address shows its user, and a `gdrive` authority is the account's email. The user info ends at the last `@`, and its password starts at the first `:`.
+pub(crate) fn kept_authority(scheme: &str, authority: &str) -> String {
+    let Some((user_info, host)) = authority.rsplit_once('@') else {
+        return authority.to_string();
+    };
+    if scheme.eq_ignore_ascii_case("smb") {
+        return host.to_string();
+    }
+    let user = user_info.split(':').next().unwrap_or_default();
+    format!("{user}@{host}")
+}
+
+/// `address` as Marlin keeps it: its authority goes through `kept_authority`, and so does the source address inside an `archive:` address. The authority ends at the first `/`, as the path bar reads it, so a password that holds a raw `/` is not seen as one. An `archive:` address is rebuilt only when its source changed, because `build_archive_uri` may encode the rest differently from how it came.
+pub(crate) fn without_password(address: &str) -> String {
+    let Some((scheme, rest)) = address.split_once("://") else {
+        return address.to_string();
+    };
+    if scheme.eq_ignore_ascii_case("archive") {
+        let Ok(archive) = archive::parse_archive_uri(address) else {
+            return address.to_string();
+        };
+        let src = without_password(&archive.src);
+        if src == archive.src {
+            return address.to_string();
+        }
+        return archive::build_archive_uri(&src, &archive.path);
+    }
+    let authority = rest.split('/').next().unwrap_or_default();
+    format!(
+        "{scheme}://{}{}",
+        kept_authority(scheme, authority),
+        &rest[authority.len()..]
+    )
 }
 
 fn sanitize_path(input: impl Into<String>) -> String {
@@ -435,6 +462,103 @@ mod tests {
     #[test]
     fn not_a_folder_names_the_path() {
         assert_eq!(not_a_folder("/a/b.txt"), "[ENOTDIR] Not a folder: /a/b.txt");
+    }
+
+    #[test]
+    fn a_location_keeps_no_password() {
+        for (raw, authority, want_raw) in [
+            (
+                "smb://user:secret@server/share/a.jpg",
+                "server",
+                "smb://server/share/a.jpg",
+            ),
+            ("smb://CORP;user:sec@ret@server/", "server", "smb://server/"),
+            (
+                "sftp://alice:secret@host:2222/a",
+                "alice@host:2222",
+                "sftp://alice@host:2222/a",
+            ),
+            ("sftp://alice@host/a", "alice@host", "sftp://alice@host/a"),
+            (
+                "gdrive://me@example.com/My Drive",
+                "me@example.com",
+                "gdrive://me@example.com/My Drive",
+            ),
+        ] {
+            let location = LocationInput::Raw(raw.to_string()).into_location().unwrap();
+            assert_eq!(location.authority(), Some(authority), "{raw}");
+            assert_eq!(location.raw(), want_raw, "{raw}");
+        }
+
+        let location = LocationInput::Descriptor(LocationDescriptorInput {
+            scheme: Some("smb".to_string()),
+            authority: Some("user:secret@server".to_string()),
+            path: "/share".to_string(),
+        })
+        .into_location()
+        .unwrap();
+        assert_eq!(location.raw(), "smb://server/share");
+
+        let location = LocationInput::Descriptor(LocationDescriptorInput {
+            scheme: Some("archive".to_string()),
+            authority: None,
+            path: "/?src=smb%3A%2F%2Falice%3Asecret%40nas%2Fshare%2Fa.zip&path=%2F".to_string(),
+        })
+        .into_location()
+        .unwrap();
+        assert_eq!(
+            location.raw(),
+            archive::build_archive_uri("smb://nas/share/a.zip", "/")
+        );
+
+        let archive = archive::build_archive_uri("smb://user:secret@server/share/a.zip", "/b");
+        let location = LocationInput::Raw(archive).into_location().unwrap();
+        assert_eq!(
+            location.raw(),
+            archive::build_archive_uri("smb://server/share/a.zip", "/b")
+        );
+
+        // An archive address with no password keeps its exact text, even one `build_archive_uri` would encode differently.
+        let archive = "archive:///?src=%2Ftmp%2Fa%20(1).zip&path=%2F";
+        let location = LocationInput::Raw(archive.to_string())
+            .into_location()
+            .unwrap();
+        assert_eq!(location.raw(), archive);
+    }
+
+    #[test]
+    fn without_password_keeps_hosts_and_paths() {
+        for (address, want) in [
+            (
+                "smb://user:secret@host/share/a.jpg",
+                "smb://host/share/a.jpg",
+            ),
+            ("SMB://user:secret@host/share", "SMB://host/share"),
+            (
+                "sftp://alice:secret@host:2222/a",
+                "sftp://alice@host:2222/a",
+            ),
+            ("sftp://alice@host:2222/a", "sftp://alice@host:2222/a"),
+            ("sftp://alice:p@ss:w@host/a", "sftp://alice@host/a"),
+            (
+                "sftp://alice:secret@[::1]:2222/a",
+                "sftp://alice@[::1]:2222/a",
+            ),
+            (
+                "smb://host/share/me@home.jpg",
+                "smb://host/share/me@home.jpg",
+            ),
+            ("smb://alice@nas/share", "smb://nas/share"),
+            ("/Users/a/b.txt", "/Users/a/b.txt"),
+        ] {
+            assert_eq!(without_password(address), want, "{address}");
+        }
+
+        let archive = archive::build_archive_uri("smb://user:secret@host/share/a.zip", "/b.jpg");
+        assert_eq!(
+            without_password(&archive),
+            archive::build_archive_uri("smb://host/share/a.zip", "/b.jpg")
+        );
     }
 
     #[test]

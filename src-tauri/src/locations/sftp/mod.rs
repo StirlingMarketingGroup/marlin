@@ -3,8 +3,8 @@ pub mod pool;
 
 use crate::fs_utils::FileItem;
 use crate::locations::{
-    not_a_folder, Location, LocationCapabilities, LocationProvider, LocationSummary,
-    ProviderDirectoryEntries,
+    kept_authority, not_a_folder, Location, LocationCapabilities, LocationProvider,
+    LocationSummary, ProviderDirectoryEntries,
 };
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
@@ -399,7 +399,7 @@ async fn recursive_delete(
 pub fn parse_sftp_url(url: &str) -> Result<(String, String, u16, String), String> {
     let remainder = url
         .strip_prefix("sftp://")
-        .ok_or_else(|| format!("Invalid SFTP URL scheme (expected sftp://): {}", url))?;
+        .ok_or_else(|| "Invalid SFTP URL scheme (expected sftp://)".to_string())?;
 
     let (authority_part, path_part) = if let Some(slash_idx) = remainder.find('/') {
         let (auth, path) = remainder.split_at(slash_idx);
@@ -408,7 +408,7 @@ pub fn parse_sftp_url(url: &str) -> Result<(String, String, u16, String), String
         (remainder, "/".to_string())
     };
 
-    let (username, hostname, port) = parse_authority(authority_part)?;
+    let (username, hostname, port) = parse_authority(&kept_authority("sftp", authority_part))?;
 
     let path = if path_part.is_empty() {
         "/".to_string()
@@ -546,6 +546,16 @@ mod tests {
         assert_eq!(host, "myserver");
         assert_eq!(port, 2222);
         assert_eq!(path, "/home/admin/file.txt");
+    }
+
+    #[test]
+    fn test_parse_sftp_url_drops_the_password() {
+        let (user, host, port, path) =
+            parse_sftp_url("sftp://alice:secret@myserver:2222/home/alice/a.txt").unwrap();
+        assert_eq!(user, "alice");
+        assert_eq!(host, "myserver");
+        assert_eq!(port, 2222);
+        assert_eq!(path, "/home/alice/a.txt");
     }
 
     #[test]

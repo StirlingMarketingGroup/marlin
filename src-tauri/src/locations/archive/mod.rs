@@ -21,12 +21,12 @@ mod reader;
 use reader::{normalize_internal_path, ArchiveEntry};
 
 #[derive(Debug, Clone)]
-struct ArchiveLocation {
-    src: String,
-    path: String,
+pub(super) struct ArchiveLocation {
+    pub(super) src: String,
+    pub(super) path: String,
 }
 
-fn parse_archive_uri(raw: &str) -> Result<ArchiveLocation, String> {
+pub(super) fn parse_archive_uri(raw: &str) -> Result<ArchiveLocation, String> {
     let url = Url::parse(raw).map_err(|e| format!("Invalid archive URI: {e}"))?;
     if url.scheme() != "archive" {
         return Err("Not an archive URI".to_string());
@@ -50,7 +50,7 @@ fn parse_archive_uri(raw: &str) -> Result<ArchiveLocation, String> {
     Ok(ArchiveLocation { src, path })
 }
 
-fn build_archive_uri(src: &str, internal_path: &str) -> String {
+pub(super) fn build_archive_uri(src: &str, internal_path: &str) -> String {
     let encoded_src = encode(src);
     let encoded_path = encode(internal_path);
     format!("archive:///?src={encoded_src}&path={encoded_path}")

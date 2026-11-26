@@ -10,7 +10,7 @@ Every path in Marlin is a URI, and its scheme picks a storage backend called a l
 `src-tauri/src/locations/mod.rs` defines it:
 
 - **`LocationInput`** is what a command receives: a raw string (`/Users/me`, `smb://nas/share/x`) or an object with `scheme`, `authority`, and `path`. A string with no scheme is `file`.
-- **`Location`** is the parsed form.
+- **`Location`** is the parsed form. It keeps no password: Marlin signs in with the keychain, never with an address. `without_password` drops the password from the authority (`kept_authority`) and from the source inside an `archive:` address, and an `smb` authority keeps only its host, as the path bar does. A thumbnail request's path goes through `without_password` too, in `request_thumbnail`.
 - **`LocationProvider`** is the trait each backend implements.
 - **`REGISTRY`** maps a scheme to its provider. `resolve_location(input)` returns the provider and the parsed location.
 - **`LocationCapabilities`** tells the frontend what the backend allows, so the UI can disable actions.

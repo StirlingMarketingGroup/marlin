@@ -67,9 +67,8 @@ fn request_with_local_path(
 pub fn download_smb_file_sync(smb_path: &str) -> Result<std::path::PathBuf, String> {
     use crate::locations::smb::client;
 
-    log::debug!("download_smb_file_sync: path={}", smb_path);
-
     let (share, file_path, creds_json) = prepare_smb_request(smb_path)?;
+    log::debug!("download_smb_file_sync: share={} path={}", share, file_path);
     let temp_path = smb_temp_path(&file_path)?;
     let temp_path_str = temp_path.to_string_lossy().to_string();
 
@@ -99,13 +98,13 @@ fn download_smb_file_partial_sync(
 ) -> Result<(std::path::PathBuf, u64, u64), String> {
     use crate::locations::smb::client;
 
+    let (share, file_path, creds_json) = prepare_smb_request(smb_path)?;
     log::debug!(
-        "download_smb_file_partial_sync: path={} max_bytes={}",
-        smb_path,
+        "download_smb_file_partial_sync: share={} path={} max_bytes={}",
+        share,
+        file_path,
         max_bytes
     );
-
-    let (share, file_path, creds_json) = prepare_smb_request(smb_path)?;
     let temp_path = smb_temp_path(&file_path)?;
     let temp_path_str = temp_path.to_string_lossy().to_string();
 
