@@ -51,12 +51,14 @@ pub struct Opened {
     pub provider: Arc<dyn Provider>,
     /// How many calls a mount of this provider runs at once, when the provider needs its own number rather than the helper's `Options::max_calls`.
     pub max_calls: Option<usize>,
+    /// How many uploads a mount of this provider runs at once, when the provider needs its own number rather than the helper's `Options::max_uploads`.
+    pub max_uploads: Option<usize>,
 }
 
 /// Opens the storage behind an account. `LinkedProviders` is the one the helper links.
 #[async_trait::async_trait]
 pub trait Providers: Send + Sync + 'static {
-    /// `provider` is a kind such as `gdrive`. `account` names the account and is never a secret: the provider reads its own credentials from the OS keychain. `open` need not reach the remote: the mount table makes the first call. `max_calls` replaces the helper's own call limit when the provider needs one.
+    /// `provider` is a kind such as `gdrive`. `account` names the account and is never a secret: the provider reads its own credentials from the OS keychain. `open` need not reach the remote: the mount table makes the first call. `max_calls` and `max_uploads` replace the helper's own limits when the provider needs its own.
     async fn open(&self, provider: &str, account: &str) -> Result<Opened, MountError>;
 }
 
@@ -285,7 +287,7 @@ pub struct Mounts {
     root: PathBuf,
     /// The folder that holds one spool folder per account.
     spool: PathBuf,
-    /// The limits of each mount's core. A provider's own call limit replaces `max_calls`.
+    /// The limits of each mount's core. A provider's own call limit replaces `max_calls`, and its own upload limit replaces `max_uploads`.
     options: Options,
 }
 
@@ -453,6 +455,7 @@ impl Mounts {
             let opened = self.providers.open(provider, account).await?;
             let options = Options {
                 max_calls: opened.max_calls.unwrap_or(self.options.max_calls),
+                max_uploads: opened.max_uploads.unwrap_or(self.options.max_uploads),
                 ..self.options
             };
             let build = || {

@@ -131,6 +131,7 @@ impl Providers for MemoryProviders {
         Ok(Opened {
             provider: memory,
             max_calls,
+            max_uploads: None,
         })
     }
 }

@@ -1,5 +1,5 @@
 //! The SMB helper protocol, the client that runs `marlin-smb`, and the saved SMB servers.
-//! The crate also holds the read-only mount provider for one saved server.
+//! The crate also holds the mount provider for one saved server. The provider takes writes.
 //! The app links this crate. `marlin-smb` links the protocol only.
 
 pub mod protocol;
@@ -12,7 +12,7 @@ mod servers;
 mod sidecar;
 
 #[cfg(feature = "client")]
-pub use provider::{SmbProvider, SmbSignIn, PROCESSES};
+pub use provider::{SmbProvider, SmbSignIn, PROCESSES, UPLOAD_PROCESSES};
 #[cfg(feature = "client")]
 pub use servers::{
     add_server, migrate_plaintext_passwords, remove_server, saved_servers, server_credentials,

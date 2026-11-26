@@ -9,8 +9,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use marlin_smb_client::protocol::{error_codes, READ_MAX, SMBCLIENT_MISSING};
-use marlin_smb_client::{add_server, SmbProvider, SmbSignIn, StartError, PROCESSES};
-use marlin_vfs::{ItemId, Kind, Options, Provider, Space, Vfs, VfsError, POSIX};
+use marlin_smb_client::{
+    add_server, SmbProvider, SmbSignIn, StartError, PROCESSES, UPLOAD_PROCESSES,
+};
+use marlin_vfs::{ItemId, Kind, Options, Provider, Revision, Space, Vfs, VfsError, POSIX};
 
 const WHEN: &str = "2020-01-02T03:04:05Z";
 
@@ -233,7 +235,10 @@ async fn a_folder_lists_its_files_and_folders() {
         listed[0].attributes.modified,
         UNIX_EPOCH + Duration::from_secs(1_577_934_245)
     );
-    assert!(listed[0].attributes.revision.is_none());
+    assert_eq!(
+        listed[0].attributes.revision,
+        Some(Revision(format!("12:{}", 1_577_934_245)))
+    );
     assert!(!listed[0].attributes.read_only);
     assert_eq!(listed[1].id, ItemId("/data/sub".into()));
     assert_eq!(listed[1].attributes.kind, Kind::Folder);
@@ -550,7 +555,7 @@ async fn a_process_that_dies_during_a_call_is_replaced() {
 #[tokio::test]
 async fn each_error_code_maps_to_a_vfs_error() {
     let script = fake(&format!(
-        "{read}{missing}{denied}{down}{folder}{library}{other}{bad}{shares}",
+        "{read}{missing}{denied}{down}{folder}{library}{taken}{holding}{changed}{full}{params}{other}{bad}{shares}",
         read = arm(
             r#"*'"method":"read"'*"#,
             &print_error(error_codes::SMB_IS_A_FOLDER),
@@ -574,6 +579,26 @@ async fn each_error_code_maps_to_a_vfs_error() {
         library = arm(
             r#"*'"path":"/lib"'*"#,
             &print_error(error_codes::SMB_LIBRARY_MISSING),
+        ),
+        taken = arm(
+            r#"*'"path":"/taken"'*"#,
+            &print_error(error_codes::SMB_ALREADY_EXISTS),
+        ),
+        holding = arm(
+            r#"*'"path":"/holding"'*"#,
+            &print_error(error_codes::SMB_NOT_EMPTY),
+        ),
+        changed = arm(
+            r#"*'"path":"/changed"'*"#,
+            &print_error(error_codes::SMB_CHANGED),
+        ),
+        full = arm(
+            r#"*'"path":"/full"'*"#,
+            &print_error(error_codes::SMB_NO_SPACE),
+        ),
+        params = arm(
+            r#"*'"path":"/params"'*"#,
+            &print_error(error_codes::INVALID_PARAMS),
         ),
         other = arm(r#"*'"path":"/other"'*"#, &print_error(-1000)),
         bad = arm(r#"*'"path":"/bad"'*"#, "printf 'not-json\\n'"),
@@ -623,6 +648,41 @@ async fn each_error_code_maps_to_a_vfs_error() {
             .await
             .unwrap_err(),
         VfsError::Other(SMBCLIENT_MISSING.into())
+    );
+    assert_eq!(
+        provider
+            .list(&ItemId("/data/taken".into()))
+            .await
+            .unwrap_err(),
+        VfsError::Conflict
+    );
+    assert_eq!(
+        provider
+            .list(&ItemId("/data/holding".into()))
+            .await
+            .unwrap_err(),
+        VfsError::NotEmpty
+    );
+    assert_eq!(
+        provider
+            .list(&ItemId("/data/changed".into()))
+            .await
+            .unwrap_err(),
+        VfsError::Conflict
+    );
+    assert_eq!(
+        provider
+            .list(&ItemId("/data/full".into()))
+            .await
+            .unwrap_err(),
+        VfsError::NoSpace
+    );
+    assert_eq!(
+        provider
+            .list(&ItemId("/data/params".into()))
+            .await
+            .unwrap_err(),
+        VfsError::NotSupported
     );
     assert_eq!(
         provider
@@ -997,4 +1057,274 @@ async fn space_uses_the_first_share_that_reports_a_size() {
         assert_eq!(provider.space().await.unwrap_err(), error);
         assert!(!logged(&script).contains(r#""share":"later""#));
     }
+}
+
+fn local_file(bytes: &[u8]) -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("upload");
+    fs::write(&path, bytes).unwrap();
+    (dir, path)
+}
+
+/// `get_file_metadata` answers not found, so a new file goes on to `save_file`.
+fn missing_metadata() -> String {
+    arm(
+        r#"*'"method":"get_file_metadata"'*"#,
+        &print_error(error_codes::SMB_PATH_NOT_FOUND),
+    )
+}
+
+fn empty_directory() -> String {
+    arm(
+        r#"*'"method":"read_directory"'*"#,
+        &print_result(r#"{"entries":[]}"#),
+    )
+}
+
+async fn wait_for_requests(
+    fake: &Fake,
+    ready: impl Fn(&[serde_json::Value]) -> bool,
+) -> Vec<serde_json::Value> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let sent = requests(fake);
+        if ready(&sent) {
+            return sent;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "requests stayed:\n{}",
+            logged(fake)
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+fn temporary_path(request: &serde_json::Value) -> String {
+    request["params"]["temporary_path"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_upload_does_not_hold_up_other_calls() {
+    let script = fake(&format!(
+        "{save}{meta}{dir}{shares}",
+        save = arm(r#"*'"method":"save_file"'*"#, "sleep 600"),
+        meta = missing_metadata(),
+        dir = empty_directory(),
+        shares = root_shares(&["data"]),
+    ));
+    let saved = save("uploads-aside.example", "pw");
+    let provider = Arc::new(open(&saved, &script));
+    accepted(&provider).await;
+    let (_file_dir, file) = local_file(b"bytes");
+
+    let mut uploads = Vec::new();
+    for n in 0..UPLOAD_PROCESSES {
+        let provider = Arc::clone(&provider);
+        let file = file.clone();
+        uploads.push(tokio::spawn(async move {
+            let _ = provider
+                .create_file(
+                    &ItemId("/data".into()),
+                    &format!("n{n}.txt"),
+                    &file,
+                    UNIX_EPOCH,
+                    &|_| {},
+                )
+                .await;
+        }));
+    }
+    wait_for_requests(&script, |sent| {
+        sent.iter()
+            .filter(|line| line["method"] == "save_file")
+            .count()
+            >= UPLOAD_PROCESSES
+    })
+    .await;
+    let listed = provider.list(&ItemId("/data".into())).await.unwrap();
+    assert!(listed.is_empty());
+    assert!(uploads.iter().all(|upload| !upload.is_finished()));
+    for upload in uploads {
+        upload.abort();
+    }
+}
+
+#[tokio::test]
+async fn progress_reaches_the_core_and_a_stopped_upload_removes_its_temporary_file() {
+    let notices = r#"printf '{"jsonrpc":"2.0","method":"staged","params":{"id":%s}}\n' "$id"
+      printf '{"jsonrpc":"2.0","method":"progress","params":{"id":%s,"bytes":3}}\n' "$id"
+      printf '{"jsonrpc":"2.0","method":"progress","params":{"id":%s,"bytes":8}}\n' "$id"
+      sleep 600"#;
+    let script = fake(&format!(
+        "{save}{meta}{shares}",
+        save = arm(r#"*'"method":"save_file"'*"#, notices),
+        meta = missing_metadata(),
+        shares = root_shares(&["data"]),
+    ));
+    let saved = save("progress.example", "pw");
+    let provider = Arc::new(open(&saved, &script));
+    accepted(&provider).await;
+    let (_file_dir, file) = local_file(b"12345678");
+    let heard = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let upload = tokio::spawn({
+        let provider = Arc::clone(&provider);
+        let heard = Arc::clone(&heard);
+        let file = file.clone();
+        async move {
+            let _ = provider
+                .create_file(
+                    &ItemId("/data".into()),
+                    "note.txt",
+                    &file,
+                    UNIX_EPOCH,
+                    &move |bytes| heard.lock().unwrap().push(bytes),
+                )
+                .await;
+        }
+    });
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if heard.lock().unwrap().len() >= 2 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "progress: {:?}",
+            heard.lock().unwrap()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(*heard.lock().unwrap(), vec![3, 8]);
+    let temporary = temporary_path(
+        requests(&script)
+            .iter()
+            .find(|line| line["method"] == "save_file")
+            .unwrap(),
+    );
+    upload.abort();
+    wait_for_requests(&script, |sent| {
+        sent.iter()
+            .any(|line| line["method"] == "delete" && line["params"]["path"] == temporary.as_str())
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_failed_save_after_staged_removes_its_temporary_file() {
+    let body = format!(
+        "{staged}\n      {error}",
+        staged = r#"printf '{"jsonrpc":"2.0","method":"staged","params":{"id":%s}}\n' "$id""#,
+        error = print_error(error_codes::SMB_CHANGED),
+    );
+    let script = fake(&format!(
+        "{save}{meta}{shares}",
+        save = arm(r#"*'"method":"save_file"'*"#, &body),
+        meta = missing_metadata(),
+        shares = root_shares(&["data"]),
+    ));
+    let saved = save("staged-fails.example", "pw");
+    let provider = open(&saved, &script);
+    accepted(&provider).await;
+    let (_file_dir, file) = local_file(b"abc");
+    assert_eq!(
+        provider
+            .create_file(
+                &ItemId("/data".into()),
+                "note.txt",
+                &file,
+                UNIX_EPOCH,
+                &|_| {},
+            )
+            .await
+            .unwrap_err(),
+        VfsError::Conflict
+    );
+    let sent = requests(&script);
+    let save_at = sent
+        .iter()
+        .position(|line| line["method"] == "save_file")
+        .unwrap();
+    let temporary = temporary_path(&sent[save_at]);
+    assert_eq!(sent[save_at + 1]["method"], "delete");
+    assert_eq!(sent[save_at + 1]["params"]["path"], temporary);
+}
+
+#[tokio::test]
+async fn a_removal_that_fails_is_tried_again_before_the_next_upload() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("deleted-once");
+    let succeed = r#"printf '{"jsonrpc":"2.0","id":%s,"result":null}\n' "$id""#;
+    let delete = format!(
+        "if [ ! -f {marker} ]; then\n        touch {marker}\n        {error}\n      else\n        {succeed}\n      fi",
+        marker = shell_quote(&marker),
+        error = print_error(error_codes::SMB_CONNECTION_LOST),
+        succeed = succeed,
+    );
+    let save_body = format!(
+        "{staged}\n      {error}",
+        staged = r#"printf '{"jsonrpc":"2.0","method":"staged","params":{"id":%s}}\n' "$id""#,
+        error = print_error(error_codes::SMB_CHANGED),
+    );
+    let script = fake(&format!(
+        "{save}{delete}{meta}{shares}",
+        save = arm(r#"*'"method":"save_file"'*"#, &save_body),
+        delete = arm(r#"*'"method":"delete"'*"#, &delete),
+        meta = missing_metadata(),
+        shares = root_shares(&["data"]),
+    ));
+    let saved = save("stray.example", "pw");
+    let provider = open(&saved, &script);
+    accepted(&provider).await;
+    let (_file_dir, file) = local_file(b"abc");
+    assert_eq!(
+        provider
+            .create_file(
+                &ItemId("/data".into()),
+                "one.txt",
+                &file,
+                UNIX_EPOCH,
+                &|_| {},
+            )
+            .await
+            .unwrap_err(),
+        VfsError::Conflict
+    );
+    let first = temporary_path(
+        requests(&script)
+            .iter()
+            .find(|line| line["method"] == "save_file")
+            .unwrap(),
+    );
+    assert_eq!(
+        provider
+            .create_file(
+                &ItemId("/data".into()),
+                "two.txt",
+                &file,
+                UNIX_EPOCH,
+                &|_| {},
+            )
+            .await
+            .unwrap_err(),
+        VfsError::Conflict
+    );
+    let sent = requests(&script);
+    let saves: Vec<usize> = sent
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line["method"] == "save_file")
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(saves.len(), 2);
+    // The first delete failed. The second upload sends the same path again, before its own `save_file`.
+    let retried = sent
+        .iter()
+        .take(saves[1])
+        .skip(saves[0] + 1)
+        .filter(|line| line["method"] == "delete" && line["params"]["path"] == first.as_str())
+        .count();
+    assert_eq!(retried, 2, "requests:\n{}", logged(&script));
 }

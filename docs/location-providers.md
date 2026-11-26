@@ -3,7 +3,7 @@
 Every path in Marlin is a URI, and its scheme picks a storage backend called a location provider. The provider trait covers listing and whole-item operations only. It has no way to read or write file contents, so every feature that moves bytes between two backends is written by hand for each pair. Epic #368 replaces this with native mounts.
 
 **Covers:** `src-tauri/src/locations/`, `src-tauri/crates/marlin-smb/`, `src-tauri/crates/marlin-smb-client/`, `src-tauri/crates/marlin-sftp/`, `src-tauri/crates/marlin-local-network/`, `src-tauri/Info.plist`, the paste, drop, download, and extract commands in `src-tauri/src/commands.rs`, the `unrar` entry in `src-tauri/Cargo.toml`, `src/utils/sftpHostKey.ts`, `src/windows/SftpConnectWindow.tsx`, and `src/utils/googleSignIn.ts`
-**Checked against the code:** 2026-11-25
+**Checked against the code:** 2026-11-26
 
 ## The model
 
@@ -119,7 +119,7 @@ Each temp copy keeps the file's exact name, in a folder of its own under the OS 
 
 ## Where this is going
 
-Epic #368 turns each connected account or server into a native mount, so the OS sees an ordinary folder. Then local-to-remote and remote-to-remote copies, drag and drop, the clipboard, and other apps all work through normal filesystem calls, and the pair table goes away. A few provider actions stay outside the filesystem, such as a Drive copy that keeps a Google Doc a Doc. The work is split into issues #369 to #378. [Decision 0001](decisions/0001-mount-architecture.md) sets the architecture and the order of that work. Its evidence is the spike in `spikes/mount-hello/`. The helper's sweep test uses the spike's programs. The [mount core](mount-core.md) and the [mount helper](mount-helper.md) are in the repo: the helper mounts a Google account and a saved SFTP server, with writes, and a saved SMB server, read-only, on Linux and macOS. Marlin's window does not route an account to its mount yet: a saved account or a provider address opens through the providers on this page. A mount opened by its own path goes through the window's local code, which lists it as a network or FUSE folder (see [Architecture](architecture.md)).
+Epic #368 turns each connected account or server into a native mount, so the OS sees an ordinary folder. Then local-to-remote and remote-to-remote copies, drag and drop, the clipboard, and other apps all work through normal filesystem calls, and the pair table goes away. A few provider actions stay outside the filesystem, such as a Drive copy that keeps a Google Doc a Doc. The work is split into issues #369 to #378. [Decision 0001](decisions/0001-mount-architecture.md) sets the architecture and the order of that work. Its evidence is the spike in `spikes/mount-hello/`. The helper's sweep test uses the spike's programs. The [mount core](mount-core.md) and the [mount helper](mount-helper.md) are in the repo: the helper mounts a Google account and a saved SFTP server, with writes, and a saved SMB server, with writes, on Linux and macOS. Marlin's window does not route an account to its mount yet: a saved account or a provider address opens through the providers on this page. A mount opened by its own path goes through the window's local code, which lists it as a network or FUSE folder (see [Architecture](architecture.md)).
 
 [Decision 0009](decisions/0009-window-on-mount-paths.md) sets how the window moves onto mounts, one provider at a time, and which code on this page stays. #377 lists the pieces.
 

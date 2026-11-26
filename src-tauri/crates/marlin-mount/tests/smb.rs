@@ -6,9 +6,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use marlin_mount::protocol::{error_codes, MountState, MountStatus, ReadOnly};
+use marlin_mount::protocol::{error_codes, MountState, MountStatus};
 use marlin_mount::{Config, LinkedProviders, OsAdapter, Server, SmbConfig};
 use marlin_mount_client::{Client, ClientError, Event, Start};
 use marlin_test_samba::{DENIED_SHARE, SHARE, URL_CHARACTERS_SHARE};
@@ -332,9 +332,25 @@ done
     stop(running).await;
 }
 
+/// libsmbclient 4.23 and later can replace a file on a server that is not on port 445. `smbclient --version` prints the library's version, such as `Version 4.17.12-Debian`.
+fn libsmbclient_replaces_off_port_445() -> bool {
+    let output = Command::new("smbclient").arg("--version").output().unwrap();
+    let text = String::from_utf8_lossy(&output.stdout);
+    let Some(version) = text
+        .split(|character: char| !character.is_ascii_digit() && character != '.')
+        .find(|part| part.contains('.'))
+    else {
+        return false;
+    };
+    let mut numbers = version
+        .split('.')
+        .map(|part| part.parse::<u32>().unwrap_or(0));
+    (numbers.next().unwrap_or(0), numbers.next().unwrap_or(0)) >= (4, 23)
+}
+
 #[ignore = "mounts for real: run crates/marlin-fuse/test-in-docker.sh on Linux, crates/marlin-fuse/test-on-mac.sh on a Mac"]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_saved_server_mounts_and_reads_through_fuse() {
+async fn a_saved_server_mounts_and_takes_writes_through_fuse() {
     marlin_test_keychain::install();
     let server = marlin_test_samba::Server::start();
     std::fs::write(server.path("notes.txt"), b"hello").unwrap();
@@ -387,14 +403,7 @@ async fn a_saved_server_mounts_and_reads_through_fuse() {
         .await
         .unwrap();
     assert_eq!(status.state, MountState::Mounted);
-    assert_eq!(status.read_only, Some(ReadOnly::Provider));
-    assert!(!running
-        .root
-        .parent()
-        .unwrap()
-        .join("spool")
-        .join("smb")
-        .exists());
+    assert_eq!(status.read_only, None);
     let point = PathBuf::from(&status.mount_point);
 
     let mut shares = [SHARE, DENIED_SHARE, URL_CHARACTERS_SHARE].map(String::from);
@@ -453,41 +462,64 @@ async fn a_saved_server_mounts_and_reads_through_fuse() {
     let denied = list(&point.join(DENIED_SHARE)).await.unwrap_err();
     assert_eq!(denied.raw_os_error(), Some(libc::EACCES));
 
-    let created = tokio::task::spawn_blocking({
+    // libsmbclient before 4.23 reads a file's access only on port 445. This server is not, so a replace is refused and this test does not overwrite.
+    let replaces = libsmbclient_replaces_off_port_445();
+    tokio::task::spawn_blocking({
+        let data = data.clone();
+        move || {
+            std::fs::write(data.join("new.txt"), b"made here").unwrap();
+            std::fs::create_dir(data.join("box")).unwrap();
+            std::fs::rename(data.join("notes.txt"), data.join("box").join("notes.txt")).unwrap();
+            if replaces {
+                std::fs::write(data.join("big.bin"), b"replaced").unwrap();
+            }
+        }
+    })
+    .await
+    .unwrap();
+    // Uploads start 2 seconds after the last close. A rename and a new folder reach the server at once.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let ready = tokio::task::spawn_blocking({
+            let server = server.path("");
+            move || {
+                std::fs::read(server.join("new.txt")).ok().as_deref() == Some(b"made here")
+                    && server.join("box").is_dir()
+                    && std::fs::read(server.join("box").join("notes.txt"))
+                        .ok()
+                        .as_deref()
+                        == Some(b"hello")
+                    && !server.join("notes.txt").exists()
+                    && (!replaces
+                        || std::fs::read(server.join("big.bin")).ok().as_deref()
+                            == Some(b"replaced"))
+            }
+        })
+        .await
+        .unwrap();
+        if ready {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the server did not show the writes"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    tokio::task::spawn_blocking({
         let path = data.join("new.txt");
-        move || std::fs::write(path, b"x")
+        move || std::fs::remove_file(path).unwrap()
     })
     .await
-    .unwrap()
-    .unwrap_err();
-    assert_eq!(created.raw_os_error(), Some(libc::EROFS));
-    let made = tokio::task::spawn_blocking({
-        let path = data.join("new");
-        move || std::fs::create_dir(path)
-    })
-    .await
-    .unwrap()
-    .unwrap_err();
-    assert_eq!(made.raw_os_error(), Some(libc::EROFS));
-    let removed = tokio::task::spawn_blocking({
-        let path = data.join("notes.txt");
-        move || std::fs::remove_file(path)
-    })
-    .await
-    .unwrap()
-    .unwrap_err();
-    assert_eq!(removed.raw_os_error(), Some(libc::EROFS));
-    let renamed = tokio::task::spawn_blocking({
-        let from = data.join("notes.txt");
-        let to = data.join("other.txt");
-        move || std::fs::rename(from, to)
-    })
-    .await
-    .unwrap()
-    .unwrap_err();
-    assert_eq!(renamed.raw_os_error(), Some(libc::EROFS));
-    assert_eq!(names(&server.path("")).await, shared);
-    assert_eq!(std::fs::read(server.path("notes.txt")).unwrap(), b"hello");
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while server.path("new.txt").exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the remove did not reach the server"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
     let pids = marlin_smb_children();
     assert!(!pids.is_empty());
@@ -499,9 +531,29 @@ async fn a_saved_server_mounts_and_reads_through_fuse() {
         }
         wait_until_exited(pid);
     }
-    assert_eq!(names(&data).await, shared);
+    let after = ["big.bin", "box", "sub"].map(String::from);
+    assert_eq!(names(&data).await, after);
     // A new process answered: a killed one can still show as a zombie until its parent reaps it.
     assert!(marlin_smb_children().iter().any(|pid| !pids.contains(pid)));
+
+    // The kill ended the call processes. One finished upload starts an upload process, and the unmount has to end that too.
+    tokio::task::spawn_blocking({
+        let path = data.join("after.txt");
+        move || std::fs::write(path, b"after").unwrap()
+    })
+    .await
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if std::fs::read(server.path("after.txt")).ok().as_deref() == Some(b"after") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the upload after the killed processes did not finish"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 
     running
         .client

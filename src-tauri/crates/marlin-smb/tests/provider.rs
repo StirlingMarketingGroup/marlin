@@ -1,12 +1,13 @@
 use std::fs::File;
 use std::io::Write;
+use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use marlin_smb_client::protocol::READ_MAX;
 use marlin_smb_client::{add_server, SmbProvider, SmbSignIn};
-use marlin_test_samba::{Server, PASSWORD};
-use marlin_vfs::{ItemId, Kind, Provider, VfsError};
+use marlin_test_samba::{Server, DENIED_SHARE, PASSWORD};
+use marlin_vfs::{ItemId, Kind, Provider, Revision, VfsError};
 
 fn mounted(password: &str) -> (Server, tempfile::TempDir, SmbProvider) {
     marlin_test_keychain::install();
@@ -206,4 +207,313 @@ async fn a_stopped_server_is_offline() {
         provider.list(&ItemId("/data".into())).await.unwrap_err(),
         VfsError::Offline
     );
+}
+
+fn local_file(bytes: &[u8]) -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("upload");
+    std::fs::write(&path, bytes).unwrap();
+    (dir, path)
+}
+
+fn whole_seconds(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn assert_matches_disk(server: &Server, name: &str, item: &marlin_vfs::Item, bytes: &[u8]) {
+    let path = server.path(name);
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    let on_disk = std::fs::metadata(&path).unwrap().modified().unwrap();
+    assert_eq!(
+        whole_seconds(item.attributes.modified),
+        whole_seconds(on_disk)
+    );
+}
+
+fn assert_no_marlin_names(dir: &Path) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name();
+        assert!(
+            !name.to_string_lossy().starts_with(".marlin-"),
+            "{}",
+            name.to_string_lossy()
+        );
+        if entry.file_type().unwrap().is_dir() {
+            assert_no_marlin_names(&entry.path());
+        }
+    }
+}
+
+/// Whether the helper reads a file's access from the test server, which is not on port 445. libsmbclient before 4.23 reads access only on port 445, so with it the helper refuses a replace before anything is made.
+fn server_reads_access() -> bool {
+    // SAFETY: libsmbclient returns a static string, such as `4.17.12-Debian`.
+    let version = unsafe { std::ffi::CStr::from_ptr(pavao_sys::smbc_version()) }.to_string_lossy();
+    let mut numbers = version
+        .split('.')
+        .map(|part| part.parse::<u32>().unwrap_or(0));
+    (numbers.next().unwrap_or(0), numbers.next().unwrap_or(0)) >= (4, 23)
+}
+
+#[tokio::test]
+async fn samba_makes_moves_and_removes_folders_and_files() {
+    let (server, _dir, provider) = mounted(PASSWORD);
+    let modified = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let folder = provider
+        .create_folder(&ItemId("/data".into()), "box")
+        .await
+        .unwrap();
+    assert_eq!(folder.id, ItemId("/data/box".into()));
+    assert!(server.path("box").is_dir());
+    assert_eq!(
+        provider
+            .create_folder(&ItemId("/data".into()), "box")
+            .await
+            .unwrap_err(),
+        VfsError::Conflict
+    );
+
+    let bytes = b"hello";
+    let (_local, path) = local_file(bytes);
+    let file = provider
+        .create_file(&folder.id, "note.txt", &path, modified, &|_| {})
+        .await
+        .unwrap();
+    assert_eq!(file.id, ItemId("/data/box/note.txt".into()));
+    assert_matches_disk(&server, "box/note.txt", &file, bytes);
+    assert_eq!(
+        provider
+            .create_file(&folder.id, "note.txt", &path, modified, &|_| {})
+            .await
+            .unwrap_err(),
+        VfsError::Conflict
+    );
+
+    let renamed = provider
+        .rename(&file.id, &folder.id, &folder.id, "other.txt", None)
+        .await
+        .unwrap();
+    assert_eq!(renamed.id, ItemId("/data/box/other.txt".into()));
+    assert!(!server.path("box/note.txt").exists());
+
+    let other = provider
+        .create_folder(&ItemId("/data".into()), "other")
+        .await
+        .unwrap();
+    let moved = provider
+        .rename(&renamed.id, &folder.id, &other.id, "other.txt", None)
+        .await
+        .unwrap();
+    assert_eq!(moved.id, ItemId("/data/other/other.txt".into()));
+
+    let (_kept_dir, kept_path) = local_file(b"OLD");
+    let kept = provider
+        .create_file(&other.id, "kept.txt", &kept_path, modified, &|_| {})
+        .await
+        .unwrap();
+    assert_eq!(
+        provider
+            .rename(&moved.id, &other.id, &other.id, "kept.txt", None)
+            .await
+            .unwrap_err(),
+        VfsError::Conflict
+    );
+    assert_eq!(
+        std::fs::read(server.path("other/kept.txt")).unwrap(),
+        b"OLD"
+    );
+    let replaced = provider
+        .rename(&moved.id, &other.id, &other.id, "kept.txt", Some(&kept.id))
+        .await
+        .unwrap();
+    assert_eq!(replaced.id, kept.id);
+    assert!(!server.path("other/other.txt").exists());
+    assert_eq!(std::fs::read(server.path("other/kept.txt")).unwrap(), bytes);
+
+    assert_eq!(
+        provider
+            .rename(
+                &folder.id,
+                &ItemId("/data".into()),
+                &folder.id,
+                "inner",
+                None
+            )
+            .await
+            .unwrap_err(),
+        VfsError::NotSupported
+    );
+    assert_eq!(
+        provider
+            .rename(
+                &replaced.id,
+                &other.id,
+                &ItemId(format!("/{DENIED_SHARE}")),
+                "x.txt",
+                None,
+            )
+            .await
+            .unwrap_err(),
+        VfsError::NotSupported
+    );
+    assert_eq!(
+        provider
+            .rename(&replaced.id, &other.id, &ItemId("/".into()), "x.txt", None)
+            .await
+            .unwrap_err(),
+        VfsError::NotSupported
+    );
+    assert_eq!(
+        provider
+            .create_folder(&ItemId("/data".into()), "a?b")
+            .await
+            .unwrap_err(),
+        VfsError::NotSupported
+    );
+    assert_eq!(
+        provider
+            .create_file(&ItemId("/data".into()), "a:b", &path, modified, &|_| {})
+            .await
+            .unwrap_err(),
+        VfsError::NotSupported
+    );
+
+    provider.remove(&replaced.id, &other.id).await.unwrap();
+    assert!(!server.path("other/kept.txt").exists());
+    let (_stay_dir, stay_path) = local_file(b"stay");
+    let stay = provider
+        .create_file(&folder.id, "stay.txt", &stay_path, modified, &|_| {})
+        .await
+        .unwrap();
+    assert_eq!(
+        provider
+            .remove(&folder.id, &ItemId("/data".into()))
+            .await
+            .unwrap_err(),
+        VfsError::NotEmpty
+    );
+    provider.remove(&stay.id, &folder.id).await.unwrap();
+    provider
+        .remove(&folder.id, &ItemId("/data".into()))
+        .await
+        .unwrap();
+    assert!(!server.path("box").exists());
+    assert_no_marlin_names(&server.path(""));
+}
+
+#[tokio::test]
+async fn samba_replaces_bytes_only_at_the_base_revision() {
+    let (server, _dir, provider) = mounted(PASSWORD);
+    let modified = UNIX_EPOCH + Duration::from_secs(1_700_000_100);
+    let original = vec![1u8; 2 * 1024 * 1024];
+    let (_dir, path) = local_file(&original);
+    let item = provider
+        .create_file(
+            &ItemId("/data".into()),
+            "note.bin",
+            &path,
+            modified,
+            &|_| {},
+        )
+        .await
+        .unwrap();
+    let base = item.attributes.revision.clone().unwrap();
+    let replacement = vec![2u8; original.len()];
+    let (_dir, next) = local_file(&replacement);
+    let heard = Arc::new(std::sync::Mutex::new(Vec::new()));
+    assert_eq!(
+        provider
+            .replace_bytes(&item.id, &next, &Revision("0:1".into()), modified, &{
+                let heard = Arc::clone(&heard);
+                move |bytes| heard.lock().unwrap().push(bytes)
+            },)
+            .await
+            .unwrap_err(),
+        VfsError::Conflict
+    );
+    assert!(heard.lock().unwrap().is_empty());
+    assert_eq!(std::fs::read(server.path("note.bin")).unwrap(), original);
+
+    let heard = Arc::new(std::sync::Mutex::new(Vec::new()));
+    // The same size, so only the later time tells the two revisions apart.
+    let later = modified + Duration::from_secs(3600);
+    let replaced = provider
+        .replace_bytes(&item.id, &next, &base, later, &{
+            let heard = Arc::clone(&heard);
+            move |bytes| heard.lock().unwrap().push(bytes)
+        })
+        .await;
+    if server_reads_access() {
+        let replaced = replaced.unwrap();
+        assert_eq!(std::fs::read(server.path("note.bin")).unwrap(), replacement);
+        let heard = heard.lock().unwrap();
+        assert!(heard.windows(2).all(|pair| pair[0] <= pair[1]), "{heard:?}");
+        assert_eq!(heard.last().copied(), Some(replacement.len() as u64));
+        assert_eq!(
+            replaced.attributes.revision,
+            Some(Revision(format!("{}:1700003700", replacement.len())))
+        );
+    } else {
+        // libsmbclient before 4.23 reads access only on port 445, and this server is not on 445, so the replace is refused.
+        assert_eq!(replaced.unwrap_err(), VfsError::AccessDenied);
+        assert_eq!(std::fs::read(server.path("note.bin")).unwrap(), original);
+    }
+    assert_no_marlin_names(&server.path(""));
+}
+
+#[tokio::test]
+async fn a_stopped_upload_leaves_no_temporary_file() {
+    let (server, _dir, provider) = mounted(PASSWORD);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sparse");
+    let file = File::create(&path).unwrap();
+    file.set_len(64 * 1024 * 1024).unwrap();
+    drop(file);
+
+    let provider = Arc::new(provider);
+    let seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let upload = tokio::spawn({
+        let provider = Arc::clone(&provider);
+        let seen = Arc::clone(&seen);
+        let path = path.clone();
+        async move {
+            let _ = provider
+                .create_file(
+                    &ItemId("/data".into()),
+                    "big.bin",
+                    &path,
+                    UNIX_EPOCH,
+                    &move |_| seen.store(true, std::sync::atomic::Ordering::Relaxed),
+                )
+                .await;
+        }
+    });
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !seen.load(std::sync::atomic::Ordering::Relaxed) {
+        assert!(Instant::now() < deadline, "the upload sent no progress");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    upload.abort();
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let left = std::fs::read_dir(server.path("")).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".marlin-")
+        });
+        if !left {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "a temporary file stayed in the share"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(!server.path("big.bin").exists());
 }
