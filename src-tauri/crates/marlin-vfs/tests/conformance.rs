@@ -2554,6 +2554,280 @@ async fn a_new_file_uploads_after_the_settle_time() {
     assert_eq!(found.node, made.node);
 }
 
+/// Replays Finder's calls for a copy of two items (#629).
+async fn finders_placeholders_never_reach(
+    provider: Arc<MemoryProvider>,
+    vfs: Arc<Vfs>,
+    dir: tempfile::TempDir,
+) {
+    let _uploads = start_uploads(&vfs);
+    let (big_placeholder, big) = vfs
+        .create(Vfs::ROOT, "big.bin", Access::Write)
+        .await
+        .unwrap();
+    vfs.release(big);
+    let (small_placeholder, small) = vfs
+        .create(Vfs::ROOT, "small.txt", Access::Write)
+        .await
+        .unwrap();
+    vfs.release(small);
+
+    vfs.remove(Vfs::ROOT, "big.bin", Kind::File).await.unwrap();
+    // `create` counted a lookup. A removed new file keeps its spool file until that lookup is given back.
+    vfs.forget(big_placeholder.node, 1);
+    let (_, big) = vfs
+        .create(Vfs::ROOT, "big.bin", Access::Write)
+        .await
+        .unwrap();
+    vfs.write(big, 0, b"big bytes").await.unwrap();
+
+    advance(settle() * 3).await;
+    assert_eq!(provider.uploads(), 0);
+    let unsent = vfs.unsent();
+    assert_eq!(unsent.len(), 2);
+    assert!(unsent
+        .iter()
+        .all(|unsent| unsent.state == UnsentState::Open));
+
+    vfs.release(big);
+    advance(settle() / 2).await;
+    assert_eq!(provider.uploads(), 0);
+
+    vfs.remove(Vfs::ROOT, "small.txt", Kind::File)
+        .await
+        .unwrap();
+    vfs.forget(small_placeholder.node, 1);
+    let (_, small) = vfs
+        .create(Vfs::ROOT, "small.txt", Access::Write)
+        .await
+        .unwrap();
+    vfs.write(small, 0, b"small").await.unwrap();
+    vfs.release(small);
+
+    advance(settle()).await;
+    yield_until("the files did not upload", || {
+        provider.uploads() == 2 && spool_files(&dir) == 0
+    })
+    .await;
+    let mut got: Vec<(String, Vec<u8>)> = root_items(&provider)
+        .await
+        .into_iter()
+        .map(|item| {
+            let bytes = provider.contents(&item.id);
+            (item.name, bytes)
+        })
+        .collect();
+    got.sort();
+    assert_eq!(
+        got,
+        vec![
+            ("big.bin".to_string(), b"big bytes".to_vec()),
+            ("small.txt".to_string(), b"small".to_vec()),
+        ]
+    );
+    assert_eq!(provider.uploads(), 2);
+    assert!(vfs.unsent().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn finders_placeholders_never_reach_the_remote() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    finders_placeholders_never_reach(provider, vfs, dir).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn finders_placeholders_never_reach_a_remote_whose_ids_are_paths() {
+    let (provider, vfs, dir) = spooled_path_mount(Options::default(), 1024, never_local);
+    finders_placeholders_never_reach(provider, vfs, dir).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_empty_new_file_waits_for_every_writer_in_the_mount() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    let _uploads = start_uploads(&vfs);
+    let (_, alone) = vfs
+        .create(Vfs::ROOT, "alone.txt", Access::Write)
+        .await
+        .unwrap();
+    vfs.release(alone);
+    advance(settle()).await;
+    yield_until("the empty file did not upload", || provider.uploads() == 1).await;
+    let items = root_items(&provider).await;
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].name, "alone.txt");
+    assert_eq!(provider.contents(&items[0].id), b"");
+
+    let (_, open) = vfs
+        .create(Vfs::ROOT, "open.txt", Access::Write)
+        .await
+        .unwrap();
+    vfs.write(open, 0, b"x").await.unwrap();
+    let (_, empty) = vfs
+        .create(Vfs::ROOT, "empty.txt", Access::Write)
+        .await
+        .unwrap();
+    vfs.release(empty);
+    let (_, full) = vfs
+        .create(Vfs::ROOT, "full.txt", Access::Write)
+        .await
+        .unwrap();
+    vfs.write(full, 0, b"y").await.unwrap();
+    vfs.release(full);
+
+    advance(settle()).await;
+    yield_until("the non-empty file did not upload", || {
+        provider.uploads() == 2
+    })
+    .await;
+    advance(settle() * 2).await;
+    assert_eq!(provider.uploads(), 2);
+    let empty = vfs
+        .unsent()
+        .into_iter()
+        .find(|unsent| unsent.name == "empty.txt")
+        .unwrap();
+    assert_eq!(empty.state, UnsentState::Open);
+
+    vfs.release(open);
+    advance(settle() - Duration::from_millis(1)).await;
+    assert_eq!(provider.uploads(), 2);
+    advance(Duration::from_millis(1)).await;
+    yield_until("the held files did not upload", || {
+        provider.uploads() == 4 && spool_files(&dir) == 0
+    })
+    .await;
+    let mut got: Vec<(String, Vec<u8>)> = root_items(&provider)
+        .await
+        .into_iter()
+        .map(|item| {
+            let bytes = provider.contents(&item.id);
+            (item.name, bytes)
+        })
+        .collect();
+    got.sort();
+    assert_eq!(
+        got,
+        vec![
+            ("alone.txt".to_string(), b"".to_vec()),
+            ("empty.txt".to_string(), b"".to_vec()),
+            ("full.txt".to_string(), b"y".to_vec()),
+            ("open.txt".to_string(), b"x".to_vec()),
+        ]
+    );
+    assert!(vfs.unsent().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_empty_new_file_keeps_its_retry_wait_when_another_writer_closes() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    provider.add_file(&provider.root(), "other.txt", b"old");
+    let _uploads = start_uploads(&vfs);
+    // `create` asks the provider for the folder until the mount holds its listing and attributes. Those calls are not the upload.
+    vfs.attributes(Vfs::ROOT).await.unwrap();
+    vfs.lookup(Vfs::ROOT, "other.txt").await.unwrap();
+    provider.fail_with(Some(VfsError::Offline));
+    let (_, empty) = vfs
+        .create(Vfs::ROOT, "empty.txt", Access::Write)
+        .await
+        .unwrap();
+    vfs.release(empty);
+    advance(settle()).await;
+    yield_until("the failure was not recorded", || {
+        vfs.unsent().iter().any(|unsent| {
+            unsent.name == "empty.txt" && unsent.state == UnsentState::Failed(VfsError::Offline)
+        }) && provider.uploads() == 1
+    })
+    .await;
+    provider.fail_with(None);
+    // The retry is due 5 seconds after that failure.
+    advance(Duration::from_secs(1)).await;
+    let other = vfs.lookup(Vfs::ROOT, "other.txt").await.unwrap();
+    let handle = vfs.open(other.node, Access::Write).await.unwrap();
+    assert!(vfs.unsent().iter().any(|unsent| {
+        unsent.name == "empty.txt" && unsent.state == UnsentState::Failed(VfsError::Offline)
+    }));
+    advance(Duration::from_millis(500)).await;
+    vfs.release(handle);
+    advance(Duration::from_millis(3_499)).await;
+    assert_eq!(provider.uploads(), 1);
+    advance(Duration::from_millis(1)).await;
+    yield_until("the retry did not upload", || {
+        provider.uploads() == 2 && spool_files(&dir) == 0
+    })
+    .await;
+    let items = root_items(&provider).await;
+    let empty = items.iter().find(|item| item.name == "empty.txt").unwrap();
+    assert_eq!(provider.contents(&empty.id), b"");
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_empty_new_file_whose_retry_comes_while_a_writer_is_open_waits_for_it() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);
+    provider.add_file(&provider.root(), "other.txt", b"old");
+    let _uploads = start_uploads(&vfs);
+    // `create` asks the provider for the folder until the mount holds its listing and attributes. Those calls are not the upload.
+    vfs.attributes(Vfs::ROOT).await.unwrap();
+    let other = vfs.lookup(Vfs::ROOT, "other.txt").await.unwrap();
+    provider.fail_with(Some(VfsError::Offline));
+    let (_, empty) = vfs
+        .create(Vfs::ROOT, "empty.txt", Access::Write)
+        .await
+        .unwrap();
+    vfs.release(empty);
+    advance(settle()).await;
+    yield_until("the first try did not fail", || provider.uploads() == 1).await;
+    provider.fail_with(None);
+    // The retry is due 5 seconds after that failure. The writer is still open then.
+    advance(Duration::from_secs(1)).await;
+    let handle = vfs.open(other.node, Access::Write).await.unwrap();
+    advance(Duration::from_secs(5)).await;
+    assert_eq!(provider.uploads(), 1);
+    assert!(vfs.unsent().iter().any(|unsent| {
+        unsent.name == "empty.txt" && unsent.state == UnsentState::Failed(VfsError::Offline)
+    }));
+    vfs.release(handle);
+    advance(settle() - Duration::from_millis(1)).await;
+    assert_eq!(provider.uploads(), 1);
+    advance(Duration::from_millis(1)).await;
+    yield_until("the retry did not upload", || {
+        provider.uploads() == 2 && spool_files(&dir) == 0
+    })
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_refused_empty_new_file_shows_its_refusal_while_another_file_is_written() {
+    let (provider, vfs, _dir) = spooled_mount(Options::default(), 1024, never_local);
+    provider.add_file(&provider.root(), "other.txt", b"old");
+    let _uploads = start_uploads(&vfs);
+    // `create` asks the provider for the folder until the mount holds its listing and attributes. Those calls are not the upload.
+    vfs.attributes(Vfs::ROOT).await.unwrap();
+    vfs.lookup(Vfs::ROOT, "other.txt").await.unwrap();
+    provider.fail_with(Some(VfsError::AccessDenied));
+    let (_, empty) = vfs
+        .create(Vfs::ROOT, "empty.txt", Access::Write)
+        .await
+        .unwrap();
+    vfs.release(empty);
+    advance(settle()).await;
+    yield_until("the refusal was not recorded", || {
+        vfs.unsent().iter().any(|unsent| {
+            unsent.name == "empty.txt"
+                && unsent.state == UnsentState::Refused(VfsError::AccessDenied)
+        })
+    })
+    .await;
+    provider.fail_with(None);
+    let other = vfs.lookup(Vfs::ROOT, "other.txt").await.unwrap();
+    let handle = vfs.open(other.node, Access::Write).await.unwrap();
+    assert!(vfs.unsent().iter().any(|unsent| {
+        unsent.name == "empty.txt" && unsent.state == UnsentState::Refused(VfsError::AccessDenied)
+    }));
+    vfs.release(handle);
+    advance(settle() * 2).await;
+    assert_eq!(provider.uploads(), 1);
+}
+
 #[tokio::test(start_paused = true)]
 async fn an_edited_file_keeps_its_id_and_shows_the_new_revision() {
     let (provider, vfs, dir) = spooled_mount(Options::default(), 1024, never_local);

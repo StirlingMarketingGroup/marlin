@@ -103,7 +103,7 @@ pub struct Options {
     /// How long the account's total and free space may be reused. Zero turns it off.
     pub space_ttl: Duration,
 
-    /// How long a file waits after its last writer closes, or after its last change, before it uploads.
+    /// How long a file waits after its last writer closes, or after its last change, before it uploads. An empty file that is only in the spool also waits until no file in the mount has been open for writing for this long (decision 0012).
     pub settle: Duration,
 
     /// How many uploads may run at once. An upload's byte calls never take a slot of [`Self::max_calls`] and have no [`Self::call_timeout`]. A conflict copy's `item` call, the remove of a stray item, and the check before an adopted file's first try are ordinary calls.
@@ -358,8 +358,14 @@ struct State {
     /// The sum of `size` and `reserved` over every [`SpoolFile`].
     spool_used: u64,
 
-    /// When a spool file may next be sent. An entry stays after the file changes. The uploader drops one that cannot start.
+    /// When a spool file may next be sent. An entry stays after the file changes. The uploader drops one that cannot start, or moves it to `held`.
     queue: BTreeSet<(Instant, SpoolId)>,
+
+    /// Empty new files the uploader took from the queue while the mount was not quiet. The uploader puts them back in the queue once nothing in the mount has been open for writing for the settle time (decision 0012). A file is in `queue` or here, never both: `schedule` and `discard` take it out of here.
+    held: BTreeSet<SpoolId>,
+
+    /// When the mount's last handle open for writing closed. `None` until one has.
+    writers_closed: Option<Instant>,
 }
 
 /// How much of a remote file one fetch reads at a time. A stored size never limits a read, so the piece size is the only cap.
@@ -452,6 +458,8 @@ impl Vfs {
                 new_files: HashMap::new(),
                 spool_used: 0,
                 queue: BTreeSet::new(),
+                held: BTreeSet::new(),
+                writers_closed: None,
             })),
             room: Arc::new(Notify::new()),
             uploads: Arc::new(Notify::new()),
@@ -873,7 +881,7 @@ impl Vfs {
             discard(&mut state, &self.room, spool_id);
             return Err(spool::map_io(error));
         }
-        // A writer holds the upload back. A file made for reading uploads empty, as `touch` needs.
+        // A writer holds the upload back, and while the file is empty so does any writer in the mount (decision 0012). An empty file made on purpose, as by `touch`, still uploads once nothing in the mount is open for writing.
         upload::schedule(
             &mut state,
             &self.uploads,
@@ -952,6 +960,11 @@ impl Vfs {
                 if let (Some(syncs), Some(_)) = (&self.syncs, self.sends(&state, id)) {
                     let _ = syncs.send(state.spools[&id].path.clone());
                 }
+            }
+            // The mount's last writer closed. Empty new files wait the settle time from now (decision 0012).
+            if !upload::mount_has_writer(&state) {
+                state.writers_closed = Some(Instant::now());
+                self.uploads.notify_one();
             }
         }
         let nodes = match opened {
@@ -2296,6 +2309,7 @@ fn discard(state: &mut State, room: &Notify, id: SpoolId) {
     };
     state.spool_used -= spool.size + spool.reserved;
     state.queue.remove(&(spool.due, id));
+    state.held.remove(&id);
     room.notify_waiters();
     // Unlinking is one quick call, and the sync callers (`release`, `forget`) cannot wait. When any caller returns, the bytes are gone. The record goes second: a crash between the two leaves a record with no file, which the next mount deletes.
     let _ = std::fs::remove_file(&spool.path);

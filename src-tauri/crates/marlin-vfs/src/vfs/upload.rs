@@ -10,7 +10,7 @@ use crate::{spool, Item, ItemId, Revision, VfsError};
 use super::record::save_record;
 use super::{
     change_listing, discard, drop_unreferenced, moved_path, note_changed, remember, unlist, unname,
-    Asked, Bytes, Identity, NodeId, Place, Sent, SpoolId, State, Vfs, PIECE,
+    Access, Asked, Bytes, Identity, NodeId, Opened, Place, Sent, SpoolId, State, Vfs, PIECE,
 };
 
 /// How long the first retry waits. Each later wait is twice the one before, up to [`RETRY_MAX`].
@@ -38,7 +38,7 @@ pub struct Unsent {
 /// Where an [`Unsent`] file is in its upload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnsentState {
-    /// A writer has it open.
+    /// A writer has it open. An empty file that is only in the spool, and whose last try did not fail, also shows open while any file in the mount is open for writing: it waits for those writers too (decision 0012).
     Open,
 
     /// No writer has it open and no upload of it runs: it waits for its settle time or for a free upload slot.
@@ -212,6 +212,7 @@ pub(super) fn schedule(state: &mut State, uploads: &Notify, spool_id: SpoolId, a
     };
     let before = std::mem::replace(&mut spool.due, at);
     state.queue.remove(&(before, spool_id));
+    state.held.remove(&spool_id);
     state.queue.insert((at, spool_id));
     uploads.notify_one();
 }
@@ -270,6 +271,31 @@ pub(super) fn node_holds(state: &State, spool_id: SpoolId) -> bool {
         .is_some_and(|node| matches!(node.bytes, Bytes::Spooled(id) if id == spool_id))
 }
 
+/// Whether the spool file is an empty file that is only in the spool. Finder makes one for each item it copies, and removes it when it writes the item. So such a file waits until nothing in the mount is open for writing, or a slow copy would upload each placeholder empty and then remove it on the remote (decision 0012).
+pub(super) fn is_empty_new_file(state: &State, spool_id: SpoolId) -> bool {
+    let Some(spool) = state.spools.get(&spool_id) else {
+        return false;
+    };
+    spool.size == 0
+        && state
+            .nodes
+            .get(&spool.node)
+            .is_some_and(|node| matches!(node.identity, Identity::New(_)))
+}
+
+/// Whether any file in the mount is open for writing.
+pub(super) fn mount_has_writer(state: &State) -> bool {
+    state.handles.values().any(|opened| {
+        matches!(
+            opened,
+            Opened::File {
+                access: Access::Write,
+                ..
+            }
+        )
+    })
+}
+
 /// The node's bytes are the remote's again: its spool file goes, and so does the node when nothing else holds it.
 fn back_to_remote(state: &mut State, room: &Notify, node: NodeId, spool_id: SpoolId) {
     discard(state, room, spool_id);
@@ -291,6 +317,19 @@ impl Vfs {
             let next = {
                 let mut state = self.state.lock().unwrap();
                 let now = Instant::now();
+                // An empty new file uploads once nothing in the mount has been open for writing for the settle time (decision 0012). `None` while a file is open for writing.
+                let quiet_at = (!mount_has_writer(&state)).then(|| {
+                    state
+                        .writers_closed
+                        .map_or(now, |closed| closed + self.options.settle)
+                });
+                let quiet = quiet_at.is_some_and(|at| at <= now);
+                if quiet {
+                    for spool_id in std::mem::take(&mut state.held) {
+                        let due = state.spools[&spool_id].due;
+                        state.queue.insert((due, spool_id));
+                    }
+                }
                 while tasks.len() < self.options.max_uploads {
                     let Some(&(at, spool_id)) = state.queue.first() else {
                         break;
@@ -299,7 +338,7 @@ impl Vfs {
                         break;
                     }
                     state.queue.remove(&(at, spool_id));
-                    // An entry that cannot start is dropped. Whatever holds the file back queues it again when it lets go: for a refused file, that is `try_again` or an edit.
+                    // An entry that cannot start is dropped. Whatever holds the file back queues it again when it lets go: for a refused file, that is `try_again` or an edit. An empty new file that waits for the mount to be quiet goes to `held` instead, and comes back when it is.
                     let Some((target, _)) = self.sends(&state, spool_id) else {
                         continue;
                     };
@@ -309,6 +348,10 @@ impl Vfs {
                         || state.nodes[&spool.node].writers > 0
                         || matches!(spool.failure, Some(Failure::Refused(_)))
                     {
+                        continue;
+                    }
+                    if !quiet && is_empty_new_file(&state, spool_id) {
+                        state.held.insert(spool_id);
                         continue;
                     }
                     let stop = Arc::new(Notify::new());
@@ -347,7 +390,10 @@ impl Vfs {
                 }
                 // A due entry with no free slot must not spin this loop.
                 let has_room = tasks.len() < self.options.max_uploads;
-                state.queue.first().map(|(at, _)| *at).filter(|_| has_room)
+                let queued = state.queue.first().map(|(at, _)| *at).filter(|_| has_room);
+                // While a file is open for writing, the last writer's close wakes the uploader.
+                let held_at = quiet_at.filter(|_| !state.held.is_empty());
+                queued.into_iter().chain(held_at).min()
             };
             tokio::select! {
                 _ = self.uploads.notified() => {}
@@ -360,6 +406,7 @@ impl Vfs {
     /// Every spool file that should still reach the remote, in node order. Removed, unnamed, and stays-local files are left out.
     pub fn unsent(&self) -> Vec<Unsent> {
         let state = self.state.lock().unwrap();
+        let writing = mount_has_writer(&state);
         let mut found: Vec<Unsent> = state
             .spools
             .iter()
@@ -374,6 +421,8 @@ impl Vfs {
                     _ => match &file.failure {
                         Some(Failure::Passing { error, .. }) => UnsentState::Failed(error.clone()),
                         Some(Failure::Refused(error)) => UnsentState::Refused(error.clone()),
+                        // An empty new file waits for every writer in the mount (decision 0012).
+                        None if writing && is_empty_new_file(&state, spool_id) => UnsentState::Open,
                         None => UnsentState::Waiting,
                     },
                 };
