@@ -2,8 +2,8 @@ pub mod client;
 
 use crate::fs_utils::FileItem;
 use crate::locations::{
-    not_a_folder, Location, LocationCapabilities, LocationProvider, LocationSummary,
-    ProviderDirectoryEntries,
+    kept_authority, not_a_folder, Location, LocationCapabilities, LocationProvider,
+    LocationSummary, ProviderDirectoryEntries,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -496,17 +496,13 @@ pub fn parse_smb_url(url: &str) -> Result<(String, String, String), String> {
     // parse them leniently to match that behavior.
     let remainder = url
         .strip_prefix("smb://")
-        .ok_or_else(|| format!("Invalid SMB URL scheme (expected smb://): {}", url))?;
+        .ok_or_else(|| "Invalid SMB URL scheme (expected smb://)".to_string())?;
 
-    // Support (but do not require) smb://user:pass@server/share/path by stripping credentials.
     let (authority_part, path_part) = remainder
         .split_once('/')
         .ok_or_else(|| "SMB URL must include share name: smb://server/share/path".to_string())?;
 
-    let hostname = authority_part
-        .rsplit_once('@')
-        .map(|(_, host)| host)
-        .unwrap_or(authority_part);
+    let hostname = kept_authority("smb", authority_part);
 
     if hostname.is_empty() {
         return Err("SMB URL requires server hostname".to_string());
@@ -515,53 +511,7 @@ pub fn parse_smb_url(url: &str) -> Result<(String, String, String), String> {
     // Normalize any accidental duplicate slashes at the start of the path portion.
     let path = format!("/{}", path_part.trim_start_matches('/'));
 
-    parse_smb_path(hostname, &path)
-}
-
-/// Extract credentials from SMB URL if present
-/// Format: smb://user:pass@server/share or smb://domain;user:pass@server/share
-#[allow(dead_code)]
-pub fn extract_url_credentials(url: &str) -> Option<(String, String, String, Option<String>)> {
-    // Parse smb://[domain;]user:pass@server/...
-    let without_scheme = url.strip_prefix("smb://")?;
-
-    let at_pos = without_scheme.find('@')?;
-    let auth_part = &without_scheme[..at_pos];
-    let server_part = &without_scheme[at_pos + 1..];
-
-    // Extract server (before first /)
-    let server = server_part.split('/').next()?.to_string();
-
-    // Check for domain;user:pass format
-    let (domain, user_pass) = if auth_part.contains(';') {
-        let mut parts = auth_part.splitn(2, ';');
-        (Some(parts.next()?.to_string()), parts.next()?)
-    } else {
-        (None, auth_part)
-    };
-
-    // Split user:pass
-    let colon_pos = user_pass.find(':')?;
-    let username = user_pass[..colon_pos].to_string();
-    let password = user_pass[colon_pos + 1..].to_string();
-
-    // URL decode the parts
-    let username = urlencoding::decode(&username).ok()?.to_string();
-    let password = urlencoding::decode(&password).ok()?.to_string();
-    let domain = domain.and_then(|d| urlencoding::decode(&d).ok().map(|s| s.to_string()));
-
-    Some((server, username, password, domain))
-}
-
-/// Strip credentials from URL for display/storage
-#[allow(dead_code)]
-pub fn strip_url_credentials(url: &str) -> String {
-    if let Some(without_scheme) = url.strip_prefix("smb://") {
-        if let Some(at_pos) = without_scheme.find('@') {
-            return format!("smb://{}", &without_scheme[at_pos + 1..]);
-        }
-    }
-    url.to_string()
+    parse_smb_path(&hostname, &path)
 }
 
 /// Upload a local file to an SMB share via the sidecar, handling name collisions.
@@ -695,34 +645,5 @@ mod tests {
         assert_eq!(host, "server.local");
         assert_eq!(share, "share");
         assert_eq!(path, "/folder/file.txt");
-    }
-
-    #[test]
-    fn test_extract_url_credentials() {
-        let result = extract_url_credentials("smb://user:password@server.local/share");
-        assert!(result.is_some());
-        let (server, user, pass, domain) = result.unwrap();
-        assert_eq!(server, "server.local");
-        assert_eq!(user, "user");
-        assert_eq!(pass, "password");
-        assert!(domain.is_none());
-    }
-
-    #[test]
-    fn test_extract_url_credentials_with_domain() {
-        let result = extract_url_credentials("smb://CORP;user:password@server.local/share");
-        assert!(result.is_some());
-        let (server, user, pass, domain) = result.unwrap();
-        assert_eq!(server, "server.local");
-        assert_eq!(user, "user");
-        assert_eq!(pass, "password");
-        assert_eq!(domain, Some("CORP".to_string()));
-    }
-
-    #[test]
-    fn test_strip_url_credentials() {
-        let url = "smb://user:password@server.local/share/path";
-        let stripped = strip_url_credentials(url);
-        assert_eq!(stripped, "smb://server.local/share/path");
     }
 }
