@@ -45,7 +45,11 @@ tauri-plugin-fs = "2.5.1"
 tauri-plugin-os = "2.3.2"
 tauri-plugin-shell = "2.3.5"
 tauri-plugin-decorum = "1.1.1"
-tauri-plugin-dialog = "2.7.1"
+# 2.8.4 takes rfd 0.17.2, whose Linux dialogs read their text as a printf format, so a % in a
+# file name garbles a dialog or crashes the app (#749). 2.8.3 is the same code on rfd 0.16.1,
+# which has the fix (rfd #343). #779 unpins it once a release takes an rfd that passes
+# rfd_shows_dialog_text_as_written in src/lib.rs. Dependabot skips it until then.
+tauri-plugin-dialog = "=2.8.3"
 tauri-plugin-drag = "2.1.1"
 tauri-plugin-opener = "2.5.4"
 tauri-plugin-wdio-webdriver = { version = "1.5.1", optional = true }

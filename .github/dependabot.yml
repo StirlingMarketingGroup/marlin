@@ -68,6 +68,11 @@ updates:
     labels:
       - 'dependencies'
       - 'cargo'
+    ignore:
+      # 2.8.4 takes rfd 0.17.2, whose Linux dialogs read their text as a
+      # printf format (#749). src-tauri/Cargo.toml pins 2.8.3 until #779.
+      - dependency-name: 'tauri-plugin-dialog'
+        versions: ['>2.8.3']
     groups:
       ssh-crypto-stack:
         applies-to: 'version-updates'
