@@ -118,7 +118,7 @@ The provider goes by the error code `marlin-smb` answers, never by the text: `ma
 | `SMB_NOT_EMPTY`                               | `NotEmpty`                                                                                                                                                 |
 | `SMB_CHANGED`                                 | `Conflict`                                                                                                                                                 |
 | `SMB_NO_SPACE`                                | `NoSpace`                                                                                                                                                  |
-| `INVALID_PARAMS`                              | `NotSupported`. A name `marlin-smb` cannot send fails this item, never the mount.                                                                         |
+| `INVALID_PARAMS`                              | `NotSupported`. A name `marlin-smb` cannot send fails this item, never the mount.                                                                          |
 | `SMB_LIBRARY_MISSING`: no `smbclient` program | `Other` with `marlin-smb`'s own text (`SMBCLIENT_MISSING`), which says how to install it                                                                   |
 | `marlin-smb` cannot start                     | `Other` with the text the app shows: the helper is missing, Samba is not installed, or the process failed to start, with the OS error, which names no path |
 | Any other code                                | `Other("marlin-smb answered error code <code>")`                                                                                                           |

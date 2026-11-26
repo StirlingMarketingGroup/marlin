@@ -282,10 +282,10 @@ Rules the table keeps:
 
 `LinkedProviders` in `providers.rs` opens an account for a mount. It knows three providers. Any other name fails with -1004.
 
-| Provider | Account                                                                                            | Storage                                        | Calls at once                         |
-| -------- | -------------------------------------------------------------------------------------------------- | ---------------------------------------------- | ------------------------------------- |
-| `gdrive` | The Google account's email                                                                         | [Google Drive mount provider](mount-gdrive.md) | 16, the helper's `Options::max_calls` |
-| `sftp`   | The server as the app's `sftp://` URIs write it: `<user>@<host>`, with `:<port>` when it is not 22 | [SFTP mount provider](mount-sftp.md)           | 4, `marlin_sftp::MAX_CALLS`           |
+| Provider | Account                                                                                            | Storage                                        | Calls at once                                                                      |
+| -------- | -------------------------------------------------------------------------------------------------- | ---------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `gdrive` | The Google account's email                                                                         | [Google Drive mount provider](mount-gdrive.md) | 16, the helper's `Options::max_calls`                                              |
+| `sftp`   | The server as the app's `sftp://` URIs write it: `<user>@<host>`, with `:<port>` when it is not 22 | [SFTP mount provider](mount-sftp.md)           | 4, `marlin_sftp::MAX_CALLS`                                                        |
 | `smb`    | The saved SMB server's host as the user saved it, such as `nas.local`                              | [SMB mount provider](mount-smb.md)             | 4 calls, `PROCESSES`. Uploads run on 4 processes of their own, `UPLOAD_PROCESSES`. |
 
 **A provider's own call limit.** `Providers::open` returns an `Opened`: the provider, and the number of calls a mount of it runs at once when that is not the helper's own. The number replaces the helper's `Options::max_calls` for that mount, higher or lower. It can also name how many uploads run at once, which replaces `Options::max_uploads`. SMB does, because each upload runs on a process of its own ([decision 0010](decisions/0010-smb-uploads-run-on-their-own-processes.md)). Each mount has its own slots, so a slow server holds up only its own mounts.
