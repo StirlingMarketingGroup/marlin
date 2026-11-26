@@ -5,22 +5,22 @@
 This is not the code behind `gdrive://` paths. The app handles those through its own location provider: see [Location providers](location-providers.md).
 
 **Covers:** `src-tauri/crates/marlin-gdrive/`
-**Checked against the code:** 2026-11-24
+**Checked against the code:** 2026-11-25
 
 ## The parts
 
-| File                    | Holds                                                                                                                             |
-| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `src/provider.rs`       | `DriveProvider`, its five read calls, `locate`, three change calls, and two byte calls, the item IDs, and what a caller supplies. |
-| `src/upload.rs`         | The resumable upload behind the two byte calls: the session, the pieces, and the resume.                                          |
-| `src/api.rs`            | `request`, the path of every request but an upload's `PUT`s: the token, the retries, and the error table. Google's JSON.          |
-| `src/sign_in.rs`        | `OAuthClient`, `SavedSignIn`, and the keychain entry: see [The saved sign-in](#the-saved-sign-in).                                |
-| `build.rs`              | Passes the OAuth client ID and secret to the compiler.                                                                            |
-| `tests/drive.rs`        | The provider's tests. They run against a fake Drive server in the test process.                                                   |
-| `tests/sign_in.rs`      | The sign-in's tests. They run against a fake token endpoint and an in-memory keychain.                                            |
-| `tests/live.rs`         | Manual tests against a real account: see [Checked against real Google](#checked-against-real-google).                             |
-| `tests/live_changes.rs` | One manual test of the three change calls against a real account. It changes the account.                                         |
-| `tests/live_uploads.rs` | One manual test of the two byte calls against a real account. It changes the account.                                             |
+| File                    | Holds                                                                                                                                                                                                                                             |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/provider.rs`       | `DriveProvider`, its five read calls, `locate`, `thumbnail`, three change calls, and two byte calls, the item IDs, and what a caller supplies.                                                                                                    |
+| `src/upload.rs`         | The resumable upload behind the two byte calls: the session, the pieces, and the resume.                                                                                                                                                          |
+| `src/api.rs`            | `request_url`, the path of every request but an upload's `PUT`s: the token, the retries, and the error table. `request` builds a Drive API address for it, and `thumbnail` passes it Drive's picture link with the size asked for. Google's JSON. |
+| `src/sign_in.rs`        | `OAuthClient`, `SavedSignIn`, and the keychain entry: see [The saved sign-in](#the-saved-sign-in).                                                                                                                                                |
+| `build.rs`              | Passes the OAuth client ID and secret to the compiler.                                                                                                                                                                                            |
+| `tests/drive.rs`        | The provider's tests. They run against a fake Drive server in the test process.                                                                                                                                                                   |
+| `tests/sign_in.rs`      | The sign-in's tests. They run against a fake token endpoint and an in-memory keychain.                                                                                                                                                            |
+| `tests/live.rs`         | Manual tests against a real account: see [Checked against real Google](#checked-against-real-google).                                                                                                                                             |
+| `tests/live_changes.rs` | One manual test of the three change calls against a real account. It changes the account.                                                                                                                                                         |
+| `tests/live_uploads.rs` | One manual test of the two byte calls against a real account. It changes the account.                                                                                                                                                             |
 
 The provider does not sign in, read a keychain, or know about the helper. A caller gives it two things:
 
@@ -132,7 +132,17 @@ What follows from that:
 - **A shared drive's top folder is asked from the drive, not from `files.get`.** On a real account `files.get` gives that folder another name than the drive's. So `item` asks `drives.get`, and its answer equals the drive's line in the `Shared drives` listing.
 - **A shared drive's modified time** is the time the drive was made. Google gives a shared drive no other time.
 - **`locate` walks parents.** One `files.get` of the item, with its parents, and at the same time one of `root`, whose real ID ends a walk in My Drive. Then one `files.get` for each folder above the item, up to the top. An empty ID, or one with any character but a letter, a digit, `-`, or `_`, sends nothing and is `NotFound`. A trashed item, an item with no parent the account can see, and a parent Google refuses or does not know, answer no place.
-- The five read calls send only GET, and so does `locate`. The change calls also send POST and PATCH, and the byte calls PUT. A token refresh sends a POST to Google's token endpoint.
+- The five read calls send only GET, and so do `locate` and `thumbnail`. The change calls also send POST and PATCH, and the byte calls PUT. A token refresh sends a POST to Google's token endpoint.
+
+## Thumbnails
+
+`thumbnail` hands the core Drive's own picture of a file, so a file browser can draw the file without reading it through the mount: see [Thumbnails](mount-helper.md#thumbnails) for when the helper asks. It sends one `files.get` with `thumbnailLink`, `imageMediaMetadata(width,height)`, and `videoMediaMetadata(width,height)` beside the item's own fields, then one GET of the link.
+
+- **The size.** Drive's link ends with `=s220`, the longer side in pixels. The provider puts the size asked for in its place. A link that does not end with `=s` and a number is fetched as it is.
+- **The token.** The GET of the link goes through `request_url`, the path under `request`, with the account's token, its retries, and its error table. The link comes from Google's own answer. The `gdrive://` location sends the token with it too (`fetch_gdrive_url`).
+- **No picture.** A file with no `thumbnailLink` answers none. So does a GET of the link that ends in `NotFound` or `AccessDenied`: Drive will not hand over its picture, but the file is still there. A rate limit or a full drive is handled as for any request.
+- **A link file answers none and sends nothing.** Its bytes are its small web page, so Drive's picture of the item it opens is not a picture of them. `/` and `Shared drives` answer none too, and the core never asks about a folder.
+- **The width and height are the file's own,** never the picture's: `imageMediaMetadata` for an image, `videoMediaMetadata` for a video. Google gives neither for other files, such as a PDF, and the answer then has none.
 
 ## The three change calls
 
@@ -376,7 +386,7 @@ The [mount core](mount-core.md) runs at most 16 provider calls at once and ends 
 - **The question `bytes */0` ends an empty file.** Google answered 200 with the file. So the provider never asks about an empty file.
 - **A replace of 150 KiB took 1.4 to 1.8 s:** its check, the session, the check before the last piece, and the one request.
 
-Not checked live: a change in a shared drive, a file moved between drives, and what Google answers a folder moved into its own subtree (the provider refuses it before Google sees it).
+Not checked live: `thumbnail`. The fake server's tests cover a link that ends in `=s220` and the token sent with it. That Google's real link has that ending and takes the token rests on the `gdrive://` location's code and Google's documentation. What Drive gives right after new bytes land is not checked either. A [2012 Google post](https://gsuite-developers.googleblog.com/2012/10/thumbnails-for-your-custom-file-types.html) says Drive drops a file's picture when its bytes change. Until Drive makes a new one, `thumbnailLink` is then missing and the provider answers none. If Drive gave the old picture instead, the app would keep it for the new bytes until the file changes again. Also not checked live: a change in a shared drive, a file moved between drives, and what Google answers a folder moved into its own subtree (the provider refuses it before Google sees it).
 
 Every automated test runs against the fake server, so these still rest on Google's documentation:
 
@@ -404,6 +414,7 @@ Every automated test runs against the fake server, so these still rest on Google
 - The change-call tests cover creating a folder, trashing, renaming, moving, the refusals, a resent create, and a move whose answer was lost. They check the request, not only the result.
 - The byte-call tests cover a new file, a replacement, the pieces, a resume from an even and an uneven offset, a dropped connection, a body cut off after a finished upload, a lost session, the revision check before a first send and a resend of the last request, and the refusals. The tests of a dropped connection, a cut-off answer, and a local file cut during an upload serve the session from a small HTTP server in the test, because wiremock cannot drop a connection partway through a body. They check the request, not only the result.
 - One test checks that the five read calls send only GET.
+- `thumbnail` is tested for an image and a video, a file with no picture, a link file (no request), a picture Google refuses with 404 or 403, and a link with no size. The image test checks the size in the link and the token sent with it.
 - `locate` and `reference` are tested for a My Drive file, a shared drive item, an item the mount shows nowhere, an unknown or unsafe ID, each ID form, and a `Vfs` on the fake server whose shared drive holds two files named `a.txt`. They check the fields each request asks for.
 - The listing test checks the read-only mark of a file the account may only view, a file it owns, a file with no `capabilities`, a folder, and a link file. The `item` test checks a view-only file and an owned one. A replace of a view-only file opens no upload session.
 - The helper's tests mount this provider through FUSE against a fake Google: see [Mount helper](mount-helper.md#testing).

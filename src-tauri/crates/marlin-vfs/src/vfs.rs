@@ -10,7 +10,7 @@ use tokio::time::Instant;
 use crate::spool::{self, Spool};
 use crate::{
     escape, unescape, unique_names, Attributes, Item, ItemId, Kind, NameRules, Provider, Revision,
-    Space, VfsError,
+    Space, Thumbnail, VfsError,
 };
 
 mod record;
@@ -36,6 +36,19 @@ pub enum Identified {
 
     /// A file that is only in the spool. It has not reached the remote yet, so it has no ID there.
     New,
+}
+
+/// What [`Vfs::thumbnail`] found for the item at a path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Thumbnailed {
+    /// The remote's picture of the file. The remote has the file's current bytes.
+    Picture(Thumbnail),
+
+    /// The remote has no picture of the item. A folder never has one.
+    NoPicture,
+
+    /// The item may not use a provider call (decision 0009, choice 7): the remote does not have the file's current bytes. The file is only in the spool, its bytes in the spool are not sent yet, or a write is fetching them to change them. A picture the remote made would show old bytes or none.
+    NotEligible,
 }
 
 /// One name in a folder, as the mount shows it.
@@ -974,22 +987,60 @@ impl Vfs {
 
     /// What is at `path`: names as the mount shows them, joined with `/`, from the top of the mount. The empty path is the top. A name that is not there is [`VfsError::NotFound`], and a path through a file [`VfsError::NotAFolder`]. It reads the listings the core holds while they are fresh, as a lookup does.
     pub async fn identify(&self, path: &str) -> Result<Identified, VfsError> {
-        let mut id = self.provider.root();
+        match self.item_at(path).await? {
+            Some((id, _)) => Ok(Identified::Remote(self.provider.reference(&id))),
+            None => Ok(Identified::New),
+        }
+    }
+
+    /// The item at `path`, as [`Self::identify`] reads a path, and its kind. `None` for a file that is only in the spool.
+    async fn item_at(&self, path: &str) -> Result<Option<(ItemId, Kind)>, VfsError> {
+        let mut found = (self.provider.root(), Kind::Folder);
         if !path.is_empty() {
             let mut names = path.split('/').peekable();
             while let Some(name) = names.next() {
-                let holder = self.find(&id, name).await?.1.ok_or(VfsError::NotFound)?;
+                let holder = self
+                    .find(&found.0, name)
+                    .await?
+                    .1
+                    .ok_or(VfsError::NotFound)?;
                 // The core knows a file is no folder: no listing is asked for it.
                 if names.peek().is_some() && holder.kind() != Kind::Folder {
                     return Err(VfsError::NotAFolder);
                 }
                 match holder {
-                    Holder::Item(item) => id = item.id,
-                    Holder::New { .. } => return Ok(Identified::New),
+                    Holder::Item(item) => found = (item.id, item.attributes.kind),
+                    Holder::New { .. } => return Ok(None),
                 }
             }
         }
-        Ok(Identified::Remote(self.provider.reference(&id)))
+        Ok(Some(found))
+    }
+
+    /// The remote's picture of the file at `path`, read as [`Self::identify`] reads a path, with `size` as the longer side the caller asks for. [`Provider::thumbnail`] is asked only when the remote has the file's current bytes: a folder is [`Thumbnailed::NoPicture`], and a new file, a file with bytes in the spool, or a file a write is fetching is [`Thumbnailed::NotEligible`]. Reading the path can still list a folder, as a lookup does. The picture shows the bytes the remote had when it was asked, so a caller that keys it by the file's size and time reads those before it asks.
+    pub async fn thumbnail(&self, path: &str, size: u32) -> Result<Thumbnailed, VfsError> {
+        let Some((id, kind)) = self.item_at(path).await? else {
+            return Ok(Thumbnailed::NotEligible);
+        };
+        if kind == Kind::Folder {
+            return Ok(Thumbnailed::NoPicture);
+        }
+        // Decision 0009, choice 7: an item may use a provider call only when the remote has it with no unsent changes. Bytes in the spool, or a write fetching them, are not the bytes the remote has.
+        let unsent = {
+            let state = self.state.lock().unwrap();
+            state
+                .by_item
+                .get(&id)
+                .copied()
+                .is_some_and(|node| !matches!(state.nodes[&node].bytes, Bytes::Clean))
+        };
+        if unsent {
+            return Ok(Thumbnailed::NotEligible);
+        }
+        match self.call(self.provider.thumbnail(&id, size)).await? {
+            Some(picture) => Ok(Thumbnailed::Picture(picture)),
+            None => Ok(Thumbnailed::NoPicture),
+        }
     }
 
     /// Makes an empty folder named `name` in `parent` and returns it. `name` is the name the OS sent. A name already in the listing, including a new file, is [`VfsError::Conflict`].

@@ -65,6 +65,16 @@ pub struct Space {
     pub free: u64,
 }
 
+/// A picture of a file that its remote made, such as Google Drive's thumbnail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Thumbnail {
+    /// The bytes of an image file, as the remote sends them. Google Drive sends PNG or JPEG.
+    pub image: Vec<u8>,
+
+    /// The width and height of the file itself in pixels, when the remote knows them, as Google Drive does for an image or a video. Never the picture's own size.
+    pub dimensions: Option<(u32, u32)>,
+}
+
 /// A storage account the core can read. A provider that cannot change the remote leaves out the change calls and the two byte calls, leaves [`Self::can_write`] at its default, and each of those calls then answers [`VfsError::ReadOnly`].
 #[async_trait::async_trait]
 pub trait Provider: Send + Sync + 'static {
@@ -93,6 +103,12 @@ pub trait Provider: Send + Sync + 'static {
     fn reference(&self, id: &ItemId) -> Option<String> {
         let _ = id;
         None
+    }
+
+    /// A picture of the file `id` that the remote made from the bytes it has, so a file browser can show the file without reading it. `size` is the longer side the caller asks for, in pixels; the remote may send another size. `None` when the remote has no picture of it. The core asks only about a file, never a folder. A provider whose remote makes no pictures leaves this out, and it answers `None`.
+    async fn thumbnail(&self, id: &ItemId, size: u32) -> Result<Option<Thumbnail>, VfsError> {
+        let _ = (id, size);
+        Ok(None)
     }
 
     /// Whether this provider has the three change calls and the two byte calls. A mount of a provider that answers `false` is read-only (decision 0005, choice 13).

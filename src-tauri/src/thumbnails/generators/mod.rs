@@ -43,26 +43,34 @@ pub fn is_video_extension(ext: &str) -> bool {
 
 pub struct ThumbnailGenerator;
 
-/// Result of async pre-processing: a local file path ready for CPU-bound generation,
-/// plus an optional temp file to clean up after.
+/// What `prepare` hands to `generate`: the request, and what the generator reads for it.
 pub struct PreparedRequest {
     pub request: ThumbnailRequest,
-    pub temp_file: Option<std::path::PathBuf>,
+    pub source: Source,
+}
+
+/// What the generator reads for a request.
+pub enum Source {
+    /// The file at `request.path`.
+    File,
+    /// A local copy of a remote or archived file. The worker deletes it once generation ends.
+    Copy(std::path::PathBuf),
+    /// A picture of the file that the file's remote made. The file itself is read only when the picture does not decode.
+    #[cfg(unix)]
+    RemotePicture(crate::mount_helper::RemotePicture),
 }
 
 impl ThumbnailGenerator {
-    /// Async pre-processing phase: downloads remote files to local temp paths.
+    /// Async pre-processing phase: copies a remote or archived file to a local temp file, or fetches the remote's own picture of a file in a Google Drive mount.
     /// This runs in the async context (no thread blocking) and must be called
     /// BEFORE `generate()` which runs in `spawn_blocking`.
     pub async fn prepare(request: ThumbnailRequest) -> Result<PreparedRequest, String> {
         if request.path.starts_with("archive://") {
             let temp_path =
                 crate::locations::archive::extract_archive_entry_to_temp(&request.path).await?;
-            let mut prepared = request;
-            prepared.path = temp_path.to_string_lossy().to_string();
             return Ok(PreparedRequest {
-                request: prepared,
-                temp_file: Some(temp_path),
+                request,
+                source: Source::Copy(temp_path.into()),
             });
         }
 
@@ -77,42 +85,65 @@ impl ThumbnailGenerator {
             )
             .await?;
 
-            let mut prepared = request;
-            prepared.path = temp_path.clone();
             return Ok(PreparedRequest {
-                request: prepared,
-                temp_file: Some(std::path::PathBuf::from(temp_path)),
+                request,
+                source: Source::Copy(temp_path.into()),
             });
         }
 
         if sftp::is_sftp_path(&request.path) {
             let temp_path = sftp::download_sftp_file_async(&request.path).await?;
-            let mut prepared = request;
-            prepared.path = temp_path.to_string_lossy().to_string();
             return Ok(PreparedRequest {
-                request: prepared,
-                temp_file: Some(temp_path),
+                request,
+                source: Source::Copy(temp_path.into()),
+            });
+        }
+
+        // A file in a Google Drive mount gets Drive's own picture, so drawing the grid reads none of its bytes through the mount.
+        #[cfg(unix)]
+        if let Some(picture) =
+            crate::mount_helper::remote_thumbnail(Path::new(&request.path), request.size).await
+        {
+            return Ok(PreparedRequest {
+                request,
+                source: Source::RemotePicture(picture),
             });
         }
 
         // SMB and local files: no async pre-processing needed
         Ok(PreparedRequest {
             request,
-            temp_file: None,
+            source: Source::File,
         })
     }
 
-    /// Synchronous generation phase: CPU-bound image processing only.
-    /// Remote files should already be downloaded via `prepare()`.
-    /// This is safe to call from `spawn_blocking`.
-    pub fn generate(request: &ThumbnailRequest) -> Result<ThumbnailGenerationResult, String> {
-        // Check for SMB paths and handle them specially
-        if smb::is_smb_path(&request.path) {
-            return smb::generate_smb_thumbnail(request);
+    /// Synchronous generation phase, run on the blocking pool after `prepare()`.
+    /// Reading a file in a mount, or an `smb://` file, can wait on the network.
+    pub fn generate(prepared: &PreparedRequest) -> Result<ThumbnailGenerationResult, String> {
+        let request = &prepared.request;
+        match &prepared.source {
+            Source::File if smb::is_smb_path(&request.path) => smb::generate_smb_thumbnail(request),
+            Source::File => Self::generate_local(request),
+            Source::Copy(copy) => Self::generate_local(&ThumbnailRequest {
+                path: copy.to_string_lossy().into_owned(),
+                ..request.clone()
+            }),
+            #[cfg(unix)]
+            Source::RemotePicture(picture) => {
+                match images::ImageGenerator::generate(&picture.file, request) {
+                    Ok(mut made) => {
+                        // The UI shows these as the file's size. The picture's own size is not the file's.
+                        made.image_width = picture.dimensions.map(|dimensions| dimensions.width);
+                        made.image_height = picture.dimensions.map(|dimensions| dimensions.height);
+                        Ok(made)
+                    }
+                    Err(error) => {
+                        log::debug!("The remote's picture could not be read, so the file makes the thumbnail: {error}");
+                        Self::generate_local(request)
+                    }
+                }
+            }
         }
-
-        // All other paths (local, or remote files already downloaded by prepare())
-        Self::generate_local(request)
     }
 
     /// Generate a thumbnail from a local file path.
@@ -161,7 +192,7 @@ impl ThumbnailGenerator {
 
         // Check if it's an image file
         if Self::is_image_file(path) {
-            return images::ImageGenerator::generate(request);
+            return images::ImageGenerator::generate(path, request);
         }
 
         // Check if it's an SVG file

@@ -27,6 +27,19 @@ pub(crate) struct DriveFile {
     pub(crate) drive_id: Option<String>,
     /// Set when the request asked for it.
     pub(crate) capabilities: Option<Capabilities>,
+    /// Drive's short-lived link to its picture of the file, when it has one and the request asked for it.
+    pub(crate) thumbnail_link: Option<String>,
+    /// Set for an image, when the request asked for it.
+    pub(crate) image_media_metadata: Option<MediaSize>,
+    /// Set for a video, when the request asked for it.
+    pub(crate) video_media_metadata: Option<MediaSize>,
+}
+
+/// The width and height of an image or a video, in pixels.
+#[derive(Deserialize)]
+pub(crate) struct MediaSize {
+    pub(crate) width: Option<u32>,
+    pub(crate) height: Option<u32>,
 }
 
 impl DriveFile {

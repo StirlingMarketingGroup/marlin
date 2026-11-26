@@ -111,7 +111,7 @@ Each temp copy keeps the file's exact name, in a folder of its own under the OS 
 
 **5. A drop is validated as a local path.** `resolve_drop_operation` expands the destination with `fs_utils::expand_path` and fails if that path does not exist on disk. It has no remote case.
 
-**6. Thumbnails know about each provider.** `thumbnails/generators/mod.rs` has a download branch for `archive`, `gdrive`, `smb`, and `sftp`, and `thumbnails/cache.rs` builds cache identity differently for `smb` and `sftp`.
+**6. Thumbnails know about each provider.** `thumbnails/generators/mod.rs` has a download branch for `archive`, `gdrive`, and `sftp`, and the SMB generator reads an `smb` file itself. `thumbnails/cache.rs` builds cache identity differently for `smb` and `sftp`.
 
 **7. Only local folders refresh on their own.** `supports_watching` is true for `file` alone.
 

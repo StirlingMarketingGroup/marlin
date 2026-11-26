@@ -10,12 +10,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use marlin_vfs::{NodeId, Options, Provider, Spool, Vfs, VfsError};
+use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
 use crate::log::{self, redact};
 use crate::protocol::{
-    error_codes, DeadMount, Identified, MountState, MountStatus, ReadOnly, RpcError, UnsentFile,
-    UnsentFiles, UnsentState,
+    error_codes, DeadMount, Dimensions, Identified, MountState, MountStatus, ReadOnly, RpcError,
+    Thumbnailed, UnsentFile, UnsentFiles, UnsentState,
 };
 
 /// The file that marks the mount folder as the helper's. The helper sweeps, and mounts in, only a mount folder that has it, so a folder of the user's with the same name is never changed: on a Mac's disk, which ignores letter case, a checkout of Marlin at `~/marlin` is `~/Marlin` (#541).
@@ -817,6 +818,51 @@ impl Mounts {
         })
     }
 
+    /// The remote's picture of the file at a mount-relative path, written to the new file `file`. [`Thumbnailed::Written`] means the helper made that file and finished writing it: see [`marlin_vfs::Vfs::thumbnail`] for when the remote is asked.
+    pub async fn thumbnail(
+        &self,
+        provider: &str,
+        account: &str,
+        path: &str,
+        size: u32,
+        file: &Path,
+    ) -> Result<Thumbnailed, MountError> {
+        let found = self
+            .mounted_core(provider, account)?
+            .thumbnail(path, size)
+            .await
+            .map_err(item_error)?;
+        match found {
+            marlin_vfs::Thumbnailed::Picture(picture) => {
+                // The app names the path, so the helper makes a new file only and never follows or replaces what is there.
+                let mut opened = tokio::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(file)
+                    .await?;
+                let written = async {
+                    opened.write_all(&picture.image).await?;
+                    opened.flush().await?;
+                    Ok::<(), std::io::Error>(())
+                }
+                .await;
+                if let Err(error) = written {
+                    // The file is the helper's own once the open succeeded. A failed write must not leave it behind.
+                    let _ = tokio::fs::remove_file(file).await;
+                    return Err(error.into());
+                }
+                Ok(Thumbnailed::Written {
+                    dimensions: picture
+                        .dimensions
+                        .map(|(width, height)| Dimensions { width, height }),
+                })
+            }
+            marlin_vfs::Thumbnailed::NoPicture => Ok(Thumbnailed::NoPicture),
+            marlin_vfs::Thumbnailed::NotEligible => Ok(Thumbnailed::NotEligible),
+        }
+    }
+
     /// Makes the mount drop its cached listings and stored answers, so its next listing asks the remote.
     pub fn refresh(&self, provider: &str, account: &str) -> Result<(), MountError> {
         self.mounted_core(provider, account)?.refresh();
@@ -1014,7 +1060,7 @@ fn log_state(status: &MountStatus) {
     log::write(level, "mount.state", serde_json::json!(status));
 }
 
-/// The error a `locate` or `identify` answers when its core call fails. A remote that says no is no such item for the caller: an unknown ID, one the account may not see, and a path through a file.
+/// The error a `locate`, `identify`, or `thumbnail` answers when its core call fails. A remote that says no is no such item for the caller: an unknown ID, one the account may not see, and a path through a file.
 fn item_error(error: VfsError) -> MountError {
     match error {
         VfsError::NotFound | VfsError::NotAFolder | VfsError::AccessDenied => {

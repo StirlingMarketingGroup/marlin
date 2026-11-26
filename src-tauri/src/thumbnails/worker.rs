@@ -6,7 +6,7 @@ use std::time::Instant;
 use tokio::sync::{mpsc, oneshot, Semaphore};
 use tokio::task::JoinHandle;
 
-use super::generators::ThumbnailGenerator;
+use super::generators::{Source, ThumbnailGenerator};
 use super::{cache::ThumbnailCache, ThumbnailRequest, ThumbnailResponse};
 
 #[derive(Debug)]
@@ -159,6 +159,11 @@ impl ThumbnailWorker {
                     let handle = tokio::spawn(async move {
                         let start_time = Instant::now();
 
+                        // The key holds the file's size and time as they were before anything reads the file or asks its remote, so a thumbnail made while the file changes lands under the old key, which no later request asks for.
+                        let key = cache_clone
+                            .key(&request.path, request.size, request.accent.as_ref())
+                            .await;
+
                         // Phase 1: Async pre-processing (downloads remote files without blocking threads)
                         let prepared = match ThumbnailGenerator::prepare(request.clone()).await {
                             Ok(p) => p,
@@ -175,19 +180,21 @@ impl ThumbnailWorker {
                             }
                         };
 
-                        let temp_file = prepared.temp_file.clone();
-                        let req_for_pool = prepared.request;
+                        let copy = match &prepared.source {
+                            Source::Copy(path) => Some(path.clone()),
+                            _ => None,
+                        };
 
-                        // Phase 2: CPU-bound generation in blocking thread pool (fast, no network I/O)
+                        // Phase 2: generation on the blocking pool. Reading a file in a mount, or an `smb://` file, can wait on the network.
+                        // The closure owns `prepared`, so a remote picture's folder goes when generation ends, even after a cancel.
                         let result = tokio::task::spawn_blocking(move || {
-                            thread_pool_clone
-                                .install(|| ThumbnailGenerator::generate(&req_for_pool))
+                            thread_pool_clone.install(|| ThumbnailGenerator::generate(&prepared))
                         })
                         .await;
 
                         // Clean up any temp files from remote downloads
-                        if let Some(temp) = temp_file {
-                            let _ = std::fs::remove_file(&temp);
+                        if let Some(copy) = copy {
+                            let _ = std::fs::remove_file(&copy);
                         }
 
                         let response = match result {
@@ -202,9 +209,7 @@ impl ThumbnailWorker {
                                 // Store in cache (including dimensions)
                                 if let Err(e) = cache_clone
                                     .put(
-                                        &request.path,
-                                        request.size,
-                                        request.accent.as_ref(),
+                                        &key,
                                         gen_result.data_url.clone(),
                                         generation_time_ms,
                                         gen_result.has_transparency,

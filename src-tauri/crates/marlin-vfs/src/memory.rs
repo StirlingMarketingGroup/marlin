@@ -2,12 +2,15 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::{Attributes, Item, ItemId, Kind, Progress, Provider, Revision, Space, VfsError};
+use crate::{
+    Attributes, Item, ItemId, Kind, Progress, Provider, Revision, Space, Thumbnail, VfsError,
+};
 
 struct Stored {
     item: Item,
     parent: Option<ItemId>,
     contents: Vec<u8>,
+    thumbnail: Option<Thumbnail>,
 }
 
 struct Inner {
@@ -76,6 +79,7 @@ impl MemoryProvider {
             },
             parent: None,
             contents: Vec::new(),
+            thumbnail: None,
         };
         Self {
             paths,
@@ -138,6 +142,14 @@ impl MemoryProvider {
         let stored = inner.stored.iter_mut().find(|stored| stored.item.id == *id);
         let stored = stored.expect("no item has this ID");
         stored.item.attributes.read_only = on;
+    }
+
+    /// The picture [`Provider::thumbnail`] answers for the item, or none.
+    pub fn set_thumbnail(&self, id: &ItemId, thumbnail: Option<Thumbnail>) {
+        let mut inner = self.inner.lock().unwrap();
+        let stored = inner.stored.iter_mut().find(|stored| stored.item.id == *id);
+        let stored = stored.expect("no item has this ID");
+        stored.thumbnail = thumbnail;
     }
 
     /// Removes one item behind the mount's back, and with ids that are paths everything inside it. No provider call is counted.
@@ -347,6 +359,7 @@ fn allocate(
         item: item.clone(),
         parent,
         contents: contents.to_vec(),
+        thumbnail: None,
     });
     item
 }
@@ -439,6 +452,12 @@ impl Provider for MemoryProvider {
 
     fn reference(&self, id: &ItemId) -> Option<String> {
         (*id != self.root()).then(|| id.0.clone())
+    }
+
+    async fn thumbnail(&self, id: &ItemId, size: u32) -> Result<Option<Thumbnail>, VfsError> {
+        let _ = size;
+        self.answer(|inner| Ok(find(&inner.stored, id)?.thumbnail.clone()))
+            .await
     }
 
     fn can_write(&self) -> bool {

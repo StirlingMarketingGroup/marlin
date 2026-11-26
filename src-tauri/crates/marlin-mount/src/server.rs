@@ -3,7 +3,7 @@
 use std::fs::File;
 use std::future::Future;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,7 +18,8 @@ use crate::log;
 use crate::mounts::{Adapter, Mounts, Notice, Providers};
 use crate::protocol::{
     error_codes, methods, AccountParams, HelloParams, HelloResult, IdentifyParams, LocateParams,
-    MountParams, Request, Response, RpcError, UnsentParams, JSONRPC_VERSION, PROTOCOL_VERSION,
+    MountParams, Request, Response, RpcError, ThumbnailParams, UnsentParams, JSONRPC_VERSION,
+    PROTOCOL_VERSION,
 };
 
 /// The longest request line a client may send, in bytes.
@@ -373,6 +374,27 @@ async fn answer(
                 serde_json::from_value(params).map_err(invalid_params)?;
             mounts.refresh(&provider, &account)?;
             Value::Null
+        }
+        methods::THUMBNAIL => {
+            let ThumbnailParams {
+                provider,
+                account,
+                path,
+                size,
+                file,
+            } = serde_json::from_value(params).map_err(invalid_params)?;
+            // The helper makes the file, so the path must not depend on the helper's working folder.
+            if !Path::new(&file).is_absolute() {
+                return Err(RpcError {
+                    code: error_codes::INVALID_PARAMS,
+                    message: "invalid params".to_string(),
+                });
+            }
+            json!(
+                mounts
+                    .thumbnail(&provider, &account, &path, size, Path::new(&file))
+                    .await?
+            )
         }
         _ => {
             return Err(RpcError {

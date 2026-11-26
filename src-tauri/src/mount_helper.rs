@@ -388,6 +388,64 @@ pub async fn refresh_mount(
     call(&app, methods::REFRESH, AccountParams { provider, account }).await
 }
 
+/// A picture of a file in a mount that the mount's remote made. It lives in a private temp folder of the app's own, which goes when this is dropped.
+#[cfg(unix)]
+pub(crate) struct RemotePicture {
+    /// Removes the folder and the picture when dropped.
+    _folder: tempfile::TempDir,
+    pub(crate) file: std::path::PathBuf,
+    /// The file's own width and height, when the remote knows them.
+    pub(crate) dimensions: Option<marlin_mount_client::protocol::Dimensions>,
+}
+
+/// Google Drive's own picture of the file at `path`, when `path` is in a Google Drive mount that is up and Drive has the file's current bytes. `None` sends the caller to the file itself. It reads the mount table and uses the open connection only, so it never starts a helper and never waits for one to connect.
+#[cfg(unix)]
+pub(crate) async fn remote_thumbnail(path: &Path, size: u32) -> Option<RemotePicture> {
+    use std::os::unix::fs::PermissionsExt;
+
+    use marlin_mount_client::protocol::{ThumbnailParams, Thumbnailed};
+
+    let mounted = MOUNTS.lock().unwrap().holding(path)?;
+    // Only the Drive provider makes pictures. Asking another mount would walk its folders for nothing.
+    if mounted.mount.provider != "gdrive" {
+        return None;
+    }
+    // The table holds a mount only while a connection is open, or at the end of a connect, which keeps this lock until it has listed the mounts. So this never waits for a helper to start.
+    let client = {
+        let slot = CLIENT.lock().await;
+        std::sync::Arc::clone(slot.as_ref().filter(|client| !client.is_closed())?)
+    };
+    // The folder is the app's own, and only this user may list it. A cancelled thumbnail drops it before the helper answers, and a helper that writes later finds no folder and leaves nothing behind.
+    let folder = tempfile::Builder::new()
+        .prefix("marlin-thumbnail-")
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .ok()?;
+    let file = folder.path().join("picture");
+    let params = ThumbnailParams {
+        provider: mounted.mount.provider,
+        account: mounted.mount.account,
+        path: mounted.path,
+        size,
+        file: file.to_str()?.to_owned(),
+    };
+    match client.call(methods::THUMBNAIL, params).await {
+        Ok(Thumbnailed::Written { dimensions }) => Some(RemotePicture {
+            _folder: folder,
+            file,
+            dimensions,
+        }),
+        Ok(answer) => {
+            log::debug!("The mount helper gave no picture of the file: {answer:?}");
+            None
+        }
+        Err(error) => {
+            log::debug!("The mount helper gave no picture of the file: {error}");
+            None
+        }
+    }
+}
+
 /// Reads the app's mount table only, so it never starts a helper. The table is empty until the first command that sends a request, so call `list_mounts` first at launch.
 #[tauri::command]
 pub fn find_mount(path: String) -> Option<MountedPath> {
@@ -567,5 +625,242 @@ mod tests {
                 .state,
             MountState::Degraded
         );
+    }
+
+    fn write_png(path: &Path, width: u32, height: u32) {
+        let image = image::RgbaImage::from_pixel(width, height, image::Rgba([10, 20, 30, 255]));
+        image
+            .save_with_format(path, image::ImageFormat::Png)
+            .unwrap();
+    }
+
+    fn request(path: &Path) -> crate::thumbnails::ThumbnailRequest {
+        use crate::thumbnails::{
+            ThumbnailFormat, ThumbnailPriority, ThumbnailQuality, ThumbnailRequest,
+        };
+        ThumbnailRequest {
+            id: "t".into(),
+            path: path.to_str().unwrap().to_string(),
+            size: 64,
+            quality: ThumbnailQuality::Low,
+            priority: ThumbnailPriority::High,
+            format: ThumbnailFormat::PNG,
+            accent: None,
+        }
+    }
+
+    /// Clears the mount table and the helper connection this test is the only one to touch.
+    struct Reset;
+
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            if let Ok(mut client) = super::CLIENT.try_lock() {
+                *client = None;
+            }
+            super::MOUNTS.lock().unwrap().clear();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_file_in_a_drive_mount_gets_drives_picture_or_its_own_thumbnail() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::{Arc, Mutex};
+
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        use tokio::net::UnixListener;
+
+        use crate::thumbnails::generators::{Source, ThumbnailGenerator};
+        use crate::thumbnails::{ThumbnailFormat, ThumbnailRequest};
+
+        let within = std::time::Duration::from_secs(10);
+
+        let _reset = Reset;
+        let dir = tempfile::tempdir().unwrap();
+        let mnt = dir.path().join("mnt");
+        let drive = mnt.join("My Drive");
+        std::fs::create_dir_all(&drive).unwrap();
+        // `a.png` has no file, so only Drive's picture can make its thumbnail.
+        for name in ["b.png", "c.png", "d.png", "e.png"] {
+            write_png(&drive.join(name), 20, 10);
+        }
+        let outside = dir.path().join("out.png");
+        write_png(&outside, 20, 10);
+        let sftp = dir.path().join("sftp");
+        std::fs::create_dir_all(&sftp).unwrap();
+        write_png(&sftp.join("x.png"), 20, 10);
+
+        for (provider, mount_point) in [("gdrive", &mnt), ("sftp", &sftp)] {
+            super::MOUNTS.lock().unwrap().changed(&MountStatus {
+                provider: provider.into(),
+                account: "ana@example.com".into(),
+                name: format!("{provider}-ana"),
+                mount_point: mount_point.to_str().unwrap().to_string(),
+                state: MountState::Mounted,
+                error: None,
+                read_only: None,
+            });
+        }
+
+        let socket = dir.path().join("h.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        // Every `thumbnail` request's params, for the checks at the end.
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        // For `e.png` the fake hands the test its file, waits for the go, then tries to make the file.
+        let (held_tx, held_rx) = tokio::sync::oneshot::channel::<std::path::PathBuf>();
+        let (go_tx, go_rx) = tokio::sync::oneshot::channel::<()>();
+        let (made_tx, made_rx) = tokio::sync::oneshot::channel::<bool>();
+        let written = serde_json::json!({"thumbnail": "written", "dimensions": {"width": 4000, "height": 2000}});
+        let fake_asked = Arc::clone(&asked);
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut writer) = stream.into_split();
+            let mut lines = tokio::io::BufReader::new(read).lines();
+            let mut held = Some((held_tx, go_rx, made_tx));
+            while let Ok(Some(line)) = lines.next_line().await {
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                let params = &request["params"];
+                let file = params["file"].as_str().unwrap_or_default().to_string();
+                let result = if request["method"] == "hello" {
+                    serde_json::json!({
+                        "protocol": marlin_mount_client::protocol::PROTOCOL_VERSION,
+                        "version": "fake",
+                    })
+                } else {
+                    fake_asked.lock().unwrap().push(request.clone());
+                    match params["path"].as_str().unwrap_or_default() {
+                        "My Drive/a.png" | "My Drive/f.jpg" => {
+                            write_png(Path::new(&file), 40, 20);
+                            written.clone()
+                        }
+                        "My Drive/c.png" => serde_json::json!({"thumbnail": "not-eligible"}),
+                        "My Drive/d.png" => {
+                            std::fs::write(&file, b"not an image").unwrap();
+                            written.clone()
+                        }
+                        "My Drive/e.png" => {
+                            let (held_tx, go_rx, made_tx) = held.take().unwrap();
+                            held_tx.send(file.clone().into()).unwrap();
+                            go_rx.await.unwrap();
+                            made_tx.send(std::fs::File::create(&file).is_ok()).unwrap();
+                            serde_json::json!({"thumbnail": "no-picture"})
+                        }
+                        _ => serde_json::json!({"thumbnail": "no-picture"}),
+                    }
+                };
+                let answer =
+                    serde_json::json!({"jsonrpc": "2.0", "id": request["id"], "result": result});
+                writer
+                    .write_all(format!("{answer}\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let client = marlin_mount_client::Client::connect(
+            &marlin_mount_client::Start {
+                binary: dir.path().join("none"),
+                socket,
+                root: None,
+                log: dir.path().join("log"),
+            },
+            |_| {},
+        )
+        .await
+        .unwrap();
+        *super::CLIENT.lock().await = Some(Arc::new(client));
+
+        let a = drive.join("a.png");
+        // A command that holds the connection for a moment only delays Drive's picture.
+        let held = super::CLIENT.lock().await;
+        let asking = tokio::spawn(ThumbnailGenerator::prepare(request(&a)));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        drop(held);
+        let prepared = tokio::time::timeout(within, asking)
+            .await
+            .expect("the a.png thumbnail never finished")
+            .unwrap()
+            .unwrap();
+        assert_eq!(prepared.request.path, a.to_str().unwrap());
+        let Source::RemotePicture(picture) = &prepared.source else {
+            panic!("a.png got no picture from the helper");
+        };
+        let folder = picture.file.parent().unwrap().to_path_buf();
+        let mode = std::fs::metadata(&folder).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+        let made = ThumbnailGenerator::generate(&prepared).unwrap();
+        assert_eq!(
+            (made.image_width, made.image_height),
+            (Some(4000), Some(2000))
+        );
+        drop(prepared);
+        assert!(!folder.exists());
+
+        // A WebP request takes the format of the file's own extension: Drive's PNG picture of a JPEG photo stays JPEG.
+        let f = drive.join("f.jpg");
+        let webp = ThumbnailRequest {
+            format: ThumbnailFormat::WebP,
+            ..request(&f)
+        };
+        let prepared = ThumbnailGenerator::prepare(webp).await.unwrap();
+        let made = ThumbnailGenerator::generate(&prepared).unwrap();
+        assert!(made.data_url.starts_with("data:image/jpeg"));
+
+        // No picture, unsent bytes, a picture that does not decode, a mount that is not Google Drive's, and a path in no mount: the file makes the thumbnail.
+        let sftp_file = sftp.join("x.png");
+        for path in [
+            drive.join("b.png"),
+            drive.join("c.png"),
+            drive.join("d.png"),
+            sftp_file.clone(),
+            outside.clone(),
+        ] {
+            let prepared = ThumbnailGenerator::prepare(request(&path)).await.unwrap();
+            let made = ThumbnailGenerator::generate(&prepared).unwrap();
+            assert_eq!(
+                (made.image_width, made.image_height),
+                (Some(20), Some(10)),
+                "{path:?}"
+            );
+        }
+
+        let e = drive.join("e.png");
+        let task = tokio::spawn(async move { ThumbnailGenerator::prepare(request(&e)).await });
+        let picture = tokio::time::timeout(within, held_rx)
+            .await
+            .expect("prepare never asked the helper about e.png")
+            .unwrap();
+        task.abort();
+        let _ = task.await;
+        go_tx.send(()).unwrap();
+        let made = tokio::time::timeout(within, made_rx)
+            .await
+            .expect("the fake helper never tried to make e.png's picture")
+            .unwrap();
+        assert!(!made);
+        assert!(!picture.parent().unwrap().exists());
+
+        let asked = asked.lock().unwrap();
+        let paths: Vec<&str> = asked
+            .iter()
+            .map(|request| request["params"]["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                "My Drive/a.png",
+                "My Drive/f.jpg",
+                "My Drive/b.png",
+                "My Drive/c.png",
+                "My Drive/d.png",
+                "My Drive/e.png"
+            ]
+        );
+        for request in asked.iter() {
+            assert_eq!(request["method"], "thumbnail");
+            assert_eq!(request["params"]["provider"], "gdrive");
+            assert_eq!(request["params"]["account"], "ana@example.com");
+            assert_eq!(request["params"]["size"], 64);
+            assert!(Path::new(request["params"]["file"].as_str().unwrap()).is_absolute());
+        }
     }
 }

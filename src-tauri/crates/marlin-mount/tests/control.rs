@@ -13,7 +13,7 @@ use marlin_mount::protocol::PROTOCOL_VERSION;
 use marlin_mount::{
     Adapter, BindError, Config, MountError, Opened, Providers, Server, Session, MOUNT_FOLDER_MARKER,
 };
-use marlin_vfs::{Access, ItemId, MemoryProvider, Options, Provider, Vfs, VfsError};
+use marlin_vfs::{Access, ItemId, MemoryProvider, Options, Provider, Thumbnail, Vfs, VfsError};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -1851,6 +1851,16 @@ fn item_call(account: &str, key: &str, value: &str) -> Value {
     json!({"provider": "memory", "account": account, key: value})
 }
 
+fn thumbnail_call(account: &str, path: &str, file: &Path) -> Value {
+    json!({
+        "provider": "memory",
+        "account": account,
+        "path": path,
+        "size": 256,
+        "file": file.to_str().unwrap(),
+    })
+}
+
 #[tokio::test]
 async fn locate_and_identify_name_an_item_as_the_listing_shows_it() {
     let harness = start();
@@ -1983,6 +1993,144 @@ async fn refresh_makes_the_next_listing_show_a_remote_change() {
 }
 
 #[tokio::test]
+async fn a_thumbnail_is_the_remotes_picture_written_to_the_named_file_with_no_read() {
+    let harness = start();
+    let mut client = Client::connect(&harness.socket).await;
+    client.call("mount", mount("ana", "drive")).await;
+    let memory = provider(&harness, "ana");
+    let photo = memory.add_file(&memory.root(), "photo.jpg", b"photo");
+    memory.set_thumbnail(
+        &photo,
+        Some(Thumbnail {
+            image: b"picture".to_vec(),
+            dimensions: Some((4000, 3000)),
+        }),
+    );
+    memory.add_file(&memory.root(), "notes.txt", b"notes");
+    let projects = memory.add_folder(&memory.root(), "Projects");
+    // The core answers for a folder itself, so this picture never comes back.
+    memory.set_thumbnail(
+        &projects,
+        Some(Thumbnail {
+            image: b"folder".to_vec(),
+            dimensions: None,
+        }),
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let picture = dir.path().join("photo.bin");
+    let answer = client
+        .call("thumbnail", thumbnail_call("ana", "photo.jpg", &picture))
+        .await;
+    assert_eq!(
+        answer["result"],
+        json!({"thumbnail": "written", "dimensions": {"width": 4000, "height": 3000}})
+    );
+    assert_eq!(std::fs::read(&picture).unwrap(), b"picture");
+    assert_eq!(mode_bits(&picture), 0o600);
+    assert_eq!(memory.largest_read(), 0);
+
+    let notes = dir.path().join("notes.bin");
+    let answer = client
+        .call("thumbnail", thumbnail_call("ana", "notes.txt", &notes))
+        .await;
+    assert_eq!(answer["result"], json!({"thumbnail": "no-picture"}));
+    assert!(!notes.exists());
+
+    let projects = dir.path().join("projects.bin");
+    let answer = client
+        .call("thumbnail", thumbnail_call("ana", "Projects", &projects))
+        .await;
+    assert_eq!(answer["result"], json!({"thumbnail": "no-picture"}));
+    assert!(!projects.exists());
+}
+
+#[tokio::test]
+async fn a_file_with_unsent_bytes_gets_no_remote_picture() {
+    let harness = start();
+    let mut client = Client::connect(&harness.socket).await;
+    client.call("mount", mount("ana", "drive")).await;
+    let memory = provider(&harness, "ana");
+    let photo = memory.add_file(&memory.root(), "photo.jpg", b"photo");
+    memory.set_thumbnail(
+        &photo,
+        Some(Thumbnail {
+            image: b"picture".to_vec(),
+            dimensions: Some((4000, 3000)),
+        }),
+    );
+    memory.set_upload_delay(Duration::from_secs(60));
+    let vfs = harness.fake.vfs.lock().unwrap()["drive"].clone();
+    let entry = vfs.lookup(Vfs::ROOT, "photo.jpg").await.unwrap();
+    let handle = vfs.open(entry.node, Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"new".to_vec()).await.unwrap();
+    vfs.release(handle);
+    vfs.forget(entry.node, 1);
+
+    let dir = tempfile::tempdir().unwrap();
+    let picture = dir.path().join("photo.bin");
+    let answer = client
+        .call("thumbnail", thumbnail_call("ana", "photo.jpg", &picture))
+        .await;
+    assert_eq!(answer["result"], json!({"thumbnail": "not-eligible"}));
+    assert!(!picture.exists());
+
+    write_bytes(&vfs, "draft.jpg", b"draft").await;
+    let draft = dir.path().join("draft.bin");
+    let answer = client
+        .call("thumbnail", thumbnail_call("ana", "draft.jpg", &draft))
+        .await;
+    assert_eq!(answer["result"], json!({"thumbnail": "not-eligible"}));
+    assert!(!draft.exists());
+}
+
+#[tokio::test]
+async fn a_thumbnail_never_replaces_a_file_and_needs_an_absolute_path() {
+    let harness = start();
+    let mut client = Client::connect(&harness.socket).await;
+    client.call("mount", mount("ana", "drive")).await;
+    let memory = provider(&harness, "ana");
+    let photo = memory.add_file(&memory.root(), "photo.jpg", b"photo");
+    memory.set_thumbnail(
+        &photo,
+        Some(Thumbnail {
+            image: b"picture".to_vec(),
+            dimensions: Some((4000, 3000)),
+        }),
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let kept = dir.path().join("keep.bin");
+    std::fs::write(&kept, b"keep").unwrap();
+    let answer = client
+        .call("thumbnail", thumbnail_call("ana", "photo.jpg", &kept))
+        .await;
+    assert_eq!(code(&answer), -1008);
+    assert_eq!(std::fs::read(&kept).unwrap(), b"keep");
+
+    let relative = client
+        .call(
+            "thumbnail",
+            json!({
+                "provider": "memory",
+                "account": "ana",
+                "path": "photo.jpg",
+                "size": 256,
+                "file": "relative.bin",
+            }),
+        )
+        .await;
+    assert_eq!(code(&relative), -32602);
+
+    let missing = dir.path().join("missing.bin");
+    let answer = client
+        .call("thumbnail", thumbnail_call("ana", "Nope/a.jpg", &missing))
+        .await;
+    assert_eq!(code(&answer), -1019);
+    assert!(!missing.exists());
+}
+
+#[tokio::test]
 async fn requests_about_items_need_a_mount_that_is_up() {
     let harness = start();
     let mut client = Client::connect(&harness.socket).await;
@@ -1994,6 +2142,17 @@ async fn requests_about_items_need_a_mount_that_is_up() {
         code(
             &client
                 .call("identify", item_call("ana", "path", "a.txt"))
+                .await
+        ),
+        -1018
+    );
+    assert_eq!(
+        code(
+            &client
+                .call(
+                    "thumbnail",
+                    thumbnail_call("ana", "a.txt", Path::new("/no/such")),
+                )
                 .await
         ),
         -1018
@@ -2013,6 +2172,17 @@ async fn requests_about_items_need_a_mount_that_is_up() {
         code(
             &client
                 .call("identify", item_call("ana", "path", "a.txt"))
+                .await
+        ),
+        -1018
+    );
+    assert_eq!(
+        code(
+            &client
+                .call(
+                    "thumbnail",
+                    thumbnail_call("ana", "a.txt", Path::new("/no/such")),
+                )
                 .await
         ),
         -1018

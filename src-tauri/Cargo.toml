@@ -77,6 +77,7 @@ notify = { version = "8.2", default-features = false, features = ["macos_fsevent
 walkdir = "2.5"
 same-file = "1.0"
 libc = "0.2"
+tempfile = "3.27"
 zip = { version = "9.0", default-features = false, features = ["deflate", "bzip2", "zstd"] }
 tar = "0.4"
 flate2 = "1.1"
@@ -129,7 +130,6 @@ remove_dir_all = { version = "1.0", features = ["parallel"] }
 gtk = { version = "0.18", package = "gtk" }
 
 [dev-dependencies]
-tempfile = "3.27"
 marlin-test-keychain = { path = "crates/marlin-test-keychain" }
 
 # The tests that mount a real FUSE filesystem: run them with test-in-docker.sh.
