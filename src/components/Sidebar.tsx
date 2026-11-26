@@ -562,7 +562,8 @@ export default function Sidebar() {
             {[...pinnedDirectories]
               .sort((a, b) => a.name.localeCompare(b.name))
               .map((pin) => {
-                const isActive = currentPath === pin.path;
+                // A server root lists as `sftp://host/`, and a pin is stored without the trailing slash.
+                const isActive = currentPath.replace(/\/+$/, '') === pin.path.replace(/\/+$/, '');
                 return (
                   <QuickTooltip key={pin.path} text={pin.path}>
                     {({ onBlur, onFocus, onMouseEnter, onMouseLeave, ref }) => (
