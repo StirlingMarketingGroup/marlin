@@ -11,3 +11,6 @@ mod upload;
 
 pub use provider::{AccessTokens, Config, DriveProvider};
 pub use sign_in::{keyring_entry, OAuthClient, SavedSignIn, SignInError, KEYRING_SERVICE};
+
+#[cfg(feature = "app-test")]
+pub mod app_test;

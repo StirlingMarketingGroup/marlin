@@ -7,6 +7,9 @@ publish = false
 rust-version = "1.89"
 description = "Marlin's Google Drive provider for native mounts, and the saved Google sign-in the app and the mount helper share."
 
+[features]
+app-test = []
+
 [dependencies]
 marlin-vfs = { path = "../marlin-vfs" }
 async-trait = "0.1"

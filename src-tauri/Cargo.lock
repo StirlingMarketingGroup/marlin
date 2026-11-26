@@ -4321,6 +4321,7 @@ dependencies = [
  "marlin-mount-client",
  "marlin-sftp",
  "marlin-smb-client",
+ "marlin-test-google",
  "marlin-test-keychain",
  "marlin-test-samba",
  "marlin-test-sshd",
@@ -4405,11 +4406,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "marlin-test-google"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tokio",
+ "wiremock",
+]
+
+[[package]]
 name = "marlin-test-keychain"
 version = "0.1.0"
 dependencies = [
  "keyring",
  "once_cell",
+ "serde_json",
 ]
 
 [[package]]

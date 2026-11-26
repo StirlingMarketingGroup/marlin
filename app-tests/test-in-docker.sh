@@ -9,6 +9,9 @@ rm -rf "${src}/test-results/app"
 mkdir -p "${src}/test-results/app"
 
 docker run --rm \
+  --device /dev/fuse \
+  --cap-add SYS_ADMIN \
+  --security-opt apparmor=unconfined \
   -v "${src}:/src:ro" \
   -v "${src}/test-results/app:/screenshots" \
   -v marlin-app-test-registry:/usr/local/cargo/registry \
@@ -22,10 +25,10 @@ apt-get install -y -qq curl ca-certificates
 # The Node that Debian ships is too old for Vite.
 curl -fsSL https://deb.nodesource.com/setup_24.x | bash - > /dev/null
 # The build packages are the ones check.yml installs. xvfb is the virtual display.
-# The SFTP test runs its own sshd. Copy and paste run xclip.
+# The SFTP test runs its own sshd. Copy and paste run xclip. The mount test needs fuse3.
 apt-get install -y -qq nodejs build-essential clang libclang-dev libssl-dev pkg-config \
   libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
-  procps xvfb xauth xclip openssh-server
+  procps xvfb xauth xclip openssh-server fuse3
 useradd -m tester
 # The source is mounted read-only. Work on a copy without the host dependencies and build output, and without the agent worktrees in .claude.
 tar -C /src --exclude=./node_modules --exclude=./src-tauri/target --exclude=./dist --exclude=./.git --exclude=./.claude \

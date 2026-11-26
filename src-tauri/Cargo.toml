@@ -10,16 +10,16 @@ rust-version = "1.99"
 default-run = "marlin"
 
 [workspace]
-members = ["crates/marlin-smb", "crates/marlin-smb-client", "crates/marlin-vfs", "crates/marlin-mount", "crates/marlin-mount-client", "crates/marlin-fuse", "crates/marlin-gdrive", "crates/marlin-sftp", "crates/marlin-local-network", "crates/marlin-test-keychain", "crates/marlin-test-samba", "crates/marlin-test-sshd"]
+members = ["crates/marlin-smb", "crates/marlin-smb-client", "crates/marlin-vfs", "crates/marlin-mount", "crates/marlin-mount-client", "crates/marlin-fuse", "crates/marlin-gdrive", "crates/marlin-sftp", "crates/marlin-local-network", "crates/marlin-test-keychain", "crates/marlin-test-google", "crates/marlin-test-samba", "crates/marlin-test-sshd"]
 
 [features]
 default = []
 cargo-clippy = []
 # Gates the manual tests in tests/smb_integration.rs. They need a real SMB server.
 smb = []
-# The build that `npm run test:app` drives: it serves WebDriver on a local port and keeps secrets in memory, not in the OS keychain.
+# The build that `npm run test:app` drives: it serves WebDriver on a local port, keeps secrets in a test keychain, not in the OS keychain, and signs in to Google accounts against a fake Google.
 # Debug builds only. See docs/decisions/0004-real-app-tests.md.
-app-test = ["dep:tauri-plugin-wdio-webdriver", "dep:marlin-test-keychain"]
+app-test = ["dep:tauri-plugin-wdio-webdriver", "dep:marlin-test-keychain", "marlin-gdrive/app-test"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

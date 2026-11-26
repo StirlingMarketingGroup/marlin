@@ -110,9 +110,9 @@ fn raise_open_file_limit() {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     ensure_rustls_crypto_provider();
-    // The test app must never read or write the developer's real keychain.
+    // The test app keeps secrets in the test keychain, shared with its mount helper, never the real one.
     #[cfg(feature = "app-test")]
-    marlin_test_keychain::install();
+    marlin_test_keychain::install_for_app_test();
     let builder = tauri::Builder::default();
     // Registered on the builder, not in `setup`: the plugin adds a script to each webview as it is created.
     #[cfg(feature = "app-test")]
