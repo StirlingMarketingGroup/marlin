@@ -428,25 +428,13 @@ impl SmbProvider {
             }
             saved
         });
-        let mut work = std::pin::pin!(work);
-        let mut hearing = true;
-        loop {
-            tokio::select! {
-                biased;
-                bytes = rx.recv(), if hearing => {
-                    match bytes {
-                        Some(bytes) => progress(bytes),
-                        None => hearing = false,
-                    }
-                }
-                result = &mut work => {
-                    while let Ok(bytes) = rx.try_recv() {
-                        progress(bytes);
-                    }
-                    return result;
-                }
+        // The worker holds the only sender, so the channel closes when the worker returns, on success and on error alike.
+        let (result, ()) = tokio::join!(work, async {
+            while let Some(bytes) = rx.recv().await {
+                progress(bytes);
             }
-        }
+        });
+        result
     }
 }
 
