@@ -6,11 +6,13 @@ use std::path::Path;
 pub struct ImageGenerator;
 
 impl ImageGenerator {
-    pub fn generate(request: &ThumbnailRequest) -> Result<ThumbnailGenerationResult, String> {
-        let path = Path::new(&request.path);
-
+    /// A thumbnail for `request` of the image at `source`: the file itself, or a remote's picture of it. A WebP request takes its output format from `request.path`, the file the thumbnail is of.
+    pub fn generate(
+        source: &Path,
+        request: &ThumbnailRequest,
+    ) -> Result<ThumbnailGenerationResult, String> {
         // Load the image
-        let image = Self::load_image(path)?;
+        let image = Self::load_image(source)?;
 
         // Get original dimensions before resizing
         let (image_width, image_height) = image.dimensions();
@@ -25,7 +27,7 @@ impl ImageGenerator {
         let format = if request.format != super::super::ThumbnailFormat::WebP {
             request.format
         } else {
-            get_thumbnail_format_from_path(path)
+            get_thumbnail_format_from_path(Path::new(&request.path))
         };
 
         // Encode to data URL

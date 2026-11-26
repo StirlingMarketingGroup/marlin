@@ -2,7 +2,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use marlin_vfs::{Attributes, Item, ItemId, Kind, Progress, Provider, Revision, Space, VfsError};
+use marlin_vfs::{
+    Attributes, Item, ItemId, Kind, Progress, Provider, Revision, Space, Thumbnail, VfsError,
+};
 use reqwest::{Method, StatusCode};
 
 use crate::api::{self, About, DriveFile, DrivePage, FilePage, FileParents, SharedDrive};
@@ -687,6 +689,42 @@ impl Provider for DriveProvider {
             // A shared drive's top folder is `{drive}/{drive}`, so this gives the drive's ID. A link file gives the Drive file it is, not the one its page opens.
             Place::File { file, .. } | Place::Link { file, .. } => Some(file.to_string()),
         }
+    }
+
+    async fn thumbnail(&self, id: &ItemId, size: u32) -> Result<Option<Thumbnail>, VfsError> {
+        // A link file's bytes are its small web page, so Drive's picture of the item it opens is not a picture of the file's bytes. The top and Shared drives are not Drive files.
+        let Place::File { .. } = place(id) else {
+            return Ok(None);
+        };
+        let fields = format!(
+            "{ITEM_FIELDS},thumbnailLink,imageMediaMetadata(width,height),videoMediaMetadata(width,height)"
+        );
+        let found = self.file_of(id, &fields).await?;
+        let Some(link) = found.thumbnail_link else {
+            return Ok(None);
+        };
+        // Drive's link ends with `=s220`, the longer side in pixels. Ask for the size the caller wants.
+        let url = match link.rsplit_once("=s") {
+            Some((rest, digits))
+                if !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()) =>
+            {
+                format!("{rest}=s{size}")
+            }
+            _ => link,
+        };
+        let response = match self.request_url(Method::GET, &url, &[], None, None).await {
+            Ok(response) => response,
+            Err(VfsError::NotFound | VfsError::AccessDenied) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let image = response
+            .bytes()
+            .await
+            .map_err(|_| VfsError::Offline)?
+            .to_vec();
+        let media = found.image_media_metadata.or(found.video_media_metadata);
+        let dimensions = media.and_then(|media| Some((media.width?, media.height?)));
+        Ok(Some(Thumbnail { image, dimensions }))
     }
 
     fn can_write(&self) -> bool {

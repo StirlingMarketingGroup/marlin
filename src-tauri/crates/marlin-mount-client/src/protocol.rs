@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 pub const JSONRPC_VERSION: &str = "2.0";
 
 /// Protocol number the helper and the app speak. Raised when the control API changes.
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// JSON-RPC and helper error codes.
 pub mod error_codes {
@@ -56,6 +56,7 @@ pub mod methods {
     pub const LOCATE: &str = "locate";
     pub const IDENTIFY: &str = "identify";
     pub const REFRESH: &str = "refresh";
+    pub const THUMBNAIL: &str = "thumbnail";
     pub const MOUNT_CHANGED: &str = "mountChanged";
     pub const UNSENT_CHANGED: &str = "unsentChanged";
 }
@@ -270,6 +271,39 @@ pub enum Identified {
     New,
 }
 
+/// Body of a `thumbnail` request. `path` is mount-relative, as for `identify`. `size` is the longer side the caller asks for, in pixels; the remote may send another size. `file` is an absolute path that must not exist yet: the helper makes the file there, with mode 0600, and writes the picture into it. It never replaces what is already at that path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThumbnailParams {
+    pub provider: String,
+    pub account: String,
+    pub path: String,
+    pub size: u32,
+    pub file: String,
+}
+
+/// A width and a height in pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Dimensions {
+    pub width: u32,
+    pub height: u32,
+}
+
+/// The answer to `thumbnail`. `Written` means the helper made the request's `file` and finished writing the picture into it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "thumbnail", rename_all = "kebab-case")]
+pub enum Thumbnailed {
+    /// The helper wrote the remote's picture of the file to the request's `file`. `dimensions` is the file's own width and height, absent when the remote does not know them. It is never the picture's size.
+    Written {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dimensions: Option<Dimensions>,
+    },
+    /// The remote has no picture of the item.
+    NoPicture,
+    /// The item may not use a provider call (decision 0009, choice 7): the remote does not have the file's current bytes, so its picture would be wrong.
+    NotEligible,
+}
+
 /// A dead mount under the mount folder: its server was killed, and the OS still lists it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -363,6 +397,68 @@ mod tests {
         );
         assert_eq!(
             serde_json::from_value::<LocateParams>(wire).unwrap(),
+            params
+        );
+    }
+
+    #[test]
+    fn thumbnail_keeps_its_shape_on_the_wire() {
+        use super::{Dimensions, ThumbnailParams, Thumbnailed};
+
+        let written = Thumbnailed::Written {
+            dimensions: Some(Dimensions {
+                width: 4000,
+                height: 3000,
+            }),
+        };
+        let wire = serde_json::to_value(&written).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({"thumbnail": "written", "dimensions": {"width": 4000, "height": 3000}})
+        );
+        assert_eq!(
+            serde_json::from_value::<Thumbnailed>(wire).unwrap(),
+            written
+        );
+
+        let bare = Thumbnailed::Written { dimensions: None };
+        let wire = serde_json::to_value(&bare).unwrap();
+        assert_eq!(wire, serde_json::json!({"thumbnail": "written"}));
+        assert_eq!(serde_json::from_value::<Thumbnailed>(wire).unwrap(), bare);
+
+        let none = Thumbnailed::NoPicture;
+        let wire = serde_json::to_value(&none).unwrap();
+        assert_eq!(wire, serde_json::json!({"thumbnail": "no-picture"}));
+        assert_eq!(serde_json::from_value::<Thumbnailed>(wire).unwrap(), none);
+
+        let not_eligible = Thumbnailed::NotEligible;
+        let wire = serde_json::to_value(&not_eligible).unwrap();
+        assert_eq!(wire, serde_json::json!({"thumbnail": "not-eligible"}));
+        assert_eq!(
+            serde_json::from_value::<Thumbnailed>(wire).unwrap(),
+            not_eligible
+        );
+
+        let params = ThumbnailParams {
+            provider: "gdrive".into(),
+            account: "ana".into(),
+            path: "My Drive/photo.jpg".into(),
+            size: 256,
+            file: "/tmp/picture".into(),
+        };
+        let wire = serde_json::to_value(&params).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({
+                "provider": "gdrive",
+                "account": "ana",
+                "path": "My Drive/photo.jpg",
+                "size": 256,
+                "file": "/tmp/picture",
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<ThumbnailParams>(wire).unwrap(),
             params
         );
     }

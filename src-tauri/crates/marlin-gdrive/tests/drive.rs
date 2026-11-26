@@ -7,8 +7,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use marlin_gdrive::{AccessTokens, Config, DriveProvider};
 use marlin_vfs::{
-    Access, Identified, IfExists, Item, ItemId, Kind, Options, Provider, Revision, Space, Vfs,
-    VfsError, POSIX,
+    Access, Identified, IfExists, Item, ItemId, Kind, Options, Provider, Revision, Space,
+    Thumbnail, Vfs, VfsError, POSIX,
 };
 use serde_json::{json, Value};
 use wiremock::matchers::{header, method, path, query_param};
@@ -18,6 +18,9 @@ const MODIFIED: &str = "2020-01-02T03:04:05.678Z";
 
 const ITEM_FIELDS: &str =
     "id,name,mimeType,size,modifiedTime,headRevisionId,trashed,driveId,shortcutDetails(targetId),capabilities(canModifyContent)";
+
+const THUMBNAIL_FIELDS: &str =
+    "id,name,mimeType,size,modifiedTime,headRevisionId,trashed,driveId,shortcutDetails(targetId),capabilities(canModifyContent),thumbnailLink,imageMediaMetadata(width,height),videoMediaMetadata(width,height)";
 
 const FOLDER: &str = "application/vnd.google-apps.folder";
 const DOC: &str = "application/vnd.google-apps.document";
@@ -3760,5 +3763,145 @@ async fn locate_and_identify_round_trip_through_a_mount_with_duplicate_names() {
     assert_eq!(
         vfs.identify("Shared drives").await.unwrap(),
         Identified::Remote(None)
+    );
+}
+
+#[tokio::test]
+async fn thumbnail_fetches_drives_picture_at_the_size_asked() {
+    let server = MockServer::start().await;
+    let mut file = file_json("abc", "photo.jpg", "image/jpeg", "10");
+    file["thumbnailLink"] = json!(format!("{}/thumb/xyz=s220", server.uri()));
+    file["imageMediaMetadata"] = json!({"width": 4000, "height": 3000});
+    Mock::given(method("GET"))
+        .and(path("/files/abc"))
+        .and(query_param("fields", THUMBNAIL_FIELDS))
+        .respond_with(ok_json(file))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/thumb/xyz=s512"))
+        .and(header("authorization", "Bearer token-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"jpeg bytes".to_vec()))
+        .mount(&server)
+        .await;
+    let drive = drive(&server);
+    assert_eq!(
+        drive.thumbnail(&ItemId("abc".into()), 512).await.unwrap(),
+        Some(Thumbnail {
+            image: b"jpeg bytes".to_vec(),
+            dimensions: Some((4000, 3000)),
+        })
+    );
+}
+
+#[tokio::test]
+async fn thumbnail_of_a_video_gives_the_videos_size() {
+    let server = MockServer::start().await;
+    let mut file = file_json("abc", "clip.mp4", "video/mp4", "10");
+    file["thumbnailLink"] = json!(format!("{}/thumb/xyz=s220", server.uri()));
+    file["videoMediaMetadata"] = json!({"width": 1920, "height": 1080});
+    Mock::given(method("GET"))
+        .and(path("/files/abc"))
+        .and(query_param("fields", THUMBNAIL_FIELDS))
+        .respond_with(ok_json(file))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/thumb/xyz=s512"))
+        .and(header("authorization", "Bearer token-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"jpeg bytes".to_vec()))
+        .mount(&server)
+        .await;
+    let drive = drive(&server);
+    assert_eq!(
+        drive.thumbnail(&ItemId("abc".into()), 512).await.unwrap(),
+        Some(Thumbnail {
+            image: b"jpeg bytes".to_vec(),
+            dimensions: Some((1920, 1080)),
+        })
+    );
+}
+
+#[tokio::test]
+async fn thumbnail_of_a_file_drive_has_no_picture_of_is_none() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/files/abc"))
+        .and(query_param("fields", THUMBNAIL_FIELDS))
+        .respond_with(ok_json(file_json("abc", "notes.txt", PLAIN, "4")))
+        .mount(&server)
+        .await;
+    let drive = drive(&server);
+    assert_eq!(
+        drive.thumbnail(&ItemId("abc".into()), 256).await.unwrap(),
+        None
+    );
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn thumbnail_of_a_link_file_asks_google_nothing() {
+    let server = MockServer::start().await;
+    let drive = drive(&server);
+    assert_eq!(
+        drive
+            .thumbnail(&ItemId("abc#abc".into()), 256)
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_picture_drive_will_not_hand_over_is_none() {
+    for status in [404, 403] {
+        let server = MockServer::start().await;
+        let mut file = file_json("abc", "photo.jpg", "image/jpeg", "10");
+        file["thumbnailLink"] = json!(format!("{}/thumb/xyz=s220", server.uri()));
+        Mock::given(method("GET"))
+            .and(path("/files/abc"))
+            .and(query_param("fields", THUMBNAIL_FIELDS))
+            .respond_with(ok_json(file))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/thumb/xyz=s256"))
+            .respond_with(ResponseTemplate::new(status))
+            .mount(&server)
+            .await;
+        let drive = drive(&server);
+        assert_eq!(
+            drive.thumbnail(&ItemId("abc".into()), 256).await.unwrap(),
+            None,
+            "status {status}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn thumbnail_keeps_a_link_with_no_size_as_it_is() {
+    let server = MockServer::start().await;
+    let mut file = file_json("abc", "photo.jpg", "image/jpeg", "10");
+    file["thumbnailLink"] = json!(format!("{}/thumb/plain", server.uri()));
+    Mock::given(method("GET"))
+        .and(path("/files/abc"))
+        .and(query_param("fields", THUMBNAIL_FIELDS))
+        .respond_with(ok_json(file))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/thumb/plain"))
+        .and(header("authorization", "Bearer token-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"jpeg bytes".to_vec()))
+        .mount(&server)
+        .await;
+    let drive = drive(&server);
+    assert_eq!(
+        drive.thumbnail(&ItemId("abc".into()), 512).await.unwrap(),
+        Some(Thumbnail {
+            image: b"jpeg bytes".to_vec(),
+            dimensions: None,
+        })
     );
 }

@@ -100,7 +100,7 @@ impl ThumbnailCache {
         size: u32,
         accent: Option<&AccentColor>,
     ) -> Option<(String, bool, Option<u32>, Option<u32>)> {
-        let cache_key = self.generate_cache_key(path, size, accent).await?;
+        let cache_key = self.key(path, size, accent).await;
 
         // Try L1 memory cache first
         {
@@ -141,23 +141,16 @@ impl ThumbnailCache {
 
     pub async fn put(
         &self,
-        path: &str,
-        size: u32,
-        accent: Option<&AccentColor>,
+        key: &str,
         data_url: String,
         generation_time_ms: u64,
         has_transparency: bool,
         image_width: Option<u32>,
         image_height: Option<u32>,
     ) -> Result<(), String> {
-        let cache_key = self
-            .generate_cache_key(path, size, accent)
-            .await
-            .ok_or("Failed to generate cache key")?;
-
         // Store in both memory and disk cache
         self.put_memory(
-            &cache_key,
+            key,
             &data_url,
             generation_time_ms,
             has_transparency,
@@ -166,7 +159,7 @@ impl ThumbnailCache {
         )
         .await;
         self.put_disk(
-            &cache_key,
+            key,
             &data_url,
             generation_time_ms,
             has_transparency,
@@ -294,12 +287,8 @@ impl ThumbnailCache {
         ))
     }
 
-    async fn generate_cache_key(
-        &self,
-        path: &str,
-        size: u32,
-        accent: Option<&AccentColor>,
-    ) -> Option<String> {
+    /// The cache key for `path` at `size`, from the file as it is now.
+    pub(crate) async fn key(&self, path: &str, size: u32, accent: Option<&AccentColor>) -> String {
         // Handle SMB paths specially - they can't use std::path for identity
         let identity = if path.starts_with("smb://") {
             match super::generators::smb::get_smb_file_identity(path) {
@@ -334,7 +323,7 @@ impl ThumbnailCache {
             let path_obj = Path::new(path);
             super::get_file_identity(path_obj)
         };
-        Some(super::generate_cache_key(path, size, &identity, accent))
+        super::generate_cache_key(path, size, &identity, accent)
     }
 
     async fn load_disk_cache_index(&mut self) -> Result<(), String> {
