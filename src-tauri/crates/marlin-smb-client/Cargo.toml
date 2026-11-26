@@ -5,7 +5,7 @@ edition = "2021"
 license = "MIT"
 publish = false
 rust-version = "1.89"
-description = "Marlin's SMB helper protocol, the client that runs `marlin-smb`, the saved SMB servers, and the read-only mount provider for one saved server."
+description = "Marlin's SMB helper protocol, the client that runs `marlin-smb`, the saved SMB servers, and the mount provider for one saved server. The provider takes writes."
 
 [features]
 default = ["client"]
@@ -20,7 +20,7 @@ dirs = { version = "7.0", optional = true }
 log = { version = "0.4", optional = true }
 marlin-vfs = { path = "../marlin-vfs", optional = true }
 async-trait = { version = "0.1", optional = true }
-tokio = { version = "1.50", features = ["rt", "sync"], optional = true }
+tokio = { version = "1.50", features = ["macros", "rt", "sync"], optional = true }
 chrono = { version = "0.4", default-features = false, features = ["std"], optional = true }
 
 [target.'cfg(unix)'.dependencies]

@@ -1,6 +1,6 @@
 # 0006: An SMB mount is one saved server, served by its own `marlin-smb` processes
 
-**Status:** accepted
+**Status:** accepted; choice 4 extended by [0010](0010-smb-uploads-run-on-their-own-processes.md)
 **Date:** 2026-11-19
 **Issue:** #612 (epic #368)
 

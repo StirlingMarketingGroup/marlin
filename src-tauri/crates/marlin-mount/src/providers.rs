@@ -72,6 +72,7 @@ impl LinkedProviders {
         Ok(Opened {
             provider: Arc::new(DriveProvider::new(sign_in, self.drive.clone())),
             max_calls: None,
+            max_uploads: None,
         })
     }
 
@@ -93,6 +94,7 @@ impl LinkedProviders {
         Ok(Opened {
             provider: Arc::new(SftpProvider::new(sftp_account)),
             max_calls: Some(marlin_sftp::MAX_CALLS),
+            max_uploads: None,
         })
     }
 
@@ -114,6 +116,8 @@ impl LinkedProviders {
             provider: Arc::new(SmbProvider::new(sign_in, binary)),
             // Each `marlin-smb` process runs one call at a time (decision 0006).
             max_calls: Some(marlin_smb_client::PROCESSES),
+            // Each upload runs on a process of its own.
+            max_uploads: Some(marlin_smb_client::UPLOAD_PROCESSES),
         })
     }
 }
