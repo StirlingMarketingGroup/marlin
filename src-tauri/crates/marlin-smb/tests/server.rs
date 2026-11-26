@@ -1058,6 +1058,16 @@ fn progress_ends_at(heard: &[Notice], size: u64) {
     assert_eq!(last, size, "{heard:?}");
 }
 
+/// Whether libsmbclient reads a file's access from the test server. It reads access through a second connection, which libsmbclient before 4.23 opens on port 445 whatever port the URL names, and the test server listens on another port. There a replace is refused before anything is made.
+fn server_reads_access() -> bool {
+    // SAFETY: libsmbclient returns a static string, such as `4.17.12-Debian`.
+    let version = unsafe { std::ffi::CStr::from_ptr(pavao_sys::smbc_version()) }.to_string_lossy();
+    let mut numbers = version
+        .split('.')
+        .map(|part| part.parse::<u32>().unwrap_or(0));
+    (numbers.next().unwrap_or(0), numbers.next().unwrap_or(0)) >= (4, 23)
+}
+
 fn assert_no_marlin_names(server: &Server) {
     for entry in std::fs::read_dir(server.path("")).unwrap() {
         let name = entry.unwrap().file_name();
@@ -1137,6 +1147,20 @@ fn save_file_replaces_a_file_in_one_step() {
         ..saving(&server, &source, "/replaced.bin", Some(stamp))
     };
     let (response, heard) = call_reporting(methods::SAVE_FILE, params);
+    if !server_reads_access() {
+        assert_eq!(
+            code(&response),
+            i64::from(error_codes::SMB_PERMISSION_DENIED),
+            "{response}"
+        );
+        assert!(heard.is_empty(), "{heard:?}");
+        assert_eq!(
+            std::fs::read(server.path("replaced.bin")).unwrap(),
+            b"first"
+        );
+        assert_no_marlin_names(&server);
+        return;
+    }
     let saved: FileMetadataResult = result(&response);
     assert_eq!(saved.size, bytes.len() as u64);
     assert_eq!(stamp_of(&saved).modified, 1262401445);
@@ -1151,7 +1175,7 @@ fn save_file_keeps_the_old_files_access() {
     let server = Server::start();
     let (_folder, source) = local_file(b"new-bytes");
 
-    // smbd on macOS accepts a security-descriptor set and leaves the file at mode 0400, so the replace stops. Linux stores the descriptor as a POSIX ACL, so the new file keeps the old access.
+    // A new file over SMB gets mode 0744, so these differ from it.
     for mode in [0o600, 0o664] {
         let name = format!("mode-{mode:o}.txt");
         std::fs::write(server.path(&name), b"old").unwrap();
@@ -1161,7 +1185,7 @@ fn save_file_keeps_the_old_files_access() {
             methods::SAVE_FILE,
             saving(&server, &source, &format!("/{name}"), Some(stamp)),
         );
-        if cfg!(target_os = "linux") {
+        if server_reads_access() {
             assert!(response.get("error").is_none(), "{response}");
             assert_eq!(std::fs::read(server.path(&name)).unwrap(), b"new-bytes");
             let new_mode = std::fs::metadata(server.path(&name))
@@ -1177,7 +1201,7 @@ fn save_file_keeps_the_old_files_access() {
                 "{response}"
             );
             assert_eq!(std::fs::read(server.path(&name)).unwrap(), b"old");
-            assert_eq!(heard, [Notice::Staged { id: 1 }]);
+            assert!(heard.is_empty(), "{heard:?}");
         }
         assert_no_marlin_names(&server);
     }
@@ -1212,6 +1236,16 @@ fn save_file_refuses_a_file_changed_during_the_upload() {
     );
     let status = child.wait().expect("wait for marlin-smb");
     assert!(status.success(), "marlin-smb exited {status}");
+    if !server_reads_access() {
+        assert!(!appended, "the replace sent bytes");
+        assert_eq!(
+            code(&response),
+            i64::from(error_codes::SMB_PERMISSION_DENIED),
+            "{response}"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"original");
+        return;
+    }
     assert!(appended, "no progress arrived");
     assert_eq!(
         code(&response),

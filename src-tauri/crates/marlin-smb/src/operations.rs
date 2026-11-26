@@ -153,7 +153,7 @@ impl<'a> Share<'a> {
         if read < 0 {
             return Err(std::io::Error::last_os_error().into());
         }
-        text.truncate(read as usize);
+        // libsmbclient 4.17 (Debian 12) answers 0 on success, and 4.18 on answer the length. So `parse` reads the text up to its NUL: `text` started zeroed.
         Ok(Access::parse(&String::from_utf8_lossy(&text))?)
     }
 
@@ -161,9 +161,17 @@ impl<'a> Share<'a> {
     fn set_access(&self, path: &str, access: &Access) -> SmbResult<()> {
         let url = self.url(path)?;
         let mut value = format!("REVISION:1,GROUP:{}", access.group);
+        // libsmbclient writes a mask in hex (`0x0012019f`) and reads one with `%u`, which stops at the `x` and gives 0. So each mask goes back in decimal.
         for entry in &access.entries {
-            value.push_str(",ACL:");
-            value.push_str(entry);
+            let invalid = || {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("an access entry with no hex mask: {entry}"),
+                )
+            };
+            let (rest, mask) = entry.rsplit_once("/0x").ok_or_else(invalid)?;
+            let mask = u32::from_str_radix(mask, 16).map_err(|_| invalid())?;
+            value.push_str(&format!(",ACL:{rest}/{mask}"));
         }
         // libsmbclient reads the value as a C string (`%s`), whatever length it is given, so it must end in a NUL.
         let value = CString::new(value)?;
@@ -1094,7 +1102,7 @@ impl<'a> Replaced<'a> {
         })
     }
 
-    /// Gives the temporary file this file's group and access list, and reads them back: a new file gets the share's create mask, and smbd on macOS accepts the set and leaves mode 0400.
+    /// Gives the temporary file this file's group and access list, and reads them back: a new file gets the share's create mask, and a server may accept a set it does not keep.
     fn give_access_to(&self, share: &Share<'_>, temporary: &str) -> Result<(), (i32, String)> {
         let current = share.access(temporary).map_err(refused_access)?;
         let wanted = self.access.for_owner(&current.owner);
@@ -1605,6 +1613,9 @@ mod tests {
         );
         let repeated = format!("{text},ACL:S-1-1-0:0/0/0x00120089");
         assert_eq!(Access::parse(&repeated).unwrap(), access);
+        // `access` hands over its whole zeroed buffer, since libsmbclient 4.17 answers 0 and not the length.
+        let padded = format!("{text}\0\0\0\0");
+        assert_eq!(Access::parse(&padded).unwrap(), access);
 
         // An allow entry and a deny entry. The same entries in the other order are not the same list: Windows reads them in order.
         let deny_first = "REVISION:1,OWNER:S-1-5-21-1-2-3-1000,GROUP:S-1-22-2-1000,ACL:S-1-5-21-1-2-3-1001:1/0/0x0012019f,ACL:S-1-5-21-1-2-3-1000:0/0/0x0012019f";
