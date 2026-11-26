@@ -1303,6 +1303,11 @@ async fn sshd_uploads_through_a_temporary_name_and_keeps_permissions() {
                 .await,
             Err(VfsError::NotSupported)
         );
+        assert_eq!(
+            provider.check_new_item(&parent, "bad\u{FFFD}name"),
+            Err(VfsError::NotSupported)
+        );
+        assert_eq!(provider.check_new_item(&parent, "fine.bin"), Ok(()));
 
         let private = folder.join("private.bin");
         fs::write(&private, b"old-bytes").unwrap();

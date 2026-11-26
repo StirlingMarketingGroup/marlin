@@ -731,6 +731,10 @@ impl Provider for DriveProvider {
         true
     }
 
+    fn check_new_item(&self, folder: &ItemId, _name: &str) -> Result<(), VfsError> {
+        destination(folder).map(|_| ())
+    }
+
     async fn create_folder(&self, parent: &ItemId, name: &str) -> Result<Item, VfsError> {
         let (drive, parent_file) = destination(parent)?;
         let id = self.new_file_id().await?;

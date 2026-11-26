@@ -1018,6 +1018,10 @@ impl Provider for SftpProvider {
         .await
     }
 
+    fn check_new_item(&self, _folder: &ItemId, name: &str) -> Result<(), VfsError> {
+        check_name(name)
+    }
+
     async fn create_folder(&self, parent: &ItemId, name: &str) -> Result<Item, VfsError> {
         check_name(name)?;
         let folder = parent.0.as_str();

@@ -2064,6 +2064,16 @@ async fn the_folders_a_mount_makes_up_cannot_be_changed() {
     let not_found = Err::<Item, _>(VfsError::NotFound);
     assert_eq!(provider.create_folder(&top, "a").await, denied);
     assert_eq!(provider.create_folder(&shared, "a").await, denied);
+    assert_eq!(
+        provider.check_new_item(&top, "a"),
+        Err(VfsError::AccessDenied)
+    );
+    assert_eq!(
+        provider.check_new_item(&shared, "a"),
+        Err(VfsError::AccessDenied)
+    );
+    assert_eq!(provider.check_new_item(&root, "a"), Ok(()));
+    assert_eq!(provider.check_new_item(&drive_top, "a"), Ok(()));
     assert_eq!(provider.create_folder(&link, "a").await, not_folder);
     assert_eq!(provider.remove(&top, &folder).await, removed);
     assert_eq!(provider.remove(&shared, &folder).await, removed);

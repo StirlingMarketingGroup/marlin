@@ -12,7 +12,9 @@ use marlin_smb_client::protocol::{error_codes, READ_MAX, SMBCLIENT_MISSING};
 use marlin_smb_client::{
     add_server, SmbProvider, SmbSignIn, StartError, PROCESSES, UPLOAD_PROCESSES,
 };
-use marlin_vfs::{ItemId, Kind, Options, Provider, Revision, Space, Vfs, VfsError, POSIX};
+use marlin_vfs::{
+    Access, ItemId, Kind, Options, Provider, Revision, Space, Spool, Vfs, VfsError, POSIX,
+};
 
 const WHEN: &str = "2020-01-02T03:04:05Z";
 
@@ -1358,10 +1360,24 @@ async fn refusals_send_no_request() {
             .unwrap_err(),
         VfsError::NotSupported
     );
+    assert_eq!(
+        provider.check_new_item(&root, "x"),
+        Err(VfsError::NotSupported)
+    );
+    assert_eq!(provider.check_new_item(&data, "x"), Ok(()));
+    assert_eq!(
+        provider.check_new_item(&ItemId("/data/sub".into()), "x"),
+        Ok(())
+    );
     for name in ["a?b", "a:b", "a\u{7f}b", "a\u{85}b", "", ".."] {
         assert_eq!(
             provider.create_folder(&data, name).await.unwrap_err(),
             VfsError::NotSupported,
+            "{name:?}"
+        );
+        assert_eq!(
+            provider.check_new_item(&data, name),
+            Err(VfsError::NotSupported),
             "{name:?}"
         );
     }
@@ -1424,6 +1440,52 @@ async fn refusals_send_no_request() {
         VfsError::IsAFolder
     );
     assert_eq!(requests(&script).len(), sent);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_file_on_the_share_list_fails_like_a_new_folder() {
+    let script = fake(&format!(
+        "{dir}{shares}",
+        dir = empty_directory(),
+        shares = root_shares(&["data"]),
+    ));
+    let saved = save("share-list-file.example", "pw");
+    let provider = open(&saved, &script);
+    let dir = tempfile::tempdir().unwrap();
+    let vfs = Vfs::new(Arc::new(provider), POSIX, Options::default())
+        .take_writes(Spool {
+            folder: dir.path().to_path_buf(),
+            limit: 1 << 20,
+            stays_local: |_| false,
+        })
+        .unwrap();
+    assert_eq!(
+        vfs.create(Vfs::ROOT, "a.txt", Access::Write)
+            .await
+            .unwrap_err(),
+        VfsError::NotSupported
+    );
+    assert_eq!(
+        vfs.create_folder(Vfs::ROOT, "a").await.unwrap_err(),
+        VfsError::NotSupported
+    );
+    assert_eq!(
+        vfs.create(Vfs::ROOT, "data", Access::Write)
+            .await
+            .unwrap_err(),
+        VfsError::Conflict
+    );
+    assert_eq!(
+        vfs.create_folder(Vfs::ROOT, "data").await.unwrap_err(),
+        VfsError::Conflict
+    );
+    let data = vfs.lookup(Vfs::ROOT, "data").await.unwrap();
+    assert_eq!(
+        vfs.create(data.node, "a?b", Access::Write)
+            .await
+            .unwrap_err(),
+        VfsError::NotSupported
+    );
 }
 
 #[tokio::test]
