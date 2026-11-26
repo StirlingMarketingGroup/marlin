@@ -77,7 +77,7 @@ usvg = { version = "0.50", default-features = true, features = ["text"] }
 ffmpeg-sidecar = "2.5"
 psd = "0.3"
 # File system watching
-notify = { version = "8.2", default-features = false, features = ["macos_fsevent"] }
+notify = { version = "9.0", default-features = false, features = ["macos_fsevent"] }
 walkdir = "2.5"
 same-file = "1.0"
 libc = "0.2"
