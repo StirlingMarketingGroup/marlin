@@ -420,3 +420,38 @@ pub fn run() {
         }
     });
 }
+
+#[cfg(test)]
+mod tests {
+    /// The dialog plugin shows `ask` and `message` through rfd. On Linux, every rfd before 0.16.1,
+    /// and 0.17.0 to 0.17.2, passes a dialog's text to GTK as a printf format, so a `%` in a file
+    /// name garbles the dialog or crashes the app (#749, rfd #343). The `tauri-plugin-dialog` pin
+    /// in Cargo.toml keeps rfd on a release with the fix.
+    #[test]
+    fn rfd_shows_dialog_text_as_written() {
+        let lines: Vec<&str> = include_str!("../Cargo.lock").lines().collect();
+        let versions: Vec<&str> = lines
+            .windows(2)
+            .filter(|pair| pair[0] == r#"name = "rfd""#)
+            .filter_map(|pair| pair[1].strip_prefix(r#"version = ""#)?.strip_suffix('"'))
+            .collect();
+        assert!(!versions.is_empty(), "Cargo.lock lists no rfd");
+        for version in versions {
+            let mut numbers = version
+                .split('.')
+                .map(|part| part.parse::<u64>().unwrap_or(0));
+            let release = (
+                numbers.next().unwrap_or(0),
+                numbers.next().unwrap_or(0),
+                numbers.next().unwrap_or(0),
+            );
+            let formats_text = release < (0, 16, 1) || ((0, 17, 0)..=(0, 17, 2)).contains(&release);
+            assert!(
+                !formats_text,
+                "rfd {version} reads dialog text as a printf format on Linux (#749). Keep \
+                 tauri-plugin-dialog on a release whose rfd has the fix. If Dependabot proposed \
+                 this update, add its plugin version to the ignore list in .github/dependabot.yml."
+            );
+        }
+    }
+}
