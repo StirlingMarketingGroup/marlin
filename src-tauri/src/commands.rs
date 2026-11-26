@@ -7486,7 +7486,7 @@ pub fn get_watched_directories() -> Result<Vec<String>, String> {
 }
 
 /// Internal representation stored in JSON (minimal fields for persistence)
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 struct StoredPinnedDirectory {
     pub name: String,
     pub path: String,
@@ -7513,7 +7513,7 @@ fn pinned_directories_path() -> Result<PathBuf, String> {
     Ok(app_dir.join("pinned_directories.json"))
 }
 
-/// Load stored pinned directories from JSON (internal use)
+/// The saved pins in the form `kept_pins` gives. A file that holds another form is saved in this one. A failed save is logged and the pins are still returned, so the sidebar never shows a password.
 fn load_stored_pinned_directories() -> Result<Vec<StoredPinnedDirectory>, String> {
     let path = pinned_directories_path()?;
     if !path.exists() {
@@ -7526,10 +7526,44 @@ fn load_stored_pinned_directories() -> Result<Vec<StoredPinnedDirectory>, String
     file.read_to_string(&mut contents)
         .map_err(|e| format!("Failed to read pinned directories: {}", e))?;
 
-    let pinned_dirs: Vec<StoredPinnedDirectory> = serde_json::from_str(&contents)
+    let parsed: Vec<StoredPinnedDirectory> = serde_json::from_str(&contents)
         .map_err(|e| format!("Failed to parse pinned directories: {}", e))?;
 
+    let pinned_dirs = kept_pins(&parsed);
+    if pinned_dirs != parsed {
+        if let Err(e) = save_pinned_directories(&pinned_dirs) {
+            warn!("Failed to save the cleaned pinned directories: {e}");
+        }
+    }
+
     Ok(pinned_dirs)
+}
+
+/// The pins as Marlin keeps them, in file order. Each address goes through `kept_address` and loses a trailing `/`, as `add_pinned_directory` stores one, so it holds no password and no SFTP port 22. An SFTP or SMB server root's name goes through `kept_authority`. A pin whose address equals an earlier pin's is dropped.
+fn kept_pins(pins: &[StoredPinnedDirectory]) -> Vec<StoredPinnedDirectory> {
+    let mut kept: Vec<StoredPinnedDirectory> = Vec::new();
+    for pin in pins {
+        let path = normalize_trailing_slash(&crate::locations::kept_address(&pin.path));
+        if kept.iter().any(|earlier| earlier.path == path) {
+            continue;
+        }
+        // SFTP and SMB name a server root after its authority.
+        let (scheme, rest) = path.split_once("://").unwrap_or_default();
+        let server_root = (scheme.eq_ignore_ascii_case("sftp")
+            || scheme.eq_ignore_ascii_case("smb"))
+            && !rest.contains('/');
+        let name = if server_root {
+            crate::locations::kept_authority(scheme, &pin.name)
+        } else {
+            pin.name.clone()
+        };
+        kept.push(StoredPinnedDirectory {
+            name,
+            path,
+            pinned_at: pin.pinned_at,
+        });
+    }
+    kept
 }
 
 /// Compute git repo and symlink status for a path
@@ -7618,11 +7652,7 @@ pub async fn add_pinned_directory(
 
     let mut stored_pins = load_stored_pinned_directories()?;
 
-    // Check if already pinned (compare normalized paths to handle trailing slash differences)
-    if stored_pins
-        .iter()
-        .any(|p| normalize_trailing_slash(&p.path) == stored_path)
-    {
+    if stored_pins.iter().any(|p| p.path == stored_path) {
         return Err("Directory is already pinned".to_string());
     }
 
@@ -7683,7 +7713,7 @@ pub fn remove_pinned_directory(app: AppHandle, path: String) -> Result<bool, Str
     let mut stored_pins = load_stored_pinned_directories()?;
 
     let initial_len = stored_pins.len();
-    stored_pins.retain(|p| normalize_trailing_slash(&p.path) != normalized_path);
+    stored_pins.retain(|p| p.path != normalized_path);
 
     if stored_pins.len() < initial_len {
         save_pinned_directories(&stored_pins)?;
@@ -9012,5 +9042,121 @@ mod connect_window_tests {
         requests.close();
         requests.connect(id, "smb://server/later".to_string());
         assert!(matches!(receiver.try_recv(), Err(TryRecvError::Closed)));
+    }
+}
+
+#[cfg(test)]
+mod pinned_directory_tests {
+    use super::{kept_pins, StoredPinnedDirectory};
+
+    fn pin(name: &str, path: &str) -> StoredPinnedDirectory {
+        StoredPinnedDirectory {
+            name: name.to_string(),
+            path: path.to_string(),
+            pinned_at: "2026-01-02T03:04:05Z".parse().unwrap(),
+        }
+    }
+
+    #[test]
+    fn a_folder_pin_drops_a_password_and_sftp_port_22_and_keeps_its_name() {
+        let kept = kept_pins(&[
+            pin("team", "sftp://alice:secret@host:22/team"),
+            pin("share", "smb://alice:secret@nas/share"),
+        ]);
+        assert_eq!(
+            kept,
+            vec![
+                pin("team", "sftp://alice@host/team"),
+                pin("share", "smb://nas/share"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_server_root_drops_a_password_an_smb_user_and_sftp_port_22_from_its_name() {
+        assert_eq!(
+            kept_pins(&[pin("alice:secret@host:22", "sftp://alice:secret@host:22")]),
+            vec![pin("alice@host", "sftp://alice@host")]
+        );
+        assert_eq!(
+            kept_pins(&[pin("alice:secret@nas", "smb://alice:secret@nas")]),
+            vec![pin("nas", "smb://nas")]
+        );
+        assert_eq!(
+            kept_pins(&[pin("alice@files.example", "sftp://files.example:22")]),
+            vec![pin("alice@files.example", "sftp://files.example")]
+        );
+        assert_eq!(
+            kept_pins(&[pin("alice@host:22", "sftp://alice@host")]),
+            vec![pin("alice@host", "sftp://alice@host")]
+        );
+        assert_eq!(
+            kept_pins(&[pin("Work", "sftp://alice@host")]),
+            vec![pin("Work", "sftp://alice@host")]
+        );
+        // A root saved with its trailing `/` is the same root.
+        assert_eq!(
+            kept_pins(&[
+                pin("alice:secret@nas", "smb://alice:secret@nas/"),
+                pin("nas", "smb://nas"),
+            ]),
+            vec![pin("nas", "smb://nas")]
+        );
+    }
+
+    #[test]
+    fn a_pin_that_is_not_a_server_root_keeps_its_name() {
+        let pins = vec![
+            pin("me@home", "smb://nas/share/me@home"),
+            pin("alice:x@example.com", "gdrive://alice@example.com"),
+        ];
+        assert_eq!(kept_pins(&pins), pins);
+    }
+
+    #[test]
+    fn a_pin_inside_an_archive_keeps_its_name_and_gets_the_cleaned_address() {
+        let dirty = "archive:///?src=smb%3A%2F%2Falice%3Asecret%40nas%2Fshare%2Fa.zip&path=%2Fdocs";
+        let kept = kept_pins(&[pin("docs", dirty)]);
+        assert_eq!(kept[0].path, crate::locations::kept_address(dirty));
+        assert!(!kept[0].path.contains("secret"));
+        assert_eq!(kept[0].name, "docs");
+    }
+
+    #[test]
+    fn a_list_that_is_already_clean_comes_back_equal() {
+        let pins = vec![
+            pin("Projects", "/Users/a/Projects"),
+            pin("Shared", "gdrive://alice@example.com/Shared"),
+            pin("team", "sftp://alice@host:2222/team"),
+            pin("share", "smb://nas/share"),
+            pin("alice@host", "sftp://alice@host"),
+        ];
+        assert_eq!(kept_pins(&pins), pins);
+    }
+
+    #[test]
+    fn two_pins_that_become_one_address_keep_only_the_first() {
+        // The second pin of each pair has a later time, so the expected pin's time from `pin` shows the first one stayed.
+        let later = "2026-06-07T08:09:10Z".parse().unwrap();
+        assert_eq!(
+            kept_pins(&[
+                pin("team", "sftp://alice@host:22/team"),
+                StoredPinnedDirectory {
+                    pinned_at: later,
+                    ..pin("team", "sftp://alice@host/team")
+                },
+            ]),
+            vec![pin("team", "sftp://alice@host/team")]
+        );
+        assert_eq!(
+            kept_pins(&[
+                pin("share", "smb://alice@nas/share"),
+                StoredPinnedDirectory {
+                    pinned_at: later,
+                    ..pin("share", "smb://nas/share")
+                },
+            ]),
+            vec![pin("share", "smb://nas/share")]
+        );
     }
 }
