@@ -449,8 +449,7 @@ mod tests {
             assert!(
                 !formats_text,
                 "rfd {version} reads dialog text as a printf format on Linux (#749). Keep \
-                 tauri-plugin-dialog on a release whose rfd has the fix. If Dependabot proposed \
-                 this update, add its plugin version to the ignore list in .github/dependabot.yml."
+                 tauri-plugin-dialog on a release whose rfd has the fix (#779)."
             );
         }
     }
