@@ -33,11 +33,15 @@ pub mod error_codes {
     pub const SMB_IS_A_FOLDER: i32 = -1007;
     /// A folder was asked for and the path is a file.
     pub const SMB_NOT_A_FOLDER: i32 = -1008;
+    /// The name is already taken.
+    pub const SMB_ALREADY_EXISTS: i32 = -1009;
+    /// A folder to replace holds something.
+    pub const SMB_NOT_EMPTY: i32 = -1010;
     /// Generic SMB error
     pub const SMB_ERROR: i32 = -1000;
 }
 
-/// What `marlin-smb` answers with `SMB_LIBRARY_MISSING`, when `list_shares` cannot find the `smbclient` program.
+/// What `marlin-smb` answers with `SMB_LIBRARY_MISSING`, when a call that runs the `smbclient` program (`list_shares`, `rename`) cannot find it.
 pub const SMBCLIENT_MISSING: &str = "smbclient not found. Install Samba (macOS: `brew install samba`, Linux: `sudo apt-get install smbclient`).";
 
 /// The most bytes one `read` may ask for.
@@ -161,6 +165,9 @@ pub struct RenameParams {
     pub share: String,
     pub from_path: String,
     pub to_path: String,
+    /// When false, a taken name answers `SMB_ALREADY_EXISTS` and nothing changes. When true, the item at `to_path` is replaced in one step. The app sends no `replace` field, so it gets false.
+    #[serde(default)]
+    pub replace: bool,
 }
 
 /// Parameters for copy method.

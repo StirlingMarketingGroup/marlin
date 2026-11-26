@@ -565,6 +565,7 @@ fn write_calls_keep_names_with_url_characters() {
             share: SHARE.into(),
             from_path: "/a%20b.txt".into(),
             to_path: "/r%20s.txt".into(),
+            replace: false,
         },
     );
     assert!(response.get("error").is_none(), "{response}");
@@ -689,7 +690,7 @@ fn server_that_cannot_be_reached() {
 }
 
 #[test]
-fn list_shares_signs_in_through_stdin() {
+fn list_shares_signs_in_through_a_pipe() {
     let server = Server::start();
 
     let response = call(
@@ -718,4 +719,238 @@ fn list_shares_signs_in_through_stdin() {
         i64::from(error_codes::SMB_AUTH_FAILED),
         "{response}"
     );
+
+    // smbclient would strip the space and send another password, so it is refused before it reaches the server.
+    let response = call(
+        methods::LIST_SHARES,
+        ListSharesParams {
+            credentials: credentials(&server, " starts-with-a-space"),
+        },
+    );
+    assert_eq!(code(&response), i64::from(error_codes::SMB_AUTH_FAILED));
+    assert!(
+        message(&response).contains("starts with a space"),
+        "{response}"
+    );
+}
+
+fn message(response: &serde_json::Value) -> String {
+    response["error"]["message"]
+        .as_str()
+        .unwrap_or_else(|| panic!("error has no message: {response}"))
+        .to_string()
+}
+
+fn renaming(server: &Server, from: &str, to: &str, replace: bool) -> RenameParams {
+    RenameParams {
+        credentials: credentials(server, PASSWORD),
+        share: SHARE.into(),
+        from_path: from.into(),
+        to_path: to.into(),
+        replace,
+    }
+}
+
+/// The request the app's `smb://` rename sends: it has no `replace` field.
+#[test]
+fn the_apps_rename_never_overwrites_a_taken_name() {
+    let server = Server::start();
+    std::fs::write(server.path("a.txt"), b"from").unwrap();
+    std::fs::write(server.path("b.txt"), b"to").unwrap();
+
+    let response = call(
+        methods::RENAME,
+        serde_json::json!({
+            "credentials": credentials(&server, PASSWORD),
+            "share": SHARE,
+            "from_path": "/a.txt",
+            "to_path": "/b.txt",
+        }),
+    );
+    assert_eq!(code(&response), i64::from(error_codes::SMB_ALREADY_EXISTS));
+    assert_eq!(message(&response), "Destination path already exists");
+    assert_eq!(std::fs::read(server.path("a.txt")).unwrap(), b"from");
+    assert_eq!(std::fs::read(server.path("b.txt")).unwrap(), b"to");
+}
+
+#[test]
+fn rename_moves_and_replaces_only_when_asked() {
+    let server = Server::start();
+    std::fs::write(server.path("a.txt"), b"from").unwrap();
+    std::fs::write(server.path("b.txt"), b"to").unwrap();
+    let response = call(methods::RENAME, renaming(&server, "/a.txt", "/b.txt", true));
+    assert!(response.get("error").is_none(), "{response}");
+    assert!(!server.path("a.txt").exists());
+    assert_eq!(std::fs::read(server.path("b.txt")).unwrap(), b"from");
+
+    std::fs::create_dir(server.path("src-dir")).unwrap();
+    std::fs::write(server.path("src-dir/inside.txt"), b"inside").unwrap();
+    std::fs::create_dir(server.path("dst-dir")).unwrap();
+    std::fs::write(server.path("dst-dir/keep.txt"), b"keep").unwrap();
+    let response = call(
+        methods::RENAME,
+        renaming(&server, "/src-dir", "/dst-dir", true),
+    );
+    assert_eq!(
+        code(&response),
+        i64::from(error_codes::SMB_NOT_EMPTY),
+        "{response}"
+    );
+    assert_eq!(
+        std::fs::read(server.path("src-dir/inside.txt")).unwrap(),
+        b"inside"
+    );
+    assert_eq!(
+        std::fs::read(server.path("dst-dir/keep.txt")).unwrap(),
+        b"keep"
+    );
+
+    let response = call(
+        methods::RENAME,
+        renaming(&server, "/missing.txt", "/b.txt", false),
+    );
+    assert_eq!(
+        code(&response),
+        i64::from(error_codes::SMB_PATH_NOT_FOUND),
+        "{response}"
+    );
+    assert_eq!(std::fs::read(server.path("b.txt")).unwrap(), b"from");
+
+    std::fs::create_dir(server.path("dest")).unwrap();
+    std::fs::write(server.path("move-me.txt"), b"move").unwrap();
+    let response = call(
+        methods::RENAME,
+        renaming(&server, "/move-me.txt", "/dest/move-me.txt", false),
+    );
+    assert!(response.get("error").is_none(), "{response}");
+    assert_eq!(
+        std::fs::read(server.path("dest/move-me.txt")).unwrap(),
+        b"move"
+    );
+    assert!(!server.path("move-me.txt").exists());
+
+    std::fs::write(server.path("other.txt"), b"other").unwrap();
+    std::fs::write(server.path("dest/there.txt"), b"there").unwrap();
+    let response = call(
+        methods::RENAME,
+        renaming(&server, "/other.txt", "/dest/there.txt", true),
+    );
+    assert!(response.get("error").is_none(), "{response}");
+    assert_eq!(
+        std::fs::read(server.path("dest/there.txt")).unwrap(),
+        b"other"
+    );
+    assert!(!server.path("other.txt").exists());
+}
+
+#[test]
+fn rename_reads_the_status_not_the_names() {
+    let server = Server::start();
+    for name in [
+        "/NT_STATUS_CONNECTION_RESET.txt",
+        "/session setup failed.txt",
+    ] {
+        let response = call(methods::RENAME, renaming(&server, name, "/b.txt", false));
+        assert_eq!(
+            code(&response),
+            i64::from(error_codes::SMB_PATH_NOT_FOUND),
+            "{response}"
+        );
+    }
+}
+
+#[test]
+fn rename_keeps_names_with_semicolons_spaces_and_percent() {
+    let server = Server::start();
+    std::fs::write(server.path("semi;colon a.txt"), b"semi").unwrap();
+    let response = call(
+        methods::RENAME,
+        renaming(&server, "/semi;colon a.txt", "/new;name %41.txt", false),
+    );
+    assert!(response.get("error").is_none(), "{response}");
+    assert_eq!(
+        std::fs::read(server.path("new;name %41.txt")).unwrap(),
+        b"semi"
+    );
+    assert!(!server.path("semi;colon a.txt").exists());
+    assert!(!server.path("new;name A.txt").exists());
+    assert!(!server.path("new").exists());
+
+    std::fs::write(server.path("keep.txt"), b"keep").unwrap();
+    let response = call(
+        methods::RENAME,
+        renaming(&server, "/keep.txt", "/quo\"te.txt", false),
+    );
+    assert_eq!(
+        code(&response),
+        i64::from(error_codes::INVALID_PARAMS),
+        "{response}"
+    );
+    assert_eq!(std::fs::read(server.path("keep.txt")).unwrap(), b"keep");
+    assert!(!server.path("quo\"te.txt").exists());
+}
+
+#[test]
+fn rename_in_a_deep_folder() {
+    let server = Server::start();
+    let nested = format!(
+        "{}/{}/{}",
+        "a".repeat(200),
+        "b".repeat(200),
+        "c".repeat(200)
+    );
+    std::fs::create_dir_all(server.path(&nested)).unwrap();
+    let old_name = "f".repeat(200);
+    let new_name = "h".repeat(200);
+    std::fs::write(server.path(&format!("{nested}/{old_name}")), b"deep").unwrap();
+    assert!(format!("rename \"{old_name}\" \"{new_name}\"").len() < 1000);
+
+    let from = format!("/{nested}/{old_name}");
+    let to = format!("/{nested}/{new_name}");
+    let response = call(methods::RENAME, renaming(&server, &from, &to, false));
+    assert!(response.get("error").is_none(), "{response}");
+    assert_eq!(
+        std::fs::read(server.path(&format!("{nested}/{new_name}"))).unwrap(),
+        b"deep"
+    );
+    assert!(!server.path(&format!("{nested}/{old_name}")).exists());
+
+    let top = format!("/{}", "g".repeat(200));
+    let from = format!("/{nested}/{new_name}");
+    let command = format!("rename \"{from}\" \"{top}\"");
+    assert!(
+        command.len() >= 1000,
+        "the full paths are {} bytes",
+        command.len()
+    );
+    let response = call(methods::RENAME, renaming(&server, &from, &top, false));
+    assert_eq!(
+        code(&response),
+        i64::from(error_codes::INVALID_PARAMS),
+        "{response}"
+    );
+    assert_eq!(
+        std::fs::read(server.path(&format!("{nested}/{new_name}"))).unwrap(),
+        b"deep"
+    );
+    assert!(!server.path(&"g".repeat(200)).exists());
+}
+
+/// A rename that changes only the letter case names the same file on a server that ignores case, and is not a taken name.
+#[test]
+fn rename_changes_only_the_case() {
+    let server = Server::start();
+    std::fs::write(server.path("report.txt"), b"report").unwrap();
+
+    let response = call(
+        methods::RENAME,
+        renaming(&server, "/report.txt", "/Report.txt", false),
+    );
+    assert!(response.get("error").is_none(), "{response}");
+    let names: Vec<String> = std::fs::read_dir(server.path(""))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["Report.txt"]);
+    assert_eq!(std::fs::read(server.path("Report.txt")).unwrap(), b"report");
 }

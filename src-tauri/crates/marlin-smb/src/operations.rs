@@ -1,4 +1,4 @@
-//! SMB operations using pavao/libsmbclient.
+//! SMB operations. Most go through pavao/libsmbclient; `list_shares` and `rename` run the `smbclient` program.
 //!
 //! All operations receive credentials as parameters (no keychain access).
 
@@ -94,10 +94,6 @@ impl<'a> Share<'a> {
 
     fn unlink(&self, path: &str) -> SmbResult<()> {
         self.client.unlink(escape_for_url(path))
-    }
-
-    fn rename(&self, from: &str, to: &str) -> SmbResult<()> {
-        self.client.rename(escape_for_url(from), escape_for_url(to))
     }
 
     fn open_with(&self, path: &str, options: SmbOpenOptions) -> SmbResult<SmbFile<'_>> {
@@ -263,12 +259,123 @@ pub fn delete(params: DeleteParams) -> Result<(), (i32, String)> {
 }
 
 /// Rename a file or directory.
+///
+/// libsmbclient's rename deletes a file that already has the new name, then renames, so a taken name is destroyed and a replace leaves the name empty between the two steps. `smbclient`'s `rename` refuses a taken name, and `rename -f` replaces it in one step.
+///
+/// The command goes on stdin: `-c` splits on `;` even inside quotes, so a name with `;` would run the rest as another command. smbclient reads each stdin line into a 1024-byte buffer and runs what does not fit as another command, so a line of 1000 bytes or more is refused. A rename inside one folder starts smbclient in that folder (`-D`, which ends smbclient when it cannot go there) and names only the two names, so a deep folder still fits. Only a rename across folders, which names both full paths, can reach the limit.
+///
+/// Each error text is a reason on its own: the app shows it after its own "Failed to rename:".
 pub fn rename(params: RenameParams) -> Result<(), (i32, String)> {
-    let share = Share::open(&params.credentials, &params.share)?;
+    // Inside a command, a name cannot hold `"`, and a control character could end the line. An SMB name holds neither.
+    if [&params.from_path, &params.to_path]
+        .iter()
+        .any(|path| path.chars().any(|c| c == '"' || c < ' '))
+    {
+        return Err((
+            error_codes::INVALID_PARAMS,
+            "A name cannot hold \" or a control character".to_string(),
+        ));
+    }
+    let (from_folder, from_name) = params
+        .from_path
+        .rsplit_once('/')
+        .unwrap_or(("", &params.from_path));
+    let (to_folder, to_name) = params
+        .to_path
+        .rsplit_once('/')
+        .unwrap_or(("", &params.to_path));
+    let (host, _) = split_port(&params.credentials.hostname);
+    let mut args = vec![format!("//{host}/{}", params.share), "-q".to_string()];
+    if from_folder != to_folder {
+        return run_rename(
+            &params.credentials,
+            &args,
+            &params.from_path,
+            &params.to_path,
+            params.replace,
+        );
+    }
+    let folder = if from_folder.is_empty() {
+        "/"
+    } else {
+        from_folder
+    };
+    args.extend(["-D".to_string(), folder.to_string()]);
 
-    share
-        .rename(&params.from_path, &params.to_path)
-        .map_err(|e| share.failure("Failed to rename", e))
+    // A server whose disk ignores case finds the item itself under a name that changes only the case, and refuses the rename: Samba answers that the name is taken, or with `-f` that access is denied. So when the folder holds nothing else under the new name, the item goes through a temporary name, as the app's local rename does.
+    if from_name != to_name && from_name.to_lowercase() == to_name.to_lowercase() {
+        let share = Share::open(&params.credentials, &params.share)?;
+        let listed = share
+            .list_dirplus(folder)
+            .map_err(|e| share.failure("Failed to list the folder", e))?;
+        let holders = listed
+            .iter()
+            .filter(|entry| entry.name().to_lowercase() == to_name.to_lowercase())
+            .count();
+        if holders == 1 {
+            let aside = format!(".marlin-case-{}", std::process::id());
+            run_rename(&params.credentials, &args, from_name, &aside, false)?;
+            return run_rename(&params.credentials, &args, &aside, to_name, false).map_err(
+                |(code, reason)| {
+                    // Back to the old name, so the item never stays under the temporary one. When that fails too, the reason says where the item is, because a dot name is hidden.
+                    match run_rename(&params.credentials, &args, &aside, from_name, false) {
+                        Ok(()) => (code, reason),
+                        Err(_) => (code, format!("{reason}. The item is now named {aside}")),
+                    }
+                },
+            );
+        }
+    }
+    run_rename(
+        &params.credentials,
+        &args,
+        from_name,
+        to_name,
+        params.replace,
+    )
+}
+
+/// One smbclient `rename` from `from` to `to`, relative to the folder `args` starts in.
+fn run_rename(
+    credentials: &SmbCredentials,
+    args: &[String],
+    from: &str,
+    to: &str,
+    replace: bool,
+) -> Result<(), (i32, String)> {
+    let command = format!(
+        "rename \"{from}\" \"{to}\"{}\n",
+        if replace { " -f" } else { "" }
+    );
+    if command.len() >= 1000 {
+        return Err((
+            error_codes::INVALID_PARAMS,
+            "The path is too long for smbclient".to_string(),
+        ));
+    }
+
+    let output = run_smbclient(credentials, args, &command)?;
+    let reported = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    command_result(&reported, output.status.success()).map_err(|(code, status)| {
+        let reason = match (code, status) {
+            (_, Some("NT_STATUS_SHARING_VIOLATION")) => "The item is in use",
+            (error_codes::SMB_ALREADY_EXISTS, _) => "Destination path already exists",
+            (error_codes::SMB_PATH_NOT_FOUND, _) => "The item or its folder is not there",
+            (error_codes::SMB_NOT_EMPTY, _) => "The folder to replace is not empty",
+            (error_codes::SMB_PERMISSION_DENIED, _) => "Permission denied",
+            (error_codes::SMB_CONNECTION_LOST, _) => "Failed to connect to SMB server",
+            (error_codes::SMB_AUTH_FAILED, _) => "The server refused the sign-in",
+            _ if reported.trim().is_empty() => {
+                return (code, format!("smbclient {}", output.status))
+            }
+            _ => reported.trim(),
+        };
+        (code, reason.to_string())
+    })
 }
 
 /// Copy a file.
@@ -378,67 +485,160 @@ fn split_port(hostname: &str) -> (&str, Option<&str>) {
     }
 }
 
-/// The code for a failed `smbclient -L`, from the lines it printed.
+/// Statuses for a connection that never came up or broke.
+const UNREACHABLE: &[&str] = &[
+    "NT_STATUS_CONNECTION_REFUSED",
+    "NT_STATUS_IO_TIMEOUT",
+    "NT_STATUS_HOST_UNREACHABLE",
+    "NT_STATUS_NETWORK_UNREACHABLE",
+    "NT_STATUS_CONNECTION_RESET",
+    "NT_STATUS_CONNECTION_DISCONNECTED",
+];
+
+/// The code for `smbclient` output that names no path: a failed `-L`, or a connect line of a run that was given commands.
 fn smbclient_code(reported: &str) -> i32 {
-    let unreachable = [
-        "NT_STATUS_CONNECTION_REFUSED",
-        "NT_STATUS_IO_TIMEOUT",
-        "NT_STATUS_HOST_UNREACHABLE",
-        "NT_STATUS_NETWORK_UNREACHABLE",
-        "NT_STATUS_CONNECTION_RESET",
-        "NT_STATUS_CONNECTION_DISCONNECTED",
-    ];
     // A `do_connect` line means smbclient never reached the server, whatever its status. On a Mac, a LAN host that is turned off answers NT_STATUS_ACCESS_DENIED there: the socket's EHOSTDOWN.
     if reported.contains("do_connect:")
-        || unreachable.iter().any(|status| reported.contains(status))
+        || UNREACHABLE.iter().any(|status| reported.contains(status))
     {
         error_codes::SMB_CONNECTION_LOST
     } else if reported.contains("session setup failed") {
         // A wrong password, or a locked, disabled, or expired account.
         error_codes::SMB_AUTH_FAILED
     } else if reported.contains("NT_STATUS_ACCESS_DENIED") {
-        // Signed in, but the server does not let this user list its shares.
+        // Signed in, but the server refuses the listing or the share.
         error_codes::SMB_PERMISSION_DENIED
     } else {
         error_codes::SMB_ERROR
     }
 }
 
-/// List available shares on a server.
-pub fn list_shares(params: ListSharesParams) -> Result<ListSharesResult, (i32, String)> {
+/// The code for one NT status token.
+fn status_code(status: &str) -> i32 {
+    match status {
+        "NT_STATUS_OBJECT_NAME_COLLISION" => error_codes::SMB_ALREADY_EXISTS,
+        "NT_STATUS_OBJECT_NAME_NOT_FOUND"
+        | "NT_STATUS_OBJECT_PATH_NOT_FOUND"
+        | "NT_STATUS_NO_SUCH_FILE" => error_codes::SMB_PATH_NOT_FOUND,
+        "NT_STATUS_DIRECTORY_NOT_EMPTY" => error_codes::SMB_NOT_EMPTY,
+        "NT_STATUS_FILE_IS_A_DIRECTORY" => error_codes::SMB_IS_A_FOLDER,
+        "NT_STATUS_NOT_A_DIRECTORY" => error_codes::SMB_NOT_A_FOLDER,
+        "NT_STATUS_ACCESS_DENIED" => error_codes::SMB_PERMISSION_DENIED,
+        _ if UNREACHABLE.contains(&status) => error_codes::SMB_CONNECTION_LOST,
+        _ => error_codes::SMB_ERROR,
+    }
+}
+
+/// How one smbclient run that was given commands failed: its code, and the status a command's own line names. Only a failed command's line names a path, so its status is read by its place in that line: a name may hold `NT_STATUS_CONNECTION_RESET` or `session setup failed`. The connect lines name no path and read as a failed listing's do. Any other line that names a status is a generic error, and only exit 0 with no status anywhere is success.
+fn command_result(output: &str, exited_ok: bool) -> Result<(), (i32, Option<&str>)> {
+    for line in output.lines() {
+        // `NT_STATUS_X renaming files \a -> \b`
+        if let Some((status, rest)) = line.split_once(' ') {
+            if status.starts_with("NT_STATUS_") && rest.starts_with("renaming files ") {
+                return Err((status_code(status), Some(status)));
+            }
+        }
+        // `rename \a: NT_STATUS_X`, and `cd \folder: NT_STATUS_X` when `-D` could not enter the folder: smbclient then runs no command.
+        if let Some(rest) = line
+            .strip_prefix("rename ")
+            .or_else(|| line.strip_prefix("cd "))
+        {
+            let status = rest
+                .rsplit_once(": ")
+                .map_or("", |(_, status)| status.trim());
+            return Err((status_code(status), Some(status)));
+        }
+        if [
+            "do_connect:",
+            "session setup failed",
+            "tree connect failed",
+            "protocol negotiation failed",
+        ]
+        .iter()
+        .any(|start| line.starts_with(start))
+        {
+            return Err((smbclient_code(line), None));
+        }
+        if line.contains("NT_STATUS_") {
+            return Err((error_codes::SMB_ERROR, None));
+        }
+    }
+    if exited_ok {
+        Ok(())
+    } else {
+        Err((error_codes::SMB_ERROR, None))
+    }
+}
+
+/// Runs the `smbclient` program for this server with `args`, and `commands` on its stdin.
+///
+/// The sign-in goes through a pipe on descriptor 3 (`-A /dev/fd/3`), so it is never an argument, an environment variable, or a file. smbclient strips the leading spaces and tabs of each value it reads there, and a line break ends one, so such a value is refused before it could reach the server changed: each refused sign-in can count toward a lockout.
+fn run_smbclient(
+    credentials: &SmbCredentials,
+    args: &[String],
+    commands: &str,
+) -> Result<std::process::Output, (i32, String)> {
+    use std::os::unix::io::AsRawFd;
+    use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
 
-    wait_for_local_network(&params.credentials.hostname)?;
+    // smbclient also reads a user name's `%` as the start of a password.
+    let domain = credentials.domain.as_deref().unwrap_or_default();
+    if [credentials.username.as_str(), &credentials.password, domain]
+        .iter()
+        .any(|value| value.starts_with([' ', '\t']) || value.contains(['\n', '\r']))
+        || credentials.username.contains('%')
+    {
+        return Err((
+            error_codes::SMB_AUTH_FAILED,
+            "The saved sign-in cannot be passed to smbclient: a value starts with a space or a tab or holds a line break, or the user name holds %".to_string(),
+        ));
+    }
+    let mut sign_in = format!(
+        "username = {}\npassword = {}\n",
+        credentials.username, credentials.password
+    );
+    if credentials.domain.is_some() {
+        sign_in.push_str(&format!("domain = {domain}\n"));
+    }
 
-    // Use smbclient -L to enumerate shares (pavao doesn't support this well)
-    let (smbclient_program, augmented_path) = resolve_smbclient_command();
-    let mut cmd = Command::new(smbclient_program);
-    if let Some(path_env) = augmented_path {
+    wait_for_local_network(&credentials.hostname)?;
+
+    let (program, path_env) = resolve_smbclient_command();
+    let mut cmd = Command::new(program);
+    if let Some(path_env) = path_env {
         cmd.env("PATH", path_env);
     }
-    let (host, port) = split_port(&params.credentials.hostname);
-    cmd.arg("-L").arg(format!("//{host}")).arg("-g"); // Machine-readable output
-    if let Some(port) = port {
+    if let (_, Some(port)) = split_port(&credentials.hostname) {
         cmd.arg("-p").arg(port);
     }
-    cmd.arg("-A")
-        .arg("/dev/stdin")
+    cmd.args(args)
+        .args(["-A", "/dev/fd/3"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    // smbclient reads its auth text from stdin (-A /dev/stdin), so the credentials reach
-    // neither the command line nor a file.
-    let auth_text = {
-        let mut s = format!(
-            "username = {}\npassword = {}\n",
-            params.credentials.username, params.credentials.password
-        );
-        if let Some(domain) = &params.credentials.domain {
-            s.push_str(&format!("domain = {}\n", domain));
-        }
-        s
-    };
+    let (reader, mut writer) = std::io::pipe().map_err(|e| {
+        (
+            error_codes::SMB_ERROR,
+            format!("Failed to run smbclient: {e}"),
+        )
+    })?;
+    let read_fd = reader.as_raw_fd();
+    // SAFETY: runs in the forked child before exec, and calls only `dup2` and `fcntl` on a descriptor open in this process. `dup2` onto 3 clears close-on-exec. `dup2` of a descriptor onto itself does not, so that case clears the flag with `fcntl`.
+    unsafe {
+        cmd.pre_exec(move || {
+            if read_fd == 3 {
+                let flags = libc::fcntl(read_fd, libc::F_GETFD);
+                if flags < 0 || libc::fcntl(read_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            } else if libc::dup2(read_fd, 3) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
 
     let mut child = match cmd.spawn() {
         Ok(child) => child,
@@ -451,22 +651,35 @@ pub fn list_shares(params: ListSharesParams) -> Result<ListSharesResult, (i32, S
         Err(e) => {
             return Err((
                 error_codes::SMB_ERROR,
-                format!("Failed to run smbclient: {}", e),
+                format!("Failed to run smbclient: {e}"),
             ));
         }
     };
-
+    drop(reader);
+    // A smbclient that exited before it read these fails below, with its own output.
+    let _ = writer.write_all(sign_in.as_bytes());
+    drop(writer);
     if let Some(mut stdin) = child.stdin.take() {
-        // A smbclient that exited before it read this fails below, with its own stderr.
-        let _ = stdin.write_all(auth_text.as_bytes());
+        let _ = stdin.write_all(commands.as_bytes());
     }
 
-    let output = child.wait_with_output().map_err(|e| {
+    child.wait_with_output().map_err(|e| {
         (
             error_codes::SMB_ERROR,
-            format!("Failed to run smbclient: {}", e),
+            format!("Failed to run smbclient: {e}"),
         )
-    })?;
+    })
+}
+
+/// List available shares on a server.
+pub fn list_shares(params: ListSharesParams) -> Result<ListSharesResult, (i32, String)> {
+    // Use smbclient -L to enumerate shares (pavao doesn't support this well). `-g` prints them machine-readable.
+    let (host, _) = split_port(&params.credentials.hostname);
+    let output = run_smbclient(
+        &params.credentials,
+        &["-L".to_string(), format!("//{host}"), "-g".to_string()],
+        "",
+    )?;
 
     if !output.status.success() {
         // With `-g`, smbclient can print a failure on either stream: a refused sign-in on stdout (`session setup failed: NT_STATUS_LOGON_FAILURE`), a refused connection on stderr.
@@ -701,7 +914,7 @@ fn resolve_smbclient_command() -> (std::ffi::OsString, Option<std::ffi::OsString
             return (found.into_os_string(), Some(augmented_path));
         }
 
-        return (OsString::from("smbclient"), Some(augmented_path));
+        (OsString::from("smbclient"), Some(augmented_path))
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -712,7 +925,10 @@ fn resolve_smbclient_command() -> (std::ffi::OsString, Option<std::ffi::OsString
 
 #[cfg(test)]
 mod tests {
-    use super::{error_code, shares_from, smbclient_code, space_from, split_port};
+    use super::{
+        command_result, error_code, shares_from, smbclient_code, space_from, split_port,
+        status_code,
+    };
     use marlin_smb_client::protocol::error_codes;
     use std::io::{Error, ErrorKind};
 
@@ -837,5 +1053,125 @@ mod tests {
             smbclient_code("session setup failed: NT_STATUS_ACCOUNT_DISABLED"),
             error_codes::SMB_AUTH_FAILED
         );
+    }
+
+    #[test]
+    fn status_code_for_each_status() {
+        for (status, code) in [
+            (
+                "NT_STATUS_OBJECT_NAME_COLLISION",
+                error_codes::SMB_ALREADY_EXISTS,
+            ),
+            (
+                "NT_STATUS_OBJECT_NAME_NOT_FOUND",
+                error_codes::SMB_PATH_NOT_FOUND,
+            ),
+            (
+                "NT_STATUS_OBJECT_PATH_NOT_FOUND",
+                error_codes::SMB_PATH_NOT_FOUND,
+            ),
+            ("NT_STATUS_NO_SUCH_FILE", error_codes::SMB_PATH_NOT_FOUND),
+            ("NT_STATUS_DIRECTORY_NOT_EMPTY", error_codes::SMB_NOT_EMPTY),
+            (
+                "NT_STATUS_FILE_IS_A_DIRECTORY",
+                error_codes::SMB_IS_A_FOLDER,
+            ),
+            ("NT_STATUS_NOT_A_DIRECTORY", error_codes::SMB_NOT_A_FOLDER),
+            (
+                "NT_STATUS_ACCESS_DENIED",
+                error_codes::SMB_PERMISSION_DENIED,
+            ),
+            (
+                "NT_STATUS_CONNECTION_RESET",
+                error_codes::SMB_CONNECTION_LOST,
+            ),
+            ("NT_STATUS_IO_TIMEOUT", error_codes::SMB_CONNECTION_LOST),
+            ("NT_STATUS_NOT_IMPLEMENTED", error_codes::SMB_ERROR),
+        ] {
+            assert_eq!(status_code(status), code, "{status}");
+        }
+    }
+
+    /// Each line is a shape smbclient 4.23.4 prints. A status inside a path is not the status of the command.
+    #[test]
+    fn command_result_reads_the_line_not_the_names() {
+        for (printed, expected) in [
+            (
+                "NT_STATUS_OBJECT_NAME_COLLISION renaming files \\a.txt -> \\b.txt \n",
+                (
+                    error_codes::SMB_ALREADY_EXISTS,
+                    Some("NT_STATUS_OBJECT_NAME_COLLISION"),
+                ),
+            ),
+            (
+                "rename \\a.txt: NT_STATUS_NO_SUCH_FILE\n",
+                (
+                    error_codes::SMB_PATH_NOT_FOUND,
+                    Some("NT_STATUS_NO_SUCH_FILE"),
+                ),
+            ),
+            (
+                "cd \\gone\\: NT_STATUS_OBJECT_NAME_NOT_FOUND\n",
+                (
+                    error_codes::SMB_PATH_NOT_FOUND,
+                    Some("NT_STATUS_OBJECT_NAME_NOT_FOUND"),
+                ),
+            ),
+            // A status or a phrase inside a name is not the command's status.
+            (
+                "NT_STATUS_OBJECT_NAME_NOT_FOUND renaming files \\NT_STATUS_CONNECTION_RESET.txt -> \\b.txt \n",
+                (
+                    error_codes::SMB_PATH_NOT_FOUND,
+                    Some("NT_STATUS_OBJECT_NAME_NOT_FOUND"),
+                ),
+            ),
+            (
+                "NT_STATUS_OBJECT_NAME_NOT_FOUND renaming files \\session setup failed.txt -> \\b.txt \n",
+                (
+                    error_codes::SMB_PATH_NOT_FOUND,
+                    Some("NT_STATUS_OBJECT_NAME_NOT_FOUND"),
+                ),
+            ),
+            (
+                "NT_STATUS_OBJECT_NAME_INVALID renaming files \\NT_STATUS_SHARING_VIOLATION.txt -> \\bad?.txt \n",
+                (
+                    error_codes::SMB_ERROR,
+                    Some("NT_STATUS_OBJECT_NAME_INVALID"),
+                ),
+            ),
+            (
+                "do_connect: Connection to HOST failed (Error NT_STATUS_CONNECTION_REFUSED)\n",
+                (error_codes::SMB_CONNECTION_LOST, None),
+            ),
+            (
+                "session setup failed: NT_STATUS_LOGON_FAILURE\n",
+                (error_codes::SMB_AUTH_FAILED, None),
+            ),
+            (
+                "tree connect failed: NT_STATUS_ACCESS_DENIED\n",
+                (error_codes::SMB_PERMISSION_DENIED, None),
+            ),
+            (
+                "protocol negotiation failed: NT_STATUS_CONNECTION_RESET\n",
+                (error_codes::SMB_CONNECTION_LOST, None),
+            ),
+            // Any other line that names a status fails, and says nothing more.
+            (
+                "NT_STATUS_INVALID_DEVICE_REQUEST getting shadow copy data for \\a.txt\n",
+                (error_codes::SMB_ERROR, None),
+            ),
+            (
+                "warning: saw NT_STATUS_CONNECTION_RESET in a note\n",
+                (error_codes::SMB_ERROR, None),
+            ),
+            ("", (error_codes::SMB_ERROR, None)),
+        ] {
+            assert_eq!(command_result(printed, false), Err(expected), "{printed}");
+        }
+        assert_eq!(
+            command_result("warning: saw NT_STATUS_UNSUCCESSFUL in a note\n", true),
+            Err((error_codes::SMB_ERROR, None))
+        );
+        assert_eq!(command_result("", true), Ok(()));
     }
 }
