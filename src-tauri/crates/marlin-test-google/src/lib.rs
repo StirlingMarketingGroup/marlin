@@ -1,14 +1,18 @@
-//! A fake Google for Marlin's tests only: the Drive API, the token endpoint, the sign-in page, and the user info.
+//! A fake Google for Marlin's tests only: the Drive API, the token endpoint, the sign-in page, the user info, and resumable uploads of new files.
 //! `app-tests/` runs it through the program in `src/main.rs`.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde_json::{json, Value};
 use wiremock::matchers::any;
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 const MODIFIED: &str = "2020-01-02T03:04:05.678Z";
+
+/// Each upload is one PUT, answered after this wait, so a test sees the file uploading.
+const UPLOAD_TIME: Duration = Duration::from_secs(2);
 
 /// The one account the sign-in page returns. No name and no picture, so the app fetches nothing else.
 pub const USER_EMAIL: &str = "app-test@example.com";
@@ -36,6 +40,10 @@ pub struct GoogleState {
     pub rejected: bool,
     pub drive: Drive,
     pub files: Vec<FakeFile>,
+    /// Session id to file name, so the upload's PUT can answer with the name the POST sent.
+    pub uploads: HashMap<String, String>,
+    /// The next id handed out by `generateIds`. The first new file is `new-1`.
+    pub next_id: u32,
 }
 
 impl GoogleState {
@@ -77,12 +85,16 @@ impl GoogleState {
                     bytes: Vec::new(),
                 },
             ],
+            uploads: HashMap::new(),
+            next_id: 1,
         }
     }
 }
 
 struct FakeGoogle {
     state: Arc<Mutex<GoogleState>>,
+    /// The server's own address. A request's URL is built from `http://localhost` and does not carry the server's port.
+    uri: String,
 }
 
 pub fn pattern(len: usize) -> Vec<u8> {
@@ -104,7 +116,7 @@ impl Respond for FakeGoogle {
     fn respond(&self, request: &Request) -> ResponseTemplate {
         let path = request.url.path();
         let method = request.method.as_str();
-        let state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
         if method == "GET" && path == "/auth" {
             let redirect_uri = request
                 .url
@@ -169,6 +181,35 @@ impl Respond for FakeGoogle {
                     .set_body_json(json!({"error": {"errors": [{"reason": "domainPolicy"}]}}))
             }
         }
+        if method == "POST" && path == "/upload/files" {
+            let body: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
+            let id = body.get("id").and_then(Value::as_str).map(str::to_string);
+            let name = body.get("name").and_then(Value::as_str).map(str::to_string);
+            let (Some(id), Some(name)) = (id, name) else {
+                return ResponseTemplate::new(400);
+            };
+            let location = format!("{}/upload-session/{id}", self.uri);
+            state.uploads.insert(id, name);
+            return ResponseTemplate::new(200).insert_header("Location", location);
+        }
+        if method == "PUT" {
+            if let Some(id) = path.strip_prefix("/upload-session/") {
+                let Some(name) = state.uploads.remove(id) else {
+                    return ResponseTemplate::new(404);
+                };
+                return ResponseTemplate::new(200)
+                    .set_body_json(json!({
+                        "id": id,
+                        "name": name,
+                        "mimeType": "application/octet-stream",
+                        "size": request.body.len().to_string(),
+                        "modifiedTime": MODIFIED,
+                        "headRevisionId": "1",
+                        "trashed": false,
+                    }))
+                    .set_delay(UPLOAD_TIME);
+            }
+        }
         if method != "GET" {
             return ResponseTemplate::new(404);
         }
@@ -202,6 +243,11 @@ impl Respond for FakeGoogle {
                 body["nextPageToken"] = json!(next);
             }
             return ResponseTemplate::new(200).set_body_json(body);
+        }
+        if path == "/files/generateIds" {
+            let id = format!("new-{}", state.next_id);
+            state.next_id += 1;
+            return ResponseTemplate::new(200).set_body_json(json!({ "ids": [id] }));
         }
         let Some(id) = path.strip_prefix("/files/") else {
             return ResponseTemplate::new(404);
@@ -255,6 +301,7 @@ pub async fn start() -> (MockServer, Arc<Mutex<GoogleState>>) {
     Mock::given(any())
         .respond_with(FakeGoogle {
             state: Arc::clone(&state),
+            uri: server.uri(),
         })
         .mount(&server)
         .await;

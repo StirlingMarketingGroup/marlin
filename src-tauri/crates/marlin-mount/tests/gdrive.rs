@@ -301,7 +301,7 @@ async fn a_google_account_mounts_and_reads_through_fuse() {
     marlin_test_keychain::set(KEYRING_SERVICE, email, "refresh-1");
     let running = running_with(uri.clone(), oauth(&uri)).await;
 
-    // The fake Google takes no writes, so this test keeps the mount read-only through the "spool folder cannot be made" rule, and checks that rule through a real mount.
+    // The fake Google takes no change but a new file's upload, so this test keeps the mount read-only through the "spool folder cannot be made" rule, and checks that rule through a real mount.
     let spool = running.root.parent().unwrap().join("spool");
     std::fs::write(&spool, b"not a folder").unwrap();
     let status = mount_gdrive(&running.client, email, "drive").await.unwrap();

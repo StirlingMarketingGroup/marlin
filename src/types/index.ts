@@ -407,7 +407,13 @@ export type UnsentFileState =
   | { state: 'failed'; error: string }
   | { state: 'refused'; error: string };
 
-export type UnsentFile = { node: number; name: string; size: number } & UnsentFileState;
+export type UnsentFile = {
+  node: number;
+  name: string;
+  // The file's path in the mount, names joined with `/`. Missing when the helper does not know its folder.
+  path?: string;
+  size: number;
+} & UnsentFileState;
 
 export interface UnsentFiles {
   provider: string;

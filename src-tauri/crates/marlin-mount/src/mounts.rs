@@ -1177,6 +1177,7 @@ fn unsent_files(key: &Key, attempt: Uuid, vfs: &Vfs) -> UnsentFiles {
             .map(|file| UnsentFile {
                 node: file.node.0,
                 name: file.name,
+                path: file.path,
                 size: file.size,
                 state: match file.state {
                     marlin_vfs::UnsentState::Open => UnsentState::Open,
