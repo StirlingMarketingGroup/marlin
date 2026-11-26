@@ -1058,7 +1058,7 @@ fn progress_ends_at(heard: &[Notice], size: u64) {
     assert_eq!(last, size, "{heard:?}");
 }
 
-/// Whether libsmbclient reads a file's access from the test server. It reads access through a second connection, which libsmbclient before 4.23 opens on port 445 whatever port the URL names, and the test server listens on another port. There a replace is refused before anything is made.
+/// Whether the helper reads a file's access from the test server, which is not on port 445. libsmbclient before 4.23 reads access only on port 445, so with it the helper refuses a replace before anything is made.
 fn server_reads_access() -> bool {
     // SAFETY: libsmbclient returns a static string, such as `4.17.12-Debian`.
     let version = unsafe { std::ffi::CStr::from_ptr(pavao_sys::smbc_version()) }.to_string_lossy();
@@ -1216,7 +1216,14 @@ fn save_file_refuses_a_file_changed_during_the_upload() {
         saving(&server, &first, "/target.txt", None),
     );
     let stamp = stamp_of(&result(&made));
-    let (_folder, source) = local_file(&vec![9u8; 64 * 1024 * 1024]);
+    // A sparse file, so this process never holds 64 MiB. On Linux a child's peak memory starts from this process's peak, and `read_in_the_middle_of_a_large_file` measures a child's.
+    let (_folder, source) = local_file(b"");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&source)
+        .unwrap()
+        .set_len(64 * 1024 * 1024)
+        .unwrap();
 
     let target = server.path("target.txt");
     let mut appended = false;

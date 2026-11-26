@@ -22,7 +22,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// Sidecar version string.
 pub const SIDECAR_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// One connection to a share, for one call. pavao connects at the first call, not when it opens. The helper runs one request at a time, and pavao holds one lock around every libsmbclient call, whose global state is not thread-safe.
+/// One connection to a share, for one call. pavao connects at the first call, not when it opens. libsmbclient's global state is not thread-safe. The helper runs one request at a time on one thread, so no two of its calls race. pavao also holds a lock around each of its own calls; `utimes`, `access`, and `set_access` call libsmbclient without it.
 ///
 /// Its calls take each name as the server holds it, and escape it for libsmbclient's URL ([`escape_for_url`]). Every libsmbclient call goes through one of them.
 struct Share<'a> {
@@ -161,17 +161,12 @@ impl<'a> Share<'a> {
     fn set_access(&self, path: &str, access: &Access) -> SmbResult<()> {
         let url = self.url(path)?;
         let mut value = format!("REVISION:1,GROUP:{}", access.group);
-        // libsmbclient writes a mask in hex (`0x0012019f`) and reads one with `%u`, which stops at the `x` and gives 0. So each mask goes back in decimal.
         for entry in &access.entries {
-            let invalid = || {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("an access entry with no hex mask: {entry}"),
-                )
-            };
-            let (rest, mask) = entry.rsplit_once("/0x").ok_or_else(invalid)?;
-            let mask = u32::from_str_radix(mask, 16).map_err(|_| invalid())?;
-            value.push_str(&format!(",ACL:{rest}/{mask}"));
+            // libsmbclient writes a mask in hex (`0x0012019f`) and reads one with `%u`, which stops at the `x` and gives 0. So the mask goes back in decimal.
+            value.push_str(&format!(
+                ",ACL:{}:{}/{}/{}",
+                entry.sid, entry.kind, entry.flags, entry.mask
+            ));
         }
         // libsmbclient reads the value as a C string (`%s`), whatever length it is given, so it must end in a NUL.
         let value = CString::new(value)?;
@@ -203,22 +198,37 @@ const SECURITY_DESCRIPTOR: &CStr = c"system.nt_sec_desc.*";
 struct Access {
     owner: String,
     group: String,
-    entries: Vec<String>,
+    entries: Vec<Entry>,
+}
+
+/// One entry of an access list: whom it names, allow or deny (`kind`), how it is inherited (`flags`), and the rights it gives (`mask`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Entry {
+    sid: String,
+    kind: u32,
+    flags: u32,
+    mask: u32,
 }
 
 impl Access {
-    /// Reads `REVISION:1,OWNER:<sid>,GROUP:<sid>,ACL:<sid>:<type>/<flags>/<mask>,…`.
+    /// Reads `REVISION:1,OWNER:<sid>,GROUP:<sid>,ACL:<entry>,…` up to the text's first NUL.
     fn parse(text: &str) -> std::io::Result<Self> {
-        let (mut owner, mut group, mut entries) = (None, None, Vec::<String>::new());
+        let (mut owner, mut group, mut entries) = (None, None, Vec::new());
         for part in text.split('\0').next().unwrap_or_default().split(',') {
             if let Some(sid) = part.strip_prefix("OWNER:") {
                 owner = Some(sid.to_string());
             } else if let Some(sid) = part.strip_prefix("GROUP:") {
                 group = Some(sid.to_string());
             } else if let Some(entry) = part.strip_prefix("ACL:") {
+                let entry = Entry::parse(entry).ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("the security descriptor has an entry in an unknown form: {entry}"),
+                    )
+                })?;
                 // Samba can read an entry back twice. A later copy adds nothing, and Windows reads the list in order, so only a new entry is kept, where it came.
-                if !entries.iter().any(|seen| seen == entry) {
-                    entries.push(entry.to_string());
+                if !entries.contains(&entry) {
+                    entries.push(entry);
                 }
             }
         }
@@ -237,12 +247,12 @@ impl Access {
 
     /// The same group and entries, with the owner and every entry of the old owner moved to `new_owner`. The signed-in user becomes the owner, as with an editor's safe save, and keeps the old owner's rights. A moved entry that repeats one already there is dropped, as `parse` drops it.
     fn for_owner(&self, new_owner: &str) -> Self {
-        let mut entries: Vec<String> = Vec::new();
+        let mut entries = Vec::new();
         for entry in &self.entries {
-            let entry = match entry.split_once(':') {
-                Some((sid, rest)) if sid == self.owner => format!("{new_owner}:{rest}"),
-                _ => entry.clone(),
-            };
+            let mut entry = entry.clone();
+            if entry.sid == self.owner {
+                entry.sid = new_owner.to_string();
+            }
             if !entries.contains(&entry) {
                 entries.push(entry);
             }
@@ -252,6 +262,23 @@ impl Access {
             group: self.group.clone(),
             entries,
         }
+    }
+}
+
+impl Entry {
+    /// Reads `<sid>:<kind>/<flags>/0x<mask>`, as libsmbclient writes it.
+    fn parse(text: &str) -> Option<Self> {
+        let (sid, rest) = text.split_once(':')?;
+        let mut fields = rest.split('/');
+        let kind = fields.next()?.parse().ok()?;
+        let flags = fields.next()?.parse().ok()?;
+        let mask = u32::from_str_radix(fields.next()?.strip_prefix("0x")?, 16).ok()?;
+        Some(Self {
+            sid: sid.to_string(),
+            kind,
+            flags,
+            mask,
+        })
     }
 }
 
@@ -1035,7 +1062,7 @@ pub fn upload_file(params: UploadFileParams) -> Result<UploadFileResult, (i32, S
     Ok(UploadFileResult { size })
 }
 
-/// The temporary file's name. Dropping it removes the file, unless `publish` put it at its name.
+/// The temporary file's name. Dropping it tries to remove the file, unless `publish` put it at its name.
 struct Staged<'a> {
     share: &'a Share<'a>,
     path: &'a str,
@@ -1044,14 +1071,9 @@ struct Staged<'a> {
 
 impl Staged<'_> {
     /// Renames the file onto `to`, replacing what is there when `replace` says so. smbclient's output is read, not trusted: the publish counts only when the temporary name is gone.
-    fn publish(
-        mut self,
-        credentials: &SmbCredentials,
-        to: &str,
-        replace: bool,
-    ) -> Result<(), (i32, String)> {
+    fn publish(mut self, to: &str, replace: bool) -> Result<(), (i32, String)> {
         rename(RenameParams {
-            credentials: credentials.clone(),
+            credentials: self.share.credentials.clone(),
             share: self.share.share.clone(),
             from_path: self.path.to_string(),
             to_path: to.to_string(),
@@ -1094,6 +1116,14 @@ impl<'a> Replaced<'a> {
         share
             .open_with(path, SmbOpenOptions::default().write(true))
             .map_err(|e| share.failure("Failed to open the file for writing", e))?;
+        // SAFETY: libsmbclient returns a static string, such as `4.17.12-Debian`.
+        let version = unsafe { CStr::from_ptr(pavao_sys::smbc_version()) }.to_string_lossy();
+        if !reads_access_on_its_port(&share.credentials.hostname, &version) {
+            return Err((
+                error_codes::SMB_PERMISSION_DENIED,
+                format!("{ACCESS_REFUSED}: libsmbclient {version} reads access on port 445 only"),
+            ));
+        }
         let access = share.access(path).map_err(refused_access)?;
         Ok(Self {
             path,
@@ -1115,7 +1145,7 @@ impl<'a> Replaced<'a> {
         if share.access(temporary).map_err(refused_access)? != wanted {
             return Err((
                 error_codes::SMB_PERMISSION_DENIED,
-                ACCESS_REFUSED.to_string(),
+                format!("{ACCESS_REFUSED}: it kept other access than it was given"),
             ));
         }
         Ok(())
@@ -1164,6 +1194,13 @@ pub fn save_file(
             format!("Failed to open source file: {e}"),
         )
     })?;
+    // The publish runs smbclient, so a machine without it refuses before any byte is sent.
+    if !std::path::Path::new(&resolve_smbclient_command().0).is_file() {
+        return Err((
+            error_codes::SMB_LIBRARY_MISSING,
+            SMBCLIENT_MISSING.to_string(),
+        ));
+    }
     let share = Share::open(&params.credentials, &params.share)?;
 
     let replaced = match &params.replaces {
@@ -1240,9 +1277,10 @@ pub fn save_file(
     if let Some(replaced) = &replaced {
         replaced.still_there(&share)?;
     }
-    staged.publish(&params.credentials, &params.path, replaced.is_some())?;
+    staged.publish(&params.path, replaced.is_some())?;
     Ok(metadata_from(&params.path, &stat))
 }
+
 /// The file at `path` is still the file `stamp` names: there, not a folder, and the same size and modified second.
 fn require_same_file(
     share: &Share<'_>,
@@ -1270,17 +1308,27 @@ fn require_same_file(
 
 const ACCESS_REFUSED: &str = "The server would not give the new file the old file's access";
 
+/// Whether libsmbclient `version` reads and sets access on the server at `hostname`. It does that through a second connection, which before 4.23 it always opens on port 445. For a server on another port, that connection would sign in to whatever listens on port 445 of that host, such as the local machine's own server behind a port forward.
+fn reads_access_on_its_port(hostname: &str, version: &str) -> bool {
+    let mut numbers = version
+        .split('.')
+        .map(|part| part.parse::<u32>().unwrap_or(0));
+    let uses_the_port = (numbers.next().unwrap_or(0), numbers.next().unwrap_or(0)) >= (4, 23);
+    uses_the_port
+        || split_port(hostname)
+            .1
+            .is_none_or(|port| port.parse() == Ok(445_u16))
+}
+
 /// A file's access that cannot be read or set refuses the replace. A lost connection, a full disk, and a file that is gone keep their own codes, so the caller retries or starts over instead of waiting for the user.
 fn refused_access(error: pavao::SmbError) -> (i32, String) {
-    match error_code(&error) {
+    let code = match error_code(&error) {
         code @ (error_codes::SMB_CONNECTION_LOST
         | error_codes::SMB_NO_SPACE
-        | error_codes::SMB_PATH_NOT_FOUND) => (code, format!("{ACCESS_REFUSED}: {error}")),
-        _ => (
-            error_codes::SMB_PERMISSION_DENIED,
-            ACCESS_REFUSED.to_string(),
-        ),
-    }
+        | error_codes::SMB_PATH_NOT_FOUND) => code,
+        _ => error_codes::SMB_PERMISSION_DENIED,
+    };
+    (code, format!("{ACCESS_REFUSED}: {error}"))
 }
 
 /// Resolve the smbclient command, searching common paths on macOS.
@@ -1336,8 +1384,8 @@ fn resolve_smbclient_command() -> (std::ffi::OsString, Option<std::ffi::OsString
 #[cfg(test)]
 mod tests {
     use super::{
-        command_result, error_code, shares_from, smbclient_code, space_from, split_port,
-        status_code, Access,
+        command_result, error_code, reads_access_on_its_port, shares_from, smbclient_code,
+        space_from, split_port, status_code, Access, Entry,
     };
     use marlin_smb_client::protocol::error_codes;
     use std::io::{Error, ErrorKind};
@@ -1417,6 +1465,16 @@ mod tests {
         assert_eq!(split_port("nas:4450"), ("nas", Some("4450")));
         assert_eq!(split_port("nas:abc"), ("nas:abc", None));
         assert_eq!(split_port("fe80::1"), ("fe80::1", None));
+    }
+
+    #[test]
+    fn access_off_port_445_needs_libsmbclient_4_23() {
+        assert!(reads_access_on_its_port("nas", "4.17.12-Debian"));
+        assert!(reads_access_on_its_port("nas:445", "4.17.12-Debian"));
+        assert!(!reads_access_on_its_port("nas:4450", "4.17.12-Debian"));
+        assert!(!reads_access_on_its_port("nas:4450", "4.22.6"));
+        assert!(reads_access_on_its_port("nas:4450", "4.23.4"));
+        assert!(reads_access_on_its_port("nas:4450", "5.0.0"));
     }
 
     /// `smbclient -L -g` output, as smbclient 4.23.4 prints it.
@@ -1600,15 +1658,21 @@ mod tests {
     #[test]
     fn access_keeps_order_and_moves_the_owners_entries() {
         let text = "REVISION:1,OWNER:S-1-5-21-1-2-3-1000,GROUP:S-1-22-2-1000,ACL:S-1-5-21-1-2-3-1000:0/0/0x0012019f,ACL:S-1-22-2-1000:0/0/0x0012019f,ACL:S-1-1-0:0/0/0x00120089";
+        let entry = |sid: &str, mask| Entry {
+            sid: sid.to_string(),
+            kind: 0,
+            flags: 0,
+            mask,
+        };
         let access = Access::parse(text).unwrap();
         assert_eq!(access.owner, "S-1-5-21-1-2-3-1000");
         assert_eq!(access.group, "S-1-22-2-1000");
         assert_eq!(
             access.entries,
             [
-                "S-1-5-21-1-2-3-1000:0/0/0x0012019f",
-                "S-1-22-2-1000:0/0/0x0012019f",
-                "S-1-1-0:0/0/0x00120089",
+                entry("S-1-5-21-1-2-3-1000", 0x0012019f),
+                entry("S-1-22-2-1000", 0x0012019f),
+                entry("S-1-1-0", 0x00120089),
             ]
         );
         let repeated = format!("{text},ACL:S-1-1-0:0/0/0x00120089");
@@ -1616,6 +1680,8 @@ mod tests {
         // `access` hands over its whole zeroed buffer, since libsmbclient 4.17 answers 0 and not the length.
         let padded = format!("{text}\0\0\0\0");
         assert_eq!(Access::parse(&padded).unwrap(), access);
+        // An entry in another form refuses the replace, whatever its rights would have been.
+        assert!(Access::parse(&format!("{text},ACL:S-1-1-0:0/0/1180041")).is_err());
 
         // An allow entry and a deny entry. The same entries in the other order are not the same list: Windows reads them in order.
         let deny_first = "REVISION:1,OWNER:S-1-5-21-1-2-3-1000,GROUP:S-1-22-2-1000,ACL:S-1-5-21-1-2-3-1001:1/0/0x0012019f,ACL:S-1-5-21-1-2-3-1000:0/0/0x0012019f";
@@ -1632,9 +1698,9 @@ mod tests {
         assert_eq!(
             moved.entries,
             [
-                "S-1-5-21-9-9-9-2000:0/0/0x0012019f",
-                "S-1-22-2-1000:0/0/0x0012019f",
-                "S-1-1-0:0/0/0x00120089",
+                entry("S-1-5-21-9-9-9-2000", 0x0012019f),
+                entry("S-1-22-2-1000", 0x0012019f),
+                entry("S-1-1-0", 0x00120089),
             ]
         );
 
@@ -1642,7 +1708,7 @@ mod tests {
         let named = Access::parse("REVISION:1,OWNER:S-1-5-21-1-2-3-1000,GROUP:S-1-22-2-1000,ACL:S-1-5-21-1-2-3-1000:0/0/0x0012019f,ACL:S-1-5-21-1-2-3-1001:0/0/0x0012019f").unwrap();
         assert_eq!(
             named.for_owner("S-1-5-21-1-2-3-1001").entries,
-            ["S-1-5-21-1-2-3-1001:0/0/0x0012019f"]
+            [entry("S-1-5-21-1-2-3-1001", 0x0012019f)]
         );
     }
 }
