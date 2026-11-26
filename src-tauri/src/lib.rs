@@ -209,7 +209,6 @@ pub fn run() {
             commands::authorize_folder_access,
             commands::render_svg_to_png,
             commands::read_preferences,
-            commands::write_preferences,
             commands::get_dir_prefs,
             commands::set_dir_prefs,
             commands::set_global_prefs,

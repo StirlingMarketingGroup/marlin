@@ -222,7 +222,7 @@ impl LocationInput {
 }
 
 fn parse_raw_location(value: String) -> Result<Location, String> {
-    let kept = without_password(value.trim());
+    let kept = kept_address(value.trim());
     let trimmed = kept.as_str();
     if trimmed.is_empty() {
         return Ok(Location {
@@ -266,8 +266,13 @@ fn parse_raw_location(value: String) -> Result<Location, String> {
     }
 }
 
-/// The part of an address's authority that Marlin keeps. Marlin signs in with the keychain, never with an address, so a password goes. An SMB server is signed in to by its host alone, so an `smb` authority keeps only the host, as `smbServerAndFolders` does in the frontend. Any other user stays: an `sftp` address shows its user, and a `gdrive` authority is the account's email. The user info ends at the last `@`, and its password starts at the first `:`.
+/// The part of an address's authority that Marlin keeps. Marlin signs in with the keychain, never with an address, so a password goes. An SMB server is signed in to by its host alone, so an `smb` authority keeps only the host, as `smbServerAndFolders` does in the frontend. Any other user stays: an `sftp` address shows its user, and a `gdrive` authority is the account's email. The user info ends at the last `@`, and its password starts at the first `:`. An `sftp` authority drops port 22, the port SFTP uses when an address names none, so a server has one address however it was typed.
 pub(crate) fn kept_authority(scheme: &str, authority: &str) -> String {
+    let authority = if scheme.eq_ignore_ascii_case("sftp") {
+        authority.strip_suffix(":22").unwrap_or(authority)
+    } else {
+        authority
+    };
     let Some((user_info, host)) = authority.rsplit_once('@') else {
         return authority.to_string();
     };
@@ -279,7 +284,7 @@ pub(crate) fn kept_authority(scheme: &str, authority: &str) -> String {
 }
 
 /// `address` as Marlin keeps it: its authority goes through `kept_authority`, and so does the source address inside an `archive:` address. The authority ends at the first `/`, as the path bar reads it, so a password that holds a raw `/` is not seen as one. An `archive:` address is rebuilt only when its source changed, because `build_archive_uri` may encode the rest differently from how it came.
-pub(crate) fn without_password(address: &str) -> String {
+pub(crate) fn kept_address(address: &str) -> String {
     let Some((scheme, rest)) = address.split_once("://") else {
         return address.to_string();
     };
@@ -287,7 +292,7 @@ pub(crate) fn without_password(address: &str) -> String {
         let Ok(archive) = archive::parse_archive_uri(address) else {
             return address.to_string();
         };
-        let src = without_password(&archive.src);
+        let src = kept_address(&archive.src);
         if src == archive.src {
             return address.to_string();
         }
@@ -480,6 +485,11 @@ mod tests {
             ),
             ("sftp://alice@host/a", "alice@host", "sftp://alice@host/a"),
             (
+                "sftp://alice@host:22/a",
+                "alice@host",
+                "sftp://alice@host/a",
+            ),
+            (
                 "gdrive://me@example.com/My Drive",
                 "me@example.com",
                 "gdrive://me@example.com/My Drive",
@@ -527,7 +537,7 @@ mod tests {
     }
 
     #[test]
-    fn without_password_keeps_hosts_and_paths() {
+    fn kept_address_keeps_hosts_and_paths() {
         for (address, want) in [
             (
                 "smb://user:secret@host/share/a.jpg",
@@ -539,6 +549,10 @@ mod tests {
                 "sftp://alice@host:2222/a",
             ),
             ("sftp://alice@host:2222/a", "sftp://alice@host:2222/a"),
+            ("sftp://alice@host:222/a", "sftp://alice@host:222/a"),
+            ("sftp://alice@host:22/a", "sftp://alice@host/a"),
+            ("sftp://alice:secret@host:22/a", "sftp://alice@host/a"),
+            ("SFTP://host:22/a", "SFTP://host/a"),
             ("sftp://alice:p@ss:w@host/a", "sftp://alice@host/a"),
             (
                 "sftp://alice:secret@[::1]:2222/a",
@@ -549,14 +563,15 @@ mod tests {
                 "smb://host/share/me@home.jpg",
             ),
             ("smb://alice@nas/share", "smb://nas/share"),
+            ("smb://nas:22/share", "smb://nas:22/share"),
             ("/Users/a/b.txt", "/Users/a/b.txt"),
         ] {
-            assert_eq!(without_password(address), want, "{address}");
+            assert_eq!(kept_address(address), want, "{address}");
         }
 
         let archive = archive::build_archive_uri("smb://user:secret@host/share/a.zip", "/b.jpg");
         assert_eq!(
-            without_password(&archive),
+            kept_address(&archive),
             archive::build_archive_uri("smb://host/share/a.zip", "/b.jpg")
         );
     }

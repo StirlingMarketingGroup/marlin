@@ -134,6 +134,17 @@ export async function sizeBytes(browser: Browser): Promise<number> {
   return Number(last.replace(/\D/g, ''));
 }
 
+// Where the app keeps its preferences under the home folder `startApp` gives it.
+export function preferencesPath(home: string): string {
+  return path.join(
+    home,
+    ...(process.platform === 'darwin'
+      ? ['Library', 'Application Support', 'Marlin']
+      : ['.config', 'Marlin']),
+    'preferences.json'
+  );
+}
+
 /**
  * Starts the test build of the app with its own home folder and WebDriver port.
  * `files` is an empty folder for the files a test wants the app to show.

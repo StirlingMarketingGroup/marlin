@@ -7,7 +7,15 @@ import os from 'node:os';
 import path from 'node:path';
 import { isDeepStrictEqual, promisify } from 'node:util';
 import { afterAll, beforeAll, expect, test } from 'vitest';
-import { fileRow, freePort, openFolder, rowNames, runCommand, startApp } from './app';
+import {
+  fileRow,
+  freePort,
+  openFolder,
+  preferencesPath,
+  rowNames,
+  runCommand,
+  startApp,
+} from './app';
 
 const execFileAsync = promisify(execFile);
 const sshdPath = '/usr/sbin/sshd';
@@ -514,3 +522,67 @@ test(
     expect(await runCommand(browser, 'is_watching_directory', { path: files })).toBe(true);
   }
 );
+
+test('folder settings and the last folder saved with port 22 load under the address without it', async () => {
+  const { browser, home } = app!;
+  const prefsPath = preferencesPath(home);
+  const saved = JSON.parse(await fs.readFile(prefsPath, 'utf8').catch(() => '{}')) as {
+    directoryPreferences?: Record<string, unknown>;
+  };
+  saved.directoryPreferences = {
+    ...saved.directoryPreferences,
+    'sftp://alice@files.example:22/team': { sortBy: 'size' },
+    'sftp://bob@files.example:22/both': { sortBy: 'name' },
+    'sftp://bob@files.example/both': { sortBy: 'modified', showHidden: true },
+    // A server opened from the sidebar saves an empty entry under its address without the port.
+    'sftp://carol@files.example/': {},
+    'sftp://carol@files.example:22/': { sortBy: 'size' },
+  };
+  await fs.writeFile(
+    prefsPath,
+    JSON.stringify({ ...saved, lastDir: 'sftp://dave:secret@files.example:22/home' })
+  );
+
+  const dirPrefs = async (address: string) =>
+    JSON.parse(String(await runCommand(browser, 'get_dir_prefs', { path: address })));
+  expect(await dirPrefs('sftp://alice@files.example/team')).toEqual({ sortBy: 'size' });
+  expect(await dirPrefs('sftp://alice@files.example:22/team')).toEqual({ sortBy: 'size' });
+  // Two keys for one folder are read as one entry: `sortBy` from the key with `:22`, which holds
+  // the user's choices, and `showHidden` from the other.
+  expect(await dirPrefs('sftp://bob@files.example/both')).toEqual({
+    sortBy: 'name',
+    showHidden: true,
+  });
+  expect(await dirPrefs('sftp://carol@files.example/')).toEqual({ sortBy: 'size' });
+
+  const read = JSON.parse(String(await runCommand(browser, 'read_preferences'))) as {
+    directoryPreferences: Record<string, unknown>;
+    lastDir: string;
+  };
+  expect(read.directoryPreferences['sftp://alice@files.example/team']).toEqual({ sortBy: 'size' });
+  expect(Object.keys(read.directoryPreferences).filter((key) => key.includes(':22/'))).toEqual([]);
+  expect(read.lastDir).toBe('sftp://dave@files.example/home');
+
+  expect(
+    await runCommand(browser, 'set_dir_prefs', {
+      path: 'sftp://alice@files.example/team',
+      prefs: JSON.stringify({ showHidden: true }),
+    })
+  ).toBeNull();
+  const written = JSON.parse(await fs.readFile(prefsPath, 'utf8')) as {
+    directoryPreferences: Record<string, unknown>;
+    lastDir: string;
+  };
+  expect(written.directoryPreferences['sftp://alice@files.example/team']).toEqual({
+    sortBy: 'size',
+    showHidden: true,
+  });
+  expect(written.directoryPreferences['sftp://bob@files.example/both']).toEqual({
+    sortBy: 'name',
+    showHidden: true,
+  });
+  expect(Object.keys(written.directoryPreferences).filter((key) => key.includes(':22/'))).toEqual(
+    []
+  );
+  expect(written.lastDir).toBe('sftp://dave@files.example/home');
+});

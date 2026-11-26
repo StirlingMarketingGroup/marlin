@@ -1,8 +1,7 @@
 import fs from 'node:fs/promises';
-import path from 'node:path';
 import { afterAll, beforeAll, expect, test } from 'vitest';
 import { Key } from 'webdriverio';
-import { commandOrControl, startApp } from './app';
+import { commandOrControl, preferencesPath, startApp } from './app';
 
 let app: Awaited<ReturnType<typeof startApp>>;
 
@@ -50,13 +49,7 @@ test('a theme picked in Preferences changes the file browser and is saved', asyn
     { timeout: 10_000, timeoutMsg: 'the file browser never took the theme picked in Preferences' }
   );
 
-  const prefsPath = path.join(
-    home,
-    ...(process.platform === 'darwin'
-      ? ['Library', 'Application Support', 'Marlin']
-      : ['.config', 'Marlin']),
-    'preferences.json'
-  );
+  const prefsPath = preferencesPath(home);
   const saved = JSON.parse(await fs.readFile(prefsPath, 'utf8')) as {
     globalPreferences?: { theme?: string; darkThemeId?: string; lightThemeId?: string };
   };

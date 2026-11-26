@@ -46,6 +46,7 @@ impl LocationProvider for SftpProvider {
             .ok_or_else(|| "SFTP path requires server: sftp://host/path".to_string())?;
 
         let (username, hostname, port) = address_account(authority)?;
+        let authority = kept_authority("sftp", &format!("{username}@{hostname}:{port}"));
         let path = location.path().to_string();
         let remote_path = if path.is_empty() || path == "/" {
             "/"
@@ -94,12 +95,9 @@ impl LocationProvider for SftpProvider {
             };
 
             let full_path = if remote_path == "/" {
-                format!("sftp://{}@{}:{}/{}", username, hostname, port, name)
+                format!("sftp://{authority}/{name}")
             } else {
-                format!(
-                    "sftp://{}@{}:{}{}/{}",
-                    username, hostname, port, remote_path, name
-                )
+                format!("sftp://{authority}{remote_path}/{name}")
             };
 
             items.push(FileItem {
@@ -127,19 +125,10 @@ impl LocationProvider for SftpProvider {
             _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
         });
 
-        let display_path = if port == 22 {
-            format!("sftp://{}@{}{}", username, hostname, remote_path)
-        } else {
-            format!("sftp://{}@{}:{}{}", username, hostname, port, remote_path)
-        };
+        let display_path = format!("sftp://{authority}{remote_path}");
 
         Ok(ProviderDirectoryEntries {
-            location: LocationSummary::new(
-                "sftp",
-                Some(format!("{}@{}:{}", username, hostname, port)),
-                remote_path,
-                display_path,
-            ),
+            location: LocationSummary::new("sftp", Some(authority), remote_path, display_path),
             entries: items,
         })
     }
@@ -154,11 +143,7 @@ impl LocationProvider for SftpProvider {
 
         if remote_path == "/" || remote_path.is_empty() {
             return Ok(FileItem {
-                name: if port == 22 {
-                    format!("{}@{}", username, hostname)
-                } else {
-                    format!("{}@{}:{}", username, hostname, port)
-                },
+                name: kept_authority("sftp", &format!("{username}@{hostname}:{port}")),
                 path: location.raw().to_string(),
                 is_directory: true,
                 is_hidden: false,

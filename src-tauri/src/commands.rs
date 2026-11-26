@@ -5822,7 +5822,7 @@ pub async fn request_thumbnail(
 
     let request = crate::thumbnails::ThumbnailRequest {
         id: crate::thumbnails::generate_request_id(),
-        path: crate::locations::without_password(&path),
+        path: crate::locations::kept_address(&path),
         size: size.unwrap_or(128),
         quality,
         priority,
@@ -7250,26 +7250,7 @@ fn preferences_path() -> Result<PathBuf, String> {
 
 #[tauri::command]
 pub fn read_preferences() -> Result<String, String> {
-    let path = preferences_path()?;
-    if !path.exists() {
-        return Ok("{}".to_string());
-    }
-    let mut file =
-        fs::File::open(&path).map_err(|e| format!("Failed to open preferences: {}", e))?;
-    let mut contents = String::new();
-    file.read_to_string(&mut contents)
-        .map_err(|e| format!("Failed to read preferences: {}", e))?;
-    Ok(contents)
-}
-
-#[tauri::command]
-pub fn write_preferences(json: String) -> Result<(), String> {
-    let path = preferences_path()?;
-    let mut file =
-        fs::File::create(&path).map_err(|e| format!("Failed to create preferences: {}", e))?;
-    file.write_all(json.as_bytes())
-        .map_err(|e| format!("Failed to write preferences: {}", e))?;
-    Ok(())
+    Ok(read_prefs_value()?.to_string())
 }
 
 fn normalize_path(s: String) -> String {
@@ -7277,14 +7258,12 @@ fn normalize_path(s: String) -> String {
         return "/".to_string();
     }
 
-    // For URI schemes (e.g., gdrive://user@email/path), don't apply file path normalization
-    // URI schemes contain "://" and should be kept as-is
+    // An address takes the form `kept_address` gives, so a folder has one key however its address was written.
     if s.contains("://") {
-        // This is a URI - return as-is without path normalization
-        return s;
+        return crate::locations::kept_address(&s);
     }
 
-    // Regular file path normalization
+    // A local path: forward slashes, no doubled or trailing slash, and a drive root keeps its slash.
     let mut result = s.replace('\\', "/");
     while result.contains("//") {
         result = result.replace("//", "/");
@@ -7311,7 +7290,30 @@ fn read_prefs_value() -> Result<Value, String> {
     let mut contents = String::new();
     file.read_to_string(&mut contents)
         .map_err(|e| format!("Failed to read preferences: {}", e))?;
-    let v: Value = serde_json::from_str(&contents).unwrap_or_else(|_| json!({}));
+    let mut v: Value = serde_json::from_str(&contents).unwrap_or_else(|_| json!({}));
+    // Saved addresses are read in the form `normalize_path` gives, and the next write saves them so. A key in another form, such as an SFTP address with `:22`, is folded into the key for the same folder. Where both set a field, the folded key wins: a file that holds an SFTP key with `:22` holds the user's choices for that folder under it.
+    if let Some(dirs) = v
+        .get_mut("directoryPreferences")
+        .and_then(Value::as_object_mut)
+    {
+        let other_forms: Vec<String> = dirs
+            .keys()
+            .filter(|key| normalize_path(key.to_string()) != key.as_str())
+            .cloned()
+            .collect();
+        for key in other_forms {
+            let Some(Value::Object(saved)) = dirs.remove(&key) else {
+                continue;
+            };
+            let entry = dirs.entry(normalize_path(key)).or_insert_with(|| json!({}));
+            if let Some(fields) = entry.as_object_mut() {
+                fields.extend(saved);
+            }
+        }
+    }
+    if let Some(last_dir) = v.get("lastDir").and_then(Value::as_str).map(str::to_string) {
+        v["lastDir"] = Value::String(normalize_path(last_dir));
+    }
     Ok(v)
 }
 
