@@ -41,6 +41,7 @@ Start here. Each line says what a page answers. The rules for keeping these page
 | [0008: Read-only files](decisions/0008-read-only-files.md)                                               | How a mount shows a file the account may not change, what the core refuses, and why an upload the remote refuses stops and waits for the user.                                                                             |
 | [0009: Window on mount paths](decisions/0009-window-on-mount-paths.md)                                   | How Marlin's own window moves onto mounts (#377): mount paths in the window, provider addresses for input and storage, mounts at launch, what a computer that cannot mount gets, and the order the old provider code goes. |
 | [0010: SMB uploads run on their own processes](decisions/0010-smb-uploads-run-on-their-own-processes.md) | Why an SMB mount runs byte calls on processes of their own, up to four, on top of the four call processes from 0006.                                                                                                       |
+| [0011: Read-only folders](decisions/0011-read-only-folders.md)                                           | How a mount shows a folder the account may not add to, what the core refuses there, and why Finder's own files are still taken.                                                                                            |
 
 ## Frozen history
 

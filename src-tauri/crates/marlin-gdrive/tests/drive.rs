@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use marlin_gdrive::{AccessTokens, Config, DriveProvider};
 use marlin_vfs::{
-    Access, Identified, IfExists, Item, ItemId, Kind, Options, Provider, Revision, Space,
+    Access, Identified, IfExists, Item, ItemId, Kind, Options, Provider, Revision, Space, Spool,
     Thumbnail, Vfs, VfsError, POSIX,
 };
 use serde_json::{json, Value};
@@ -17,10 +17,10 @@ use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 const MODIFIED: &str = "2020-01-02T03:04:05.678Z";
 
 const ITEM_FIELDS: &str =
-    "id,name,mimeType,size,modifiedTime,headRevisionId,trashed,driveId,shortcutDetails(targetId),capabilities(canModifyContent)";
+    "id,name,mimeType,size,modifiedTime,headRevisionId,trashed,driveId,shortcutDetails(targetId),capabilities(canModifyContent,canAddChildren)";
 
 const THUMBNAIL_FIELDS: &str =
-    "id,name,mimeType,size,modifiedTime,headRevisionId,trashed,driveId,shortcutDetails(targetId),capabilities(canModifyContent),thumbnailLink,imageMediaMetadata(width,height),videoMediaMetadata(width,height)";
+    "id,name,mimeType,size,modifiedTime,headRevisionId,trashed,driveId,shortcutDetails(targetId),capabilities(canModifyContent,canAddChildren),thumbnailLink,imageMediaMetadata(width,height),videoMediaMetadata(width,height)";
 
 const FOLDER: &str = "application/vnd.google-apps.folder";
 const DOC: &str = "application/vnd.google-apps.document";
@@ -1105,7 +1105,12 @@ async fn shared_drives_follow_two_pages_and_each_id_is_the_drive_twice() {
         vec![
             ok_json(json!({
                 "nextPageToken": "page-2",
-                "drives": [{ "id": "team-1", "name": "Team", "createdTime": MODIFIED }],
+                "drives": [{
+                    "id": "team-1",
+                    "name": "Team",
+                    "createdTime": MODIFIED,
+                    "capabilities": {"canAddChildren": false},
+                }],
             })),
             ok_json(json!({
                 "drives": [{ "id": "team-2", "name": "Other", "createdTime": MODIFIED }],
@@ -1124,11 +1129,17 @@ async fn shared_drives_follow_two_pages_and_each_id_is_the_drive_twice() {
     assert_eq!(items[0].attributes.kind, Kind::Folder);
     assert_eq!(items[0].attributes.size, 0);
     assert_eq!(items[0].attributes.modified, modified());
+    assert!(items[0].attributes.read_only);
     assert_eq!(items[1].id, ItemId("team-2/team-2".to_string()));
     assert_eq!(items[1].name, "Other");
+    assert!(!items[1].attributes.read_only);
     let requests = server.received_requests().await.unwrap();
     assert_eq!(requests.len(), 2);
     assert_eq!(query_of(&requests[0]).get("pageToken"), None);
+    assert_eq!(
+        query_of(&requests[0]).get("fields").unwrap(),
+        "nextPageToken,drives(id,name,createdTime,capabilities(canAddChildren))"
+    );
     assert_eq!(query_of(&requests[1]).get("pageToken").unwrap(), "page-2");
 }
 
@@ -1141,14 +1152,22 @@ async fn a_shared_drives_top_folder_is_asked_from_the_drive_and_matches_its_list
         .mount(&server)
         .await;
     Mock::given(path("/drives/team-1"))
-        .respond_with(ok_json(
-            json!({ "id": "team-1", "name": "Team", "createdTime": MODIFIED }),
-        ))
+        .respond_with(ok_json(json!({
+            "id": "team-1",
+            "name": "Team",
+            "createdTime": MODIFIED,
+            "capabilities": {"canAddChildren": false},
+        })))
         .mount(&server)
         .await;
     Mock::given(path("/drives"))
         .respond_with(ok_json(json!({
-            "drives": [{ "id": "team-1", "name": "Team", "createdTime": MODIFIED }],
+            "drives": [{
+                "id": "team-1",
+                "name": "Team",
+                "createdTime": MODIFIED,
+                "capabilities": {"canAddChildren": false},
+            }],
         })))
         .mount(&server)
         .await;
@@ -1160,6 +1179,16 @@ async fn a_shared_drives_top_folder_is_asked_from_the_drive_and_matches_its_list
     let found = drive.item(&listed[0].id).await.unwrap();
     assert_eq!(found, listed[0]);
     assert_eq!(found.name, "Team");
+    assert!(found.attributes.read_only);
+    let requests = server.received_requests().await.unwrap();
+    let asked = requests
+        .iter()
+        .find(|request| request.url.path() == "/drives/team-1")
+        .unwrap();
+    assert_eq!(
+        query_of(asked).get("fields").unwrap(),
+        "id,name,createdTime,capabilities(canAddChildren)"
+    );
 }
 
 #[tokio::test]
@@ -2057,6 +2086,8 @@ async fn the_folders_a_mount_makes_up_cannot_be_changed() {
     let file = id("file-1");
     let link = id("doc#doc");
     let folder = id("folder");
+    assert!(provider.item(&top).await.unwrap().attributes.read_only);
+    assert!(provider.item(&shared).await.unwrap().attributes.read_only);
     let denied = Err::<Item, _>(VfsError::AccessDenied);
     let removed = Err::<(), _>(VfsError::AccessDenied);
     let not_folder = Err::<Item, _>(VfsError::NotAFolder);
@@ -2567,7 +2598,7 @@ async fn replace_bytes_with_a_stale_revision_uploads_nothing() {
 }
 
 #[tokio::test]
-async fn a_listing_marks_a_view_only_file_and_a_link_file_read_only() {
+async fn a_listing_marks_what_the_account_may_not_change_read_only() {
     let server = MockServer::start().await;
     let mut view_only = file_json("view", "View", PLAIN, "4");
     view_only["capabilities"] = json!({"canModifyContent": false});
@@ -2578,11 +2609,15 @@ async fn a_listing_marks_a_view_only_file_and_a_link_file_read_only() {
     folder["capabilities"] = json!({"canModifyContent": false});
     let mut doc = file_json("doc", "Notes", DOC, "0");
     doc["capabilities"] = json!({"canModifyContent": true});
+    let mut no_add = folder_json("no-add", "No add");
+    no_add["capabilities"] = json!({"canAddChildren": false});
+    let mut can_add = folder_json("can-add", "Can add");
+    can_add["capabilities"] = json!({"canAddChildren": true});
     mount_path(
         &server,
         "/files",
         ok_json(file_page(
-            vec![view_only, owned, unknown, folder, doc],
+            vec![view_only, owned, unknown, folder, doc, no_add, can_add],
             None,
         )),
     )
@@ -2592,23 +2627,78 @@ async fn a_listing_marks_a_view_only_file_and_a_link_file_read_only() {
         .await
         .unwrap();
     let read_only: Vec<_> = items.iter().map(|item| item.attributes.read_only).collect();
-    assert_eq!(read_only, [true, false, false, false, true]);
+    assert_eq!(read_only, [true, false, false, false, true, true, false]);
 }
 
 #[tokio::test]
-async fn item_of_a_view_only_file_is_read_only_and_an_owned_one_is_not() {
+async fn item_of_what_the_account_may_not_change_is_read_only() {
     let server = MockServer::start().await;
     let mut view_only = with_revision(file_json("view", "View", PLAIN, "4"), "rev-1");
     view_only["capabilities"] = json!({"canModifyContent": false});
     let mut owned = with_revision(file_json("owned", "Owned", PLAIN, "4"), "rev-1");
     owned["capabilities"] = json!({"canModifyContent": true});
+    let mut no_add = folder_json("no-add", "No add");
+    no_add["capabilities"] = json!({"canAddChildren": false});
+    let mut can_add = folder_json("can-add", "Can add");
+    can_add["capabilities"] = json!({"canAddChildren": true});
     mount_path(&server, "/files/view", ok_json(view_only)).await;
     mount_path(&server, "/files/owned", ok_json(owned)).await;
+    mount_path(&server, "/files/no-add", ok_json(no_add)).await;
+    mount_path(&server, "/files/can-add", ok_json(can_add)).await;
     let drive = drive(&server);
     let view_only = drive.item(&id("view")).await.unwrap();
     let owned = drive.item(&id("owned")).await.unwrap();
+    let no_add = drive.item(&id("no-add")).await.unwrap();
+    let can_add = drive.item(&id("can-add")).await.unwrap();
     assert!(view_only.attributes.read_only);
     assert!(!owned.attributes.read_only);
+    assert!(no_add.attributes.read_only);
+    assert!(!can_add.attributes.read_only);
+}
+
+#[tokio::test]
+async fn a_new_file_in_a_view_only_folder_fails_before_anything_is_spooled() {
+    let server = MockServer::start().await;
+    let body = ok_json(folder_json("alias-root", "My Drive"));
+    mount_path(&server, "/files/root", body).await;
+    let mut theirs = folder_json("theirs", "Theirs");
+    theirs["capabilities"] = json!({"canAddChildren": false});
+    Mock::given(method("GET"))
+        .and(query_param("q", "'root' in parents and trashed = false"))
+        .respond_with(ok_json(file_page(vec![theirs.clone()], None)))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(query_param("q", "'theirs' in parents and trashed = false"))
+        .respond_with(ok_json(file_page(vec![], None)))
+        .mount(&server)
+        .await;
+    mount_path(&server, "/files/theirs", ok_json(theirs)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let vfs = Vfs::new(Arc::new(drive(&server)), POSIX, Options::default())
+        .take_writes(Spool {
+            folder: dir.path().to_path_buf(),
+            limit: 1024 * 1024,
+            stays_local: |_| false,
+        })
+        .unwrap();
+    let my_drive = vfs.lookup(Vfs::ROOT, "My Drive").await.unwrap();
+    let theirs = vfs.lookup(my_drive.node, "Theirs").await.unwrap();
+    assert_eq!(
+        vfs.create(theirs.node, "a.txt", Access::Write).await,
+        Err(VfsError::AccessDenied)
+    );
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    assert!(sent(&server, "POST").await.is_empty());
+    let requests = server.received_requests().await.unwrap();
+    assert!(requests
+        .iter()
+        .all(|request| !request.url.path().contains("/upload")));
+    let (_made, handle) = vfs
+        .create(my_drive.node, "a.txt", Access::Write)
+        .await
+        .unwrap();
+    vfs.release(handle);
 }
 
 #[tokio::test]

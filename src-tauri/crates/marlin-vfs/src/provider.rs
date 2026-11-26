@@ -39,7 +39,7 @@ pub struct Attributes {
     /// The revision of a file's bytes. `None` for a folder, and for a provider without the byte calls.
     pub revision: Option<Revision>,
 
-    /// The provider knows the account may not give this file new bytes. `false` when the provider does not know, and always `false` for a folder. The core refuses what would put bytes in the spool for such a file. Name changes still go to the provider, whose answer decides.
+    /// For a file, the provider knows the account may not give it new bytes. For a folder, the provider knows the account may not add an item to it. `false` when the provider does not know. The core refuses what would put bytes in the spool for such a file, and a new file in such a folder. Name changes still go to the provider, whose answer decides.
     pub read_only: bool,
 }
 
@@ -121,7 +121,7 @@ pub trait Provider: Send + Sync + 'static {
         false
     }
 
-    /// Whether the remote can hold a new item named `name` in the folder `folder`, by rules the provider knows without asking the remote: names the remote cannot hold, and folders where nothing new can go, such as an SMB server's list of shares. `name` is a remote name. The answer is the error [`Self::create_folder`], [`Self::create_file`], and [`Self::rename`] give for that folder and name, and the call makes no remote request. The core asks before it makes a new file in the spool or gives one a new name, so the file fails at once instead of at its upload. A refusal only the remote can give, such as a folder the account may not write in, still comes from the call that makes the item. A provider whose remote takes any name in any folder leaves this out, and it answers `Ok`.
+    /// Whether the remote can hold a new item named `name` in the folder `folder`, by rules the provider knows without asking the remote: names the remote cannot hold, and folders where nothing new can go, such as an SMB server's list of shares. `name` is a remote name. The answer is the error [`Self::create_folder`], [`Self::create_file`], and [`Self::rename`] give for that folder and name, and the call makes no remote request. The core asks before it makes a new file in the spool or gives one a new name, so the file fails at once instead of at its upload. A folder the account may not add to is not this call's question: the provider marks that folder read-only ([`Attributes::read_only`]), and the core refuses from the mark. A provider whose remote takes any name in any folder leaves this out, and it answers `Ok`.
     fn check_new_item(&self, folder: &ItemId, name: &str) -> Result<(), VfsError> {
         let _ = (folder, name);
         Ok(())

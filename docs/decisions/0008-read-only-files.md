@@ -1,6 +1,6 @@
 # 0008: A mount shows a file it cannot change as read-only, and a refused upload waits
 
-**Status:** accepted
+**Status:** accepted; choice 1 extended to folders by [0011](0011-read-only-folders.md)
 **Date:** 2026-11-23
 **Issue:** #631 (epic #368)
 

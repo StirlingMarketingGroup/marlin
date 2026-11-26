@@ -1323,6 +1323,74 @@ async fn a_new_file_the_remote_cannot_hold_fails_like_a_new_folder() {
 
 #[ignore = "mounts for real: run crates/marlin-fuse/test-in-docker.sh on Linux, crates/marlin-fuse/test-on-mac.sh on a Mac"]
 #[tokio::test(flavor = "multi_thread")]
+async fn a_folder_the_account_may_not_add_to_shows_read_only() {
+    let provider = Arc::new(MemoryProvider::new());
+    provider.add_folder(&provider.root(), "mine");
+    let theirs_id = provider.add_folder(&provider.root(), "theirs");
+    provider.set_read_only(&theirs_id, true);
+    provider.add_file(&theirs_id, "shared.txt", b"old");
+    let (vfs, _spool) = spooled_vfs(
+        Arc::clone(&provider),
+        1024 * 1024 * 1024,
+        Options::default(),
+    );
+    let (_dir, point) = empty_dir();
+    let mut mount = marlin_fuse::mount(vfs.clone(), &point).await.unwrap();
+
+    let at = point.clone();
+    let (modes, made, folder, rename, editing, writing) = tokio::task::spawn_blocking(move || {
+        let mode = |name: &str| std::fs::metadata(at.join(name)).unwrap().mode() & 0o777;
+        let modes = [mode("mine"), mode("theirs")];
+        let made = os_code(std::fs::File::create(at.join("theirs/a.txt")));
+        let folder = os_code(std::fs::create_dir(at.join("theirs/b")));
+        let writing = std::fs::File::create(at.join("c.txt")).unwrap();
+        writing.write_at(b"kept", 0).unwrap();
+        let rename = os_code(std::fs::rename(at.join("c.txt"), at.join("theirs/c.txt")));
+        let editing = OpenOptions::new()
+            .write(true)
+            .open(at.join("theirs/shared.txt"))
+            .unwrap();
+        editing.write_at(b"new", 0).unwrap();
+        (modes, made, folder, rename, editing, writing)
+    })
+    .await
+    .unwrap();
+    assert_eq!(modes, [0o700, 0o500]);
+    // On Linux the kernel refuses for a normal user from mode 0500 (`default_permissions`) and the core refuses for root. macOS checks no modes on this mount, so the core and the provider refuse. Every refusal is EACCES on both systems.
+    assert_eq!(made, Some(libc::EACCES));
+    assert_eq!(folder, Some(libc::EACCES));
+    assert_eq!(rename, Some(libc::EACCES));
+    tokio::task::spawn_blocking(move || {
+        drop(editing);
+        drop(writing);
+    })
+    .await
+    .unwrap();
+    let listed: Vec<String> = names(&point.join("theirs"))
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|name| !marlin_fuse::stays_local(name))
+        .collect();
+    assert_eq!(listed, ["shared.txt"]);
+    wait_for_uploads(&vfs).await;
+    let files = remote_files(&provider).await;
+    assert_eq!(files.get("c.txt"), Some(&Some(b"kept".to_vec())));
+    assert_eq!(files.get("theirs/shared.txt"), Some(&Some(b"new".to_vec())));
+    assert_eq!(
+        files
+            .keys()
+            .filter(|key| key.starts_with("theirs/"))
+            .cloned()
+            .collect::<Vec<_>>(),
+        ["theirs/shared.txt"]
+    );
+
+    mount.unmount().await.unwrap();
+}
+
+#[ignore = "mounts for real: run crates/marlin-fuse/test-in-docker.sh on Linux, crates/marlin-fuse/test-on-mac.sh on a Mac"]
+#[tokio::test(flavor = "multi_thread")]
 async fn a_write_is_read_back_at_once_also_by_another_process() {
     let provider = Arc::new(MemoryProvider::new());
     let fresh = vec![1u8; 100_000];

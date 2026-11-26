@@ -25,8 +25,9 @@ pub(crate) struct DriveFile {
     pub(crate) parents: Vec<String>,
     /// Set for a file in a shared drive. My Drive leaves it out.
     pub(crate) drive_id: Option<String>,
-    /// Set when the request asked for it.
-    pub(crate) capabilities: Option<Capabilities>,
+    /// Empty when the request did not ask for it.
+    #[serde(default)]
+    pub(crate) capabilities: Capabilities,
     /// Drive's short-lived link to its picture of the file, when it has one and the request asked for it.
     pub(crate) thumbnail_link: Option<String>,
     /// Set for an image, when the request asked for it.
@@ -45,19 +46,19 @@ pub(crate) struct MediaSize {
 impl DriveFile {
     /// Whether Google says the account may not give this file new bytes. No answer is not a no.
     pub(crate) fn read_only(&self) -> bool {
-        self.capabilities
-            .as_ref()
-            .and_then(|capabilities| capabilities.can_modify_content)
-            == Some(false)
+        self.capabilities.can_modify_content == Some(false)
     }
 }
 
-/// What the account may do with a file.
-#[derive(Deserialize)]
+/// What the account may do with an item. A question Google was not asked, or did not answer, is `None`.
+#[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Capabilities {
     /// Whether the account may give the file new bytes.
     pub(crate) can_modify_content: Option<bool>,
+
+    /// Whether the account may add an item to the folder.
+    pub(crate) can_add_children: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -103,6 +104,9 @@ pub(crate) struct SharedDrive {
     pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) created_time: Option<String>,
+    /// The provider asks a drive for `canAddChildren` only.
+    #[serde(default)]
+    pub(crate) capabilities: Capabilities,
 }
 
 #[derive(Deserialize)]

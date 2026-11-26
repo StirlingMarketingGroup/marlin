@@ -24,9 +24,12 @@ const FOLDER_TYPE: &str = "application/vnd.google-apps.folder";
 
 /// The fields `item`, the change calls, and an upload's answer ask for: what an item is built from, plus `trashed` and `driveId` for their checks.
 ///
-/// `headRevisionId` changes only when the bytes change. `version` also changes on a rename or a share, so it is not here. `canModifyContent` says whether the account may give a file new bytes. `canEdit` is wider, and other things can limit it.
+/// `headRevisionId` changes only when the bytes change. `version` also changes on a rename or a share, so it is not here. `canModifyContent` says whether the account may give a file new bytes. `canAddChildren` says whether the account may add an item to a folder. `canEdit` is wider, and other things can limit it.
 pub(crate) const ITEM_FIELDS: &str =
-    "id,name,mimeType,size,modifiedTime,headRevisionId,trashed,driveId,shortcutDetails(targetId),capabilities(canModifyContent)";
+    "id,name,mimeType,size,modifiedTime,headRevisionId,trashed,driveId,shortcutDetails(targetId),capabilities(canModifyContent,canAddChildren)";
+
+/// The fields `item` asks of a shared drive and the listing of shared drives asks of each, so a listed drive and an asked one are built from the same facts. `canAddChildren` says whether the account may add an item to the drive's top folder.
+const DRIVE_FIELDS: &str = "id,name,createdTime,capabilities(canAddChildren)";
 
 /// Gives the provider an access token for one Google account.
 #[async_trait::async_trait]
@@ -144,7 +147,7 @@ fn place(id: &ItemId) -> Place<'_> {
     }
 }
 
-/// One of the two folders that exist only in a mount. Google knows neither, so neither has a modified time.
+/// One of the two folders that exist only in a mount. Google knows neither, so neither has a modified time. Neither takes a new item (`destination` refuses both), so both are read-only.
 fn made_up_folder(id: &ItemId, name: &str) -> Item {
     Item {
         id: id.clone(),
@@ -154,7 +157,7 @@ fn made_up_folder(id: &ItemId, name: &str) -> Item {
             size: 0,
             modified: UNIX_EPOCH,
             revision: None,
-            read_only: false,
+            read_only: true,
         },
     }
 }
@@ -204,7 +207,12 @@ fn item_from(drive: Option<&str>, id: String, file: DriveFile) -> Item {
     let item_id = place.id();
     // A folder has no bytes, and a link file's bytes are its page, which never changes, so neither has a revision. A link file has no bytes on Drive to replace, so it is always read-only.
     let (kind, size, revision, read_only) = match place {
-        _ if file.mime_type == FOLDER_TYPE => (Kind::Folder, 0, None, false),
+        _ if file.mime_type == FOLDER_TYPE => (
+            Kind::Folder,
+            0,
+            None,
+            file.capabilities.can_add_children == Some(false),
+        ),
         Place::Link { opens, .. } => (Kind::File, link_page(opens).len() as u64, None, true),
         _ => {
             let size = file.size.as_deref().and_then(|size| size.parse().ok());
@@ -262,7 +270,7 @@ fn shared_drive_item(drive: SharedDrive) -> Item {
             size: 0,
             modified: modified(drive.created_time.as_deref()),
             revision: None,
-            read_only: false,
+            read_only: drive.capabilities.can_add_children == Some(false),
         },
     }
 }
@@ -453,7 +461,7 @@ impl Provider for DriveProvider {
                 drive: Some(drive),
                 file,
             } if drive == file => {
-                let query = [("fields", "id,name,createdTime")];
+                let query = [("fields", DRIVE_FIELDS)];
                 let response = self
                     .request(Method::GET, &format!("/drives/{drive}"), &query, None, None)
                     .await?;
@@ -480,10 +488,8 @@ impl Provider for DriveProvider {
                 let mut items = Vec::new();
                 let mut page_token: Option<String> = None;
                 loop {
-                    let mut query = vec![
-                        ("pageSize", "100"),
-                        ("fields", "nextPageToken,drives(id,name,createdTime)"),
-                    ];
+                    let fields = format!("nextPageToken,drives({DRIVE_FIELDS})");
+                    let mut query = vec![("pageSize", "100"), ("fields", fields.as_str())];
                     if let Some(token) = &page_token {
                         query.push(("pageToken", token.as_str()));
                     }
