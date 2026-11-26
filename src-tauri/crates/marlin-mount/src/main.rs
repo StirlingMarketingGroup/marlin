@@ -1,5 +1,8 @@
 //! Mount helper binary. One process per socket, spoken to over that Unix socket.
 
+#[cfg(all(feature = "app-test", not(debug_assertions)))]
+compile_error!("The `app-test` feature points the helper at a test keychain and a fake Google. Build it in debug only.");
+
 #[cfg(not(unix))]
 fn main() {
     eprintln!("marlin-mount does not run on this OS yet (issue #375)");
@@ -15,6 +18,10 @@ async fn main() {
 
     use marlin_mount::{log, BindError, Config, LinkedProviders, OsAdapter, Server, SmbConfig};
     use tokio::signal::unix::{signal, SignalKind};
+
+    // The test build keeps secrets in the test keychain it shares with the test app, never the real one.
+    #[cfg(feature = "app-test")]
+    marlin_test_keychain::install_for_app_test();
 
     let mut socket = None;
     let mut root = None;
@@ -63,6 +70,18 @@ async fn main() {
         std::process::exit(1);
     };
 
+    // The test build talks to the fake Google only.
+    #[cfg(feature = "app-test")]
+    let (drive, oauth_client) = (
+        marlin_gdrive::app_test::drive_config(),
+        marlin_gdrive::app_test::oauth_client,
+    );
+    #[cfg(not(feature = "app-test"))]
+    let (drive, oauth_client) = (
+        marlin_gdrive::Config::default(),
+        marlin_gdrive::OAuthClient::load,
+    );
+
     let server = match Server::bind(
         Config {
             socket,
@@ -72,8 +91,8 @@ async fn main() {
         },
         Arc::new(OsAdapter),
         Arc::new(LinkedProviders::new(
-            marlin_gdrive::Config::default(),
-            marlin_gdrive::OAuthClient::load,
+            drive,
+            oauth_client,
             marlin_sftp::Config {
                 servers,
                 known_hosts,

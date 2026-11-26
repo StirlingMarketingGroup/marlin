@@ -1,5 +1,5 @@
 use chrono::{DateTime, Duration, Utc};
-use marlin_gdrive::{keyring_entry, OAuthClient, SavedSignIn, SignInError};
+use marlin_gdrive::{keyring_entry, SavedSignIn, SignInError};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -13,6 +13,29 @@ use yup_oauth2::{
     ApplicationSecret, InstalledFlowAuthenticator, InstalledFlowReturnMethod,
     ServiceAccountAuthenticator, ServiceAccountKey,
 };
+
+/// Where the sign-in goes: Google, or in the test build the fake Google.
+#[cfg(not(feature = "app-test"))]
+mod google {
+    pub fn oauth_client() -> Result<marlin_gdrive::OAuthClient, String> {
+        marlin_gdrive::OAuthClient::load()
+    }
+    pub fn sign_in_page() -> String {
+        "https://accounts.google.com/o/oauth2/auth".to_string()
+    }
+    pub fn user_info() -> String {
+        "https://www.googleapis.com/oauth2/v2/userinfo".to_string()
+    }
+    /// Opens the sign-in page in the user's browser.
+    pub async fn open_sign_in_page(url: &str) -> Result<(), String> {
+        open::that(url).map_err(|e| {
+            log::error!("Failed to open browser: {}", e);
+            format!("Failed to open browser: {}", e)
+        })
+    }
+}
+#[cfg(feature = "app-test")]
+use marlin_gdrive::app_test as google;
 
 /// Scopes needed for Google Drive access
 const SCOPES: &[&str] = &[
@@ -285,10 +308,7 @@ impl InstalledFlowDelegate for BrowserFlowDelegate {
                 open_url.push_str(&urlencoding::encode(hint));
             }
 
-            if let Err(e) = open::that(&open_url) {
-                log::error!("Failed to open browser: {}", e);
-                return Err(format!("Failed to open browser: {}", e));
-            }
+            google::open_sign_in_page(&open_url).await?;
 
             // The authenticator will handle the redirect
             Ok(String::new())
@@ -361,7 +381,7 @@ fn add_or_update_account(
 /// Signs in to a Google account in the browser. Adds the account, or updates it when it is already listed.
 /// `login_hint` is the email the user is expected to pick.
 pub async fn add_google_account(login_hint: Option<String>) -> Result<GoogleAccountInfo, String> {
-    let client = OAuthClient::load()?;
+    let client = google::oauth_client()?;
 
     // One sign-in at a time. A second one fails at once, so it never waits on a browser tab the user closed.
     let _guard = AUTH_MUTEX.try_lock().map_err(|_| {
@@ -374,7 +394,7 @@ pub async fn add_google_account(login_hint: Option<String>) -> Result<GoogleAcco
     let secret = ApplicationSecret {
         client_id: client.client_id.clone(),
         client_secret: client.client_secret.clone(),
-        auth_uri: "https://accounts.google.com/o/oauth2/auth".to_string(),
+        auth_uri: google::sign_in_page(),
         token_uri: client.token_uri.clone(),
         redirect_uris: vec![
             "http://127.0.0.1".to_string(),
@@ -477,7 +497,7 @@ async fn fetch_user_info(access_token: &str) -> Result<GoogleUserInfo, String> {
     let client = reqwest::Client::new();
 
     let response = client
-        .get("https://www.googleapis.com/oauth2/v2/userinfo")
+        .get(google::user_info())
         .bearer_auth(access_token)
         .send()
         .await
@@ -535,7 +555,7 @@ pub async fn ensure_valid_token(email: &str) -> Result<String, String> {
         }
         tokens.insert(
             email.to_string(),
-            SavedSignIn::new(email, OAuthClient::load()?),
+            SavedSignIn::new(email, google::oauth_client()?),
         );
     }
 

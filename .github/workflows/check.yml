@@ -99,7 +99,7 @@ jobs:
           # Fail on a mirror that does not answer, so the retry loop sees it.
           apt_retry update -o APT::Update::Error-Mode=any
           # xvfb and xauth give the real-app tests a display; their SFTP test runs sshd.
-          # The copy and paste test runs xclip.
+          # The copy and paste test runs xclip. The mount test needs fuse3.
           apt_retry install -y \
             build-essential \
             clang \
@@ -118,6 +118,7 @@ jobs:
             xauth \
             xclip \
             openssh-server \
+            fuse3 \
             libglib2.0-bin \
             libgdk-pixbuf2.0-bin \
             desktop-file-utils \

@@ -1,4 +1,5 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
@@ -6,6 +7,10 @@ import { afterEach, expect } from 'vitest';
 import { Key, remote, type Browser } from 'webdriverio';
 
 const appBinary = path.join(import.meta.dirname, '../src-tauri/target/app-test/debug/marlin');
+const fakeGoogleBinary = path.join(
+  import.meta.dirname,
+  '../src-tauri/target/app-test/debug/marlin-test-google'
+);
 
 // The browser of the app this file started. Vitest loads this module once per test file.
 let runningBrowser: Browser | undefined;
@@ -51,7 +56,7 @@ export function runCommand(
   return browser.execute(
     `return window.__TAURI_INTERNALS__
       .invoke(arguments[0], arguments[1])
-      .then((value) => value ?? null, (error) => String(error))`,
+      .then((value) => value ?? null, (error) => (typeof error === 'string' ? error : JSON.stringify(error)))`,
     command,
     args
   );
@@ -145,12 +150,112 @@ export function preferencesPath(home: string): string {
   );
 }
 
+/** Starts the fake Google (`marlin-test-google`) for a test app to use in place of Google. It stops on `stop`, or when this process ends. */
+export async function startFakeGoogle(): Promise<{ address: string; stop: () => Promise<void> }> {
+  const fake = spawn(fakeGoogleBinary, [], { stdio: ['pipe', 'pipe', 'inherit'] });
+  const exited = new Promise((resolve) => fake.once('exit', resolve));
+  const address = await new Promise<string>((resolve, reject) => {
+    let output = '';
+    fake.stdout.on('data', (chunk: Buffer) => {
+      output += chunk.toString();
+      if (output.includes('\n')) resolve(output.split('\n')[0]);
+    });
+    fake.once('error', reject);
+    fake.once('exit', (code, signal) =>
+      reject(
+        new Error(
+          `The fake Google ended before it gave its address: code ${code}, signal ${signal}`
+        )
+      )
+    );
+  });
+  // It stops when its stdin closes.
+  const stop = async () => {
+    fake.stdin.end();
+    await exited;
+  };
+  return { address, stop };
+}
+
+// The helper's command line holds its socket, which is under `root`. `root` comes from mkdtemp,
+// so it holds no regex character. pgrep exits with 1 when nothing matches.
+function helperPids(root: string): string[] {
+  const found = spawnSync('pgrep', ['-f', `marlin-mount --socket ${root}/`], { encoding: 'utf8' });
+  if (found.status !== 0 && found.status !== 1) {
+    throw new Error(`pgrep failed (${found.status ?? found.error}): ${found.stderr}`);
+  }
+  return found.stdout.split('\n').filter((line) => line !== '');
+}
+
+// The mount points under `root`. Linux lists them in mountinfo, as field 5 with a space
+// written `\040`. macOS lists them in the output of `mount`. A list that fails throws: read as
+// empty, it would let the caller remove a folder that holds a mount.
+function mountPoints(root: string): string[] {
+  let points: string[];
+  if (process.platform === 'linux') {
+    points = readFileSync('/proc/self/mountinfo', 'utf8')
+      .split('\n')
+      .map((line) =>
+        (line.split(' ')[4] ?? '').replace(/\\([0-7]{3})/g, (_, octal: string) =>
+          String.fromCharCode(parseInt(octal, 8))
+        )
+      );
+  } else {
+    const found = spawnSync('mount', { encoding: 'utf8' });
+    if (found.status !== 0) {
+      throw new Error(`mount failed (${found.status ?? found.error}): ${found.stderr}`);
+    }
+    points = found.stdout.split('\n').map((line) => / on (\/.*) \([^()]*\)$/.exec(line)?.[1] ?? '');
+  }
+  return points.filter((point) => point.startsWith(`${root}/`));
+}
+
+// The harness kills the app, so the app never tells its mount helper to stop. This stops it and
+// clears what it left mounted. It throws when anything is left, before the caller removes `root`:
+// removing a folder that holds a live mount would delete the remote's files through it.
+async function stopMountHelper(root: string): Promise<void> {
+  // On SIGTERM the helper unmounts what it can and exits. One still there after 10 seconds gets
+  // SIGKILL, which leaves a dead mount.
+  for (const [signal, limitMs] of [
+    ['SIGTERM', 10_000],
+    ['SIGKILL', 2_000],
+  ] as const) {
+    for (const pid of helperPids(root)) {
+      try {
+        process.kill(Number(pid), signal);
+      } catch {
+        // It exited after pgrep saw it.
+      }
+    }
+    const deadline = Date.now() + limitMs;
+    while (helperPids(root).length > 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+  // The commands the helper uses to clear a dead mount.
+  for (const point of mountPoints(root)) {
+    if (process.platform === 'linux') {
+      spawnSync('fusermount3', ['-u', '-z', point]);
+    } else {
+      spawnSync('umount', ['-f', point]);
+    }
+  }
+  const helpers = helperPids(root);
+  const mounts = mountPoints(root);
+  if (helpers.length > 0 || mounts.length > 0) {
+    throw new Error(
+      `The test app's mount helper (${helpers.join(', ')}) or mounts (${mounts.join(', ')}) outlived it, so ${root} is left in place`
+    );
+  }
+}
+
 /**
  * Starts the test build of the app with its own home folder and WebDriver port.
  * `files` is an empty folder for the files a test wants the app to show.
  * `home` is the app's temporary home folder.
+ * `google`, when set, is the fake Google the app and its mount helper use.
  */
-export async function startApp(): Promise<{
+export async function startApp(options: { google?: string } = {}): Promise<{
   browser: Browser;
   files: string;
   home: string;
@@ -181,6 +286,7 @@ export async function startApp(): Promise<{
         await exited;
         clearTimeout(forceKill);
       }
+      await stopMountHelper(root);
       await fs.rm(root, { recursive: true, force: true });
     }
   };
@@ -195,7 +301,7 @@ export async function startApp(): Promise<{
 
     // Everything the app may see. The developer's other variables stay out, so the app
     // cannot reach their settings, Google key file, or SSH agent. The `app-test` feature
-    // keeps it out of the keychain.
+    // keeps secrets in the test keychain below, never the OS keychain.
     const env: NodeJS.ProcessEnv = {
       PATH: process.env.PATH,
       LANG: process.env.LANG,
@@ -214,6 +320,9 @@ export async function startApp(): Promise<{
       // exit, after `stop` has removed the folder. With no cache, nothing is left behind.
       MESA_SHADER_CACHE_DISABLE: 'true',
       TAURI_WEBDRIVER_PORT: String(port),
+      // The app and the mount helper it starts share this test keychain.
+      MARLIN_TEST_KEYCHAIN: path.join(root, 'keychain.json'),
+      ...(options.google !== undefined ? { MARLIN_TEST_GOOGLE: options.google } : {}),
     };
 
     app = spawn(appBinary, [], { stdio: ['ignore', 'inherit', 'inherit'], env });
