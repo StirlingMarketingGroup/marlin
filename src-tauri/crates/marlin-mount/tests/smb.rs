@@ -532,7 +532,13 @@ async fn a_saved_server_mounts_and_takes_writes_through_fuse() {
         wait_until_exited(pid);
     }
     let after = ["big.bin", "box", "sub"].map(String::from);
-    assert_eq!(names(&data).await, after);
+    // macOS writes a `._name` file beside each new file, and those stay on this computer.
+    let user_names: Vec<String> = names(&data)
+        .await
+        .into_iter()
+        .filter(|name| !marlin_fuse::stays_local(name))
+        .collect();
+    assert_eq!(user_names, after);
     // A new process answered: a killed one can still show as a zombie until its parent reaps it.
     assert!(marlin_smb_children().iter().any(|pid| !pids.contains(pid)));
 
@@ -580,10 +586,10 @@ async fn a_hung_server_times_out_and_leaves_the_other_mount_alone() {
 
     let (mut running, servers) = running_with(
         Some(marlin_smb()),
+        // The default space cache stays: macOS asks a writable mount for its free space many times a second, and with no cache each ask opens a new connection to the paused server, until it refuses new ones and the calls fail fast instead of timing out.
         Options {
             max_listings: 0,
             attributes_ttl: Duration::ZERO,
-            space_ttl: Duration::ZERO,
             call_timeout: Duration::from_secs(10),
             ..Options::default()
         },
