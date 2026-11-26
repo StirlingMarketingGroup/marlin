@@ -5,7 +5,7 @@
 The same crate holds the saved servers, the host key check, and the connect that the app's `sftp://` view uses: see [Location providers](location-providers.md).
 
 **Covers:** `src-tauri/crates/marlin-sftp/src/provider.rs`, `open_sftp_channel` in `src-tauri/crates/marlin-sftp/src/connect.rs`, `src-tauri/crates/marlin-sftp/tests/provider.rs`, `src-tauri/crates/marlin-test-sshd/`
-**Checked against the code:** 2026-11-25
+**Checked against the code:** 2026-11-26
 
 ## What a mount shows
 
@@ -38,7 +38,7 @@ The mount core knows files and folders only. A link shows as what it points to, 
 
 ## Changes and uploads
 
-A name that is empty, `.`, `..`, or that holds `/`, a NUL, or U+FFFD is `NotSupported` before any request. A path built from the first of those would name another item, and a listing hides U+FFFD (#637), so a file made under one would vanish from the mount.
+A name that is empty, `.`, `..`, or that holds `/`, a NUL, or U+FFFD is `NotSupported` before any request. A path built from the first of those would name another item, and a listing hides U+FFFD (#637), so a file made under one would vanish from the mount. `check_new_item` refuses the same names, so the core refuses a new file under one at once.
 
 A change call (`create_folder`, `remove`, `rename`) asks its first question in a call of its own, which runs once more on a new connection when the old one died while idle: nothing has changed yet. The change itself, and everything after it, runs once: the server may have acted before a lost answer came back, so a lost connection is `Offline`. A byte call (`create_file`, `replace_bytes`) runs once too. The core tries a failed upload again by itself, after 5 seconds at first and up to 5 minutes. An upload the server refuses (`AccessDenied`, `NotSupported`) waits for an edit, a new modified time, a rename, or a retry the user asks for.
 
@@ -56,6 +56,7 @@ A server without `posix-rename@openssh.com`, or one that denies it, takes new fi
 
 - A connection lost during an upload, after the temporary file's open answered, leaves a `.marlin-` file until the provider's next upload, and for good when the provider ends first. When the server makes the temporary file and the open's answer never arrives, no later upload removes it.
 - A file in a folder where the signed-in user may not make files cannot be replaced through the mount (`AccessDenied`): the new bytes go to a temporary file beside it.
+- A new file in such a folder is refused only at upload (#784). The mount shows it, and it stays on this computer as a refused unsent file.
 - A listing taken during an upload shows its `.marlin-` file.
 - A folder renamed while an upload into it runs keeps that upload's `.marlin-` file: the server moves it with the folder, and its removal looks for it under the old path.
 - A move between two of the server's file systems is `NotSupported`, because SFTP's rename cannot cross them. Copy the item, then remove the old one.

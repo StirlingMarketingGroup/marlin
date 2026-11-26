@@ -11,6 +11,8 @@ struct Stored {
     parent: Option<ItemId>,
     contents: Vec<u8>,
     thumbnail: Option<Thumbnail>,
+    /// A folder that takes no new item ([`MemoryProvider::refuse_new_items`]).
+    takes_nothing_new: bool,
 }
 
 struct Inner {
@@ -80,6 +82,7 @@ impl MemoryProvider {
             parent: None,
             contents: Vec::new(),
             thumbnail: None,
+            takes_nothing_new: false,
         };
         Self {
             paths,
@@ -142,6 +145,27 @@ impl MemoryProvider {
         let stored = inner.stored.iter_mut().find(|stored| stored.item.id == *id);
         let stored = stored.expect("no item has this ID");
         stored.item.attributes.read_only = on;
+    }
+
+    /// While on, the folder `folder` takes no new item, as an SMB server's list of shares does: `check_new_item`, `create_folder`, and `create_file` in it, and a `rename` into it, answer [`VfsError::NotSupported`]. The mark stays with the folder when it is renamed.
+    pub fn refuse_new_items(&self, folder: &ItemId, on: bool) {
+        let mut inner = self.inner.lock().unwrap();
+        let stored = inner
+            .stored
+            .iter_mut()
+            .find(|stored| stored.item.id == *folder);
+        let stored = stored.expect("no item has this ID");
+        stored.takes_nothing_new = on;
+    }
+
+    /// [`Provider::check_new_item`] on the tree `inner`.
+    fn check_new(&self, inner: &Inner, folder: &ItemId, name: &str) -> Result<(), VfsError> {
+        let takes_nothing_new =
+            find(&inner.stored, folder).is_ok_and(|stored| stored.takes_nothing_new);
+        if (self.paths && !fits_a_path(name)) || takes_nothing_new {
+            return Err(VfsError::NotSupported);
+        }
+        Ok(())
     }
 
     /// The picture [`Provider::thumbnail`] answers for the item, or none.
@@ -360,6 +384,7 @@ fn allocate(
         parent,
         contents: contents.to_vec(),
         thumbnail: None,
+        takes_nothing_new: false,
     });
     item
 }
@@ -385,6 +410,10 @@ impl Provider for MemoryProvider {
 
     fn ids_are_paths(&self) -> bool {
         self.paths
+    }
+
+    fn check_new_item(&self, folder: &ItemId, name: &str) -> Result<(), VfsError> {
+        self.check_new(&self.inner.lock().unwrap(), folder, name)
     }
 
     async fn item(&self, id: &ItemId) -> Result<Item, VfsError> {
@@ -469,9 +498,7 @@ impl Provider for MemoryProvider {
             if find(&inner.stored, parent)?.item.attributes.kind != Kind::Folder {
                 return Err(VfsError::NotAFolder);
             }
-            if self.paths && !fits_a_path(name) {
-                return Err(VfsError::NotSupported);
-            }
+            self.check_new(inner, parent, name)?;
             // A remote whose ids are paths keeps one name per folder.
             if self.paths && find(&inner.stored, &path_of(parent, name)).is_ok() {
                 return Err(VfsError::Conflict);
@@ -512,6 +539,7 @@ impl Provider for MemoryProvider {
             if find(&inner.stored, to)?.item.attributes.kind != Kind::Folder {
                 return Err(VfsError::NotAFolder);
             }
+            self.check_new(inner, to, name)?;
             // Walk up from `to`: it must not be `id` or sit inside it.
             let mut above = Some(to.clone());
             while let Some(folder) = above {
@@ -531,9 +559,6 @@ impl Provider for MemoryProvider {
                     return Err(VfsError::NotEmpty);
                 }
                 inner.stored.retain(|stored| stored.item.id != *replace);
-            }
-            if self.paths && !fits_a_path(name) {
-                return Err(VfsError::NotSupported);
             }
             let new_id = if self.paths {
                 path_of(to, name)
@@ -572,9 +597,7 @@ impl Provider for MemoryProvider {
             if find(&inner.stored, parent)?.item.attributes.kind != Kind::Folder {
                 return Err(VfsError::NotAFolder);
             }
-            if self.paths && !fits_a_path(name) {
-                return Err(VfsError::NotSupported);
-            }
+            self.check_new(inner, parent, name)?;
             // A remote whose ids are paths keeps one name per folder.
             if self.paths && find(&inner.stored, &path_of(parent, name)).is_ok() {
                 return Err(VfsError::Conflict);

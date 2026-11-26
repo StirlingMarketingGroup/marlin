@@ -588,14 +588,12 @@ impl Provider for SmbProvider {
         .await
     }
 
+    fn check_new_item(&self, folder: &ItemId, name: &str) -> Result<(), VfsError> {
+        new_entry(folder, name).map(|_| ())
+    }
+
     async fn create_folder(&self, parent: &ItemId, name: &str) -> Result<Item, VfsError> {
-        check_name(name)?;
-        let id = child(parent, name);
-        let Place::Entry { share, path } = place(&id) else {
-            return Err(VfsError::NotSupported);
-        };
-        let share = share.to_string();
-        let path = path.to_string();
+        let (id, share, path) = new_entry(parent, name)?;
         let name = name.to_string();
         self.on_process(&self.calls, move |lease| {
             let () = lease.request(methods::CREATE_DIRECTORY, |credentials| {
@@ -651,7 +649,7 @@ impl Provider for SmbProvider {
         name: &str,
         replace: Option<&ItemId>,
     ) -> Result<Item, VfsError> {
-        check_name(name)?;
+        self.check_new_item(to, name)?;
         let target = replace.cloned().unwrap_or_else(|| child(to, name));
         let (share, from_path) = match place(id) {
             Place::Entry { share, path } if parent_of(&id.0) == from.0 => {
@@ -731,20 +729,9 @@ impl Provider for SmbProvider {
         modified: SystemTime,
         progress: &Progress,
     ) -> Result<Item, VfsError> {
-        check_name(name)?;
-        let id = child(parent, name);
-        let Place::Entry { share, path } = place(&id) else {
-            return Err(VfsError::NotSupported);
-        };
+        let (id, share, path) = new_entry(parent, name)?;
         let meta = self
-            .upload(
-                share.to_string(),
-                path.to_string(),
-                from,
-                modified,
-                None,
-                progress,
-            )
+            .upload(share, path, from, modified, None, progress)
             .await?;
         Ok(item_from(
             id,
@@ -824,6 +811,17 @@ fn join_name(folder: &str, name: &str) -> String {
     } else {
         format!("{folder}/{name}")
     }
+}
+
+/// The id, share, and path in the share of a new item named `name` in `folder`. A name SMB cannot hold is `NotSupported`, and so is the share list: a mount cannot make a share.
+fn new_entry(folder: &ItemId, name: &str) -> Result<(ItemId, String, String), VfsError> {
+    check_name(name)?;
+    let id = child(folder, name);
+    let Place::Entry { share, path } = place(&id) else {
+        return Err(VfsError::NotSupported);
+    };
+    let (share, path) = (share.to_string(), path.to_string());
+    Ok((id, share, path))
 }
 
 /// A name SMB cannot hold. Samba answers some of these with a generic error, which would count against the whole mount.

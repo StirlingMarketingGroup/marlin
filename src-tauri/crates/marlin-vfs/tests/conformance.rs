@@ -1951,6 +1951,119 @@ async fn create_and_write_report_a_taken_name_a_missing_spool_and_a_read_handle(
 }
 
 #[tokio::test]
+async fn a_new_file_where_the_remote_takes_nothing_new_fails_at_once() {
+    let (provider, vfs, dir) = spooled_mount(Options::default(), 1024 * 1024, finder_files);
+    let shares_id = provider.add_folder(&provider.root(), "shares");
+    provider.refuse_new_items(&shares_id, true);
+    let shares = vfs.lookup(Vfs::ROOT, "shares").await.unwrap();
+    assert_eq!(
+        vfs.create(shares.node, "a.txt", Access::Write)
+            .await
+            .unwrap_err(),
+        VfsError::NotSupported
+    );
+    assert_eq!(
+        vfs.create_folder(shares.node, "b").await.unwrap_err(),
+        VfsError::NotSupported
+    );
+    assert_eq!(spool_files(&dir), 0);
+    assert!(vfs.unsent().is_empty());
+    assert_eq!(
+        vfs.lookup(shares.node, "a.txt").await,
+        Err(VfsError::NotFound)
+    );
+    let (_made, handle) = vfs
+        .create(shares.node, ".DS_Store", Access::Write)
+        .await
+        .unwrap();
+    assert_eq!(
+        vfs.rename(
+            shares.node,
+            ".DS_Store",
+            shares.node,
+            "notes.txt",
+            IfExists::Refuse,
+        )
+        .await,
+        Err(VfsError::NotSupported)
+    );
+    vfs.lookup(shares.node, ".DS_Store").await.unwrap();
+    vfs.release(handle);
+}
+
+#[tokio::test]
+async fn a_name_the_remote_cannot_hold_fails_at_once() {
+    let (_provider, vfs, dir) = spooled_path_mount(Options::default(), 1024 * 1024, never_local);
+    assert_eq!(
+        vfs.create(Vfs::ROOT, "a%2Fb", Access::Write)
+            .await
+            .unwrap_err(),
+        VfsError::NotSupported
+    );
+    assert_eq!(
+        vfs.create_folder(Vfs::ROOT, "a%2Fb").await.unwrap_err(),
+        VfsError::NotSupported
+    );
+    assert_eq!(spool_files(&dir), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_new_file_moved_where_the_remote_cannot_hold_it_stays_and_uploads() {
+    let (provider, vfs, dir) = spooled_path_mount(Options::default(), 1024, never_local);
+    let shares_id = provider.add_folder(&provider.root(), "shares");
+    provider.refuse_new_items(&shares_id, true);
+    let shares = vfs.lookup(Vfs::ROOT, "shares").await.unwrap();
+    let (_made, handle) = vfs.create(Vfs::ROOT, "a.txt", Access::Write).await.unwrap();
+    vfs.write(handle, 0, b"hello").await.unwrap();
+    vfs.release(handle);
+    assert_eq!(
+        vfs.rename(Vfs::ROOT, "a.txt", shares.node, "a.txt", IfExists::Refuse)
+            .await,
+        Err(VfsError::NotSupported)
+    );
+    assert_eq!(
+        vfs.rename(Vfs::ROOT, "a.txt", Vfs::ROOT, "a%2Fb.txt", IfExists::Refuse)
+            .await,
+        Err(VfsError::NotSupported)
+    );
+    vfs.lookup(Vfs::ROOT, "a.txt").await.unwrap();
+    let unsent = vfs.unsent();
+    assert_eq!(unsent.len(), 1);
+    assert_eq!(unsent[0].name, "a.txt");
+    assert_eq!(unsent[0].folder, path("/"));
+    let _uploads = start_uploads(&vfs);
+    advance(settle()).await;
+    until_spool_empty(&dir).await;
+    let file = root_items(&provider)
+        .await
+        .into_iter()
+        .find(|item| item.name == "a.txt")
+        .unwrap();
+    assert_eq!(provider.contents(&file.id), b"hello");
+    assert!(provider.list(&shares_id).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_memory_rename_that_is_refused_replaces_nothing() {
+    let provider = MemoryProvider::with_path_ids();
+    provider.add_file(&provider.root(), "a.txt", b"a");
+    provider.add_file(&provider.root(), "b.txt", b"b");
+    assert_eq!(
+        provider
+            .rename(
+                &path("/a.txt"),
+                &path("/"),
+                &path("/"),
+                "x/y",
+                Some(&path("/b.txt")),
+            )
+            .await,
+        Err(VfsError::NotSupported)
+    );
+    assert!(provider.item(&path("/b.txt")).await.is_ok());
+}
+
+#[tokio::test]
 async fn a_remote_item_that_takes_a_new_files_name_gets_a_suffix() {
     let (provider, vfs, _dir) = spooled_mount(Options::default(), 1024 * 1024, never_local);
     let (made, _handle) = vfs.create(Vfs::ROOT, "a.txt", Access::Write).await.unwrap();

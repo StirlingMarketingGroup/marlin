@@ -1277,6 +1277,52 @@ async fn a_file_the_account_may_not_change_shows_read_only() {
 
 #[ignore = "mounts for real: run crates/marlin-fuse/test-in-docker.sh on Linux, crates/marlin-fuse/test-on-mac.sh on a Mac"]
 #[tokio::test(flavor = "multi_thread")]
+async fn a_new_file_the_remote_cannot_hold_fails_like_a_new_folder() {
+    let provider = Arc::new(MemoryProvider::new());
+    let shares_id = provider.add_folder(&provider.root(), "shares");
+    provider.refuse_new_items(&shares_id, true);
+    let (vfs, _spool) = spooled_vfs(
+        Arc::clone(&provider),
+        1024 * 1024 * 1024,
+        Options::default(),
+    );
+    let (_dir, point) = empty_dir();
+    let mut mount = marlin_fuse::mount(vfs.clone(), &point).await.unwrap();
+
+    let at = point.clone();
+    let (made, folder, rename, writing) = tokio::task::spawn_blocking(move || {
+        let made = os_code(std::fs::File::create(at.join("shares/a.txt")));
+        let folder = os_code(std::fs::create_dir(at.join("shares/b")));
+        let writing = std::fs::File::create(at.join("c.txt")).unwrap();
+        writing.write_at(b"kept", 0).unwrap();
+        let rename = os_code(std::fs::rename(at.join("c.txt"), at.join("shares/c.txt")));
+        (made, folder, rename, writing)
+    })
+    .await
+    .unwrap();
+    assert_eq!(made, Some(libc::ENOTSUP));
+    assert_eq!(folder, Some(libc::ENOTSUP));
+    assert_eq!(rename, Some(libc::ENOTSUP));
+    tokio::task::spawn_blocking(move || drop(writing))
+        .await
+        .unwrap();
+    let listed: Vec<String> = names(&point.join("shares"))
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|name| !marlin_fuse::stays_local(name))
+        .collect();
+    assert!(listed.is_empty());
+    wait_for_uploads(&vfs).await;
+    let files = remote_files(&provider).await;
+    assert_eq!(files.get("c.txt"), Some(&Some(b"kept".to_vec())));
+    assert!(files.keys().all(|key| !key.starts_with("shares/")));
+
+    mount.unmount().await.unwrap();
+}
+
+#[ignore = "mounts for real: run crates/marlin-fuse/test-in-docker.sh on Linux, crates/marlin-fuse/test-on-mac.sh on a Mac"]
+#[tokio::test(flavor = "multi_thread")]
 async fn a_write_is_read_back_at_once_also_by_another_process() {
     let provider = Arc::new(MemoryProvider::new());
     let fresh = vec![1u8; 100_000];

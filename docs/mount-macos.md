@@ -2,10 +2,10 @@
 
 `marlin-fuse` serves one [mount core](mount-core.md) `Vfs` to macOS through macFUSE. The [mount helper](mount-helper.md) uses it on macOS. The same crate serves Linux: see [Linux mount adapter](mount-linux.md). A mount takes writes when its core can write: see [Writes](#writes). [Decision 0005](decisions/0005-mount-writes.md) is the design.
 
-The helper mounts a Google account or a saved SFTP server through it: see [Providers](mount-helper.md#providers). No part of the UI asks for a mount yet (#377).
+The helper mounts a Google account, a saved SFTP server, or a saved SMB server through it: see [Providers](mount-helper.md#providers). No part of the UI asks for a mount yet (#377).
 
 **Covers:** `src-tauri/crates/marlin-fuse/src/lib.rs`, `src-tauri/crates/marlin-fuse/src/macos.rs`, `src-tauri/crates/marlin-fuse/src/macos/`, `src-tauri/crates/marlin-fuse/test-on-mac.sh`
-**Checked against the code:** 2026-11-25
+**Checked against the code:** 2026-11-26
 
 The design is in [decision 0001](decisions/0001-mount-architecture.md), choices 2 and 6.
 

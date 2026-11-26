@@ -5,7 +5,7 @@
 This is not the code behind `gdrive://` paths. The app handles those through its own location provider: see [Location providers](location-providers.md).
 
 **Covers:** `src-tauri/crates/marlin-gdrive/`
-**Checked against the code:** 2026-11-25
+**Checked against the code:** 2026-11-26
 
 ## The parts
 
@@ -154,16 +154,17 @@ What follows from that:
 | `remove`        | `files.get` to check the item is still in the folder. `files.list`, one item a page, when it is a folder. Then `files.update` (`PATCH`) with `trashed: true`.                                                                                                                                                                                         |
 | `rename`        | `files.get` of the item. When a folder moves to another folder, `files.get` of each folder above the destination, up to the folder it leaves or the top. Then one `PATCH` with the name, plus `addParents` and `removeParents` when the folder changes. A `replace` adds the same checks as `remove` before the `PATCH`, and its trash `PATCH` after. |
 
-These ids are not ordinary Drive files. The provider answers `AccessDenied` for them before it sends anything. An `Allowed` entry sends the usual requests:
+These ids are not ordinary Drive files. The provider answers `AccessDenied` for them before it sends anything. An `Allowed` entry sends the usual requests, and `check_new_item` sends none:
 
-| Call                                | `/`            | `/shared-drives` | `root` (My Drive)       | `{d}/{d}` (a shared drive's top folder) |
-| ----------------------------------- | -------------- | ---------------- | ----------------------- | --------------------------------------- |
-| `create_folder` with it as `parent` | `AccessDenied` | `AccessDenied`   | Allowed. Parent `root`. | Allowed. Parent `{d}`.                  |
-| `remove` of it                      | `AccessDenied` | `AccessDenied`   | `AccessDenied`          | `AccessDenied`                          |
-| `rename` of it                      | `AccessDenied` | `AccessDenied`   | `AccessDenied`          | `AccessDenied`                          |
-| `rename` with it as `to`            | `AccessDenied` | `AccessDenied`   | Allowed.                | Allowed.                                |
+| Call                                                   | `/`            | `/shared-drives` | `root` (My Drive)       | `{d}/{d}` (a shared drive's top folder) |
+| ------------------------------------------------------ | -------------- | ---------------- | ----------------------- | --------------------------------------- |
+| `create_folder` with it as `parent`                    | `AccessDenied` | `AccessDenied`   | Allowed. Parent `root`. | Allowed. Parent `{d}`.                  |
+| `check_new_item` and `create_file` with it as `parent` | `AccessDenied` | `AccessDenied`   | Allowed.                | Allowed.                                |
+| `remove` of it                                         | `AccessDenied` | `AccessDenied`   | `AccessDenied`          | `AccessDenied`                          |
+| `rename` of it                                         | `AccessDenied` | `AccessDenied`   | `AccessDenied`          | `AccessDenied`                          |
+| `rename` with it as `to`                               | `AccessDenied` | `AccessDenied`   | Allowed.                | Allowed.                                |
 
-A link file as the parent of `create_folder`, or as `to`, is `NotAFolder`.
+A link file as the parent of `create_folder`, `create_file`, or `check_new_item`, or as `to`, is `NotAFolder`.
 
 **The item is still in the folder.** Before a remove or a rename, the provider reads the file with `parents` and `driveId`. The item is `NotFound` when it is trashed, when `driveId` is not the drive in the id (none in My Drive), when the answer would build a different id, or when `parents` does not hold the folder. `parents` holds My Drive's real id, never `root`, so a check against the top of My Drive also reads `files.get` of `root` at the same time. Nothing is kept between calls.
 

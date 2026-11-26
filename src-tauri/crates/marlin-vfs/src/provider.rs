@@ -121,6 +121,12 @@ pub trait Provider: Send + Sync + 'static {
         false
     }
 
+    /// Whether the remote can hold a new item named `name` in the folder `folder`, by rules the provider knows without asking the remote: names the remote cannot hold, and folders where nothing new can go, such as an SMB server's list of shares. `name` is a remote name. The answer is the error [`Self::create_folder`], [`Self::create_file`], and [`Self::rename`] give for that folder and name, and the call makes no remote request. The core asks before it makes a new file in the spool or gives one a new name, so the file fails at once instead of at its upload. A refusal only the remote can give, such as a folder the account may not write in, still comes from the call that makes the item. A provider whose remote takes any name in any folder leaves this out, and it answers `Ok`.
+    fn check_new_item(&self, folder: &ItemId, name: &str) -> Result<(), VfsError> {
+        let _ = (folder, name);
+        Ok(())
+    }
+
     /// Makes an empty folder named `name` in `parent`, and returns it. The core has checked that its own listing of `parent` holds no such name. A remote that keeps one name per folder answers [`VfsError::Conflict`] when the name is taken.
     async fn create_folder(&self, parent: &ItemId, name: &str) -> Result<Item, VfsError> {
         let _ = (parent, name);
