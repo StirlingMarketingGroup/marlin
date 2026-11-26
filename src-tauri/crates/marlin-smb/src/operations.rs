@@ -1,21 +1,23 @@
-//! SMB operations. Most go through pavao/libsmbclient; `list_shares` and `rename` run the `smbclient` program.
+//! SMB operations. Most go through pavao/libsmbclient; `list_shares` and `rename`, which also publishes `save_file`'s upload, run the `smbclient` program.
 //!
 //! All operations receive credentials as parameters (no keychain access).
 
 use marlin_smb_client::protocol::{
     error_codes, CopyParams, CreateDirectoryParams, DeleteParams, DirectoryEntry,
     DownloadFileParams, DownloadFileResult, DownloadPartialParams, DownloadPartialResult,
-    FileMetadataResult, GetFileMetadataParams, ListSharesParams, ListSharesResult,
-    ReadDirectoryParams, ReadDirectoryResult, ReadParams, ReadResult, RenameParams, ShareEntry,
-    SmbCredentials, SpaceParams, SpaceResult, UploadFileParams, UploadFileResult, READ_MAX,
-    SMBCLIENT_MISSING,
+    FileMetadataResult, FileStamp, GetFileMetadataParams, ListSharesParams, ListSharesResult,
+    Notice, ReadDirectoryParams, ReadDirectoryResult, ReadParams, ReadResult, RenameParams,
+    SaveFileParams, ShareEntry, SmbCredentials, SpaceParams, SpaceResult, UploadFileParams,
+    UploadFileResult, READ_MAX, SMBCLIENT_MISSING,
 };
 use pavao::{
     SmbClient, SmbCredentials as PavaoCredentials, SmbDirentInfo, SmbFile, SmbMode, SmbOpenOptions,
     SmbOptions, SmbResult, SmbStat, SmbStatVfs,
 };
+use std::ffi::{CStr, CString};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::{Mutex, PoisonError};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Sidecar version string.
 pub const SIDECAR_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -26,6 +28,7 @@ pub const SIDECAR_VERSION: &str = env!("CARGO_PKG_VERSION");
 struct Share<'a> {
     client: SmbClient,
     credentials: &'a SmbCredentials,
+    share: String,
 }
 
 impl<'a> Share<'a> {
@@ -50,6 +53,7 @@ impl<'a> Share<'a> {
         Ok(Self {
             client,
             credentials,
+            share: share.to_string(),
         })
     }
 
@@ -99,6 +103,148 @@ impl<'a> Share<'a> {
     fn open_with(&self, path: &str, options: SmbOpenOptions) -> SmbResult<SmbFile<'_>> {
         self.client.open_with(escape_for_url(path), options)
     }
+
+    /// The URL pavao builds for this path, for the calls pavao does not wrap.
+    fn url(&self, path: &str) -> SmbResult<CString> {
+        Ok(CString::new(format!(
+            "smb://{}/{}{}",
+            self.credentials.hostname,
+            escape_for_url(&self.share),
+            escape_for_url(path)
+        ))?)
+    }
+
+    /// Sets the access time and the modified time. libsmbclient sets the two together.
+    fn utimes(&self, path: &str, time: SystemTime) -> SmbResult<()> {
+        let url = self.url(path)?;
+        let since = time.duration_since(UNIX_EPOCH).unwrap_or_default();
+        let at = libc::timeval {
+            tv_sec: since.as_secs() as libc::time_t,
+            tv_usec: since.subsec_micros() as libc::suseconds_t,
+        };
+        let mut times = [at, at];
+        let ctx = self.client.ctx()?;
+        // SAFETY: `ctx` is this client's live context, and a getter only reads the call it holds.
+        let utimes = unsafe { pavao_sys::smbc_getFunctionUtimes(ctx) }
+            .ok_or(std::io::Error::from_raw_os_error(libc::EINVAL))?;
+        // `url` and `times` live through the call, and one request runs at a time on one thread, so no other libsmbclient call races it.
+        if utimes(ctx, url.as_ptr(), times.as_mut_ptr()) < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        Ok(())
+    }
+
+    /// The file's owner, group, and access list.
+    fn access(&self, path: &str) -> SmbResult<Access> {
+        let url = self.url(path)?;
+        let ctx = self.client.ctx()?;
+        // SAFETY: as in `utimes`.
+        let getxattr = unsafe { pavao_sys::smbc_getFunctionGetxattr(ctx) }
+            .ok_or(std::io::Error::from_raw_os_error(libc::EINVAL))?;
+        let mut text = vec![0u8; 64 * 1024];
+        // As in `utimes`; `text` is writable for its length.
+        let read = getxattr(
+            ctx,
+            url.as_ptr(),
+            SECURITY_DESCRIPTOR.as_ptr(),
+            text.as_mut_ptr().cast(),
+            text.len(),
+        );
+        if read < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        text.truncate(read as usize);
+        Ok(Access::parse(&String::from_utf8_lossy(&text))?)
+    }
+
+    /// Sets the group and replaces the access list. The owner stays: the text names none.
+    fn set_access(&self, path: &str, access: &Access) -> SmbResult<()> {
+        let url = self.url(path)?;
+        let mut value = format!("REVISION:1,GROUP:{}", access.group);
+        for entry in &access.entries {
+            value.push_str(",ACL:");
+            value.push_str(entry);
+        }
+        // libsmbclient reads the value as a C string (`%s`), whatever length it is given, so it must end in a NUL.
+        let value = CString::new(value)?;
+        let ctx = self.client.ctx()?;
+        // SAFETY: as in `utimes`.
+        let setxattr = unsafe { pavao_sys::smbc_getFunctionSetxattr(ctx) }
+            .ok_or(std::io::Error::from_raw_os_error(libc::EINVAL))?;
+        // As in `utimes`; `value` lives through the call.
+        let set = setxattr(
+            ctx,
+            url.as_ptr(),
+            SECURITY_DESCRIPTOR.as_ptr(),
+            value.as_ptr().cast(),
+            value.as_bytes().len(),
+            0,
+        );
+        if set < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        Ok(())
+    }
+}
+
+/// `system.nt_sec_desc.*` reads and writes the whole security descriptor as text, with numeric SIDs.
+const SECURITY_DESCRIPTOR: &CStr = c"system.nt_sec_desc.*";
+
+/// One file's owner, group, and access list, in the order libsmbclient gave them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Access {
+    owner: String,
+    group: String,
+    entries: Vec<String>,
+}
+
+impl Access {
+    /// Reads `REVISION:1,OWNER:<sid>,GROUP:<sid>,ACL:<sid>:<type>/<flags>/<mask>,…`.
+    fn parse(text: &str) -> std::io::Result<Self> {
+        let (mut owner, mut group, mut entries) = (None, None, Vec::<String>::new());
+        for part in text.split('\0').next().unwrap_or_default().split(',') {
+            if let Some(sid) = part.strip_prefix("OWNER:") {
+                owner = Some(sid.to_string());
+            } else if let Some(sid) = part.strip_prefix("GROUP:") {
+                group = Some(sid.to_string());
+            } else if let Some(entry) = part.strip_prefix("ACL:") {
+                // Samba can read an entry back twice. A later copy adds nothing, and Windows reads the list in order, so only a new entry is kept, where it came.
+                if !entries.iter().any(|seen| seen == entry) {
+                    entries.push(entry.to_string());
+                }
+            }
+        }
+        match (owner, group) {
+            (Some(owner), Some(group)) => Ok(Self {
+                owner,
+                group,
+                entries,
+            }),
+            _ => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "the security descriptor names no owner or group",
+            )),
+        }
+    }
+
+    /// The same group and entries, with the owner and every entry of the old owner moved to `new_owner`. The signed-in user becomes the owner, as with an editor's safe save, and keeps the old owner's rights. A moved entry that repeats one already there is dropped, as `parse` drops it.
+    fn for_owner(&self, new_owner: &str) -> Self {
+        let mut entries: Vec<String> = Vec::new();
+        for entry in &self.entries {
+            let entry = match entry.split_once(':') {
+                Some((sid, rest)) if sid == self.owner => format!("{new_owner}:{rest}"),
+                _ => entry.clone(),
+            };
+            if !entries.contains(&entry) {
+                entries.push(entry);
+            }
+        }
+        Self {
+            owner: new_owner.to_string(),
+            group: self.group.clone(),
+            entries,
+        }
+    }
 }
 
 /// pavao hands libsmbclient each share and path inside an `smb://` URL. libsmbclient ends the path at the last `?`, drops `"` from a share name, and decodes every `%XX`, so `a%20b.txt` would reach `a b.txt`. Each of those characters goes in escaped, and the server gets the name as given.
@@ -119,6 +265,9 @@ fn error_code(error: &pavao::SmbError) -> i32 {
         ErrorKind::IsADirectory => error_codes::SMB_IS_A_FOLDER,
         ErrorKind::NotADirectory => error_codes::SMB_NOT_A_FOLDER,
         ErrorKind::PermissionDenied => error_codes::SMB_PERMISSION_DENIED,
+        ErrorKind::AlreadyExists => error_codes::SMB_ALREADY_EXISTS,
+        ErrorKind::DirectoryNotEmpty => error_codes::SMB_NOT_EMPTY,
+        ErrorKind::StorageFull | ErrorKind::QuotaExceeded => error_codes::SMB_NO_SPACE,
         ErrorKind::ConnectionRefused
         | ErrorKind::ConnectionReset
         | ErrorKind::ConnectionAborted
@@ -204,16 +353,20 @@ pub fn get_file_metadata(
         .stat(&params.path)
         .map_err(|e| share.failure("Failed to get file metadata", e))?;
 
-    let name = std::path::Path::new(&params.path)
+    Ok(metadata_from(&params.path, &stat))
+}
+
+fn metadata_from(path: &str, stat: &SmbStat) -> FileMetadataResult {
+    let name = std::path::Path::new(path)
         .file_name()
         .and_then(|n| n.to_str())
-        .unwrap_or(&params.path)
+        .unwrap_or(path)
         .to_string();
 
     let is_directory = stat.mode.is_dir();
     let modified: chrono::DateTime<chrono::Utc> = stat.modified.into();
 
-    Ok(FileMetadataResult {
+    FileMetadataResult {
         name: name.clone(),
         is_directory,
         is_hidden: is_hidden_file(&name),
@@ -227,7 +380,7 @@ pub fn get_file_metadata(
                 .and_then(|e| e.to_str())
                 .map(|e| e.to_lowercase())
         },
-    })
+    }
 }
 
 /// Create a directory.
@@ -524,6 +677,7 @@ fn status_code(status: &str) -> i32 {
         "NT_STATUS_FILE_IS_A_DIRECTORY" => error_codes::SMB_IS_A_FOLDER,
         "NT_STATUS_NOT_A_DIRECTORY" => error_codes::SMB_NOT_A_FOLDER,
         "NT_STATUS_ACCESS_DENIED" => error_codes::SMB_PERMISSION_DENIED,
+        "NT_STATUS_DISK_FULL" | "NT_STATUS_QUOTA_EXCEEDED" => error_codes::SMB_NO_SPACE,
         _ if UNREACHABLE.contains(&status) => error_codes::SMB_CONNECTION_LOST,
         _ => error_codes::SMB_ERROR,
     }
@@ -873,6 +1027,254 @@ pub fn upload_file(params: UploadFileParams) -> Result<UploadFileResult, (i32, S
     Ok(UploadFileResult { size })
 }
 
+/// The temporary file's name. Dropping it removes the file, unless `publish` put it at its name.
+struct Staged<'a> {
+    share: &'a Share<'a>,
+    path: &'a str,
+    published: bool,
+}
+
+impl Staged<'_> {
+    /// Renames the file onto `to`, replacing what is there when `replace` says so. smbclient's output is read, not trusted: the publish counts only when the temporary name is gone.
+    fn publish(
+        mut self,
+        credentials: &SmbCredentials,
+        to: &str,
+        replace: bool,
+    ) -> Result<(), (i32, String)> {
+        rename(RenameParams {
+            credentials: credentials.clone(),
+            share: self.share.share.clone(),
+            from_path: self.path.to_string(),
+            to_path: to.to_string(),
+            replace,
+        })?;
+        match self.share.stat(self.path) {
+            Err(e) if error_code(&e) == error_codes::SMB_PATH_NOT_FOUND => {
+                self.published = true;
+                Ok(())
+            }
+            Ok(_) => Err((
+                error_codes::SMB_ERROR,
+                "The file did not reach its name".to_string(),
+            )),
+            Err(e) => Err(self.share.failure("Failed to check the published file", e)),
+        }
+    }
+}
+
+impl Drop for Staged<'_> {
+    fn drop(&mut self) {
+        if !self.published {
+            let _ = self.share.unlink(self.path);
+        }
+    }
+}
+
+/// The file a save replaces: the caller's stamp, and the file's access as read before the upload.
+struct Replaced<'a> {
+    path: &'a str,
+    stamp: &'a FileStamp,
+    access: Access,
+}
+
+impl<'a> Replaced<'a> {
+    /// The file at `path`, when it is still the one `stamp` names and the user may change it.
+    fn read(share: &Share<'_>, path: &'a str, stamp: &'a FileStamp) -> Result<Self, (i32, String)> {
+        require_same_file(share, path, stamp)?;
+        // A replace is a rename, which needs only the folder's permission, so this open is what refuses a file the user may not change.
+        share
+            .open_with(path, SmbOpenOptions::default().write(true))
+            .map_err(|e| share.failure("Failed to open the file for writing", e))?;
+        let access = share.access(path).map_err(refused_access)?;
+        Ok(Self {
+            path,
+            stamp,
+            access,
+        })
+    }
+
+    /// Gives the temporary file this file's group and access list, and reads them back: a new file gets the share's create mask, and smbd on macOS accepts the set and leaves mode 0400.
+    fn give_access_to(&self, share: &Share<'_>, temporary: &str) -> Result<(), (i32, String)> {
+        let current = share.access(temporary).map_err(refused_access)?;
+        let wanted = self.access.for_owner(&current.owner);
+        if wanted == current {
+            return Ok(());
+        }
+        share
+            .set_access(temporary, &wanted)
+            .map_err(refused_access)?;
+        if share.access(temporary).map_err(refused_access)? != wanted {
+            return Err((
+                error_codes::SMB_PERMISSION_DENIED,
+                ACCESS_REFUSED.to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// The file is still the one the caller saw, with the access the new file was given: another client may have changed either during the upload.
+    fn still_there(&self, share: &Share<'_>) -> Result<(), (i32, String)> {
+        require_same_file(share, self.path, self.stamp)?;
+        if share.access(self.path).map_err(refused_access)? != self.access {
+            return Err((
+                error_codes::SMB_CHANGED,
+                "The file changed on the server".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Sends a local file to the share. `id` is the request, which every notice names.
+///
+/// The bytes go to `temporary_path` first, and the file is renamed onto `path` only when every byte is there, so a cut connection never leaves half a file under the final name. A new file is published with smbclient's rename, which refuses a taken name. A replace gives the temporary file the old file's group and access list before any byte is sent ([`Replaced`]). The access is set by path after the file exists, because libsmbclient cannot set it at creation, so a user who opens the temporary file in that moment and keeps it open could read the bytes. Another client's change between the last check and the rename is overwritten. A replace is a new file, so the old file's ID, streams, creation time, and DOS attributes do not carry over.
+///
+/// A notice that cannot be sent means the caller is gone, so the save stops there and publishes nothing.
+pub fn save_file(
+    params: SaveFileParams,
+    id: u64,
+    send: &mut dyn FnMut(Notice) -> std::io::Result<()>,
+) -> Result<FileMetadataResult, (i32, String)> {
+    let caller_gone = |_| {
+        (
+            error_codes::SMB_ERROR,
+            "The caller stopped reading".to_string(),
+        )
+    };
+    let modified: SystemTime = chrono::DateTime::parse_from_rfc3339(&params.modified)
+        .map_err(|e| {
+            (
+                error_codes::INVALID_PARAMS,
+                format!("Invalid modified time: {e}"),
+            )
+        })?
+        .into();
+    let mut local = std::fs::File::open(&params.source_path).map_err(|e| {
+        (
+            error_codes::INTERNAL_ERROR,
+            format!("Failed to open source file: {e}"),
+        )
+    })?;
+    let share = Share::open(&params.credentials, &params.share)?;
+
+    let replaced = match &params.replaces {
+        None => {
+            match share.stat(&params.path) {
+                Ok(_) => {
+                    return Err((
+                        error_codes::SMB_ALREADY_EXISTS,
+                        "Destination path already exists".to_string(),
+                    ))
+                }
+                Err(e) if error_code(&e) == error_codes::SMB_PATH_NOT_FOUND => {}
+                Err(e) => return Err(share.failure("Failed to check the destination", e)),
+            }
+            None
+        }
+        Some(stamp) => Some(Replaced::read(&share, &params.path, stamp)?),
+    };
+
+    // The guard is declared before the handle, so on an early return the handle closes before the guard removes the file. Every byte goes through the handle that made the file, so the file whose access was checked is the file that is written.
+    let staged;
+    let mut file = share
+        .open_with(
+            &params.temporary_path,
+            SmbOpenOptions::default()
+                .write(true)
+                .create(true)
+                .exclusive(true),
+        )
+        .map_err(|e| share.failure("Failed to create the temporary file", e))?;
+    staged = Staged {
+        share: &share,
+        path: &params.temporary_path,
+        published: false,
+    };
+    send(Notice::Staged { id }).map_err(caller_gone)?;
+
+    if let Some(replaced) = &replaced {
+        replaced.give_access_to(&share, &params.temporary_path)?;
+    }
+
+    let mut sent = 0u64;
+    let mut piece = vec![0u8; 1024 * 1024];
+    loop {
+        let read = local.read(&mut piece).map_err(|e| {
+            (
+                error_codes::INTERNAL_ERROR,
+                format!("Failed to read source file: {e}"),
+            )
+        })?;
+        if read == 0 {
+            break;
+        }
+        file.write_all(&piece[..read])
+            .map_err(|e| share.failure("Failed to write the file", e))?;
+        sent += read as u64;
+        send(Notice::Progress { id, bytes: sent }).map_err(caller_gone)?;
+    }
+    // pavao discards a close's result, so the size below checks that every byte was kept.
+    drop(file);
+
+    // A server that refuses the time keeps its own, and the stat reads what the file has.
+    let _ = share.utimes(&params.temporary_path, modified);
+    let stat = share
+        .stat(&params.temporary_path)
+        .map_err(|e| share.failure("Failed to check the temporary file", e))?;
+    if stat.size != sent {
+        return Err((
+            error_codes::SMB_ERROR,
+            "The server did not keep every byte".to_string(),
+        ));
+    }
+
+    if let Some(replaced) = &replaced {
+        replaced.still_there(&share)?;
+    }
+    staged.publish(&params.credentials, &params.path, replaced.is_some())?;
+    Ok(metadata_from(&params.path, &stat))
+}
+/// The file at `path` is still the file `stamp` names: there, not a folder, and the same size and modified second.
+fn require_same_file(
+    share: &Share<'_>,
+    path: &str,
+    stamp: &FileStamp,
+) -> Result<(), (i32, String)> {
+    let stat = share
+        .stat(path)
+        .map_err(|e| share.failure("Failed to check the destination", e))?;
+    if stat.mode.is_dir() {
+        return Err((
+            error_codes::SMB_IS_A_FOLDER,
+            "Failed to check the destination: the path is a folder".to_string(),
+        ));
+    }
+    let seconds = chrono::DateTime::<chrono::Utc>::from(stat.modified).timestamp();
+    if stat.size != stamp.size || seconds != stamp.modified {
+        return Err((
+            error_codes::SMB_CHANGED,
+            "The file changed on the server".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+const ACCESS_REFUSED: &str = "The server would not give the new file the old file's access";
+
+/// A file's access that cannot be read or set refuses the replace. A lost connection, a full disk, and a file that is gone keep their own codes, so the caller retries or starts over instead of waiting for the user.
+fn refused_access(error: pavao::SmbError) -> (i32, String) {
+    match error_code(&error) {
+        code @ (error_codes::SMB_CONNECTION_LOST
+        | error_codes::SMB_NO_SPACE
+        | error_codes::SMB_PATH_NOT_FOUND) => (code, format!("{ACCESS_REFUSED}: {error}")),
+        _ => (
+            error_codes::SMB_PERMISSION_DENIED,
+            ACCESS_REFUSED.to_string(),
+        ),
+    }
+}
+
 /// Resolve the smbclient command, searching common paths on macOS.
 fn resolve_smbclient_command() -> (std::ffi::OsString, Option<std::ffi::OsString>) {
     use std::env;
@@ -927,7 +1329,7 @@ fn resolve_smbclient_command() -> (std::ffi::OsString, Option<std::ffi::OsString
 mod tests {
     use super::{
         command_result, error_code, shares_from, smbclient_code, space_from, split_port,
-        status_code,
+        status_code, Access,
     };
     use marlin_smb_client::protocol::error_codes;
     use std::io::{Error, ErrorKind};
@@ -975,6 +1377,16 @@ mod tests {
             code(ErrorKind::PermissionDenied),
             error_codes::SMB_PERMISSION_DENIED
         );
+        assert_eq!(
+            code(ErrorKind::AlreadyExists),
+            error_codes::SMB_ALREADY_EXISTS
+        );
+        assert_eq!(
+            code(ErrorKind::DirectoryNotEmpty),
+            error_codes::SMB_NOT_EMPTY
+        );
+        assert_eq!(code(ErrorKind::StorageFull), error_codes::SMB_NO_SPACE);
+        assert_eq!(code(ErrorKind::QuotaExceeded), error_codes::SMB_NO_SPACE);
         assert_eq!(
             code(ErrorKind::ConnectionRefused),
             error_codes::SMB_CONNECTION_LOST
@@ -1081,6 +1493,8 @@ mod tests {
                 "NT_STATUS_ACCESS_DENIED",
                 error_codes::SMB_PERMISSION_DENIED,
             ),
+            ("NT_STATUS_DISK_FULL", error_codes::SMB_NO_SPACE),
+            ("NT_STATUS_QUOTA_EXCEEDED", error_codes::SMB_NO_SPACE),
             (
                 "NT_STATUS_CONNECTION_RESET",
                 error_codes::SMB_CONNECTION_LOST,
@@ -1173,5 +1587,51 @@ mod tests {
             Err((error_codes::SMB_ERROR, None))
         );
         assert_eq!(command_result("", true), Ok(()));
+    }
+
+    #[test]
+    fn access_keeps_order_and_moves_the_owners_entries() {
+        let text = "REVISION:1,OWNER:S-1-5-21-1-2-3-1000,GROUP:S-1-22-2-1000,ACL:S-1-5-21-1-2-3-1000:0/0/0x0012019f,ACL:S-1-22-2-1000:0/0/0x0012019f,ACL:S-1-1-0:0/0/0x00120089";
+        let access = Access::parse(text).unwrap();
+        assert_eq!(access.owner, "S-1-5-21-1-2-3-1000");
+        assert_eq!(access.group, "S-1-22-2-1000");
+        assert_eq!(
+            access.entries,
+            [
+                "S-1-5-21-1-2-3-1000:0/0/0x0012019f",
+                "S-1-22-2-1000:0/0/0x0012019f",
+                "S-1-1-0:0/0/0x00120089",
+            ]
+        );
+        let repeated = format!("{text},ACL:S-1-1-0:0/0/0x00120089");
+        assert_eq!(Access::parse(&repeated).unwrap(), access);
+
+        // An allow entry and a deny entry. The same entries in the other order are not the same list: Windows reads them in order.
+        let deny_first = "REVISION:1,OWNER:S-1-5-21-1-2-3-1000,GROUP:S-1-22-2-1000,ACL:S-1-5-21-1-2-3-1001:1/0/0x0012019f,ACL:S-1-5-21-1-2-3-1000:0/0/0x0012019f";
+        assert_ne!(
+            Access::parse(deny_first).unwrap().entries,
+            Access::parse("REVISION:1,OWNER:S-1-5-21-1-2-3-1000,GROUP:S-1-22-2-1000,ACL:S-1-5-21-1-2-3-1000:0/0/0x0012019f,ACL:S-1-5-21-1-2-3-1001:1/0/0x0012019f")
+                .unwrap()
+                .entries
+        );
+
+        let moved = access.for_owner("S-1-5-21-9-9-9-2000");
+        assert_eq!(moved.owner, "S-1-5-21-9-9-9-2000");
+        assert_eq!(moved.group, access.group);
+        assert_eq!(
+            moved.entries,
+            [
+                "S-1-5-21-9-9-9-2000:0/0/0x0012019f",
+                "S-1-22-2-1000:0/0/0x0012019f",
+                "S-1-1-0:0/0/0x00120089",
+            ]
+        );
+
+        // The new owner already has an entry equal to the old owner's: the moved one would repeat it, and a read-back drops repeats.
+        let named = Access::parse("REVISION:1,OWNER:S-1-5-21-1-2-3-1000,GROUP:S-1-22-2-1000,ACL:S-1-5-21-1-2-3-1000:0/0/0x0012019f,ACL:S-1-5-21-1-2-3-1001:0/0/0x0012019f").unwrap();
+        assert_eq!(
+            named.for_owner("S-1-5-21-1-2-3-1001").entries,
+            ["S-1-5-21-1-2-3-1001:0/0/0x0012019f"]
+        );
     }
 }

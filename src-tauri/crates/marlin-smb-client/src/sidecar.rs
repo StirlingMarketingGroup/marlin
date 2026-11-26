@@ -1,4 +1,4 @@
-use crate::protocol::{Request, Response, JSONRPC_VERSION};
+use crate::protocol::{Notice, NoticeLine, Request, Response, JSONRPC_VERSION};
 use serde::{de::DeserializeOwned, Serialize};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -158,6 +158,30 @@ impl Sidecar {
         limit: Option<Duration>,
         stop: &AtomicBool,
     ) -> Result<R, CallError> {
+        self.request(method, params, limit, stop, &mut |_| {})
+    }
+
+    /// Like [`Self::call_until`] with no time limit. `heard` hears each notice of this request before the answer. It runs while the call holds this `Sidecar`'s lock, so it must not call this `Sidecar`.
+    ///
+    /// An upload has no time limit. Its caller stops it with `stop` when progress stops moving.
+    pub fn call_with_notices<P: Serialize, R: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: P,
+        stop: &AtomicBool,
+        heard: &mut dyn FnMut(Notice),
+    ) -> Result<R, CallError> {
+        self.request(method, params, None, stop, heard)
+    }
+
+    fn request<P: Serialize, R: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: P,
+        limit: Option<Duration>,
+        stop: &AtomicBool,
+        heard: &mut dyn FnMut(Notice),
+    ) -> Result<R, CallError> {
         let mut process = self.process.lock().unwrap_or_else(|err| err.into_inner());
         let running = self.running(&mut process).map_err(CallError::Unavailable)?;
         // A stop can come before the request is sent: while the process starts, or while the caller waited for something else, such as the provider's sign-in. Nothing is sent, and the healthy process stays.
@@ -165,7 +189,7 @@ impl Sidecar {
             return Err(CallError::Stopped);
         }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let result = exchange(running, id, method, params, limit, stop);
+        let result = exchange(running, id, method, params, limit, stop, heard);
         if result.as_ref().is_err_and(CallError::ends_process) {
             // Dropping the `Running` ends its process group.
             *process = None;
@@ -284,6 +308,7 @@ fn exchange<P: Serialize, R: DeserializeOwned>(
     params: P,
     limit: Option<Duration>,
     stop: &AtomicBool,
+    heard: &mut dyn FnMut(Notice),
 ) -> Result<R, CallError> {
     let request = Request {
         jsonrpc: JSONRPC_VERSION.to_string(),
@@ -301,7 +326,11 @@ fn exchange<P: Serialize, R: DeserializeOwned>(
     }
 
     let deadline = limit.map(|limit| Instant::now() + limit);
-    let line = loop {
+    // The stop flag is read on every pass, so a stream of lines cannot keep a stopped call running.
+    let value = loop {
+        if stop.load(Ordering::Relaxed) {
+            return Err(CallError::Stopped);
+        }
         let slice = match deadline {
             Some(deadline) => {
                 let left = deadline.saturating_duration_since(Instant::now());
@@ -312,21 +341,29 @@ fn exchange<P: Serialize, R: DeserializeOwned>(
             }
             None => STOP_SLICE,
         };
-        match running.replies.recv_timeout(slice) {
-            Ok(line) => break line,
-            Err(RecvTimeoutError::Timeout) if stop.load(Ordering::Relaxed) => {
-                return Err(CallError::Stopped);
-            }
+        let line = match running.replies.recv_timeout(slice) {
+            Ok(line) => line,
             // The next turn ends the call when the limit has passed.
-            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => {
                 log::warn!("Failed to read from sidecar stdout");
                 return Err(CallError::Lost);
             }
+        };
+        let value: serde_json::Value = serde_json::from_str(&line)
+            .map_err(|e| CallError::BadReply(format!("Failed to parse response: {}", e)))?;
+        // A line with a method is a notice. Only this request's are heard, and one this client does not know is skipped.
+        if value.get("method").is_none() {
+            break value;
+        }
+        if let Ok(line) = serde_json::from_value::<NoticeLine>(value) {
+            if line.notice.id() == id {
+                heard(line.notice);
+            }
         }
     };
 
-    let response: Response = serde_json::from_str(&line)
+    let response: Response = serde_json::from_value(value)
         .map_err(|e| CallError::BadReply(format!("Failed to parse response: {}", e)))?;
     if response.id != id {
         log::error!("Response ID mismatch: expected {}, got {}", id, response.id);

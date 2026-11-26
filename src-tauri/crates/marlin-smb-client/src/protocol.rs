@@ -35,13 +35,17 @@ pub mod error_codes {
     pub const SMB_NOT_A_FOLDER: i32 = -1008;
     /// The name is already taken.
     pub const SMB_ALREADY_EXISTS: i32 = -1009;
-    /// A folder to replace holds something.
+    /// A folder to remove or replace holds something.
     pub const SMB_NOT_EMPTY: i32 = -1010;
+    /// The file to replace no longer has the size and modified time the caller sent, or its access changed during the upload.
+    pub const SMB_CHANGED: i32 = -1011;
+    /// The server's disk or the user's quota is full.
+    pub const SMB_NO_SPACE: i32 = -1012;
     /// Generic SMB error
     pub const SMB_ERROR: i32 = -1000;
 }
 
-/// What `marlin-smb` answers with `SMB_LIBRARY_MISSING`, when a call that runs the `smbclient` program (`list_shares`, `rename`) cannot find it.
+/// What `marlin-smb` answers with `SMB_LIBRARY_MISSING`, when a call that runs the `smbclient` program (`list_shares`, `rename`, and `save_file`'s publish) cannot find it.
 pub const SMBCLIENT_MISSING: &str = "smbclient not found. Install Samba (macOS: `brew install samba`, Linux: `sudo apt-get install smbclient`).";
 
 /// The most bytes one `read` may ask for.
@@ -168,6 +172,60 @@ pub struct RenameParams {
     /// When false, a taken name answers `SMB_ALREADY_EXISTS` and nothing changes. When true, the item at `to_path` is replaced in one step. The app sends no `replace` field, so it gets false.
     #[serde(default)]
     pub replace: bool,
+}
+
+/// The size and modified time of a file to replace.
+/// `modified` is whole seconds since 1970, as a `get_file_metadata` answer's time gives it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileStamp {
+    pub size: u64,
+    pub modified: i64,
+}
+
+/// Parameters for save_file.
+///
+/// A call that ends without its answer (the caller stopped it, the process died, or `SMB_CONNECTION_LOST`) may have published the file or not: read the file's stamp again before the next replace.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SaveFileParams {
+    pub credentials: SmbCredentials,
+    pub share: String,
+    /// The local file to send.
+    pub source_path: String,
+    /// Where the file ends up.
+    pub path: String,
+    /// A free name in the same folder as `path`, where the bytes go first. The caller picks it, so it can remove the file after it stops `marlin-smb` in the middle (see [`Notice::Staged`]). Pick a new name for each call: a taken one answers `SMB_ALREADY_EXISTS`, as a taken `path` does.
+    pub temporary_path: String,
+    /// The modified time to give the file, RFC 3339. A server may refuse to set it, so the next `FileStamp` comes from the answer's time.
+    pub modified: String,
+    /// `None` makes a new file. `Some` replaces the file at `path`, which must still have this size and modified time.
+    pub replaces: Option<FileStamp>,
+}
+
+/// What a long call sends before its answer, as a JSON-RPC notification: `{"jsonrpc":"2.0","method":"staged","params":{"id":7}}`. A notification has no `id` of its own and gets no answer, so each names the request it reports on in its params.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "method", content = "params", rename_all = "snake_case")]
+pub enum Notice {
+    /// `save_file` made its temporary file. From this notice on, a caller that stops the call owns that file's removal, and when the removal fails, as with no connection, it tries again later. Before it, the name may belong to someone else, and the caller must not remove it. When `marlin-smb` is stopped after it made the file but before this notice arrives, the file stays on the server: nothing knows it is there.
+    Staged { id: u64 },
+    /// The bytes `save_file` has sent from the local file so far.
+    Progress { id: u64, bytes: u64 },
+}
+
+impl Notice {
+    /// The request this notice reports on.
+    pub fn id(&self) -> u64 {
+        match self {
+            Notice::Staged { id } | Notice::Progress { id, .. } => *id,
+        }
+    }
+}
+
+/// One notice as its line holds it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NoticeLine {
+    pub jsonrpc: String,
+    #[serde(flatten)]
+    pub notice: Notice,
 }
 
 /// Parameters for copy method.
@@ -351,4 +409,5 @@ pub mod methods {
     pub const DOWNLOAD_FILE: &str = "download_file";
     pub const DOWNLOAD_PARTIAL: &str = "download_partial";
     pub const UPLOAD_FILE: &str = "upload_file";
+    pub const SAVE_FILE: &str = "save_file";
 }

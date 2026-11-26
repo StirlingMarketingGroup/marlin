@@ -4378,6 +4378,7 @@ dependencies = [
  "marlin-test-samba",
  "marlin-vfs",
  "pavao",
+ "pavao-sys",
  "serde",
  "serde_json",
  "tempfile",

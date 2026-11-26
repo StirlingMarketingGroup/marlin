@@ -3,6 +3,7 @@
 mod common;
 
 use common::{answer_line, shell_quote, wait_for_file, wait_until_exited, write_script};
+use marlin_smb_client::protocol::Notice;
 use marlin_smb_client::{CallError, Sidecar, StartError};
 use std::fs;
 use std::path::PathBuf;
@@ -343,4 +344,79 @@ sleep 600
 
     // A killed child that its new parent has not reaped yet still answers `kill -0`.
     wait_until_exited(&wait_for_file(&child_pid));
+}
+
+#[test]
+fn notices_reach_the_caller() {
+    let (_dir, path) = script(&format!(
+        r#"
+read line
+{id}
+printf '%s\n' "{{\"jsonrpc\":\"2.0\",\"method\":\"staged\",\"params\":{{\"id\":$id}}}}"
+printf '%s\n' "{{\"jsonrpc\":\"2.0\",\"method\":\"progress\",\"params\":{{\"id\":$id,\"bytes\":3}}}}"
+printf '%s\n' "{{\"jsonrpc\":\"2.0\",\"method\":\"progress\",\"params\":{{\"id\":99,\"bytes\":99}}}}"
+printf '%s\n' "{{\"jsonrpc\":\"2.0\",\"method\":\"progress\",\"params\":{{\"id\":$id,\"bytes\":7}}}}"
+printf '%s\n' "{{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":42}}"
+"#,
+        id = answer_line()
+    ));
+    let sidecar = Sidecar::new(Some(path));
+    let stop = AtomicBool::new(false);
+    let mut heard = Vec::new();
+    let result: i64 = sidecar
+        .call_with_notices("ping", serde_json::json!({}), &stop, &mut |notice| {
+            heard.push(notice);
+        })
+        .unwrap();
+    assert_eq!(result, 42);
+    assert_eq!(
+        heard,
+        [
+            Notice::Staged { id: 1 },
+            Notice::Progress { id: 1, bytes: 3 },
+            Notice::Progress { id: 1, bytes: 7 }
+        ]
+    );
+}
+
+/// The stop flag is read before every line, so a stop set while one notice is heard ends the call even with the next notice and the answer already waiting.
+#[test]
+fn a_stop_ends_a_call_that_keeps_sending_lines() {
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("pid");
+    let path = dir.path().join("marlin-smb");
+    write_script(
+        &path,
+        &format!(
+            r#"
+read line
+echo $$ > {pid}
+{id}
+printf '%s\n' "{{\"jsonrpc\":\"2.0\",\"method\":\"progress\",\"params\":{{\"id\":$id,\"bytes\":1}}}}"
+printf '%s\n' "{{\"jsonrpc\":\"2.0\",\"method\":\"progress\",\"params\":{{\"id\":$id,\"bytes\":2}}}}"
+printf '%s\n' "{{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":42}}"
+sleep 600
+"#,
+            pid = shell_quote(&pid_file),
+            id = answer_line()
+        ),
+    );
+
+    let sidecar = Sidecar::new(Some(path));
+    let stop = AtomicBool::new(false);
+    let mut heard = 0;
+    let err = sidecar
+        .call_with_notices::<serde_json::Value, i64>(
+            "ping",
+            serde_json::json!({}),
+            &stop,
+            &mut |_| {
+                heard += 1;
+                stop.store(true, Ordering::Relaxed);
+            },
+        )
+        .unwrap_err();
+    assert_eq!(err, CallError::Stopped);
+    assert_eq!(heard, 1);
+    wait_until_exited(&wait_for_file(&pid_file));
 }

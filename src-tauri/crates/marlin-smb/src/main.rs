@@ -12,7 +12,9 @@
 
 mod operations;
 
-use marlin_smb_client::protocol::{error_codes, methods, PingResult, Request, Response};
+use marlin_smb_client::protocol::{
+    error_codes, methods, Notice, NoticeLine, PingResult, Request, Response, JSONRPC_VERSION,
+};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::io::{BufRead, Write};
@@ -58,7 +60,7 @@ fn main() {
         };
 
         // Dispatch to the appropriate handler
-        let response = dispatch_request(&request);
+        let response = dispatch_request(&request, &mut stdout_lock);
 
         // Write the response
         write_response(&mut stdout_lock, &response);
@@ -84,8 +86,19 @@ fn write_response<W: Write>(writer: &mut W, response: &Response) {
     }
 }
 
+/// Write a notice to stdout and flush it, so it reaches the caller while the work goes on. An error means the caller is gone.
+fn write_notice<W: Write>(writer: &mut W, notice: Notice) -> std::io::Result<()> {
+    let line = NoticeLine {
+        jsonrpc: JSONRPC_VERSION.to_string(),
+        notice,
+    };
+    let json = serde_json::to_string(&line).map_err(std::io::Error::other)?;
+    writeln!(writer, "{json}")?;
+    writer.flush()
+}
+
 /// Dispatch a request to the appropriate handler.
-fn dispatch_request(request: &Request) -> Response {
+fn dispatch_request(request: &Request, writer: &mut impl Write) -> Response {
     match request.method.as_str() {
         methods::PING => handle_ping(request),
         methods::READ_DIRECTORY => respond(request, operations::read_directory),
@@ -100,6 +113,11 @@ fn dispatch_request(request: &Request) -> Response {
         methods::DOWNLOAD_FILE => respond(request, operations::download_file),
         methods::DOWNLOAD_PARTIAL => respond(request, operations::download_partial),
         methods::UPLOAD_FILE => respond(request, operations::upload_file),
+        methods::SAVE_FILE => respond(request, |params| {
+            operations::save_file(params, request.id, &mut |notice| {
+                write_notice(writer, notice)
+            })
+        }),
         _ => Response::error(
             request.id,
             error_codes::METHOD_NOT_FOUND,
@@ -120,7 +138,7 @@ fn handle_ping(request: &Request) -> Response {
 /// Reads the params, runs `operation`, and answers with its result or its error.
 fn respond<P: DeserializeOwned, R: Serialize>(
     request: &Request,
-    operation: fn(P) -> Result<R, (i32, String)>,
+    operation: impl FnOnce(P) -> Result<R, (i32, String)>,
 ) -> Response {
     let params: P = match serde_json::from_value(request.params.clone()) {
         Ok(p) => p,

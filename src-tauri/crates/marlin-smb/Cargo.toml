@@ -11,6 +11,7 @@ serde = "1.0"
 serde_json = "1.0"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 pavao = "0.3"
+pavao-sys = "0.3"
 libc = "0.2"
 marlin-smb-client = { path = "../marlin-smb-client", default-features = false }
 marlin-local-network = { path = "../marlin-local-network" }

@@ -1,9 +1,9 @@
 use marlin_smb_client::protocol::{
     error_codes, methods, CopyParams, CreateDirectoryParams, DeleteParams, DownloadFileParams,
     DownloadFileResult, DownloadPartialParams, DownloadPartialResult, FileMetadataResult,
-    GetFileMetadataParams, ListSharesParams, ListSharesResult, ReadDirectoryParams,
-    ReadDirectoryResult, ReadParams, ReadResult, RenameParams, SmbCredentials, SpaceParams,
-    SpaceResult, UploadFileParams, UploadFileResult, READ_MAX,
+    FileStamp, GetFileMetadataParams, ListSharesParams, ListSharesResult, Notice, NoticeLine,
+    ReadDirectoryParams, ReadDirectoryResult, ReadParams, ReadResult, RenameParams, SaveFileParams,
+    SmbCredentials, SpaceParams, SpaceResult, UploadFileParams, UploadFileResult, READ_MAX,
 };
 use marlin_test_samba::{Server, DENIED_SHARE, PASSWORD, SHARE, URL_CHARACTERS_SHARE};
 use serde::de::DeserializeOwned;
@@ -22,8 +22,12 @@ fn credentials(server: &Server, password: &str) -> SmbCredentials {
     }
 }
 
-/// Starts `marlin-smb`, sends one request, and returns the process and its one reply. The caller reaps the process.
-fn exchange(method: &str, params: impl Serialize) -> (Child, serde_json::Value) {
+/// Starts `marlin-smb`, sends one request (id 1), and reads until the answer. `act` runs for each notice. The caller reaps the process. After the answer, `exchange` closes stdin, so the helper leaves its request loop and exits.
+fn exchange(
+    method: &str,
+    params: impl Serialize,
+    mut act: impl FnMut(&Notice),
+) -> (Child, Vec<Notice>, serde_json::Value) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_marlin-smb"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -41,24 +45,41 @@ fn exchange(method: &str, params: impl Serialize) -> (Child, serde_json::Value) 
     });
     writeln!(stdin, "{request}").expect("write request");
 
-    let mut line = String::new();
-    std::io::BufReader::new(stdout)
-        .read_line(&mut line)
-        .expect("read response");
+    let mut heard = Vec::new();
+    let mut reader = std::io::BufReader::new(stdout);
+    let response = loop {
+        let mut line = String::new();
+        let read = reader.read_line(&mut line).expect("read response");
+        assert!(read > 0, "marlin-smb closed stdout");
+        let value: serde_json::Value = serde_json::from_str(&line).expect("parse response");
+        if value.get("id").is_some() {
+            break value;
+        }
+        let notice = serde_json::from_value::<NoticeLine>(value)
+            .expect("a notice")
+            .notice;
+        assert_eq!(notice.id(), 1, "notice for another request: {notice:?}");
+        act(&notice);
+        heard.push(notice);
+    };
     drop(stdin);
-    (child, serde_json::from_str(&line).expect("parse response"))
+    (child, heard, response)
 }
 
 fn call(method: &str, params: impl Serialize) -> serde_json::Value {
-    let (mut child, response) = exchange(method, params);
+    call_reporting(method, params).0
+}
+
+fn call_reporting(method: &str, params: impl Serialize) -> (serde_json::Value, Vec<Notice>) {
+    let (mut child, heard, response) = exchange(method, params, |_| {});
     let status = child.wait().expect("wait for marlin-smb");
     assert!(status.success(), "marlin-smb exited {status}");
-    response
+    (response, heard)
 }
 
 /// Like `call`, and also returns the helper's peak memory in bytes.
 fn measured_call(method: &str, params: impl Serialize) -> (serde_json::Value, u64) {
-    let (child, response) = exchange(method, params);
+    let (child, _heard, response) = exchange(method, params, |_| {});
     // wait4 reaps the child and reports its peak memory, which `Child::wait` does not.
     let pid = child.id() as libc::pid_t;
     let mut status = 0;
@@ -953,4 +974,312 @@ fn rename_changes_only_the_case() {
         .collect();
     assert_eq!(names, ["Report.txt"]);
     assert_eq!(std::fs::read(server.path("Report.txt")).unwrap(), b"report");
+}
+
+const TEMPORARY: &str = "/.marlin-test-1";
+const MODIFIED: &str = "2001-02-03T04:05:06.789Z";
+const MODIFIED_SECONDS: i64 = 981173106;
+
+fn saving(
+    server: &Server,
+    source: &std::path::Path,
+    path: &str,
+    replaces: Option<FileStamp>,
+) -> SaveFileParams {
+    SaveFileParams {
+        credentials: credentials(server, PASSWORD),
+        share: SHARE.into(),
+        source_path: source.display().to_string(),
+        path: path.into(),
+        temporary_path: TEMPORARY.into(),
+        modified: MODIFIED.into(),
+        replaces,
+    }
+}
+
+/// A local file holding `bytes`. It goes when the folder does.
+fn local_file(bytes: &[u8]) -> (tempfile::TempDir, std::path::PathBuf) {
+    let folder = tempfile::tempdir().unwrap();
+    let path = folder.path().join("source");
+    std::fs::write(&path, bytes).unwrap();
+    (folder, path)
+}
+
+fn pattern(size: usize) -> Vec<u8> {
+    (0..size).map(|index| (index % 251) as u8).collect()
+}
+
+fn file_seconds(path: &std::path::Path) -> i64 {
+    std::fs::metadata(path)
+        .unwrap()
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+}
+
+/// The stamp `save_file` takes for an answer's file: its size and whole modified second.
+fn stamp_of(meta: &FileMetadataResult) -> FileStamp {
+    FileStamp {
+        size: meta.size,
+        modified: chrono::DateTime::parse_from_rfc3339(&meta.modified)
+            .unwrap_or_else(|error| panic!("{error}: {}", meta.modified))
+            .timestamp(),
+    }
+}
+
+/// The stamp of the file at `path`, as a caller gets it from `get_file_metadata`.
+fn stamp_at(server: &Server, path: &str) -> FileStamp {
+    let listed = call(
+        methods::GET_FILE_METADATA,
+        GetFileMetadataParams {
+            credentials: credentials(server, PASSWORD),
+            share: SHARE.into(),
+            path: path.into(),
+        },
+    );
+    stamp_of(&result(&listed))
+}
+
+fn progress_ends_at(heard: &[Notice], size: u64) {
+    assert!(
+        matches!(heard.first(), Some(Notice::Staged { .. })),
+        "{heard:?}"
+    );
+    let mut last = 0;
+    for notice in &heard[1..] {
+        let Notice::Progress { bytes, .. } = notice else {
+            panic!("notice after staged: {heard:?}");
+        };
+        assert!(*bytes > last, "{heard:?}");
+        last = *bytes;
+    }
+    assert_eq!(last, size, "{heard:?}");
+}
+
+fn assert_no_marlin_names(server: &Server) {
+    for entry in std::fs::read_dir(server.path("")).unwrap() {
+        let name = entry.unwrap().file_name();
+        let name = name.to_string_lossy();
+        assert!(!name.starts_with(".marlin-"), "{name}");
+    }
+}
+
+#[test]
+fn save_file_makes_a_new_file() {
+    let server = Server::start();
+    let bytes = pattern(5 * 1024 * 1024 / 2);
+    let (_folder, source) = local_file(&bytes);
+
+    // A name with `;` and `%41` reaches its own file.
+    let (response, heard) = call_reporting(
+        methods::SAVE_FILE,
+        saving(&server, &source, "/a;b %41.bin", None),
+    );
+    let saved: FileMetadataResult = result(&response);
+    assert_eq!(saved.size, bytes.len() as u64);
+    assert_eq!(stamp_of(&saved).modified, MODIFIED_SECONDS);
+    assert_eq!(std::fs::read(server.path("a;b %41.bin")).unwrap(), bytes);
+    assert_eq!(file_seconds(&server.path("a;b %41.bin")), MODIFIED_SECONDS);
+    assert!(!server.path("a;b A.bin").exists());
+    progress_ends_at(&heard, bytes.len() as u64);
+    assert_no_marlin_names(&server);
+}
+
+/// A taken name, or a taken temporary name, refuses the save before anything is made, with no notice: the caller must not remove a name it did not make.
+#[test]
+fn save_file_refuses_a_taken_name() {
+    let server = Server::start();
+    std::fs::write(server.path("taken.txt"), b"old").unwrap();
+    std::fs::write(server.path(".marlin-test-1"), b"temp").unwrap();
+    let (_folder, source) = local_file(b"new");
+
+    let params = SaveFileParams {
+        temporary_path: "/.marlin-test-2".into(),
+        ..saving(&server, &source, "/taken.txt", None)
+    };
+    let (response, heard) = call_reporting(methods::SAVE_FILE, params);
+    assert_eq!(code(&response), i64::from(error_codes::SMB_ALREADY_EXISTS));
+    assert_eq!(message(&response), "Destination path already exists");
+    assert!(heard.is_empty(), "{heard:?}");
+
+    let (response, heard) = call_reporting(
+        methods::SAVE_FILE,
+        saving(&server, &source, "/free.txt", None),
+    );
+    assert_eq!(code(&response), i64::from(error_codes::SMB_ALREADY_EXISTS));
+    assert!(heard.is_empty(), "{heard:?}");
+
+    assert_eq!(std::fs::read(server.path("taken.txt")).unwrap(), b"old");
+    assert_eq!(
+        std::fs::read(server.path(".marlin-test-1")).unwrap(),
+        b"temp"
+    );
+    assert!(!server.path(".marlin-test-2").exists());
+    assert!(!server.path("free.txt").exists());
+}
+
+#[test]
+fn save_file_replaces_a_file_in_one_step() {
+    let server = Server::start();
+    let (_first_folder, first) = local_file(b"first");
+    let made = call(
+        methods::SAVE_FILE,
+        saving(&server, &first, "/replaced.bin", None),
+    );
+    let stamp = stamp_of(&result(&made));
+
+    let bytes = pattern(3 * 1024 * 1024);
+    let (_folder, source) = local_file(&bytes);
+    let params = SaveFileParams {
+        modified: "2010-01-02T03:04:05Z".into(),
+        ..saving(&server, &source, "/replaced.bin", Some(stamp))
+    };
+    let (response, heard) = call_reporting(methods::SAVE_FILE, params);
+    let saved: FileMetadataResult = result(&response);
+    assert_eq!(saved.size, bytes.len() as u64);
+    assert_eq!(stamp_of(&saved).modified, 1262401445);
+    assert_eq!(std::fs::read(server.path("replaced.bin")).unwrap(), bytes);
+    assert_eq!(file_seconds(&server.path("replaced.bin")), 1262401445);
+    progress_ends_at(&heard, bytes.len() as u64);
+    assert_no_marlin_names(&server);
+}
+
+#[test]
+fn save_file_keeps_the_old_files_access() {
+    let server = Server::start();
+    let (_folder, source) = local_file(b"new-bytes");
+
+    // smbd on macOS accepts a security-descriptor set and leaves the file at mode 0400, so the replace stops. Linux stores the descriptor as a POSIX ACL, so the new file keeps the old access.
+    for mode in [0o600, 0o664] {
+        let name = format!("mode-{mode:o}.txt");
+        std::fs::write(server.path(&name), b"old").unwrap();
+        std::fs::set_permissions(server.path(&name), Permissions::from_mode(mode)).unwrap();
+        let stamp = stamp_at(&server, &format!("/{name}"));
+        let (response, heard) = call_reporting(
+            methods::SAVE_FILE,
+            saving(&server, &source, &format!("/{name}"), Some(stamp)),
+        );
+        if cfg!(target_os = "linux") {
+            assert!(response.get("error").is_none(), "{response}");
+            assert_eq!(std::fs::read(server.path(&name)).unwrap(), b"new-bytes");
+            let new_mode = std::fs::metadata(server.path(&name))
+                .unwrap()
+                .permissions()
+                .mode();
+            // The group bits of a file with a POSIX ACL show the ACL's mask, not the group's entry, so they are left out.
+            assert_eq!(new_mode & 0o707, mode & 0o707, "{name}");
+        } else {
+            assert_eq!(
+                code(&response),
+                i64::from(error_codes::SMB_PERMISSION_DENIED),
+                "{response}"
+            );
+            assert_eq!(std::fs::read(server.path(&name)).unwrap(), b"old");
+            assert_eq!(heard, [Notice::Staged { id: 1 }]);
+        }
+        assert_no_marlin_names(&server);
+    }
+}
+
+#[test]
+fn save_file_refuses_a_file_changed_during_the_upload() {
+    let server = Server::start();
+    let (_first_folder, first) = local_file(b"original");
+    let made = call(
+        methods::SAVE_FILE,
+        saving(&server, &first, "/target.txt", None),
+    );
+    let stamp = stamp_of(&result(&made));
+    let (_folder, source) = local_file(&vec![9u8; 64 * 1024 * 1024]);
+
+    let target = server.path("target.txt");
+    let mut appended = false;
+    let (mut child, _, response) = exchange(
+        methods::SAVE_FILE,
+        saving(&server, &source, "/target.txt", Some(stamp)),
+        |notice| {
+            if matches!(notice, Notice::Progress { bytes, .. } if *bytes > 0) && !appended {
+                appended = true;
+                let mut out = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&target)
+                    .unwrap();
+                out.write_all(b"x").unwrap();
+            }
+        },
+    );
+    let status = child.wait().expect("wait for marlin-smb");
+    assert!(status.success(), "marlin-smb exited {status}");
+    assert!(appended, "no progress arrived");
+    assert_eq!(
+        code(&response),
+        i64::from(error_codes::SMB_CHANGED),
+        "{response}"
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), b"originalx");
+    assert_no_marlin_names(&server);
+}
+
+/// Each of these refuses a replace before any byte is sent, makes no temporary file, and leaves the file as it was.
+#[test]
+fn save_file_refuses_a_replace_it_cannot_make() {
+    let server = Server::start();
+    std::fs::write(server.path("stay.txt"), b"abcd").unwrap();
+    // smbd runs as the test's user, so a file that user cannot write is refused. Root would write it anyway.
+    std::fs::write(server.path("locked.txt"), b"locked").unwrap();
+    std::fs::set_permissions(server.path("locked.txt"), Permissions::from_mode(0o444)).unwrap();
+    std::fs::create_dir(server.path("folder")).unwrap();
+    let (_folder, source) = local_file(b"new");
+    let stale = FileStamp {
+        size: 3,
+        ..stamp_at(&server, "/stay.txt")
+    };
+    let missing_source = std::path::Path::new("/no/such/marlin-source");
+
+    for (path, source, stamp, expected) in [
+        (
+            "/stay.txt",
+            source.as_path(),
+            stale.clone(),
+            error_codes::SMB_CHANGED,
+        ),
+        (
+            "/missing.txt",
+            source.as_path(),
+            stale.clone(),
+            error_codes::SMB_PATH_NOT_FOUND,
+        ),
+        (
+            "/folder",
+            source.as_path(),
+            stale.clone(),
+            error_codes::SMB_IS_A_FOLDER,
+        ),
+        (
+            "/locked.txt",
+            source.as_path(),
+            stamp_at(&server, "/locked.txt"),
+            error_codes::SMB_PERMISSION_DENIED,
+        ),
+        (
+            "/stay.txt",
+            missing_source,
+            stamp_at(&server, "/stay.txt"),
+            error_codes::INTERNAL_ERROR,
+        ),
+    ] {
+        let (response, heard) = call_reporting(
+            methods::SAVE_FILE,
+            saving(&server, source, path, Some(stamp)),
+        );
+        assert_eq!(code(&response), i64::from(expected), "{path}: {response}");
+        assert!(heard.is_empty(), "{path}: {heard:?}");
+        assert_no_marlin_names(&server);
+    }
+    assert_eq!(std::fs::read(server.path("stay.txt")).unwrap(), b"abcd");
+    assert_eq!(std::fs::read(server.path("locked.txt")).unwrap(), b"locked");
+    assert!(!server.path("missing.txt").exists());
+    assert!(server.path("folder").is_dir());
 }
