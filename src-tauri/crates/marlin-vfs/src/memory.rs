@@ -139,7 +139,7 @@ impl MemoryProvider {
         }
     }
 
-    /// While on, `replace_bytes` of the file answers [`VfsError::AccessDenied`], as Google Drive does for a file the account may only view. `item` and `list` report it. The other calls do not look at it.
+    /// While on, models a Google Drive item the account may only view. On a file, `replace_bytes` answers [`VfsError::AccessDenied`]. On a folder, `create_folder` and `create_file` in it, and a `rename` that moves an item into it from another folder, answer [`VfsError::AccessDenied`], as Google Drive does for a folder the account may only view. `check_new_item` does not look at the mark: only the remote knows it. `item` and `list` report it. A rename inside the folder is allowed, as Drive allows renaming an item the account may rename.
     pub fn set_read_only(&self, id: &ItemId, on: bool) {
         let mut inner = self.inner.lock().unwrap();
         let stored = inner.stored.iter_mut().find(|stored| stored.item.id == *id);
@@ -499,6 +499,9 @@ impl Provider for MemoryProvider {
                 return Err(VfsError::NotAFolder);
             }
             self.check_new(inner, parent, name)?;
+            if find(&inner.stored, parent)?.item.attributes.read_only {
+                return Err(VfsError::AccessDenied);
+            }
             // A remote whose ids are paths keeps one name per folder.
             if self.paths && find(&inner.stored, &path_of(parent, name)).is_ok() {
                 return Err(VfsError::Conflict);
@@ -540,6 +543,9 @@ impl Provider for MemoryProvider {
                 return Err(VfsError::NotAFolder);
             }
             self.check_new(inner, to, name)?;
+            if from != to && find(&inner.stored, to)?.item.attributes.read_only {
+                return Err(VfsError::AccessDenied);
+            }
             // Walk up from `to`: it must not be `id` or sit inside it.
             let mut above = Some(to.clone());
             while let Some(folder) = above {
@@ -598,6 +604,9 @@ impl Provider for MemoryProvider {
                 return Err(VfsError::NotAFolder);
             }
             self.check_new(inner, parent, name)?;
+            if find(&inner.stored, parent)?.item.attributes.read_only {
+                return Err(VfsError::AccessDenied);
+            }
             // A remote whose ids are paths keeps one name per folder.
             if self.paths && find(&inner.stored, &path_of(parent, name)).is_ok() {
                 return Err(VfsError::Conflict);

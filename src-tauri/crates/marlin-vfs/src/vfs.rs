@@ -831,7 +831,7 @@ impl Vfs {
             .map_err(spool::map_io)
     }
 
-    /// Makes a new empty file named `name` in `parent`, opens it, and counts one lookup and one handle. `name` is the name the OS sent. A mount with no spool answers [`VfsError::ReadOnly`], and a name that is taken is [`VfsError::Conflict`]. A name the remote cannot hold in `parent` is the error [`Provider::check_new_item`] gives, and nothing is made, unless the name stays on this computer.
+    /// Makes a new empty file named `name` in `parent`, opens it, and counts one lookup and one handle. `name` is the name the OS sent. A mount with no spool answers [`VfsError::ReadOnly`], and a name that is taken is [`VfsError::Conflict`]. A name the remote cannot hold in `parent` is the error [`Provider::check_new_item`] gives, and a `parent` the provider marks read-only is [`VfsError::AccessDenied`]. Nothing is made in either case, unless the name stays on this computer.
     pub async fn create(
         &self,
         parent: NodeId,
@@ -845,7 +845,7 @@ impl Vfs {
         if existing.is_some() {
             return Err(VfsError::Conflict);
         }
-        self.check_new_file(&parent_item, name)?;
+        self.check_new_file(parent, &parent_item, name).await?;
         // The spool file names its node, so the number comes first.
         let node = {
             let mut state = self.state.lock().unwrap();
@@ -892,13 +892,37 @@ impl Vfs {
         ))
     }
 
-    /// Whether the remote can hold a new file named `name`, a name the OS sent, in `folder`: [`Provider::check_new_item`] of its remote name. A name that stays on this computer never reaches the remote, so the remote's rules do not apply to it (decision 0005, choice 14).
-    fn check_new_file(&self, folder: &ItemId, name: &str) -> Result<(), VfsError> {
+    /// Whether a new file named `name`, a name the OS sent, may go in `folder`, the item of the node `folder_node`. [`Provider::check_new_item`] answers for its remote name. A folder the provider marks read-only is [`VfsError::AccessDenied`], from the answer the folder holds, however old. A folder holding no answer (only the root) is asked once. A name that stays on this computer never reaches the remote, so the remote's rules do not apply to it (decision 0005, choice 14).
+    async fn check_new_file(
+        &self,
+        folder_node: NodeId,
+        folder: &ItemId,
+        name: &str,
+    ) -> Result<(), VfsError> {
         let remote_name = unescape(name, &self.rules);
         if (self.spool()?.stays_local)(&remote_name) {
             return Ok(());
         }
-        self.provider.check_new_item(folder, &remote_name)
+        self.provider.check_new_item(folder, &remote_name)?;
+        // Asking the provider at each new file would cost a round trip per save (decision 0011). Only the root can hold no answer: every other folder's node came from a listing, a lookup, or a change.
+        let held = {
+            let state = self.state.lock().unwrap();
+            let Some(found) = state.nodes.get(&folder_node) else {
+                return Err(VfsError::StaleHandle);
+            };
+            found
+                .attributes
+                .as_ref()
+                .map(|(_, attributes)| attributes.read_only)
+        };
+        let read_only = match held {
+            Some(read_only) => read_only,
+            None => self.attributes(folder_node).await?.read_only,
+        };
+        if read_only {
+            return Err(VfsError::AccessDenied);
+        }
+        Ok(())
     }
 
     /// Closes a handle and drops the handle references it held. An unknown handle does nothing.
@@ -1164,7 +1188,7 @@ impl Vfs {
         Ok(())
     }
 
-    /// Renames `name` in `parent` to `new_name` in `new_parent`. The names are the names the OS sent, and the provider gets `new_name` unescaped: moving a duplicate shown as `a (2).txt` names the remote item `a (2).txt`. `if_exists` says what to do when `new_name` is taken. A rename of an item onto a name that another item in the destination also holds on the remote is [`VfsError::Conflict`]. A new file renamed over an item keeps its own node and bytes and takes that item's id. A new file renamed over an item the provider marks read-only is [`VfsError::AccessDenied`], and nothing is spooled for that item. Replacing a folder that holds a new file is [`VfsError::NotEmpty`]. On a provider whose ids are paths, a rename moves every node, new file, and place at or under the old path to the new one. A new file renamed or moved to a name the remote cannot hold there is the error [`Provider::check_new_item`] gives, and nothing changes, unless the new file takes an item's place or its new name stays on this computer.
+    /// Renames `name` in `parent` to `new_name` in `new_parent`. The names are the names the OS sent, and the provider gets `new_name` unescaped: moving a duplicate shown as `a (2).txt` names the remote item `a (2).txt`. `if_exists` says what to do when `new_name` is taken. A rename of an item onto a name that another item in the destination also holds on the remote is [`VfsError::Conflict`]. A new file renamed over an item keeps its own node and bytes and takes that item's id. A new file renamed over an item the provider marks read-only is [`VfsError::AccessDenied`], and nothing is spooled for that item. Replacing a folder that holds a new file is [`VfsError::NotEmpty`]. On a provider whose ids are paths, a rename moves every node, new file, and place at or under the old path to the new one. A new file renamed or moved to a name the remote cannot hold there is the error [`Provider::check_new_item`] gives, and one moved into a folder the provider marks read-only is [`VfsError::AccessDenied`]. Nothing changes in either case, unless the new file takes an item's place or its new name stays on this computer.
     pub async fn rename(
         &self,
         parent: NodeId,
@@ -1206,7 +1230,9 @@ impl Vfs {
         }
         let source = match source {
             Holder::New { node, .. } => {
-                return self.rename_new(node, &to, new_name, target, destination.asked);
+                return self
+                    .rename_new(node, new_parent, &to, new_name, target, destination.asked)
+                    .await;
             }
             Holder::Item(item) => item,
         };
@@ -1711,10 +1737,11 @@ impl Vfs {
         }
     }
 
-    /// Renames a new file. Nothing reaches the remote. A new file renamed over an item takes that item's id, so its bytes become the item's next bytes and the item keeps its id (decision 0005, choice 9). The node the item had is retired. A spooled handle on it reads its own bytes. On a provider whose ids stay with their items, a clean handle on it reads the item by id, so it reads the new bytes once they upload. On a provider whose ids are paths, a clean handle on it is [`VfsError::StaleHandle`] at once. An item the provider marks read-only is [`VfsError::AccessDenied`]: the new file stays as it is. A new file that does not take an item's id fails first with the error [`Provider::check_new_item`] gives for its new folder and name, and nothing changes.
-    fn rename_new(
+    /// Renames a new file. Nothing reaches the remote. A new file renamed over an item takes that item's id, so its bytes become the item's next bytes and the item keeps its id (decision 0005, choice 9). The node the item had is retired. A spooled handle on it reads its own bytes. On a provider whose ids stay with their items, a clean handle on it reads the item by id, so it reads the new bytes once they upload. On a provider whose ids are paths, a clean handle on it is [`VfsError::StaleHandle`] at once. An item the provider marks read-only is [`VfsError::AccessDenied`]: the new file stays as it is. A new file that does not take an item's id fails first with the error [`Provider::check_new_item`] gives for its new folder and name, or with [`VfsError::AccessDenied`] when that folder is marked read-only, and nothing changes, unless its new name stays on this computer.
+    async fn rename_new(
         &self,
         node: NodeId,
+        new_parent: NodeId,
         to: &ItemId,
         new_name: &str,
         target: Option<Holder>,
@@ -1722,7 +1749,7 @@ impl Vfs {
     ) -> Result<(), VfsError> {
         // A new file renamed over an item takes that item's id and place, which the remote already holds. Any other rename gives the new file a place of its own.
         if !matches!(target, Some(Holder::Item(_))) {
-            self.check_new_file(to, new_name)?;
+            self.check_new_file(new_parent, to, new_name).await?;
         }
         let mut state = self.state.lock().unwrap();
         // A new file is always spooled.

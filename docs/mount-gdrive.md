@@ -40,7 +40,7 @@ The provider does not sign in, read a keychain, or know about the helper. A call
 - **A Google Doc, Sheet, Slides file, or other Google editor file is a link file, and so is a shortcut.** See [Link files](#link-files).
 - A name is the name Google gives. A link file's name has two more parts. Drive allows two files with one name in a folder, and any character in a name. The core makes the names unique and safe: see [Mount core](mount-core.md).
 - A file in the trash is not listed.
-- **A file the account may not change shows as read-only.** Every request that builds an item asks Google for `capabilities.canModifyContent`. A file is read-only when it is false, so a file shared with the account to view or comment shows without write permission. A link file is always read-only. A folder never is (#639). See [decision 0008](decisions/0008-read-only-files.md).
+- **What the account may not change shows as read-only.** Every request that builds an item asks Google for `capabilities.canModifyContent` and `capabilities.canAddChildren`, and every request about a shared drive asks the drive for `capabilities.canAddChildren`. A file is read-only when `canModifyContent` is false, so a file shared with the account to view or comment shows without write permission. A folder is read-only when `canAddChildren` is false, and a shared drive's top folder when the drive's `canAddChildren` is false, so a new file there fails at once. A link file, the top of the mount, and `Shared drives` are always read-only. See [decision 0008](decisions/0008-read-only-files.md) for files and [decision 0011](decisions/0011-read-only-folders.md) for folders.
 
 ## Link files
 
@@ -233,7 +233,7 @@ The fourth failure in a row ends the call. Only bytes past the most Google has h
 | `create_file`   | `AccessDenied`       | `NotAFolder`   | Allowed     |                                  |                         |
 | `replace_bytes` | `IsAFolder`          | `NotSupported` | `IsAFolder` | `AccessDenied`                   | `NotSupported`          |
 
-A link file has no bytes on Drive to replace. The mount shows it, and a file the account may only view, as read-only, so the core refuses a write to either before anything is spooled. The core stops an upload that one of these refusals ends: see [Mount core](mount-core.md#rules-the-core-keeps).
+A link file has no bytes on Drive to replace. The mount shows it, and a file the account may only view, as read-only, so the core refuses a write to either before anything is spooled. It refuses a new file in a folder the account may only view the same way, so `create_file` there is seldom asked. The core stops an upload that one of these refusals ends: see [Mount core](mount-core.md#rules-the-core-keeps).
 
 ## Errors and retries
 
@@ -393,6 +393,7 @@ Every automated test runs against the fake server, so these still rest on Google
 
 - That `corpora=drive` with `driveId` lists every child of a folder in a shared drive. The live test lists a shared drive, but it cannot tell whether the listing is complete.
 - That every child of a folder is in the folder's own drive.
+- **`canAddChildren`.** Google's published API schema has it on a file and on a shared drive. That it is false for a folder the account may only view or comment on, and for a shared drive where its role is viewer or commenter, rests on Google's documentation.
 - **`locate` of an item shared with the account.** That an item outside the account's My Drive and its shared drives has no parent the account can see, or one Google answers with 404 or 403, so `locate` answers no place. The live run located only items the account holds.
 - That Google answers a read of an empty file with 416. The account had no empty file at the top of My Drive.
 - **An upload that fails partway.** `tests/live_uploads.rs` uploads with no failure. What a session answers after a dropped connection, a 308 with no `Range`, a new session after a 429, a 409 on a session, and an upload into a shared drive rest on Google's guide.
@@ -410,13 +411,13 @@ Every automated test runs against the fake server, so these still rest on Google
 - Each test starts a `wiremock` server on a free local port. A provider test points `Config::api` at it, and a sign-in test points `OAuthClient::token_uri` at it.
 - The sign-in tests use the in-memory keychain from the `marlin-test-keychain` crate (see [Testing](testing.md)), and one email per test. They cover a refused refresh token, a missing entry, recovery after each with the same `SavedSignIn`, a failed connection, an answer that repeats the secrets, and eight calls at once.
 - The test token source hands out `token-1`, then `token-2` after `token-1` is rejected. One test holds eight calls until all have `token-1`, and checks that they cause one new token, not eight.
-- Five tests put the provider under a real `Vfs`: one for duplicate names and a `/` in a name, one for a rename seen on the remote, one for link files that share a name, one for a file moved into a shared drive (it keeps its node), and one for a duplicate link file moved under its shown name.
+- Six tests put the provider under a real `Vfs`: one for duplicate names and a `/` in a name, one for a rename seen on the remote, one for link files that share a name, one for a file moved into a shared drive (it keeps its node), one for a duplicate link file moved under its shown name, and one for a new file in a view-only folder, which fails before anything is spooled or sent.
 - The link file tests cover the name and the ID of each kind, the size in a listing against the bytes a read returns, `item` of a shortcut, a read in parts, a shared drive, a shortcut whose target is gone or missing from the answer, and a read that sends the server nothing.
 - The change-call tests cover creating a folder, trashing, renaming, moving, the refusals, a resent create, and a move whose answer was lost. They check the request, not only the result.
 - The byte-call tests cover a new file, a replacement, the pieces, a resume from an even and an uneven offset, a dropped connection, a body cut off after a finished upload, a lost session, the revision check before a first send and a resend of the last request, and the refusals. The tests of a dropped connection, a cut-off answer, and a local file cut during an upload serve the session from a small HTTP server in the test, because wiremock cannot drop a connection partway through a body. They check the request, not only the result.
 - One test checks that the five read calls send only GET.
 - `thumbnail` is tested for an image and a video, a file with no picture, a link file (no request), a picture Google refuses with 404 or 403, and a link with no size. The image test checks the size in the link and the token sent with it.
 - `locate` and `reference` are tested for a My Drive file, a shared drive item, an item the mount shows nowhere, an unknown or unsafe ID, each ID form, and a `Vfs` on the fake server whose shared drive holds two files named `a.txt`. They check the fields each request asks for.
-- The listing test checks the read-only mark of a file the account may only view, a file it owns, a file with no `capabilities`, a folder, and a link file. The `item` test checks a view-only file and an owned one. A replace of a view-only file opens no upload session.
+- The listing test checks the read-only mark of a file the account may only view, a file it owns, a file with no `capabilities`, a link file, and a folder with `canAddChildren` false, true, and missing. The `item` test checks a view-only file and folder and an owned one of each. The shared drive tests check the drive's mark, in the listing and in `drives.get`, and the fields each asks for. The top of the mount and `Shared drives` are read-only. A replace of a view-only file opens no upload session.
 - The helper's tests mount this provider through FUSE against a fake Google: see [Mount helper](mount-helper.md#testing).
 - `tests/live.rs`, `tests/live_changes.rs`, and `tests/live_uploads.rs` are marked `#[ignore]`. Never run this crate's tests with `--ignored` or `--include-ignored`: that runs all three, and `live_changes.rs` and `live_uploads.rs` change the account. To run one, use the command in its header.

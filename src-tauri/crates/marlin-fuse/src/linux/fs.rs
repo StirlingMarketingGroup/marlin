@@ -568,6 +568,9 @@ mod tests {
                 .perm,
             0o700
         );
+        let mut read_only = attributes(Kind::Folder, 40);
+        read_only.read_only = true;
+        assert_eq!(shown(true).file_attr(NodeId(4), &read_only).perm, 0o500);
     }
 
     #[test]
