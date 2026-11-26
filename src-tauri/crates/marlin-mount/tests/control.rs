@@ -1598,6 +1598,34 @@ async fn an_unmount_waits_for_a_running_upload() {
 }
 
 #[tokio::test]
+async fn an_unmount_does_not_wait_for_an_empty_file_that_an_open_writer_holds_back() {
+    let harness = start();
+    let mut client = Client::connect(&harness.socket).await;
+    client.call("mount", mount("ana", "drive")).await;
+    let vfs = harness.fake.vfs.lock().unwrap()["drive"].clone();
+    // An app still has this file open for writing, and nothing closes it after the unmount.
+    let (_, _writer) = vfs
+        .create(Vfs::ROOT, "open.txt", Access::Write)
+        .await
+        .unwrap();
+    // An empty new file waits for every writer in the mount (decision 0012).
+    let (_, empty) = vfs
+        .create(Vfs::ROOT, "empty.txt", Access::Write)
+        .await
+        .unwrap();
+    vfs.release(empty);
+    let id = client.send("unmount", account("ana")).await;
+    let unmounted = tokio::time::timeout(Duration::from_secs(30), client.response(id))
+        .await
+        .expect("the unmount waited for the empty file");
+    assert!(unmounted["error"].is_null());
+    assert!(stored(&provider(&harness, "ana"), "empty.txt")
+        .await
+        .is_none());
+    assert_eq!(numbered_files(&account_spool(&harness, "ana")).len(), 2);
+}
+
+#[tokio::test]
 async fn a_shutdown_from_another_protocol_version_waits_for_the_upload() {
     let harness = start();
     let mut client = Client::connect(&harness.socket).await;

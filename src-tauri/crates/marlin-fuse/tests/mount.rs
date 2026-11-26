@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::ffi::{CString, OsString};
 use std::fs::OpenOptions;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{FileExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -1899,6 +1899,77 @@ async fn a_copy_bigger_than_the_spool_waits_for_uploads() {
             .unwrap()
             .unwrap_err();
     assert_eq!(error.raw_os_error(), Some(libc::ENOSPC), "{error}");
+
+    mount.unmount().await.unwrap();
+}
+
+// Replays the calls Finder makes for a copy of two items (#629). Writing the first item takes longer than the settle time, and no placeholder reaches the provider.
+#[ignore = "mounts for real: run crates/marlin-fuse/test-in-docker.sh on Linux, crates/marlin-fuse/test-on-mac.sh on a Mac"]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_copy_through_placeholders_uploads_each_file_once() {
+    let provider = Arc::new(MemoryProvider::new());
+    let (vfs, _spool) = spooled_vfs(
+        Arc::clone(&provider),
+        1024 * 1024 * 1024,
+        Options {
+            settle: Duration::from_millis(500),
+            ..Options::default()
+        },
+    );
+    let (_dir, point) = empty_dir();
+    let mut mount = marlin_fuse::mount(vfs.clone(), &point).await.unwrap();
+
+    let big = point.join("big.bin");
+    let small = point.join("small.txt");
+    let empty = point.join("empty.txt");
+    tokio::task::spawn_blocking(move || {
+        for path in [&big, &small] {
+            let file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .unwrap();
+            drop(file);
+        }
+        std::fs::remove_file(&big).unwrap();
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&big)
+            .unwrap();
+        let body = pattern(4 * 1024 * 1024);
+        for piece in body.chunks(1024 * 1024) {
+            file.write_all(piece).unwrap();
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        drop(file);
+
+        std::fs::remove_file(&small).unwrap();
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&small)
+            .unwrap();
+        file.write_all(b"small").unwrap();
+        drop(file);
+
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&empty)
+            .unwrap();
+        drop(file);
+    })
+    .await
+    .unwrap();
+
+    wait_for_uploads(&vfs).await;
+    let mut expect = BTreeMap::new();
+    expect.insert("big.bin".to_string(), Some(pattern(4 * 1024 * 1024)));
+    expect.insert("small.txt".to_string(), Some(b"small".to_vec()));
+    expect.insert("empty.txt".to_string(), Some(b"".to_vec()));
+    assert_eq!(remote_files(&provider).await, expect);
+    assert_eq!(provider.uploads(), 3, "a placeholder reached the provider");
 
     mount.unmount().await.unwrap();
 }
