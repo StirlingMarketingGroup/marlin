@@ -492,11 +492,13 @@ function App() {
             // A start path that names a file fails like a missing one, so the next one is tried.
             if (read.outcome === 'notAFolder') return false;
 
-            if (hasUriScheme(path)) {
-              await applySmartViewDefaults(path, useAppStore.getState().files);
+            // The listing's address, not the start path: a folder's settings are saved under it,
+            // and `sftp://user@host:22/a` lists as `sftp://user@host/a`.
+            const normalizedPath = useAppStore.getState().currentPath;
+            if (hasUriScheme(normalizedPath)) {
+              await applySmartViewDefaults(normalizedPath, useAppStore.getState().files);
             }
 
-            const normalizedPath = useAppStore.getState().currentPath;
             useAppStore.setState({
               pathHistory: [normalizedPath],
               historyIndex: 0,
@@ -712,8 +714,10 @@ function App() {
         }
 
         // A local listing streams in later; its defaults wait for it (see the effect below).
+        // The listing's address, not the typed one: a folder's settings are saved under it.
         if (currentPath.includes('://')) {
-          await applySmartViewDefaults(currentPath, useAppStore.getState().files);
+          const { currentPath: listed, files } = useAppStore.getState();
+          await applySmartViewDefaults(listed, files);
         }
 
         setError(undefined); // Clear any previous errors on success

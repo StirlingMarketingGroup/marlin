@@ -368,7 +368,8 @@ test.describe('Path bar', () => {
             throw `[ENOTDIR] Not a folder: ${path}`;
           }
           const folder = url.pathname || '/';
-          const raw = `sftp://admin@10.5.0.247:${port}${folder}`;
+          const authority = port === 22 ? 'admin@10.5.0.247' : `admin@10.5.0.247:${port}`;
+          const raw = `sftp://${authority}${folder}`;
           return {
             entries: [
               {
@@ -387,7 +388,7 @@ test.describe('Path bar', () => {
             ],
             location: {
               scheme: 'sftp',
-              authority: `admin@10.5.0.247:${port}`,
+              authority,
               path: folder,
               displayPath: raw,
               raw,
@@ -514,7 +515,7 @@ test.describe('Path bar', () => {
         .toBe(true);
       await answerConnectWindow(page, 'sftp://admin@10.5.0.247/');
 
-      await expect(pathInput).toHaveValue('sftp://admin@10.5.0.247:22/some/folder');
+      await expect(pathInput).toHaveValue('sftp://admin@10.5.0.247/some/folder');
       const selected = page.locator('[data-testid="file-item"].bg-accent-selected');
       await expect(selected).toHaveCount(1);
       await expect(selected).toHaveAttribute('data-name', 'report.txt');
@@ -596,7 +597,7 @@ test.describe('Path bar', () => {
 
       await expect(page.locator('[data-testid="file-item"][data-name="report.txt"]')).toBeVisible();
       await expect(page.locator('[data-testid="path-input"]')).toHaveValue(
-        'sftp://admin@10.5.0.247:22/'
+        'sftp://admin@10.5.0.247/'
       );
     });
 
@@ -610,7 +611,7 @@ test.describe('Path bar', () => {
       await pathInput.fill('sftp://10.5.0.247/some/folder/report.txt');
       await pathInput.press('Enter');
 
-      await expect(pathInput).toHaveValue('sftp://admin@10.5.0.247:22/some/folder');
+      await expect(pathInput).toHaveValue('sftp://admin@10.5.0.247/some/folder');
       const selected = page.locator('[data-testid="file-item"].bg-accent-selected');
       await expect(selected).toHaveCount(1);
       await expect(selected).toHaveAttribute('data-name', 'report.txt');
@@ -658,6 +659,85 @@ test('a folder opened while the start folder waits for a sign-in loads once the 
 
   await expect(page.locator('[data-testid="file-item"][data-name="sample.pdf"]')).toBeVisible();
   await expect(pathInput).toHaveValue(MOCK_DOWNLOADS_DIR);
+});
+
+test('a start folder written with port 22 keeps the settings saved under its listed address', async ({
+  page,
+}) => {
+  // The backend lists `sftp://admin@10.5.0.247:22/Documents` as `sftp://admin@10.5.0.247/Documents`
+  // and reads its saved settings under that address. A Documents folder with none saved would
+  // get the Documents default, newest first. The two files sort one way by size and the other
+  // way by name and by date.
+  await page.addInitScript(`
+    ${getTauriMockScript()}
+    (function() {
+      const baseInvoke = window.__TAURI_INTERNALS__.invoke;
+      window.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
+        if (cmd === 'read_preferences') {
+          return JSON.stringify({
+            ...JSON.parse(await baseInvoke(cmd, args)),
+            directoryPreferences: {
+              'sftp://admin@10.5.0.247/Documents': { sortBy: 'size', sortOrder: 'desc' },
+            },
+          });
+        }
+        if (cmd === 'read_directory' && String(args?.path ?? '').startsWith('sftp://')) {
+          const raw = 'sftp://admin@10.5.0.247/Documents';
+          const file = (name, size, modified) => ({
+            name,
+            path: raw + '/' + name,
+            is_directory: false,
+            is_hidden: false,
+            is_symlink: false,
+            is_git_repo: false,
+            size,
+            modified,
+            extension: 'txt',
+          });
+          return {
+            entries: [
+              file('report.txt', 128, new Date().toISOString()),
+              file('scan.txt', 9000, '2020-01-01T00:00:00.000Z'),
+            ],
+            location: {
+              scheme: 'sftp',
+              authority: 'admin@10.5.0.247',
+              path: '/Documents',
+              displayPath: raw,
+              raw,
+            },
+            capabilities: { canCreate: true, canDelete: true, canRename: true },
+          };
+        }
+        return baseInvoke(cmd, args);
+      };
+    })();
+  `);
+  await page.goto(`/?path=${encodeURIComponent('sftp://admin@10.5.0.247:22/Documents')}`);
+
+  await expect(page.locator('[data-testid="path-input"]')).toHaveValue(
+    'sftp://admin@10.5.0.247/Documents'
+  );
+  // Largest first, as saved.
+  await expect
+    .poll(() =>
+      page
+        .locator('[data-testid="file-item"]')
+        .evaluateAll((rows) => rows.map((row) => (row as HTMLElement).dataset.name))
+    )
+    .toEqual(['scan.txt', 'report.txt']);
+  const savedSorts = await page.evaluate(() =>
+    (
+      (
+        window as Window & {
+          __TAURI_INVOKE_LOG__?: { cmd: string; args?: { prefs?: string } }[];
+        }
+      ).__TAURI_INVOKE_LOG__ ?? []
+    )
+      .filter(({ cmd }) => cmd === 'set_dir_prefs')
+      .map(({ args }) => (JSON.parse(args?.prefs ?? '{}') as { sortBy?: string }).sortBy)
+  );
+  expect(savedSorts).not.toContain('modified');
 });
 
 test.describe('Path bar: an address that cannot be opened', () => {
