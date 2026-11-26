@@ -201,7 +201,7 @@ struct Access {
     entries: Vec<Entry>,
 }
 
-/// One entry of an access list: whom it names, allow or deny (`kind`), how it is inherited (`flags`), and the rights it gives (`mask`).
+/// One entry of an access list: whom it names, allow (0) or deny (1) (`kind`), how it is inherited (`flags`), and the rights it gives (`mask`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Entry {
     sid: String,
@@ -223,7 +223,7 @@ impl Access {
                 let entry = Entry::parse(entry).ok_or_else(|| {
                     std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
-                        format!("the security descriptor has an entry in an unknown form: {entry}"),
+                        format!("the security descriptor has an entry this cannot copy: {entry}"),
                     )
                 })?;
                 // Samba can read an entry back twice. A later copy adds nothing, and Windows reads the list in order, so only a new entry is kept, where it came.
@@ -270,7 +270,8 @@ impl Entry {
     fn parse(text: &str) -> Option<Self> {
         let (sid, rest) = text.split_once(':')?;
         let mut fields = rest.split('/');
-        let kind = fields.next()?.parse().ok()?;
+        // Only a plain allow (0) or deny (1) entry: libsmbclient's text drops the condition or object type of the other kinds, so a copy could give other rights.
+        let kind = fields.next()?.parse().ok().filter(|kind| *kind <= 1)?;
         let flags = fields.next()?.parse().ok()?;
         let mask = u32::from_str_radix(fields.next()?.strip_prefix("0x")?, 16).ok()?;
         Some(Self {
@@ -759,19 +760,8 @@ fn command_result(output: &str, exited_ok: bool) -> Result<(), (i32, Option<&str
     }
 }
 
-/// Runs the `smbclient` program for this server with `args`, and `commands` on its stdin.
-///
-/// The sign-in goes through a pipe on descriptor 3 (`-A /dev/fd/3`), so it is never an argument, an environment variable, or a file. smbclient strips the leading spaces and tabs of each value it reads there, and a line break ends one, so such a value is refused before it could reach the server changed: each refused sign-in can count toward a lockout.
-fn run_smbclient(
-    credentials: &SmbCredentials,
-    args: &[String],
-    commands: &str,
-) -> Result<std::process::Output, (i32, String)> {
-    use std::os::unix::io::AsRawFd;
-    use std::os::unix::process::CommandExt;
-    use std::process::{Command, Stdio};
-
-    // smbclient also reads a user name's `%` as the start of a password.
+/// smbclient strips the leading spaces and tabs of each sign-in value, a line break ends one, and it reads a user name's `%` as the start of a password. Such a sign-in is refused before it reaches the server changed: each refused sign-in can count toward a lockout.
+fn require_sign_in_smbclient_takes(credentials: &SmbCredentials) -> Result<(), (i32, String)> {
     let domain = credentials.domain.as_deref().unwrap_or_default();
     if [credentials.username.as_str(), &credentials.password, domain]
         .iter()
@@ -783,6 +773,23 @@ fn run_smbclient(
             "The saved sign-in cannot be passed to smbclient: a value starts with a space or a tab or holds a line break, or the user name holds %".to_string(),
         ));
     }
+    Ok(())
+}
+
+/// Runs the `smbclient` program for this server with `args`, and `commands` on its stdin.
+///
+/// The sign-in goes through a pipe on descriptor 3 (`-A /dev/fd/3`), so it is never an argument, an environment variable, or a file.
+fn run_smbclient(
+    credentials: &SmbCredentials,
+    args: &[String],
+    commands: &str,
+) -> Result<std::process::Output, (i32, String)> {
+    use std::os::unix::io::AsRawFd;
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+
+    require_sign_in_smbclient_takes(credentials)?;
+    let domain = credentials.domain.as_deref().unwrap_or_default();
     let mut sign_in = format!(
         "username = {}\npassword = {}\n",
         credentials.username, credentials.password
@@ -1125,6 +1132,13 @@ impl<'a> Replaced<'a> {
             ));
         }
         let access = share.access(path).map_err(refused_access)?;
+        // libsmbclient prints no entry both for a list that lets nobody in and for no list at all, which lets everyone in, so neither can be copied.
+        if access.entries.is_empty() {
+            return Err((
+                error_codes::SMB_PERMISSION_DENIED,
+                format!("{ACCESS_REFUSED}: its access list is empty or missing"),
+            ));
+        }
         Ok(Self {
             path,
             stamp,
@@ -1194,7 +1208,8 @@ pub fn save_file(
             format!("Failed to open source file: {e}"),
         )
     })?;
-    // The publish runs smbclient, so a machine without it refuses before any byte is sent.
+    // The publish runs smbclient, so a save it could not finish refuses before any byte is sent.
+    require_sign_in_smbclient_takes(&params.credentials)?;
     if !std::path::Path::new(&resolve_smbclient_command().0).is_file() {
         return Err((
             error_codes::SMB_LIBRARY_MISSING,
@@ -1680,8 +1695,11 @@ mod tests {
         // `access` hands over its whole zeroed buffer, since libsmbclient 4.17 answers 0 and not the length.
         let padded = format!("{text}\0\0\0\0");
         assert_eq!(Access::parse(&padded).unwrap(), access);
-        // An entry in another form refuses the replace, whatever its rights would have been.
+        // An entry in another form refuses the replace, whatever its rights would have been, and so does a callback entry (kind 9), whose condition the text leaves out.
         assert!(Access::parse(&format!("{text},ACL:S-1-1-0:0/0/1180041")).is_err());
+        assert!(Access::parse(&format!("{text},ACL:S-1-1-0:9/0/0x00120089")).is_err());
+        let deny = Access::parse(&format!("{text},ACL:S-1-1-0:1/0/0x00120089")).unwrap();
+        assert_eq!(deny.entries.last().unwrap().kind, 1);
 
         // An allow entry and a deny entry. The same entries in the other order are not the same list: Windows reads them in order.
         let deny_first = "REVISION:1,OWNER:S-1-5-21-1-2-3-1000,GROUP:S-1-22-2-1000,ACL:S-1-5-21-1-2-3-1001:1/0/0x0012019f,ACL:S-1-5-21-1-2-3-1000:0/0/0x0012019f";

@@ -1263,6 +1263,26 @@ fn save_file_refuses_a_file_changed_during_the_upload() {
     assert_no_marlin_names(&server);
 }
 
+/// smbclient would strip the space and send another password at the publish, so the save refuses before it sends anything.
+#[test]
+fn save_file_refuses_a_sign_in_smbclient_cannot_take() {
+    let server = Server::start();
+    let (_folder, source) = local_file(b"new");
+    let params = SaveFileParams {
+        credentials: credentials(&server, " starts-with-a-space"),
+        ..saving(&server, &source, "/new.txt", None)
+    };
+    let (response, heard) = call_reporting(methods::SAVE_FILE, params);
+    assert_eq!(code(&response), i64::from(error_codes::SMB_AUTH_FAILED));
+    assert!(
+        message(&response).contains("starts with a space"),
+        "{response}"
+    );
+    assert!(heard.is_empty(), "{heard:?}");
+    assert!(!server.path("new.txt").exists());
+    assert_no_marlin_names(&server);
+}
+
 /// Each of these refuses a replace before any byte is sent, makes no temporary file, and leaves the file as it was.
 #[test]
 fn save_file_refuses_a_replace_it_cannot_make() {

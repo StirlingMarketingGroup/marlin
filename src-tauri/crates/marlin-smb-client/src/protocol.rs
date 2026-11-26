@@ -184,7 +184,7 @@ pub struct FileStamp {
 
 /// Parameters for save_file.
 ///
-/// A call that ends without its answer (the caller stopped it, or the process died), or that answers an error after its last `progress` notice, may have published the file or not: read the file's stamp again before the next replace.
+/// A call that ends without its answer (the caller stopped it, or the process died), or that answers an error after its `staged` notice, may have published the file or not: read the file's stamp again before the next replace. An empty file sends no `progress` notice.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SaveFileParams {
     pub credentials: SmbCredentials,
