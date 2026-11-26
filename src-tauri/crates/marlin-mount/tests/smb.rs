@@ -586,7 +586,7 @@ async fn a_hung_server_times_out_and_leaves_the_other_mount_alone() {
 
     let (mut running, servers) = running_with(
         Some(marlin_smb()),
-        // The default space cache stays: macOS asks a writable mount for its free space many times a second, and with no cache each ask opens a new connection to the paused server, until it refuses new ones and the calls fail fast instead of timing out.
+        // `space_ttl` keeps its default: macOS asks a writable mount for its free space many times a second, and with no cache each ask opens a new connection to the paused server, until it refuses new ones and the calls fail fast instead of timing out.
         Options {
             max_listings: 0,
             attributes_ttl: Duration::ZERO,

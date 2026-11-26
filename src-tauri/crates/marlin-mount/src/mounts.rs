@@ -944,6 +944,7 @@ impl Mounts {
         let lock = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
+            .truncate(false)
             .mode(0o600)
             .open(folder.with_file_name(format!("{name}.lock")))
             .map_err(|error| error.to_string())?;

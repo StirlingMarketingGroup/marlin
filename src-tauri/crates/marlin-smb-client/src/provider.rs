@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use marlin_vfs::{Attributes, Item, ItemId, Kind, Progress, Provider, Revision, Space, VfsError};
 use serde::{de::DeserializeOwned, Serialize};
@@ -20,10 +20,10 @@ use crate::sidecar::{CallError, Sidecar};
 /// How many `marlin-smb` processes one mount runs at most for its calls. Each runs one call at a time, so it is also the mount's `max_calls` (decision 0006).
 pub const PROCESSES: usize = 4;
 
-/// How many `marlin-smb` processes one mount runs at most for the two byte calls. They run on processes of their own, so a slow upload never holds a process another call needs. It is also the mount's `max_uploads`, so the core never runs an upload that would wait for a process with no progress (and end it as stalled).
+/// How many `marlin-smb` processes one mount runs at most for the two byte calls. They run on processes of their own, so a slow upload never holds a process another call needs. An upload waits for a process only while a stopped upload still removes its temporary file, for at most `CLEANUP_LIMIT`, which is less than the core's stall time.
 pub const UPLOAD_PROCESSES: usize = 4;
 
-/// A removal of a temporary file on a dead network cannot hold an upload process forever.
+/// A removal of a temporary file on a dead network cannot hold an upload process forever. It bounds one removal of an upload's own file, and the whole sweep of older ones.
 const CLEANUP_LIMIT: Duration = Duration::from_secs(30);
 
 /// One saved server's sign-in in this process. A caller keeps one per server for its whole run and gives it to every provider of that server, as the helper keeps one `marlin_gdrive::SavedSignIn` per Google account. So a sign-in the server refused stays refused across mounts.
@@ -184,7 +184,7 @@ struct Lease {
     /// The pool this process goes back to.
     idle: Arc<std::sync::Mutex<Vec<Sidecar>>>,
     sidecar: Option<Sidecar>,
-    /// Set when the core drops the call. Every request of the call passes it to `Sidecar::call_until`.
+    /// Set when the core drops the call. Every request of the call passes it to the `Sidecar`.
     stop: Arc<AtomicBool>,
     _permit: tokio::sync::OwnedSemaphorePermit,
 }
@@ -246,8 +246,8 @@ impl Lease {
         })
     }
 
-    /// Removes an upload's temporary file. The call's own stop flag is set when the core dropped it, and a request that sees it sends nothing, so this uses a fresh flag. `Ok` or `NotFound` means the file is gone.
-    fn remove_temporary(&self, share: &str, path: &str) -> bool {
+    /// Removes an upload's temporary file. The call's own stop flag is set when the core dropped it, and a request that sees it sends nothing, so this uses a fresh flag. `limit` is how long this removal may take. `Ok` or `NotFound` means the file is gone.
+    fn remove_temporary(&self, share: &str, path: &str, limit: Duration) -> bool {
         let sidecar = self.sidecar.as_ref().expect("held until the lease drops");
         let removed = self.shared.sign_in.send(|credentials| {
             sidecar
@@ -258,7 +258,7 @@ impl Lease {
                         share: share.to_string(),
                         path: path.to_string(),
                     },
-                    Some(CLEANUP_LIMIT),
+                    Some(limit),
                     &AtomicBool::new(false),
                 )
                 .map_err(vfs_error)
@@ -275,9 +275,18 @@ impl Lease {
                 .lock()
                 .unwrap_or_else(|err| err.into_inner()),
         );
+        let deadline = Instant::now() + CLEANUP_LIMIT;
+        let mut pending = pending.into_iter();
         let mut failed = Vec::new();
-        for stray in pending {
-            if !self.remove_temporary(&stray.share, &stray.path) {
+        while let Some(stray) = pending.next() {
+            // The core dropped the call, or the sweep used its time. What is left waits for the next upload.
+            if self.stop.load(Ordering::Relaxed) || Instant::now() >= deadline {
+                failed.push(stray);
+                failed.extend(pending);
+                break;
+            }
+            let limit = deadline.saturating_duration_since(Instant::now());
+            if !self.remove_temporary(&stray.share, &stray.path, limit) {
                 failed.push(stray);
             }
         }
@@ -349,11 +358,12 @@ impl SmbProvider {
         base: Option<Revision>,
         progress: &Progress,
     ) -> Result<FileMetadataResult, VfsError> {
+        let Some(source) = from.to_str() else {
+            return Err(VfsError::Other("the spool path is not UTF-8".into()));
+        };
+        let source = source.to_string();
         let replaces = base.as_ref().map(stamp_of).transpose()?;
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let from = from.to_path_buf();
-        let modified = chrono::DateTime::<chrono::Utc>::from(modified)
-            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         let work = self.on_process(&self.uploads, move |lease| {
             lease.clear_strays();
             // An untried sign-in holds `SmbSignIn`'s lock for the whole call that sends it, so that call is this short lookup, never the upload.
@@ -365,18 +375,10 @@ impl SmbProvider {
                         path: path.clone(),
                     }
                 });
+            // The lookup is there for the sign-in only. `save_file` decides a taken name, a folder, and a changed file before any byte goes out.
             match (&base, current) {
-                (None, Ok(_)) => return Err(VfsError::Conflict),
-                (None, Err(VfsError::NotFound)) => {}
-                (None, Err(error)) => return Err(error),
-                (Some(_), Ok(meta)) if meta.is_directory => return Err(VfsError::IsAFolder),
-                (Some(base), Ok(meta))
-                    if revision_of(meta.size, self::modified(&meta.modified)) != *base =>
-                {
-                    return Err(VfsError::Conflict);
-                }
-                (Some(_), Ok(_)) => {}
-                (Some(_), Err(error)) => return Err(error),
+                (_, Ok(_)) | (None, Err(VfsError::NotFound)) => {}
+                (_, Err(error)) => return Err(error),
             }
 
             static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -395,10 +397,11 @@ impl SmbProvider {
                 |credentials| SaveFileParams {
                     credentials,
                     share: share.clone(),
-                    source_path: from.to_string_lossy().into_owned(),
+                    source_path: source,
                     path,
                     temporary_path: temporary.clone(),
-                    modified,
+                    modified: chrono::DateTime::<chrono::Utc>::from(modified)
+                        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
                     replaces,
                 },
                 &mut |notice| match notice {
@@ -409,7 +412,10 @@ impl SmbProvider {
                 },
             );
             // From the staged notice on, a failed upload removes its temporary file, and it does that before it lets the process go.
-            if saved.is_err() && staged && !lease.remove_temporary(&share, &temporary) {
+            if saved.is_err()
+                && staged
+                && !lease.remove_temporary(&share, &temporary, CLEANUP_LIMIT)
+            {
                 lease
                     .shared
                     .strays
@@ -596,14 +602,14 @@ impl Provider for SmbProvider {
 
     async fn create_folder(&self, parent: &ItemId, name: &str) -> Result<Item, VfsError> {
         check_name(name)?;
-        if matches!(place(parent), Place::Server) {
+        let id = child(parent, name);
+        let Place::Entry { share, path } = place(&id) else {
             return Err(VfsError::NotSupported);
-        }
-        let parent = parent.clone();
+        };
+        let share = share.to_string();
+        let path = path.to_string();
         let name = name.to_string();
         self.on_process(&self.calls, move |lease| {
-            let id = child(&parent, &name);
-            let (share, path) = share_path(&id)?;
             let () = lease.request(methods::CREATE_DIRECTORY, |credentials| {
                 CreateDirectoryParams {
                     credentials,
@@ -631,15 +637,14 @@ impl Provider for SmbProvider {
     }
 
     async fn remove(&self, id: &ItemId, parent: &ItemId) -> Result<(), VfsError> {
-        if !matches!(place(id), Place::Entry { .. }) {
-            return Err(VfsError::NotSupported);
-        }
+        let (share, path) = match place(id) {
+            Place::Server | Place::Share(_) => return Err(VfsError::NotSupported),
+            Place::Entry { share, path } => (share.to_string(), path.to_string()),
+        };
         if parent_of(&id.0) != parent.0 {
             return Err(VfsError::NotFound);
         }
-        let id = id.clone();
         self.on_process(&self.calls, move |lease| {
-            let (share, path) = share_path(&id)?;
             let () = lease.request(methods::DELETE, |credentials| DeleteParams {
                 credentials,
                 share,
@@ -659,78 +664,68 @@ impl Provider for SmbProvider {
         replace: Option<&ItemId>,
     ) -> Result<Item, VfsError> {
         check_name(name)?;
-        let id_share = match place(id) {
-            Place::Entry { share, .. } if parent_of(&id.0) == from.0 => share,
+        let target = replace.cloned().unwrap_or_else(|| child(to, name));
+        let (share, from_path) = match place(id) {
+            Place::Entry { share, path } if parent_of(&id.0) == from.0 => {
+                (share.to_string(), path.to_string())
+            }
             Place::Entry { .. } => return Err(VfsError::NotFound),
             Place::Server | Place::Share(_) => return Err(VfsError::NotSupported),
         };
-        let to_share = match place(to) {
-            Place::Share(share) | Place::Entry { share, .. } => share,
-            Place::Server => return Err(VfsError::NotSupported),
-        };
-        if to_share != id_share {
-            return Err(VfsError::NotSupported);
-        }
-        let new_id = match replace {
-            Some(replaced) => replaced.clone(),
-            None => child(to, name),
-        };
-        // A folder moved into itself, or into a folder inside it.
-        if new_id.0.starts_with(&format!("{}/", id.0)) {
-            return Err(VfsError::NotSupported);
+        match place(to) {
+            Place::Share(to_share)
+            | Place::Entry {
+                share: to_share, ..
+            } if to_share == share => {}
+            Place::Share(_) | Place::Entry { .. } | Place::Server => {
+                return Err(VfsError::NotSupported);
+            }
         }
         if let Some(replaced) = replace {
             if parent_of(&replaced.0) != to.0 {
                 return Err(VfsError::NotFound);
             }
         }
-        let id = id.clone();
-        let name = name.to_string();
-        let replace = replace.cloned();
+        // A folder moved into itself, or into a folder inside it.
+        if target.0.starts_with(&format!("{}/", id.0)) {
+            return Err(VfsError::NotSupported);
+        }
+        let Place::Entry { path: to_path, .. } = place(&target) else {
+            return Err(VfsError::NotSupported);
+        };
+        let to_path = to_path.to_string();
+        let replacing = replace.is_some();
         self.on_process(&self.calls, move |lease| {
-            let (share, from_path) = share_path(&id)?;
-            let (published, published_path) = if let Some(replaced) = replace {
-                let (_, replaced_path) = share_path(&replaced)?;
+            if replacing {
                 // A replace target that is gone answers `NotFound` here, and nothing is renamed.
                 let _: FileMetadataResult =
                     lease.request(methods::GET_FILE_METADATA, |credentials| {
                         GetFileMetadataParams {
                             credentials,
                             share: share.clone(),
-                            path: replaced_path.clone(),
+                            path: to_path.clone(),
                         }
                     })?;
-                let () = lease.request(methods::RENAME, |credentials| RenameParams {
-                    credentials,
-                    share: share.clone(),
-                    from_path,
-                    to_path: replaced_path.clone(),
-                    replace: true,
-                })?;
-                // On a share that ignores case, `replaced` can be spelled differently from `name`. The item now lives at `replaced`.
-                (replaced, replaced_path)
-            } else {
-                let (_, to_path) = share_path(&new_id)?;
-                let () = lease.request(methods::RENAME, |credentials| RenameParams {
-                    credentials,
-                    share: share.clone(),
-                    from_path,
-                    to_path: to_path.clone(),
-                    replace: false,
-                })?;
-                (new_id, to_path)
-            };
+            }
+            let () = lease.request(methods::RENAME, |credentials| RenameParams {
+                credentials,
+                share: share.clone(),
+                from_path,
+                to_path: to_path.clone(),
+                replace: replacing,
+            })?;
             let meta: FileMetadataResult =
                 lease.request(methods::GET_FILE_METADATA, |credentials| {
                     GetFileMetadataParams {
                         credentials,
                         share,
-                        path: published_path,
+                        path: to_path,
                     }
                 })?;
-            let published_name = published.0.rsplit('/').next().unwrap_or(&name).to_string();
+            // On a share that ignores case, the replaced item can be spelled differently from the requested name. The item now lives at `target`.
+            let published_name = target.0.rsplit('/').next().unwrap_or_default().to_string();
             Ok(item_from(
-                published,
+                target,
                 published_name,
                 meta.is_directory,
                 meta.size,
@@ -749,13 +744,19 @@ impl Provider for SmbProvider {
         progress: &Progress,
     ) -> Result<Item, VfsError> {
         check_name(name)?;
-        if matches!(place(parent), Place::Server) {
-            return Err(VfsError::NotSupported);
-        }
         let id = child(parent, name);
-        let (share, path) = share_path(&id)?;
+        let Place::Entry { share, path } = place(&id) else {
+            return Err(VfsError::NotSupported);
+        };
         let meta = self
-            .upload(share, path, from, modified, None, progress)
+            .upload(
+                share.to_string(),
+                path.to_string(),
+                from,
+                modified,
+                None,
+                progress,
+            )
             .await?;
         Ok(item_from(
             id,
@@ -774,10 +775,10 @@ impl Provider for SmbProvider {
         modified: SystemTime,
         progress: &Progress,
     ) -> Result<Item, VfsError> {
-        if matches!(place(id), Place::Server | Place::Share(_)) {
-            return Err(VfsError::IsAFolder);
-        }
-        let (share, path) = share_path(id)?;
+        let (share, path) = match place(id) {
+            Place::Server | Place::Share(_) => return Err(VfsError::IsAFolder),
+            Place::Entry { share, path } => (share.to_string(), path.to_string()),
+        };
         let name = id.0.rsplit('/').next().unwrap_or_default().to_string();
         let meta = self
             .upload(share, path, from, modified, Some(base.clone()), progress)
@@ -828,15 +829,6 @@ fn parent_of(path: &str) -> &str {
     }
 }
 
-/// The share and the path inside it. A share's own id is the path `/`.
-fn share_path(id: &ItemId) -> Result<(String, String), VfsError> {
-    match place(id) {
-        Place::Entry { share, path } => Ok((share.to_string(), path.to_string())),
-        Place::Share(share) => Ok((share.to_string(), "/".to_string())),
-        Place::Server => Err(VfsError::NotSupported),
-    }
-}
-
 /// `name` in `folder`: an id, or a path inside a share.
 fn join_name(folder: &str, name: &str) -> String {
     if folder == "/" {
@@ -855,7 +847,7 @@ fn check_name(name: &str) -> Result<(), VfsError> {
         || refused.iter().any(|character| name.contains(*character))
         || name
             .chars()
-            .any(|character| character < '\u{0020}' || character == '\u{FFFD}')
+            .any(|character| character.is_control() || character == '\u{FFFD}')
     {
         Err(VfsError::NotSupported)
     } else {

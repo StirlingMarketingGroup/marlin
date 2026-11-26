@@ -1144,7 +1144,13 @@ async fn an_upload_does_not_hold_up_other_calls() {
             >= UPLOAD_PROCESSES
     })
     .await;
-    let listed = provider.list(&ItemId("/data".into())).await.unwrap();
+    let listed = tokio::time::timeout(
+        Duration::from_secs(10),
+        provider.list(&ItemId("/data".into())),
+    )
+    .await
+    .expect("a listing waited on an upload")
+    .unwrap();
     assert!(listed.is_empty());
     assert!(uploads.iter().all(|upload| !upload.is_finished()));
     for upload in uploads {
@@ -1327,4 +1333,177 @@ async fn a_removal_that_fails_is_tried_again_before_the_next_upload() {
         .filter(|line| line["method"] == "delete" && line["params"]["path"] == first.as_str())
         .count();
     assert_eq!(retried, 2, "requests:\n{}", logged(&script));
+}
+
+#[tokio::test]
+async fn refusals_send_no_request() {
+    let script = fake(&root_shares(&["data", "other"]));
+    let saved = save("refusals.example", "pw");
+    let provider = open(&saved, &script);
+    accepted(&provider).await;
+    let sent = requests(&script).len();
+    let root = ItemId("/".into());
+    let data = ItemId("/data".into());
+    let other = ItemId("/other".into());
+    let file = Path::new("unused");
+
+    assert_eq!(
+        provider.create_folder(&root, "x").await.unwrap_err(),
+        VfsError::NotSupported
+    );
+    assert_eq!(
+        provider
+            .create_file(&root, "x", file, UNIX_EPOCH, &|_| {})
+            .await
+            .unwrap_err(),
+        VfsError::NotSupported
+    );
+    for name in ["a?b", "a:b", "a\u{7f}b", "a\u{85}b", "", ".."] {
+        assert_eq!(
+            provider.create_folder(&data, name).await.unwrap_err(),
+            VfsError::NotSupported,
+            "{name:?}"
+        );
+    }
+    assert_eq!(
+        provider.remove(&data, &root).await.unwrap_err(),
+        VfsError::NotSupported
+    );
+    assert_eq!(
+        provider
+            .remove(&ItemId("/data/x".into()), &other)
+            .await
+            .unwrap_err(),
+        VfsError::NotFound
+    );
+    assert_eq!(
+        provider
+            .rename(&ItemId("/data/a/x".into()), &data, &data, "y", None)
+            .await
+            .unwrap_err(),
+        VfsError::NotFound
+    );
+    assert_eq!(
+        provider
+            .rename(
+                &ItemId("/data/x".into()),
+                &data,
+                &ItemId("/data/b".into()),
+                "y",
+                Some(&ItemId("/data/c/y".into())),
+            )
+            .await
+            .unwrap_err(),
+        VfsError::NotFound
+    );
+    assert_eq!(
+        provider
+            .rename(&ItemId("/data/x".into()), &data, &other, "y", None)
+            .await
+            .unwrap_err(),
+        VfsError::NotSupported
+    );
+    assert_eq!(
+        provider
+            .rename(
+                &ItemId("/data/x".into()),
+                &data,
+                &ItemId("/data/x/inner".into()),
+                "x",
+                None,
+            )
+            .await
+            .unwrap_err(),
+        VfsError::NotSupported
+    );
+    assert_eq!(
+        provider
+            .replace_bytes(&data, file, &Revision("0:0".into()), UNIX_EPOCH, &|_| {})
+            .await
+            .unwrap_err(),
+        VfsError::IsAFolder
+    );
+    assert_eq!(requests(&script).len(), sent);
+}
+
+#[tokio::test]
+async fn a_replacing_rename_checks_its_target_and_replaces_exactly_it() {
+    let meta = format!(
+        r#"{{"name":"kept.txt","is_directory":false,"is_hidden":false,"size":4,"modified":"{WHEN}","extension":"txt"}}"#
+    );
+    let script = fake(&format!(
+        "{gone}{kept}{rename}{shares}",
+        gone = arm(
+            r#"*'"path":"/gone.txt"'*"#,
+            &print_error(error_codes::SMB_PATH_NOT_FOUND),
+        ),
+        kept = arm(r#"*'"path":"/kept.txt"'*"#, &print_result(&meta)),
+        rename = arm(r#"*'"method":"rename"'*"#, &print_result("null")),
+        shares = root_shares(&["data"]),
+    ));
+    let saved = save("rename-replace.example", "pw");
+    let provider = open(&saved, &script);
+    accepted(&provider).await;
+    let data = ItemId("/data".into());
+    let source = ItemId("/data/a.txt".into());
+
+    let before = requests(&script).len();
+    provider
+        .rename(
+            &source,
+            &data,
+            &data,
+            "kept.txt",
+            Some(&ItemId("/data/kept.txt".into())),
+        )
+        .await
+        .unwrap();
+    let sent = requests(&script);
+    let added = &sent[before..];
+    assert_eq!(added[0]["method"], "get_file_metadata");
+    assert_eq!(added[0]["params"]["path"], "/kept.txt");
+    assert_eq!(added[1]["method"], "rename");
+    assert_eq!(added[1]["params"]["to_path"], "/kept.txt");
+    assert_eq!(added[1]["params"]["replace"], true);
+    assert_eq!(
+        added
+            .iter()
+            .filter(|line| line["method"] == "rename")
+            .count(),
+        1
+    );
+
+    let before = requests(&script).len();
+    assert_eq!(
+        provider
+            .rename(
+                &source,
+                &data,
+                &data,
+                "gone.txt",
+                Some(&ItemId("/data/gone.txt".into())),
+            )
+            .await
+            .unwrap_err(),
+        VfsError::NotFound
+    );
+    let sent = requests(&script);
+    assert!(
+        sent[before..].iter().all(|line| line["method"] != "rename"),
+        "requests:\n{}",
+        logged(&script)
+    );
+
+    let before = requests(&script).len();
+    let _ = provider
+        .rename(&source, &data, &data, "new.txt", None)
+        .await;
+    let sent = requests(&script);
+    let renames: Vec<_> = sent[before..]
+        .iter()
+        .filter(|line| line["method"] == "rename")
+        .collect();
+    assert_eq!(renames.len(), 1, "requests:\n{}", logged(&script));
+    assert_eq!(renames[0]["params"]["replace"], false);
+    assert_eq!(renames[0]["params"]["to_path"], "/new.txt");
 }
